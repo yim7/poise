@@ -1,5 +1,5 @@
 ---
-source: src/render.rs
+source: tui/src/render.rs
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Execution Focus         
@@ -14,8 +14,8 @@ expression: snapshot
 └───────────────────────────────────────────┘└─────────────────────────────────┘
 ┌ Open Orders ──────────────────────────────┐┌ Market + Health ────────────────┐
 │Side   Price     Qty      Status           ││Last  2361.48   Mark  2361.55    │
-│BUY    2352.80   0.100    NEW              ││HTTP  UP   WS  UP                │
-│SELL   2368.30   0.100    NEW              ││Health  HEALTHY                  │
+│BUY    2352.80   0.100    NEW              ││Service WS  UP   Market WS  UP   │
+│SELL   2368.30   0.100    NEW              ││Health  HEALTHY   42ms stale 0ms │
 │                                           │└─────────────────────────────────┘
 └───────────────────────────────────────────┘┌ Command Timeline ───────────────┐
 ┌ Recent Fills ─────────────────────────────┐│ ACK  PAUSE cmd_hist_0001        │

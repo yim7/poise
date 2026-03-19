@@ -1,0 +1,1216 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
+use chrono::{SecondsFormat, TimeZone, Utc};
+use futures_util::{SinkExt, StreamExt};
+use reqwest::header::CONTENT_TYPE;
+use serde::Deserialize;
+use tokio::{
+    select,
+    sync::{Mutex, mpsc},
+    time::{Instant, interval, sleep},
+};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::warn;
+
+use crate::{
+    background::spawn_task,
+    kernel::{EngineHandle, RuntimePatch},
+    protocol::ConnectionState,
+    storage::PersistedRuntime,
+};
+
+const MARKET_STREAM_BUFFER: usize = 256;
+const USER_STREAM_BUFFER: usize = 128;
+
+#[derive(Debug, Clone)]
+pub struct BinanceConfig {
+    pub symbol: String,
+    pub env: String,
+    pub rest_base_url: String,
+    pub ws_base_url: String,
+    pub api_key: Option<String>,
+    pub metadata_refresh_interval: Duration,
+    pub health_tick_interval: Duration,
+    pub reconnect_base_delay: Duration,
+    pub reconnect_max_delay: Duration,
+    pub user_stream_keepalive_interval: Duration,
+}
+
+#[derive(Debug, Clone)]
+enum MarketHeartbeatState {
+    Disconnected,
+    WaitingForFirstEvent { connected_at: Instant },
+    Live { last_event_at: Instant },
+}
+
+impl BinanceConfig {
+    pub fn mainnet(symbol: impl Into<String>) -> Self {
+        Self {
+            symbol: symbol.into(),
+            env: "mainnet".into(),
+            rest_base_url: "https://fapi.binance.com".into(),
+            ws_base_url: "wss://fstream.binance.com".into(),
+            api_key: None,
+            metadata_refresh_interval: Duration::from_secs(300),
+            health_tick_interval: Duration::from_secs(1),
+            reconnect_base_delay: Duration::from_secs(1),
+            reconnect_max_delay: Duration::from_secs(30),
+            user_stream_keepalive_interval: Duration::from_secs(30 * 60),
+        }
+    }
+
+    pub fn testnet(symbol: impl Into<String>) -> Self {
+        Self {
+            symbol: symbol.into(),
+            env: "testnet".into(),
+            rest_base_url: "https://demo-fapi.binance.com".into(),
+            ws_base_url: "wss://fstream.binancefuture.com".into(),
+            api_key: None,
+            metadata_refresh_interval: Duration::from_secs(300),
+            health_tick_interval: Duration::from_secs(1),
+            reconnect_base_delay: Duration::from_secs(1),
+            reconnect_max_delay: Duration::from_secs(30),
+            user_stream_keepalive_interval: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+pub(crate) fn prepare_bootstrap_runtime(
+    mut runtime: PersistedRuntime,
+    config: &BinanceConfig,
+) -> PersistedRuntime {
+    let symbol_or_env_changed = runtime.snapshot.runtime.symbol != config.symbol
+        || runtime.snapshot.runtime.env != config.env;
+    let should_reset_runtime = symbol_or_env_changed || runtime.last_sequence == 0;
+
+    runtime.snapshot.runtime.symbol = config.symbol.clone();
+    runtime.snapshot.runtime.env = config.env.clone();
+    runtime.snapshot.connection.http_available = false;
+    runtime.snapshot.connection.ws_connected = false;
+    runtime.snapshot.connection.user_stream_connected = config.api_key.as_ref().map(|_| false);
+    runtime.snapshot.connection.latency_ms = None;
+    runtime.snapshot.connection.last_heartbeat_at.clear();
+    runtime.snapshot.connection.reconnect_backoff_ms = 0;
+    runtime.snapshot.connection.stale_age_ms = 0;
+
+    if should_reset_runtime {
+        runtime.snapshot.runtime.session_state = "syncing".into();
+        runtime.snapshot.runtime.last_price = 0.0;
+        runtime.snapshot.runtime.mark_price = 0.0;
+        runtime.snapshot.runtime.position_qty = 0.0;
+        runtime.snapshot.runtime.position_avg_price = 0.0;
+        runtime.snapshot.runtime.unrealized_pnl = 0.0;
+        runtime.snapshot.runtime.realized_pnl = 0.0;
+        runtime.snapshot.execution.open_orders.clear();
+        runtime.snapshot.execution.recent_fills.clear();
+        runtime.snapshot.execution.pending_commands.clear();
+        runtime.snapshot.execution.last_command_ack = None;
+        runtime.snapshot.execution.last_command_ack_event = None;
+        runtime.snapshot.execution.recent_commands.clear();
+    }
+
+    runtime
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExchangeSymbol {
+    pub symbol: String,
+    pub status: String,
+    pub underlying_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradingSchedule {
+    pub update_time_ms: i64,
+    pub market_schedules: HashMap<String, Vec<TradingSession>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradingSession {
+    pub start_time_ms: i64,
+    pub end_time_ms: i64,
+    pub session_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketStreamEvent {
+    pub event_time_ms: i64,
+    pub last_price: Option<f64>,
+    pub mark_price: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserStreamEvent {
+    pub event_time_ms: i64,
+    pub positions: Vec<PositionSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionSnapshot {
+    pub symbol: String,
+    pub qty: f64,
+    pub avg_price: f64,
+    pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+}
+
+#[async_trait]
+pub trait BinanceTransport: Send + Sync + 'static {
+    async fn fetch_exchange_info(&self, symbol: &str) -> Result<ExchangeSymbol>;
+    async fn fetch_trading_schedule(&self) -> Result<TradingSchedule>;
+    async fn connect_market_stream(
+        &self,
+        symbol: &str,
+    ) -> Result<mpsc::Receiver<MarketStreamEvent>>;
+    async fn create_user_stream(&self) -> Result<Option<String>>;
+    async fn connect_user_stream(
+        &self,
+        listen_key: &str,
+    ) -> Result<mpsc::Receiver<UserStreamEvent>>;
+    async fn keepalive_user_stream(&self, listen_key: &str) -> Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct RealBinanceTransport {
+    http: reqwest::Client,
+    rest_base_url: String,
+    ws_base_url: String,
+    api_key: Option<String>,
+}
+
+impl RealBinanceTransport {
+    pub fn new(config: &BinanceConfig) -> Result<Self> {
+        Ok(Self {
+            http: reqwest::Client::builder()
+                .user_agent("grid-platform-service/0.1.0")
+                .build()
+                .context("failed to build reqwest client")?,
+            rest_base_url: config.rest_base_url.clone(),
+            ws_base_url: config.ws_base_url.clone(),
+            api_key: config.api_key.clone(),
+        })
+    }
+
+    async fn get_json<T>(&self, path: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let url = format!("{}{}", self.rest_base_url, path);
+        let mut request = self.http.get(&url);
+        if let Some(api_key) = &self.api_key {
+            request = request.header("X-MBX-APIKEY", api_key);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to call {url}"))?;
+        decode_response(response).await
+    }
+
+    async fn create_listen_key(&self) -> Result<Option<String>> {
+        let Some(api_key) = &self.api_key else {
+            return Ok(None);
+        };
+
+        let url = format!("{}/fapi/v1/listenKey", self.rest_base_url);
+        let response = self
+            .http
+            .post(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .send()
+            .await
+            .with_context(|| format!("failed to call {url}"))?;
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("binance listenKey request failed: {body}");
+        }
+
+        let parsed: ListenKeyResponse = response
+            .json()
+            .await
+            .context("failed to decode listenKey response")?;
+        Ok(Some(parsed.listen_key))
+    }
+
+    async fn keepalive_listen_key(&self) -> Result<()> {
+        let Some(api_key) = &self.api_key else {
+            return Ok(());
+        };
+
+        let url = format!("{}/fapi/v1/listenKey", self.rest_base_url);
+        let response = self
+            .http
+            .put(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .send()
+            .await
+            .with_context(|| format!("failed to call {url}"))?;
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("binance listenKey keepalive failed: {body}");
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BinanceTransport for RealBinanceTransport {
+    async fn fetch_exchange_info(&self, symbol: &str) -> Result<ExchangeSymbol> {
+        let response: ExchangeInfoResponse = self.get_json("/fapi/v1/exchangeInfo").await?;
+        let symbol_info = response
+            .symbols
+            .into_iter()
+            .find(|item| item.symbol == symbol)
+            .ok_or_else(|| anyhow!("symbol {symbol} not found in exchangeInfo"))?;
+        Ok(ExchangeSymbol {
+            symbol: symbol_info.symbol,
+            status: symbol_info.status,
+            underlying_type: symbol_info.underlying_type,
+        })
+    }
+
+    async fn fetch_trading_schedule(&self) -> Result<TradingSchedule> {
+        let response: TradingScheduleResponse = self.get_json("/fapi/v1/tradingSchedule").await?;
+        Ok(TradingSchedule {
+            update_time_ms: response.update_time,
+            market_schedules: response
+                .market_schedules
+                .into_iter()
+                .map(|(market, schedule)| {
+                    (
+                        market,
+                        schedule
+                            .sessions
+                            .into_iter()
+                            .map(|session| TradingSession {
+                                start_time_ms: session.start_time,
+                                end_time_ms: session.end_time,
+                                session_type: session.session_type,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    async fn connect_market_stream(
+        &self,
+        symbol: &str,
+    ) -> Result<mpsc::Receiver<MarketStreamEvent>> {
+        let stream_symbol = symbol.to_ascii_lowercase();
+        let url = format!(
+            "{}/stream?streams={}@aggTrade/{}@markPrice@1s",
+            self.ws_base_url, stream_symbol, stream_symbol
+        );
+        let (socket, _) = connect_async(&url)
+            .await
+            .with_context(|| format!("failed to connect market stream {url}"))?;
+        let (tx, rx) = mpsc::channel(MARKET_STREAM_BUFFER);
+        spawn_task(async move {
+            let mut socket = socket;
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if let Ok(event) = decode_market_stream(&text)
+                            && tx.send(event).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(?error, "market websocket read failed");
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(rx)
+    }
+
+    async fn create_user_stream(&self) -> Result<Option<String>> {
+        self.create_listen_key().await
+    }
+
+    async fn connect_user_stream(
+        &self,
+        listen_key: &str,
+    ) -> Result<mpsc::Receiver<UserStreamEvent>> {
+        let url = format!("{}/ws/{}", self.ws_base_url, listen_key);
+        let (socket, _) = connect_async(&url)
+            .await
+            .with_context(|| format!("failed to connect user stream {url}"))?;
+        let (tx, rx) = mpsc::channel(USER_STREAM_BUFFER);
+        spawn_task(async move {
+            let mut socket = socket;
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if let Ok(Some(event)) = decode_user_stream(&text)
+                            && tx.send(event).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(?error, "user websocket read failed");
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(rx)
+    }
+
+    async fn keepalive_user_stream(&self, _listen_key: &str) -> Result<()> {
+        self.keepalive_listen_key().await
+    }
+}
+
+pub(crate) fn spawn_supervisor(
+    engine: EngineHandle,
+    initial_connection: ConnectionState,
+    config: BinanceConfig,
+    transport: Arc<dyn BinanceTransport>,
+) {
+    spawn_task(async move {
+        let reporter = ConnectionReporter::new(engine.clone(), initial_connection);
+        let _ = reporter.publish().await;
+
+        let last_market_heartbeat = Arc::new(Mutex::new(MarketHeartbeatState::Disconnected));
+
+        spawn_task(run_metadata_loop(
+            engine.clone(),
+            reporter.clone(),
+            config.clone(),
+            transport.clone(),
+        ));
+        spawn_task(run_market_loop(
+            engine.clone(),
+            reporter.clone(),
+            config.clone(),
+            transport.clone(),
+            last_market_heartbeat.clone(),
+        ));
+        spawn_task(run_health_loop(
+            reporter.clone(),
+            config.clone(),
+            last_market_heartbeat,
+        ));
+        if config.api_key.is_some() {
+            spawn_task(run_user_stream_loop(engine, reporter, config, transport));
+        }
+    });
+}
+
+#[derive(Clone)]
+struct ConnectionReporter {
+    engine: EngineHandle,
+    state: Arc<Mutex<ConnectionState>>,
+}
+
+impl ConnectionReporter {
+    fn new(engine: EngineHandle, state: ConnectionState) -> Self {
+        Self {
+            engine,
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    async fn mutate_local<F>(&self, mutate: F)
+    where
+        F: FnOnce(&mut ConnectionState),
+    {
+        let mut guard = self.state.lock().await;
+        mutate(&mut guard);
+    }
+
+    async fn update<F>(&self, mutate: F) -> Result<()>
+    where
+        F: FnOnce(&mut ConnectionState),
+    {
+        let mut guard = self.state.lock().await;
+        let before = guard.clone();
+        mutate(&mut guard);
+        if *guard == before {
+            return Ok(());
+        }
+        let next = guard.clone();
+        match self.engine.sync_connection(next).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *guard = before;
+                Err(error)
+            }
+        }
+    }
+
+    async fn update_until_applied<F>(&self, mutate: F, retry_delay: Duration, context: &'static str)
+    where
+        F: Fn(&mut ConnectionState) + Copy,
+    {
+        loop {
+            match self.update(mutate).await {
+                Ok(()) => return,
+                Err(error) => {
+                    warn!(?error, %context, "failed to persist connection state; retrying");
+                    sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
+    async fn publish(&self) -> Result<()> {
+        let snapshot = self.state.lock().await.clone();
+        self.engine.sync_connection(snapshot).await
+    }
+}
+
+async fn run_metadata_loop(
+    engine: EngineHandle,
+    reporter: ConnectionReporter,
+    config: BinanceConfig,
+    transport: Arc<dyn BinanceTransport>,
+) {
+    let mut ticker = interval(config.metadata_refresh_interval);
+    loop {
+        let started = Instant::now();
+        let result = async {
+            let exchange_info = transport.fetch_exchange_info(&config.symbol).await?;
+            let schedule = transport.fetch_trading_schedule().await?;
+            let session_state =
+                derive_session_state(&exchange_info, &schedule, Utc::now().timestamp_millis());
+            engine
+                .sync_runtime(RuntimePatch {
+                    session_state: Some(session_state),
+                    ..RuntimePatch::default()
+                })
+                .await?;
+            reporter
+                .update(|state| {
+                    state.http_available = true;
+                    state.latency_ms =
+                        Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                })
+                .await
+        }
+        .await;
+
+        if let Err(error) = result {
+            warn!(?error, "binance metadata sync failed");
+            let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            let _ = reporter
+                .update(|state| {
+                    state.http_available = false;
+                    state.latency_ms = Some(latency_ms);
+                })
+                .await;
+        }
+
+        ticker.tick().await;
+    }
+}
+
+async fn run_market_loop(
+    engine: EngineHandle,
+    reporter: ConnectionReporter,
+    config: BinanceConfig,
+    transport: Arc<dyn BinanceTransport>,
+    last_market_heartbeat: Arc<Mutex<MarketHeartbeatState>>,
+) {
+    let mut attempt = 0u32;
+    loop {
+        match transport.connect_market_stream(&config.symbol).await {
+            Ok(mut events) => {
+                attempt = 0;
+                {
+                    let mut heartbeat = last_market_heartbeat.lock().await;
+                    *heartbeat = MarketHeartbeatState::WaitingForFirstEvent {
+                        connected_at: Instant::now(),
+                    };
+                }
+                reporter
+                    .update_until_applied(
+                        |state| {
+                            state.ws_connected = true;
+                            state.reconnect_backoff_ms = 0;
+                            state.last_heartbeat_at.clear();
+                            state.stale_age_ms = 0;
+                        },
+                        config.reconnect_base_delay,
+                        "binance market stream connected",
+                    )
+                    .await;
+
+                while let Some(event) = events.recv().await {
+                    *last_market_heartbeat.lock().await = MarketHeartbeatState::Live {
+                        last_event_at: Instant::now(),
+                    };
+                    reporter
+                        .mutate_local(|state| {
+                            state.ws_connected = true;
+                            state.reconnect_backoff_ms = 0;
+                            state.last_heartbeat_at =
+                                timestamp_millis_to_rfc3339(event.event_time_ms);
+                            state.stale_age_ms = 0;
+                        })
+                        .await;
+                    sync_market_prices_until_applied(&engine, event, config.reconnect_base_delay)
+                        .await;
+                }
+            }
+            Err(error) => {
+                warn!(?error, "binance market stream connect failed");
+            }
+        }
+
+        attempt = attempt.saturating_add(1);
+        let backoff = reconnect_delay(&config, attempt);
+        let backoff_ms = backoff.as_millis().min(u64::MAX as u128) as u64;
+        {
+            let mut heartbeat = last_market_heartbeat.lock().await;
+            *heartbeat = MarketHeartbeatState::Disconnected;
+        }
+        reporter
+            .update_until_applied(
+                |state| {
+                    state.ws_connected = false;
+                    state.reconnect_backoff_ms = backoff_ms;
+                    state.last_heartbeat_at.clear();
+                    state.stale_age_ms = 0;
+                },
+                config.reconnect_base_delay,
+                "binance market stream disconnected",
+            )
+            .await;
+        sleep(backoff).await;
+    }
+}
+
+async fn run_health_loop(
+    reporter: ConnectionReporter,
+    config: BinanceConfig,
+    last_market_heartbeat: Arc<Mutex<MarketHeartbeatState>>,
+) {
+    let mut ticker = interval(config.health_tick_interval);
+    loop {
+        ticker.tick().await;
+        let stale_age_ms = match &*last_market_heartbeat.lock().await {
+            MarketHeartbeatState::Disconnected => 0,
+            MarketHeartbeatState::WaitingForFirstEvent { connected_at } => {
+                connected_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+            }
+            MarketHeartbeatState::Live { last_event_at } => {
+                last_event_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+            }
+        };
+        let _ = reporter
+            .update(|state| {
+                state.stale_age_ms = stale_age_ms;
+            })
+            .await;
+    }
+}
+
+async fn run_user_stream_loop(
+    engine: EngineHandle,
+    reporter: ConnectionReporter,
+    config: BinanceConfig,
+    transport: Arc<dyn BinanceTransport>,
+) {
+    let mut attempt = 0u32;
+    loop {
+        let listen_key = match transport.create_user_stream().await {
+            Ok(Some(listen_key)) => listen_key,
+            Ok(None) => {
+                reporter
+                    .update_until_applied(
+                        |state| state.user_stream_connected = None,
+                        config.reconnect_base_delay,
+                        "binance user stream disabled",
+                    )
+                    .await;
+                return;
+            }
+            Err(error) => {
+                warn!(?error, "binance user stream listenKey request failed");
+                attempt = attempt.saturating_add(1);
+                reporter
+                    .update_until_applied(
+                        |state| state.user_stream_connected = Some(false),
+                        config.reconnect_base_delay,
+                        "binance user stream listenKey failed",
+                    )
+                    .await;
+                sleep(reconnect_delay(&config, attempt)).await;
+                continue;
+            }
+        };
+
+        match transport.connect_user_stream(&listen_key).await {
+            Ok(mut events) => {
+                attempt = 0;
+                reporter
+                    .update_until_applied(
+                        |state| state.user_stream_connected = Some(true),
+                        config.reconnect_base_delay,
+                        "binance user stream connected",
+                    )
+                    .await;
+                let mut keepalive = interval(config.user_stream_keepalive_interval);
+                loop {
+                    select! {
+                        maybe_event = events.recv() => {
+                            let Some(event) = maybe_event else {
+                                break;
+                            };
+                            if let Some(position) = event
+                                .positions
+                                .into_iter()
+                                .find(|position| position.symbol == config.symbol)
+                            {
+                                sync_runtime_patch_until_applied(
+                                    &engine,
+                                    RuntimePatch {
+                                        position_qty: Some(position.qty),
+                                        position_avg_price: Some(position.avg_price),
+                                        unrealized_pnl: Some(position.unrealized_pnl),
+                                        realized_pnl: Some(position.realized_pnl),
+                                        ..RuntimePatch::default()
+                                    },
+                                    config.reconnect_base_delay,
+                                    "binance user stream position sync",
+                                )
+                                .await;
+                            }
+                        }
+                        _ = keepalive.tick() => {
+                            if let Err(error) = transport.keepalive_user_stream(&listen_key).await {
+                                warn!(?error, "binance user stream keepalive failed");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(?error, "binance user stream connect failed");
+            }
+        }
+
+        attempt = attempt.saturating_add(1);
+        reporter
+            .update_until_applied(
+                |state| state.user_stream_connected = Some(false),
+                config.reconnect_base_delay,
+                "binance user stream disconnected",
+            )
+            .await;
+        sleep(reconnect_delay(&config, attempt)).await;
+    }
+}
+
+fn derive_session_state(
+    exchange_info: &ExchangeSymbol,
+    schedule: &TradingSchedule,
+    now_ms: i64,
+) -> String {
+    if !exchange_info.status.eq_ignore_ascii_case("TRADING") {
+        return exchange_info.status.to_ascii_lowercase();
+    }
+
+    match exchange_info.underlying_type.as_str() {
+        "EQUITY" | "COMMODITY" => schedule
+            .market_schedules
+            .get(exchange_info.underlying_type.as_str())
+            .and_then(|sessions| {
+                sessions
+                    .iter()
+                    .find(|session| session.start_time_ms <= now_ms && now_ms < session.end_time_ms)
+            })
+            .map(|session| session.session_type.to_ascii_lowercase())
+            .unwrap_or_else(|| "no_trading".into()),
+        _ => "continuous".into(),
+    }
+}
+
+fn reconnect_delay(config: &BinanceConfig, attempt: u32) -> Duration {
+    let factor = 2u32.saturating_pow(attempt.saturating_sub(1)).max(1);
+    let candidate = config
+        .reconnect_base_delay
+        .as_millis()
+        .saturating_mul(factor as u128);
+    let max = config.reconnect_max_delay.as_millis();
+    Duration::from_millis(candidate.min(max).min(u64::MAX as u128) as u64)
+}
+
+fn timestamp_millis_to_rfc3339(timestamp_ms: i64) -> String {
+    Utc.timestamp_millis_opt(timestamp_ms)
+        .single()
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+async fn decode_response<T>(response: reqwest::Response) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read response body")?;
+    if status.is_success() {
+        return serde_json::from_str(&body).context("failed to decode binance response");
+    }
+    anyhow::bail!("binance request failed with status {status}: {body}");
+}
+
+fn decode_market_stream(payload: &str) -> Result<MarketStreamEvent> {
+    let envelope: CombinedStreamEnvelope =
+        serde_json::from_str(payload).context("failed to decode market stream envelope")?;
+    if envelope.stream.contains("@aggTrade") {
+        let event: AggTradePayload =
+            serde_json::from_value(envelope.data).context("failed to decode aggTrade payload")?;
+        return Ok(MarketStreamEvent {
+            event_time_ms: event.event_time,
+            last_price: Some(event.price),
+            mark_price: None,
+        });
+    }
+
+    let event: MarkPricePayload =
+        serde_json::from_value(envelope.data).context("failed to decode markPrice payload")?;
+    Ok(MarketStreamEvent {
+        event_time_ms: event.event_time,
+        last_price: None,
+        mark_price: Some(event.mark_price),
+    })
+}
+
+fn decode_user_stream(payload: &str) -> Result<Option<UserStreamEvent>> {
+    let event: UserStreamEnvelope =
+        serde_json::from_str(payload).context("failed to decode user stream payload")?;
+    if event.event_type != "ACCOUNT_UPDATE" {
+        return Ok(None);
+    }
+
+    let positions = event
+        .account_update
+        .map(|update| summarize_positions(update.positions))
+        .unwrap_or_default();
+    Ok(Some(UserStreamEvent {
+        event_time_ms: event.event_time,
+        positions,
+    }))
+}
+
+fn summarize_positions(positions: Vec<AccountUpdatePosition>) -> Vec<PositionSnapshot> {
+    let mut grouped = HashMap::<String, Vec<AccountUpdatePosition>>::new();
+    for position in positions {
+        grouped
+            .entry(position.symbol.clone())
+            .or_default()
+            .push(position);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(symbol, items)| {
+            let mut total_qty = 0.0;
+            let mut long_qty = 0.0;
+            let mut short_qty = 0.0;
+            let mut long_notional = 0.0;
+            let mut short_notional = 0.0;
+            let mut unrealized_pnl = 0.0;
+            let mut realized_pnl = 0.0;
+            for position in items {
+                let qty = position.signed_position_amount();
+                total_qty += qty;
+                if qty > f64::EPSILON {
+                    long_qty += qty;
+                    long_notional += qty * position.entry_price;
+                } else if qty < -f64::EPSILON {
+                    short_qty += qty.abs();
+                    short_notional += qty.abs() * position.entry_price;
+                }
+                unrealized_pnl += position.unrealized_pnl;
+                realized_pnl += position.accumulated_realized;
+            }
+            let avg_price = if total_qty > f64::EPSILON && long_qty > f64::EPSILON {
+                long_notional / long_qty
+            } else if total_qty < -f64::EPSILON && short_qty > f64::EPSILON {
+                short_notional / short_qty
+            } else {
+                0.0
+            };
+            PositionSnapshot {
+                symbol,
+                qty: total_qty,
+                avg_price,
+                unrealized_pnl,
+                realized_pnl,
+            }
+        })
+        .collect()
+}
+
+async fn sync_market_prices_until_applied(
+    engine: &EngineHandle,
+    event: MarketStreamEvent,
+    retry_delay: Duration,
+) {
+    loop {
+        match engine
+            .sync_market_prices(
+                event.last_price,
+                event.mark_price,
+                timestamp_millis_to_rfc3339(event.event_time_ms),
+            )
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "failed to persist binance market event; retrying same event"
+                );
+                sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+async fn sync_runtime_patch_until_applied(
+    engine: &EngineHandle,
+    patch: RuntimePatch,
+    retry_delay: Duration,
+    context: &'static str,
+) {
+    loop {
+        match engine.sync_runtime(patch.clone()).await {
+            Ok(()) => return,
+            Err(error) => {
+                warn!(?error, %context, "failed to persist binance runtime patch; retrying");
+                sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ExchangeInfoResponse {
+    symbols: Vec<ExchangeInfoSymbol>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExchangeInfoSymbol {
+    symbol: String,
+    status: String,
+    #[serde(rename = "underlyingType")]
+    underlying_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TradingScheduleResponse {
+    #[serde(rename = "updateTime")]
+    update_time: i64,
+    #[serde(rename = "marketSchedules")]
+    market_schedules: HashMap<String, MarketScheduleBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketScheduleBlock {
+    sessions: Vec<TradingScheduleSession>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TradingScheduleSession {
+    #[serde(rename = "startTime")]
+    start_time: i64,
+    #[serde(rename = "endTime")]
+    end_time: i64,
+    #[serde(rename = "type")]
+    session_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CombinedStreamEnvelope {
+    stream: String,
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct AggTradePayload {
+    #[serde(rename = "E")]
+    event_time: i64,
+    #[serde(rename = "p", deserialize_with = "deserialize_string_number")]
+    price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkPricePayload {
+    #[serde(rename = "E")]
+    event_time: i64,
+    #[serde(rename = "p", deserialize_with = "deserialize_string_number")]
+    mark_price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListenKeyResponse {
+    #[serde(rename = "listenKey")]
+    listen_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserStreamEnvelope {
+    #[serde(rename = "e")]
+    event_type: String,
+    #[serde(rename = "E")]
+    event_time: i64,
+    #[serde(rename = "a")]
+    account_update: Option<AccountUpdatePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountUpdatePayload {
+    #[serde(rename = "P", default)]
+    positions: Vec<AccountUpdatePosition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountUpdatePosition {
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "ps", default = "default_position_side")]
+    position_side: String,
+    #[serde(rename = "pa", deserialize_with = "deserialize_string_number")]
+    position_amount: f64,
+    #[serde(rename = "ep", deserialize_with = "deserialize_string_number")]
+    entry_price: f64,
+    #[serde(rename = "up", deserialize_with = "deserialize_string_number")]
+    unrealized_pnl: f64,
+    #[serde(rename = "cr", deserialize_with = "deserialize_string_number")]
+    accumulated_realized: f64,
+}
+
+impl AccountUpdatePosition {
+    fn signed_position_amount(&self) -> f64 {
+        match self.position_side.as_str() {
+            "LONG" => self.position_amount.abs(),
+            "SHORT" => -self.position_amount.abs(),
+            _ => self.position_amount,
+        }
+    }
+}
+
+fn default_position_side() -> String {
+    "BOTH".into()
+}
+
+fn deserialize_string_number<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    value.parse::<f64>().map_err(serde::de::Error::custom)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Arc};
+
+    use anyhow::{Result, anyhow};
+    use async_trait::async_trait;
+    use std::fs;
+    use tokio::sync::{Mutex, mpsc};
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        kernel::spawn_engine_with_runtime,
+        storage::{PersistedRuntime, SqliteStorage},
+    };
+
+    #[test]
+    fn summarize_positions_uses_directional_average_for_hedged_exposure() {
+        let positions = summarize_positions(vec![
+            AccountUpdatePosition {
+                symbol: "XAUUSDT".into(),
+                position_side: "LONG".into(),
+                position_amount: 1.0,
+                entry_price: 100.0,
+                unrealized_pnl: 10.0,
+                accumulated_realized: 3.0,
+            },
+            AccountUpdatePosition {
+                symbol: "XAUUSDT".into(),
+                position_side: "SHORT".into(),
+                position_amount: -0.5,
+                entry_price: 110.0,
+                unrealized_pnl: -2.0,
+                accumulated_realized: 1.0,
+            },
+        ]);
+
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].symbol, "XAUUSDT");
+        assert_eq!(positions[0].qty, 0.5);
+        assert_eq!(positions[0].avg_price, 100.0);
+        assert_eq!(positions[0].unrealized_pnl, 8.0);
+        assert_eq!(positions[0].realized_pnl, 4.0);
+    }
+
+    #[derive(Clone, Default)]
+    struct MarketOnlyTransport {
+        market_streams: Arc<Mutex<VecDeque<mpsc::Receiver<MarketStreamEvent>>>>,
+    }
+
+    impl MarketOnlyTransport {
+        async fn push_market_stream(&self, receiver: mpsc::Receiver<MarketStreamEvent>) {
+            self.market_streams.lock().await.push_back(receiver);
+        }
+    }
+
+    #[async_trait]
+    impl BinanceTransport for MarketOnlyTransport {
+        async fn fetch_exchange_info(&self, _symbol: &str) -> Result<ExchangeSymbol> {
+            Err(anyhow!("unused in this test"))
+        }
+
+        async fn fetch_trading_schedule(&self) -> Result<TradingSchedule> {
+            Err(anyhow!("unused in this test"))
+        }
+
+        async fn connect_market_stream(
+            &self,
+            _symbol: &str,
+        ) -> Result<mpsc::Receiver<MarketStreamEvent>> {
+            self.market_streams
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| anyhow!("no scripted market stream available"))
+        }
+
+        async fn create_user_stream(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn connect_user_stream(
+            &self,
+            _listen_key: &str,
+        ) -> Result<mpsc::Receiver<UserStreamEvent>> {
+            Err(anyhow!("unused in this test"))
+        }
+
+        async fn keepalive_user_stream(&self, _listen_key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connection_reporter_reverts_local_state_when_sync_fails() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("service.db");
+        let storage = SqliteStorage::open(&db_path).expect("sqlite open");
+        let runtime = PersistedRuntime::sqlite_bootstrap();
+        let (engine, read_model, _events_rx) =
+            spawn_engine_with_runtime(runtime.clone(), Some(storage.clone()));
+        let reporter = ConnectionReporter::new(engine, runtime.snapshot.connection.clone());
+
+        fs::remove_file(&db_path).expect("remove sqlite file");
+        fs::create_dir(&db_path).expect("replace sqlite file with directory");
+
+        assert!(
+            reporter
+                .update(|state| state.user_stream_connected = Some(true))
+                .await
+                .is_err()
+        );
+
+        fs::remove_dir(&db_path).expect("remove sqlite directory");
+        SqliteStorage::open(&db_path).expect("recreate sqlite db");
+
+        reporter
+            .update(|state| state.stale_age_ms = 42)
+            .await
+            .expect("connection sync should recover after sqlite is restored");
+
+        let snapshot = read_model.read().expect("read_model").snapshot();
+        assert_eq!(snapshot.connection.user_stream_connected, None);
+        assert_eq!(snapshot.connection.stale_age_ms, 42);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn market_connect_retries_connection_state_and_clears_old_heartbeat() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("service.db");
+        let storage = SqliteStorage::open(&db_path).expect("sqlite open");
+        let runtime = PersistedRuntime::sqlite_bootstrap();
+        let (engine, read_model, _events_rx) =
+            spawn_engine_with_runtime(runtime.clone(), Some(storage.clone()));
+        let reporter = ConnectionReporter::new(engine.clone(), runtime.snapshot.connection.clone());
+        let last_market_heartbeat = Arc::new(Mutex::new(MarketHeartbeatState::Disconnected));
+        let transport = MarketOnlyTransport::default();
+        let (_market_tx, market_rx) = mpsc::channel(4);
+        transport.push_market_stream(market_rx).await;
+
+        let mut config = BinanceConfig::testnet("XAUUSDT");
+        config.reconnect_base_delay = Duration::from_millis(40);
+        config.reconnect_max_delay = Duration::from_millis(40);
+
+        fs::remove_file(&db_path).expect("remove sqlite file");
+        fs::create_dir(&db_path).expect("replace sqlite file with directory");
+
+        let task = tokio::spawn(run_market_loop(
+            engine,
+            reporter,
+            config,
+            Arc::new(transport),
+            last_market_heartbeat,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        fs::remove_dir(&db_path).expect("remove sqlite directory");
+        SqliteStorage::open(&db_path).expect("recreate sqlite db");
+
+        let observed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = read_model.read().expect("read_model").snapshot();
+                if snapshot.connection.ws_connected
+                    && snapshot.connection.last_heartbeat_at.is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        task.abort();
+        assert!(
+            observed.is_ok(),
+            "market connect should retry connection state sync and clear old heartbeat"
+        );
+    }
+}

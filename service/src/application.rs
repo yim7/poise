@@ -1,14 +1,24 @@
+use std::{path::Path, sync::Arc};
+
 use anyhow::Result;
 use tokio::sync::broadcast;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    kernel::{EngineEvent, EngineHandle, ReadModel, SharedReadModel, now_utc, spawn_engine},
+    background::spawn_task,
+    integrations::binance::{
+        BinanceConfig, BinanceTransport, prepare_bootstrap_runtime, spawn_supervisor,
+    },
+    kernel::{
+        EngineEvent, EngineHandle, ReadModel, SharedReadModel, now_utc, spawn_engine,
+        spawn_engine_with_runtime,
+    },
     protocol::{
         CommandAccepted, CommandRequest, CommandType, HttpSuccessEnvelope, PROTOCOL_VERSION,
         PriceUpdated, RuntimeSnapshot, ServerEnvelope, ServerEvent,
     },
+    storage::{PersistedRuntime, SqliteStorage},
 };
 
 #[derive(Clone)]
@@ -26,11 +36,64 @@ pub struct RuntimeStreamSubscription {
 
 impl Application {
     pub fn bootstrap() -> Self {
-        let (engine, read_model, mut engine_events_rx) = spawn_engine();
+        Self::build_from_engine(spawn_engine())
+    }
+
+    pub fn bootstrap_with_binance(
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+    ) -> Self {
+        let runtime = prepare_bootstrap_runtime(PersistedRuntime::in_memory_bootstrap(), &config);
+        let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
+        application.start_binance_supervisor(config, transport);
+        application
+    }
+
+    pub fn bootstrap_with_sqlite(path: impl AsRef<Path>) -> Result<Self> {
+        let storage = SqliteStorage::open(path)?;
+        let runtime = match storage.load_runtime()? {
+            Some(runtime) => runtime,
+            None => {
+                let runtime = PersistedRuntime::sqlite_bootstrap();
+                storage.persist_runtime(&runtime)?;
+                runtime
+            }
+        };
+        Ok(Self::build_from_engine(spawn_engine_with_runtime(
+            runtime,
+            Some(storage),
+        )))
+    }
+
+    pub fn bootstrap_with_sqlite_and_binance(
+        path: impl AsRef<Path>,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+    ) -> Result<Self> {
+        let storage = SqliteStorage::open(path)?;
+        let runtime = match storage.load_runtime()? {
+            Some(runtime) => runtime,
+            None => PersistedRuntime::sqlite_bootstrap(),
+        };
+        let runtime = prepare_bootstrap_runtime(runtime, &config);
+        storage.persist_runtime(&runtime)?;
+        let application =
+            Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
+        application.start_binance_supervisor(config, transport);
+        Ok(application)
+    }
+
+    fn build_from_engine(
+        (engine, read_model, mut engine_events_rx): (
+            EngineHandle,
+            SharedReadModel,
+            tokio::sync::mpsc::Receiver<crate::kernel::SequencedEngineEvent>,
+        ),
+    ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         let publish_tx = events_tx.clone();
 
-        tokio::spawn(async move {
+        spawn_task(async move {
             while let Some(event) = engine_events_rx.recv().await {
                 let envelope = wrap_event(event.event.into(), Some(event.sequence));
                 if publish_tx.send(envelope).is_err() {
@@ -128,11 +191,26 @@ impl From<EngineEvent> for ServerEvent {
         match value {
             EngineEvent::CommandAck(ack) => Self::CommandAck(ack),
             EngineEvent::PriceUpdated(price) => Self::PriceUpdated(price),
+            EngineEvent::RuntimeSnapshot(snapshot) => Self::RuntimeSnapshot(snapshot),
+            EngineEvent::ConnectionChanged(connection) => Self::ConnectionChanged(connection),
         }
     }
 }
 
 impl Application {
+    fn start_binance_supervisor(
+        &self,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+    ) {
+        spawn_supervisor(
+            self.engine.clone(),
+            self.snapshot().connection,
+            config,
+            transport,
+        );
+    }
+
     fn snapshot_with_sequence(&self) -> (RuntimeSnapshot, u64) {
         let read_model = self.read_model();
         (read_model.snapshot(), read_model.last_sequence())

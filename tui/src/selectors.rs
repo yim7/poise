@@ -40,6 +40,38 @@ pub fn dashboard(state: &AppState) -> DashboardViewModel {
     }
 }
 
+pub fn dashboard_health_detail(state: &AppState) -> String {
+    let health = connection_health(state);
+    let latency_ms = state.connection.latency_ms.unwrap_or_default();
+    let stale_age_ms = state.connection.stale_age_ms;
+
+    match health.kind {
+        ConnectionHealthKind::Healthy => format!("{latency_ms}ms stale {stale_age_ms}ms"),
+        ConnectionHealthKind::Reconnecting => {
+            if !state.connection.ws_connected {
+                format!("svc retry {}ms", state.connection.reconnect_backoff_ms)
+            } else {
+                format!(
+                    "mkt retry {}ms",
+                    state.connection.market_reconnect_backoff_ms
+                )
+            }
+        }
+        ConnectionHealthKind::Stale => format!("stale {stale_age_ms}ms"),
+        ConnectionHealthKind::Degraded => {
+            if !state.connection.http_available {
+                "http down".into()
+            } else if state.connection.user_stream_connected == Some(false) {
+                "user down".into()
+            } else if latency_ms >= 750 {
+                format!("lat {latency_ms}ms")
+            } else {
+                format!("stale {stale_age_ms}ms")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GridLevelViewModel {
     pub side: String,
@@ -142,10 +174,13 @@ pub struct MarketViewModel {
     pub basis: String,
     pub session_state: String,
     pub http_status: String,
-    pub ws_status: String,
+    pub market_ws_status: String,
+    pub user_stream_status: String,
+    pub service_ws_status: String,
     pub latency: String,
     pub stale_age: String,
     pub reconnect_attempt: String,
+    pub market_backoff: String,
     pub heartbeat: String,
 }
 
@@ -164,7 +199,19 @@ pub fn market(state: &AppState) -> MarketViewModel {
             "DOWN"
         }
         .into(),
-        ws_status: if state.connection.ws_connected {
+        market_ws_status: if state.connection.market_ws_connected {
+            "UP"
+        } else {
+            "DOWN"
+        }
+        .into(),
+        user_stream_status: match state.connection.user_stream_connected {
+            Some(true) => "UP",
+            Some(false) => "DOWN",
+            None => "N/A",
+        }
+        .into(),
+        service_ws_status: if state.connection.ws_connected {
             "UP"
         } else {
             "DOWN"
@@ -173,6 +220,7 @@ pub fn market(state: &AppState) -> MarketViewModel {
         latency: format!("{}ms", state.connection.latency_ms.unwrap_or_default()),
         stale_age: format!("{}ms", state.connection.stale_age_ms),
         reconnect_attempt: state.connection.reconnect_attempt.to_string(),
+        market_backoff: format!("{}ms", state.connection.market_reconnect_backoff_ms),
         heartbeat: state.connection.last_heartbeat_at.clone(),
     }
 }
@@ -220,11 +268,25 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
         return ConnectionHealthViewModel {
             label: "RECONNECTING",
             detail: format!(
-                "retry {} in {}ms",
+                "service ws retry {} in {}ms",
                 state.connection.reconnect_attempt.max(1),
                 state.connection.reconnect_backoff_ms
             ),
-            hint: "WebSocket is down. Treat prices as stale until the stream recovers.".into(),
+            hint: "Service control-plane WebSocket is down. Wait for the client stream to recover."
+                .into(),
+            kind: ConnectionHealthKind::Reconnecting,
+        };
+    }
+
+    if !state.connection.market_ws_connected {
+        return ConnectionHealthViewModel {
+            label: "RECONNECTING",
+            detail: format!(
+                "binance ws retry in {}ms",
+                state.connection.market_reconnect_backoff_ms
+            ),
+            hint: "Service is online, but Binance market stream is reconnecting. Treat market data as stale."
+                .into(),
             kind: ConnectionHealthKind::Reconnecting,
         };
     }
@@ -239,14 +301,19 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
         };
     }
 
-    if !state.connection.http_available || latency_ms >= 750 || stale_age_ms >= 3_000 {
+    if !state.connection.http_available
+        || latency_ms >= 750
+        || stale_age_ms >= 3_000
+        || state.connection.user_stream_connected == Some(false)
+    {
         return ConnectionHealthViewModel {
             label: "DEGRADED",
             detail: format!(
-                "http {} / {}ms / stale {}ms",
+                "http {} / {}ms / stale {}ms / user {}",
                 status_word(state.connection.http_available),
                 latency_ms,
-                stale_age_ms
+                stale_age_ms,
+                optional_status_word(state.connection.user_stream_connected)
             ),
             hint: "Connection is usable but lagging. Avoid risky commands until it settles.".into(),
             kind: ConnectionHealthKind::Degraded,
@@ -256,7 +323,7 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
     ConnectionHealthViewModel {
         label: "HEALTHY",
         detail: format!("{}ms / stale {}ms", latency_ms, stale_age_ms),
-        hint: "HTTP snapshot and WS stream are both healthy.".into(),
+        hint: "Service and Binance streams are both healthy.".into(),
         kind: ConnectionHealthKind::Healthy,
     }
 }
@@ -316,4 +383,32 @@ pub fn command_label(command: CommandType) -> &'static str {
 
 fn status_word(is_up: bool) -> &'static str {
     if is_up { "up" } else { "down" }
+}
+
+fn optional_status_word(is_up: Option<bool>) -> &'static str {
+    match is_up {
+        Some(true) => "up",
+        Some(false) => "down",
+        None => "n/a",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+
+    #[test]
+    fn degraded_connection_detail_uses_na_for_unconfigured_user_stream() {
+        let mut state = AppState::sample();
+        state.connection.ws_connected = true;
+        state.connection.market_ws_connected = true;
+        state.connection.http_available = false;
+        state.connection.user_stream_connected = None;
+
+        let health = connection_health(&state);
+
+        assert_eq!(health.kind, ConnectionHealthKind::Degraded);
+        assert!(health.detail.contains("user n/a"));
+    }
 }

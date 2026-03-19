@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     net::TcpListener,
+    path::Path,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -15,6 +16,7 @@ use grid_platform_tui::{
     store::reduce,
     transport::TransportClient,
 };
+use tempfile::tempdir;
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
@@ -30,20 +32,34 @@ struct ServiceProcess {
 
 impl ServiceProcess {
     async fn start() -> Result<Self> {
+        Self::start_inner(None).await
+    }
+
+    async fn start_with_db(db_path: &Path) -> Result<Self> {
+        Self::start_inner(Some(db_path)).await
+    }
+
+    async fn start_inner(db_path: Option<&Path>) -> Result<Self> {
         let port = reserve_port()?;
         let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let base_url = format!("http://127.0.0.1:{port}");
         let ws_url = format!("ws://127.0.0.1:{port}/ws");
         let http = reqwest::Client::new();
 
-        let mut child = Command::new("cargo")
+        let mut command = Command::new("cargo");
+        command
             .arg("run")
             .arg("-p")
             .arg("grid-platform-service")
             .current_dir(&workspace_dir)
             .env("GRID_PLATFORM_SERVICE_ADDR", format!("127.0.0.1:{port}"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(db_path) = db_path {
+            command.env("GRID_PLATFORM_SERVICE_DB_PATH", db_path);
+        }
+
+        let mut child = command
             .spawn()
             .context("failed to spawn local paper service")?;
 
@@ -337,6 +353,75 @@ async fn local_paper_reconnect_resyncs_runtime_snapshot_and_command_result() -> 
                 })
         },
         Duration::from_secs(5),
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_restart_recovers_cold_start_and_reconnect_flow() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+
+    {
+        let service = ServiceProcess::start_with_db(&db_path).await?;
+        let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+
+        app.submit_key(KeyAction::Pause).await?;
+        app.drive_until(
+            |state| {
+                state.runtime.strategy_state == "paused"
+                    && state
+                        .execution
+                        .last_command_ack
+                        .as_ref()
+                        .is_some_and(|ack| ack.command == CommandType::Pause)
+                    && state.execution.command_timeline.iter().any(|entry| {
+                        entry.command == CommandType::Pause
+                            && entry.stage == CommandTimelineStage::Ack
+                    })
+            },
+            Duration::from_secs(3),
+        )
+        .await?;
+    }
+
+    let service = ServiceProcess::start_with_db(&db_path).await?;
+    let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+
+    assert_eq!(app.state.runtime.strategy_state, "paused");
+    assert!(
+        app.state
+            .execution
+            .last_command_ack
+            .as_ref()
+            .is_some_and(|ack| ack.command == CommandType::Pause)
+    );
+    assert!(app.state.execution.command_timeline.iter().any(|entry| {
+        entry.command == CommandType::Pause && entry.stage == CommandTimelineStage::Ack
+    }));
+
+    let reconnect_effects = app.force_ws_disconnect("forced reconnect after restart");
+    service
+        .send_command(CommandType::Resume, "cmd_resume_after_restart")
+        .await?;
+    app.apply_effects(reconnect_effects).await?;
+    app.drive_until(
+        |state| {
+            state.runtime.strategy_state == "running"
+                && state
+                    .execution
+                    .last_command_ack
+                    .as_ref()
+                    .is_some_and(|ack| ack.command_id == "cmd_resume_after_restart")
+                && state.execution.command_timeline.iter().any(|entry| {
+                    entry.command_id == "cmd_resume_after_restart"
+                        && entry.command == CommandType::Resume
+                        && entry.stage == CommandTimelineStage::Ack
+                })
+        },
+        Duration::from_secs(3),
     )
     .await?;
 

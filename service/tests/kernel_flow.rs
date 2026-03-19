@@ -10,6 +10,10 @@ use tokio::time::timeout;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_flow_updates_read_model_and_publishes_ack() -> Result<()> {
     let (engine, read_model, mut events_rx) = spawn_engine();
+    assert_eq!(
+        read_model.read().expect("read model").system_events()[0].message,
+        "Rust in-memory runtime bootstrapped."
+    );
 
     let accepted = engine
         .submit_command(

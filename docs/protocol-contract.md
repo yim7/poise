@@ -81,6 +81,13 @@
 - `risk_alert`
 - `connection_changed`
 
+`connection_changed` 当前额外约定：
+
+- `http_available` 表示 `service` 对 Binance REST 元数据同步是否健康。
+- `ws_connected` 表示 `service` 对 Binance 市场 WebSocket 是否连通。
+- `user_stream_connected` 为可选字段；未配置用户流时允许为 `null`。
+- 客户端自身到 `service` 的传输连接状态不写入该 payload，应作为本地 transport 状态单独维护。
+
 `runtime_snapshot.execution` 当前额外约定：
 
 - `pending_commands`: 仍表示未终态命令。

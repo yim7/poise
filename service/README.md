@@ -14,13 +14,27 @@
 - `control_plane`
 - `application`
 - `kernel`
-- 后续会继续补 `storage`、`integrations`、`strategy`
+- `storage`
+- `integrations`
+- 后续会继续补 `strategy`
 
 ## 运行
 
 ```bash
 cargo run -p grid-platform-service
 ```
+
+启用真实 Binance 接入时，可额外设置：
+
+- `GRID_PLATFORM_BINANCE_ENABLED=1`
+- `GRID_PLATFORM_BINANCE_ENV=testnet` 或 `mainnet`
+- `GRID_PLATFORM_BINANCE_SYMBOL=XAUUSDT`
+- `GRID_PLATFORM_BINANCE_API_KEY=...`
+
+可选覆盖默认地址：
+
+- `GRID_PLATFORM_BINANCE_REST_BASE_URL`
+- `GRID_PLATFORM_BINANCE_WS_BASE_URL`
 
 ## 测试
 

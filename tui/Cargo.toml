@@ -20,3 +20,4 @@ url = "2.5.4"
 
 [dev-dependencies]
 insta = "1.42.2"
+tempfile.workspace = true

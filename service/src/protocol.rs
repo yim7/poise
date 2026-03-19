@@ -57,6 +57,8 @@ pub enum RiskLevel {
 pub struct ConnectionState {
     pub http_available: bool,
     pub ws_connected: bool,
+    #[serde(default)]
+    pub user_stream_connected: Option<bool>,
     pub latency_ms: Option<u32>,
     pub last_heartbeat_at: String,
     pub reconnect_backoff_ms: u64,
@@ -231,6 +233,7 @@ impl RuntimeSnapshot {
             connection: ConnectionState {
                 http_available: true,
                 ws_connected: false,
+                user_stream_connected: None,
                 latency_ms: Some(42),
                 last_heartbeat_at: "2025-01-01T00:00:00Z".into(),
                 reconnect_backoff_ms: 0,

@@ -7,6 +7,7 @@
     "connection": {
       "http_available": true,
       "ws_connected": false,
+      "user_stream_connected": null,
       "latency_ms": 42,
       "last_heartbeat_at": "2025-01-01T00:00:00Z",
       "reconnect_backoff_ms": 0,

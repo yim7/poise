@@ -1,7 +1,8 @@
 # 近期计划
 
-本文档只描述最近 1 到 3 个里程碑的执行顺序、测试矩阵、任务拆分和并行方式。
+本文档只描述最近 1 到 3 个里程碑的执行顺序、测试矩阵和验收标准。
 长期阶段目标与依赖关系统一放在 [`roadmap.md`](roadmap.md)。
+更细的当前任务拆分统一放在 [`../TODO.md`](../TODO.md)。
 
 ## 1. 当前基线
 
@@ -103,6 +104,15 @@
 
 在内核和恢复稳定后，再开始真实 Binance 接入。
 
+### 当前状态
+
+已完成。当前已落地：
+
+- `integrations/binance` 适配层与 fake transport 测试边界
+- `exchangeInfo`、`tradingSchedule`、市场流、用户流接入骨架
+- 连接健康、reconnect、heartbeat、stale 状态入内核
+- TUI 对真实连接状态与 session 状态的呈现回归
+
 ### 先补的测试
 
 1. 为 Binance 适配层建立 fake transport 测试。
@@ -127,8 +137,8 @@
 
 现在最适合并行的只有三条：
 
-- `service` 内核重构与 K1 测试补齐
-- `storage` 的 schema 与恢复测试设计
-- `tui` 对恢复、重连和命令语义的兼容验证
+- `execution` 适配层与命令终态统一
+- `strategy` 的网格状态机和风控阈值建模
+- `tui` 对真实订单、账户和风险事件的兼容验证
 
-当前不建议并行展开策略、Web UI 或复杂回放框架，因为这些都依赖 `service` 内核先稳定。
+当前不建议并行展开 Web UI 或复杂回放框架，因为这些都依赖执行闭环和策略状态先稳定。

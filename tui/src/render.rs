@@ -365,57 +365,101 @@ fn draw_dashboard(
     .wrap(Wrap { trim: true });
     frame.render_widget(risk, right[0]);
 
-    let market = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("Last  ", theme.muted()),
-            Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
-            Span::styled("   Mark  ", theme.muted()),
-            Span::styled(format!("{:.2}", state.runtime.mark_price), theme.panel()),
-        ]),
-        Line::from(vec![
-            Span::styled("HTTP  ", theme.muted()),
-            Span::styled(
-                if state.connection.http_available {
-                    "UP"
-                } else {
-                    "DOWN"
-                },
-                if state.connection.http_available {
-                    theme.success()
-                } else {
-                    theme.danger()
-                },
-            ),
-            Span::styled("   WS  ", theme.muted()),
-            Span::styled(
-                if state.connection.ws_connected {
-                    "UP"
-                } else {
-                    "DOWN"
-                },
-                if state.connection.ws_connected {
-                    theme.success()
-                } else {
-                    theme.danger()
-                },
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Health  ", theme.muted()),
-            Span::styled(
-                health.label,
-                theme.status(status_tone_for_connection(health.kind)),
-            ),
-        ]),
-        Line::from(health.hint),
-    ])
-    .block(panel_block(
-        theme,
-        "Market + Health",
-        panel_focused(state, 4),
-        panel_tone_for_connection(health.kind),
-    ))
-    .wrap(Wrap { trim: true });
+    let health_detail = selectors::dashboard_health_detail(state);
+    let market_lines = if right[1].height <= 4 {
+        vec![
+            Line::from(vec![
+                Span::styled("Last  ", theme.muted()),
+                Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
+                Span::styled("   Mark  ", theme.muted()),
+                Span::styled(format!("{:.2}", state.runtime.mark_price), theme.panel()),
+            ]),
+            Line::from(vec![
+                Span::styled("Svc WS  ", theme.muted()),
+                Span::styled(
+                    if state.connection.ws_connected {
+                        "UP"
+                    } else {
+                        "DOWN"
+                    },
+                    if state.connection.ws_connected {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+                Span::styled("   Mkt WS  ", theme.muted()),
+                Span::styled(
+                    if state.connection.market_ws_connected {
+                        "UP"
+                    } else {
+                        "DOWN"
+                    },
+                    if state.connection.market_ws_connected {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+                Span::styled("   ", theme.muted()),
+                Span::styled(health_detail, theme.muted()),
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled("Last  ", theme.muted()),
+                Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
+                Span::styled("   Mark  ", theme.muted()),
+                Span::styled(format!("{:.2}", state.runtime.mark_price), theme.panel()),
+            ]),
+            Line::from(vec![
+                Span::styled("Service WS  ", theme.muted()),
+                Span::styled(
+                    if state.connection.ws_connected {
+                        "UP"
+                    } else {
+                        "DOWN"
+                    },
+                    if state.connection.ws_connected {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+                Span::styled("   Market WS  ", theme.muted()),
+                Span::styled(
+                    if state.connection.market_ws_connected {
+                        "UP"
+                    } else {
+                        "DOWN"
+                    },
+                    if state.connection.market_ws_connected {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Health  ", theme.muted()),
+                Span::styled(
+                    health.label,
+                    theme.status(status_tone_for_connection(health.kind)),
+                ),
+                Span::styled("   ", theme.muted()),
+                Span::styled(health_detail, theme.muted()),
+            ]),
+        ]
+    };
+    let market = Paragraph::new(market_lines)
+        .block(panel_block(
+            theme,
+            "Market + Health",
+            panel_focused(state, 4),
+            panel_tone_for_connection(health.kind),
+        ))
+        .wrap(Wrap { trim: true });
     frame.render_widget(market, right[1]);
 
     let command_items = command_timeline_items(state, theme, right[2]);
@@ -580,7 +624,7 @@ fn draw_market(
 ) {
     let vm = selectors::market(state);
     let health = selectors::connection_health(state);
-    let layout = if viewport.narrow() {
+    let layout = if viewport.compact() {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -631,16 +675,28 @@ fn draw_market(
 
     let connectivity = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("HTTP  ", theme.muted()),
+            Span::styled("Service WS  ", theme.muted()),
+            Span::styled(vm.service_ws_status, theme.panel()),
+            Span::styled("   HTTP  ", theme.muted()),
             Span::styled(vm.http_status, theme.panel()),
-            Span::styled("   WS  ", theme.muted()),
-            Span::styled(vm.ws_status, theme.panel()),
+        ]),
+        Line::from(vec![
+            Span::styled("Market WS  ", theme.muted()),
+            Span::styled(vm.market_ws_status, theme.panel()),
+            Span::styled("   User WS  ", theme.muted()),
+            Span::styled(vm.user_stream_status, theme.panel()),
         ]),
         Line::from(vec![
             Span::styled("Latency  ", theme.muted()),
             Span::styled(vm.latency, theme.panel()),
             Span::styled("   Stale  ", theme.muted()),
             Span::styled(vm.stale_age, theme.warning()),
+        ]),
+        Line::from(vec![
+            Span::styled("Retry  ", theme.muted()),
+            Span::styled(vm.reconnect_attempt, theme.panel()),
+            Span::styled("   Market Backoff  ", theme.muted()),
+            Span::styled(vm.market_backoff, theme.panel()),
         ]),
         Line::from(vec![
             Span::styled("Mode  ", theme.muted()),
@@ -1223,6 +1279,28 @@ mod tests {
     }
 
     #[test]
+    fn market_render_snapshot_100x16() {
+        assert_page_snapshot(
+            Page::Market,
+            100,
+            16,
+            "market_render_snapshot_100x16",
+            |_| {},
+        );
+    }
+
+    #[test]
+    fn market_render_snapshot_reconnecting_100x16() {
+        assert_page_snapshot(
+            Page::Market,
+            100,
+            16,
+            "market_render_snapshot_reconnecting_100x16",
+            apply_degraded_state,
+        );
+    }
+
+    #[test]
     fn events_render_snapshot_120x18() {
         assert_page_snapshot(
             Page::Events,
@@ -1261,6 +1339,37 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_renders_service_ws_status_when_transport_is_down() {
+        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+            state.connection.ws_connected = false;
+            state.connection.reconnect_attempt = 2;
+            state.connection.reconnect_backoff_ms = 2_000;
+            state.connection.http_available = true;
+            state.connection.market_ws_connected = true;
+            state.connection.user_stream_connected = Some(true);
+        });
+
+        assert!(rendered.contains("Svc WS"));
+        assert!(rendered.contains("Mkt WS"));
+    }
+
+    #[test]
+    fn dashboard_keeps_prices_and_degraded_reason_visible_at_common_width() {
+        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+            state.connection.ws_connected = true;
+            state.connection.market_ws_connected = true;
+            state.connection.http_available = true;
+            state.connection.user_stream_connected = Some(false);
+            state.connection.stale_age_ms = 0;
+            state.connection.latency_ms = Some(42);
+        });
+
+        assert!(rendered.contains("Last"));
+        assert!(rendered.contains("Mark"));
+        assert!(rendered.to_ascii_lowercase().contains("user down"));
+    }
+
+    #[test]
     fn events_render_snapshot_reconnecting_80x24() {
         assert_page_snapshot(
             Page::Events,
@@ -1275,6 +1384,14 @@ mod tests {
     where
         F: FnOnce(&mut AppState),
     {
+        let snapshot = render_page_to_string(page, width, height, mutate);
+        assert_snapshot!(name, snapshot);
+    }
+
+    fn render_page_to_string<F>(page: Page, width: u16, height: u16, mutate: F) -> String
+    where
+        F: FnOnce(&mut AppState),
+    {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::sample();
@@ -1284,12 +1401,14 @@ mod tests {
         mutate(&mut state);
         let theme = Theme::default();
         terminal.draw(|frame| draw(frame, &state, &theme)).unwrap();
-        let snapshot = buffer_to_string(terminal.backend().buffer(), width, height);
-        assert_snapshot!(name, snapshot);
+        buffer_to_string(terminal.backend().buffer(), width, height)
     }
 
     fn apply_degraded_state(state: &mut AppState) {
         state.connection.http_available = false;
+        state.connection.market_ws_connected = false;
+        state.connection.user_stream_connected = Some(false);
+        state.connection.market_reconnect_backoff_ms = 4_000;
         state.connection.ws_connected = false;
         state.connection.reconnect_attempt = 3;
         state.connection.reconnect_backoff_ms = 4_000;

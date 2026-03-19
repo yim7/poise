@@ -61,14 +61,12 @@ fn handle_protocol_event(state: &mut AppState, event: ServerEvent) -> Vec<Effect
         }
         ServerEvent::ConnectionChanged(connection) => {
             state.connection.http_available = connection.http_available;
-            state.connection.ws_connected = connection.ws_connected;
+            state.connection.market_ws_connected = connection.ws_connected;
+            state.connection.user_stream_connected = connection.user_stream_connected;
             state.connection.latency_ms = connection.latency_ms;
             state.connection.stale_age_ms = connection.stale_age_ms;
             state.connection.last_heartbeat_at = connection.last_heartbeat_at;
-            state.connection.reconnect_backoff_ms = connection.reconnect_backoff_ms;
-            if connection.ws_connected {
-                state.connection.reconnect_attempt = 0;
-            }
+            state.connection.market_reconnect_backoff_ms = connection.reconnect_backoff_ms;
             state.mark_dirty(
                 DirtyFlags {
                     connection: true,
@@ -138,7 +136,6 @@ fn handle_system_event(state: &mut AppState, event: SystemEvent) -> Vec<Effect> 
             let mut flags = DirtyFlags::default();
 
             if !state.connection.ws_connected {
-                state.connection.stale_age_ms += 1_000;
                 flags.connection = true;
             }
 
@@ -184,7 +181,6 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
         EffectResultEvent::WsConnected => {
             let reconnect_attempt = state.connection.reconnect_attempt;
             state.connection.ws_connected = true;
-            state.connection.stale_age_ms = 0;
             state.connection.reconnect_attempt = 0;
             state.connection.reconnect_backoff_ms = 0;
             let timestamp = state.local_timestamp();

@@ -1,5 +1,5 @@
 ---
-source: src/render.rs
+source: tui/src/render.rs
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  RECONNECTING  Focus Execution Focus                        
@@ -11,7 +11,7 @@ expression: snapshot
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
 │Side   Price     Qty      Status                      ││Last  2361.48   Mark  2361.55             │
-│BUY    2352.80   0.100    NEW                         ││HTTP  DOWN   WS  DOWN                     │
+│BUY    2352.80   0.100    NEW                         ││Svc WS  DOWN   Mkt WS  DOWN   svc retry   │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
 │BUY 2349.10 x 0.050  pnl +2.51                        ││ ACCEPTED  SHUTDOWN                       │

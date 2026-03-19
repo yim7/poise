@@ -113,12 +113,15 @@ impl DirtyFlags {
 #[derive(Debug, Clone)]
 pub struct ConnectionViewState {
     pub http_available: bool,
-    pub ws_connected: bool,
+    pub market_ws_connected: bool,
+    pub user_stream_connected: Option<bool>,
     pub latency_ms: Option<u32>,
     pub last_heartbeat_at: String,
-    pub reconnect_backoff_ms: u64,
+    pub market_reconnect_backoff_ms: u64,
     pub stale_age_ms: u64,
+    pub ws_connected: bool,
     pub reconnect_attempt: u32,
+    pub reconnect_backoff_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +224,7 @@ pub struct AppState {
 impl AppState {
     pub fn sample() -> Self {
         let mut state = Self::from_snapshot(RuntimeSnapshot::sample());
+        state.connection.ws_connected = true;
         state.risk.alerts.push_front(RiskEvent {
             severity: RiskLevel::Watch,
             code: "MARGIN_USAGE_WATCH".into(),
@@ -275,12 +279,15 @@ impl AppState {
         Self {
             connection: ConnectionViewState {
                 http_available: snapshot.connection.http_available,
-                ws_connected: snapshot.connection.ws_connected,
+                market_ws_connected: snapshot.connection.ws_connected,
+                user_stream_connected: snapshot.connection.user_stream_connected,
                 latency_ms: snapshot.connection.latency_ms,
                 last_heartbeat_at: snapshot.connection.last_heartbeat_at,
-                reconnect_backoff_ms: snapshot.connection.reconnect_backoff_ms,
+                market_reconnect_backoff_ms: snapshot.connection.reconnect_backoff_ms,
                 stale_age_ms: snapshot.connection.stale_age_ms,
+                ws_connected: false,
                 reconnect_attempt: 0,
+                reconnect_backoff_ms: 0,
             },
             runtime: RuntimeViewState {
                 symbol: snapshot.runtime.symbol,
@@ -381,6 +388,7 @@ impl AppState {
     pub fn sync_runtime_snapshot(&mut self, snapshot: RuntimeSnapshot) {
         let ws_connected = self.connection.ws_connected;
         let reconnect_attempt = self.connection.reconnect_attempt;
+        let reconnect_backoff_ms = self.connection.reconnect_backoff_ms;
         let ui = self.ui.clone();
         let system_events = self.system_events.clone();
         let alerts = self.risk.alerts.clone();
@@ -390,10 +398,7 @@ impl AppState {
         *self = Self::from_snapshot(snapshot);
         self.connection.ws_connected = ws_connected;
         self.connection.reconnect_attempt = reconnect_attempt;
-        if ws_connected {
-            self.connection.reconnect_backoff_ms = 0;
-            self.connection.stale_age_ms = 0;
-        }
+        self.connection.reconnect_backoff_ms = reconnect_backoff_ms;
         self.ui = ui;
         self.system_events = system_events;
         self.risk.alerts = alerts;
