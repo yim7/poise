@@ -1,0 +1,15 @@
+{
+  "version": "v1alpha1",
+  "event_id": "evt_connection_changed_0001",
+  "type": "connection_changed",
+  "emitted_at": "2025-01-01T00:00:06Z",
+  "sequence": 14,
+  "payload": {
+    "http_available": true,
+    "ws_connected": true,
+    "latency_ms": 87,
+    "last_heartbeat_at": "2025-01-01T00:00:06Z",
+    "reconnect_backoff_ms": 0,
+    "stale_age_ms": 0
+  }
+}

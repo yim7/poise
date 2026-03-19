@@ -1,0 +1,28 @@
+---
+source: src/render.rs
+expression: snapshot
+---
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Fills                   
+────────────────────────────────────────────────────────────────────────────────
+ Dashboard   Grid   Market   Events   Help                                      
+                                                                                
+                                                                                
+┌ Fills (1) ───────────────────────────┐┌ Alerts (1) ──────────────────────────┐
+│BUY 2349.10 x 0.050                   ││MARGIN_USAGE_WATCH Margin usage reache│
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+┌ Commands (2) ────────────────────────┐┌ System (2) · pending 0 ──────────────┐
+│ ACK  PAUSE cmd_hist_0001             ││[info] WebSocket connected and streami│
+│Strategy acknowledged pause and stoppe││[info] Initial runtime snapshot loaded│
+│req 2025-01-01T00:00:03Z -> acc 2025-0││                                      │
+│ FAILED  FLATTEN NOW cmd_hist_0002    ││                                      │
+│Exchange rejected flatten request due ││                                      │
+│req 2025-01-01T00:00:09Z -> acc 2025-0││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+ Focus Fills | Tab panels | p/r run | c/f/s danger | Enter/Esc

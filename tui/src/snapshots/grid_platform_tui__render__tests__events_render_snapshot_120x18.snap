@@ -1,0 +1,22 @@
+---
+source: src/render.rs
+expression: snapshot
+---
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  42ms / stale 0ms  Focus Fills  Pending 0                              
+ Dashboard   Grid   Market   Events   Help                                                                              
+                                                                                                                        
+                                                                                                                        
+┌ Fills (1) ───────────────────────────────────────────────┐┌ Alerts (1) ──────────────────────────────────────────────┐
+│BUY 2349.10 x 0.050                                       ││MARGIN_USAGE_WATCH Margin usage reached 39% of configured │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌ Commands (2) ────────────────────────────────────────────┐┌ System (2) · pending 0 ──────────────────────────────────┐
+│ ACK  PAUSE cmd_hist_0001                                 ││[info] WebSocket connected and streaming.                 │
+│Strategy acknowledged pause and stopped placing new orders││[info] Initial runtime snapshot loaded.                   │
+│req 2025-01-01T00:00:03Z -> acc 2025-01-01T00:00:04Z -> en││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Focus Fills | 1-4 pages ? help | Tab/Shift-Tab panels | p/r runtime | c/f/s danger ops | Enter/Esc modal

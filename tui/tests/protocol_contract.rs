@@ -1,0 +1,153 @@
+use std::{fs, path::PathBuf};
+
+use grid_platform_tui::protocol::{
+    CommandAck, CommandStatus, ConnectionState, HttpSuccessEnvelope, RiskEvent, RuntimeSnapshot,
+    ServerEnvelope, ServerEvent,
+};
+
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contracts")
+}
+
+#[test]
+fn runtime_snapshot_fixture_decodes() {
+    let raw = fs::read_to_string(fixtures_dir().join("runtime_snapshot.json")).unwrap();
+    let snapshot: RuntimeSnapshot = serde_json::from_str(&raw).unwrap();
+    assert_eq!(snapshot.runtime.symbol, "XAUUSDT");
+    assert_eq!(snapshot.execution.open_orders.len(), 2);
+    assert_eq!(
+        snapshot.execution.recent_commands[0].command_id,
+        "cmd_resume_01"
+    );
+}
+
+#[test]
+fn server_envelope_decodes_runtime_snapshot() {
+    let raw = fs::read_to_string(fixtures_dir().join("runtime_snapshot_event.json")).unwrap();
+    let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed.event_id, "evt_runtime_snapshot_0001");
+    assert_eq!(parsed.sequence, None);
+    match parsed.event {
+        ServerEvent::RuntimeSnapshot(snapshot) => assert_eq!(snapshot.runtime.env, "testnet"),
+        _ => panic!("unexpected event type"),
+    }
+}
+
+#[test]
+fn server_envelope_decodes_command_ack() {
+    let raw = fs::read_to_string(fixtures_dir().join("command_ack_event.json")).unwrap();
+    let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed.sequence, Some(12));
+    match parsed.event {
+        ServerEvent::CommandAck(CommandAck {
+            command_id, status, ..
+        }) => {
+            assert_eq!(command_id, "cmd_pause_01");
+            assert_eq!(status, CommandStatus::Completed);
+        }
+        _ => panic!("unexpected event type"),
+    }
+}
+
+#[test]
+fn server_envelope_decodes_risk_alert() {
+    let raw = fs::read_to_string(fixtures_dir().join("risk_alert_event.json")).unwrap();
+    let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed.sequence, None);
+    match parsed.event {
+        ServerEvent::RiskAlert(RiskEvent { code, message, .. }) => {
+            assert_eq!(code, "DAILY_LOSS_WARNING");
+            assert!(message.contains("stop line"));
+        }
+        _ => panic!("unexpected event type"),
+    }
+}
+
+#[test]
+fn server_envelope_decodes_connection_changed() {
+    let raw = fs::read_to_string(fixtures_dir().join("connection_changed_event.json")).unwrap();
+    let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed.sequence, Some(14));
+    match parsed.event {
+        ServerEvent::ConnectionChanged(ConnectionState {
+            ws_connected,
+            latency_ms,
+            ..
+        }) => {
+            assert!(ws_connected);
+            assert_eq!(latency_ms, Some(87));
+        }
+        _ => panic!("unexpected event type"),
+    }
+}
+
+#[test]
+fn http_success_envelope_decodes_runtime_snapshot() {
+    let raw = r#"{
+        "version": "v1alpha1",
+        "status": "ok",
+        "data": {
+            "connection": {
+                "http_available": true,
+                "ws_connected": false,
+                "latency_ms": 42,
+                "last_heartbeat_at": "2025-01-01T00:00:00Z",
+                "reconnect_backoff_ms": 0,
+                "stale_age_ms": 0
+            },
+            "runtime": {
+                "symbol": "XAUUSDT",
+                "env": "testnet",
+                "session_state": "regular",
+                "strategy_state": "running",
+                "last_price": 2361.48,
+                "mark_price": 2361.55,
+                "position_qty": 0.25,
+                "position_avg_price": 2354.2,
+                "unrealized_pnl": 1.84,
+                "realized_pnl": 14.52
+            },
+            "execution": {
+                "open_orders": [],
+                "recent_fills": [],
+                "pending_commands": [],
+                "last_command_ack": "cmd_resume_01",
+                "last_command_ack_event": {
+                    "command_id": "cmd_resume_01",
+                    "command": "resume",
+                    "status": "completed",
+                    "message": "Strategy resumed.",
+                    "emitted_at": "2025-01-01T00:00:05Z"
+                },
+                "recent_commands": [
+                    {
+                        "command_id": "cmd_resume_01",
+                        "command": "resume",
+                        "status": "completed",
+                        "summary": "Strategy resumed.",
+                        "requested_at": "2025-01-01T00:00:03Z",
+                        "accepted_at": "2025-01-01T00:00:04Z",
+                        "finished_at": "2025-01-01T00:00:05Z"
+                    }
+                ]
+            },
+            "risk": {
+                "current_notional": 590.39,
+                "max_notional": 1500.0,
+                "daily_loss_limit": -120.0,
+                "stop_loss_pct": 4.0,
+                "risk_level": "watch",
+                "breaker_engaged": false,
+                "unacked_alerts": 1
+            }
+        }
+    }"#;
+    let parsed: HttpSuccessEnvelope<RuntimeSnapshot> = serde_json::from_str(raw).unwrap();
+    assert_eq!(parsed.version, "v1alpha1");
+    assert_eq!(parsed.status, "ok");
+    assert_eq!(parsed.data.runtime.symbol, "XAUUSDT");
+    assert_eq!(
+        parsed.data.execution.recent_commands[0].command_id,
+        "cmd_resume_01"
+    );
+}

@@ -1,0 +1,28 @@
+---
+source: src/render.rs
+expression: snapshot
+---
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Active Grid Levels      
+────────────────────────────────────────────────────────────────────────────────
+ Dashboard   Grid   Market   Events   Help                                      
+                                                                                
+                                                                                
+┌ Active Grid Levels ──────────────────────────────────────────────────────────┐
+│Side   Price      Qty      bps      Status                                    │
+│BUY    2352.80    0.100    -36.8    NEW                                       │
+│SELL   2368.30    0.100    +28.9    NEW                                       │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Grid Summary ────────────────────────────────────────────────────────────────┐
+│Lower  2352.80   Upper  2368.30                                               │
+│Center  2360.55   Span  0.66%                                                 │
+│Levels  2   Bias  long inventory                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Operator Notes ──────────────────────────────────────────────────────────────┐
+│Current Price  2361.48                                                        │
+│Session  regular                                                              │
+│Health  HEALTHY                                                               │
+│Monitor spacing drift before rebuilding grid levels.                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+ Focus Active Grid Levels | Tab panels | p/r run | c/f/s danger | Enter/Esc

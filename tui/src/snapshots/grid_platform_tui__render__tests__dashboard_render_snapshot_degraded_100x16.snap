@@ -1,0 +1,20 @@
+---
+source: src/render.rs
+expression: snapshot
+---
+ GRID PLATFORM  XAUUSDT testnet running  RECONNECTING  Focus Execution Focus                        
+ Dashboard   Grid   Market   Events   Help                                                          
+                                                                                                    
+┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
+│Position  0.250 @ 2354.20                             ││Level  Danger   Breaker  OFF              │
+│U-PnL  1.84   R-PnL  14.52                            ││Notional  590/1500   Stop  4.0%           │
+└──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
+┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
+│Side   Price     Qty      Status                      ││Last  2361.48   Mark  2361.55             │
+│BUY    2352.80   0.100    NEW                         ││HTTP  DOWN   WS  DOWN                     │
+└──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
+┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
+│BUY 2349.10 x 0.050  pnl +2.51                        ││ ACCEPTED  SHUTDOWN                       │
+└──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Focus Execution Focus | Tab panels | p/r run | c/f/s danger | Enter/Esc

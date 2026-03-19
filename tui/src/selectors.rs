@@ -1,0 +1,319 @@
+use crate::{
+    protocol::{CommandType, OpenOrder},
+    state::{AppState, CommandTimelineStage},
+};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardViewModel {
+    pub symbol: String,
+    pub strategy_state: String,
+    pub session_state: String,
+    pub position_qty: String,
+    pub position_avg_price: String,
+    pub unrealized_pnl: String,
+    pub realized_pnl: String,
+    pub open_orders: usize,
+    pub pending_commands: usize,
+    pub fills: usize,
+    pub risk_summary: String,
+    pub ws_summary: String,
+}
+
+pub fn dashboard(state: &AppState) -> DashboardViewModel {
+    let health = connection_health(state);
+    DashboardViewModel {
+        symbol: state.runtime.symbol.clone(),
+        strategy_state: state.runtime.strategy_state.clone(),
+        session_state: state.runtime.session_state.clone(),
+        position_qty: format!("{:.3}", state.runtime.position_qty),
+        position_avg_price: format!("{:.2}", state.runtime.position_avg_price),
+        unrealized_pnl: format!("{:.2}", state.runtime.unrealized_pnl),
+        realized_pnl: format!("{:.2}", state.runtime.realized_pnl),
+        open_orders: state.execution.open_orders.len(),
+        pending_commands: state.execution.pending_commands.len(),
+        fills: state.execution.recent_fills.len(),
+        risk_summary: format!(
+            "{:?} {:.0}/{:.0}",
+            state.risk.risk_level, state.risk.current_notional, state.risk.max_notional
+        ),
+        ws_summary: format!("{} · {}", health.label, health.detail),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridLevelViewModel {
+    pub side: String,
+    pub price: String,
+    pub qty: String,
+    pub distance_bps: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridViewModel {
+    pub lower: String,
+    pub upper: String,
+    pub center: String,
+    pub span_pct: String,
+    pub active_levels: usize,
+    pub buy_levels: usize,
+    pub sell_levels: usize,
+    pub inventory_bias: String,
+    pub levels: Vec<GridLevelViewModel>,
+}
+
+pub fn grid(state: &AppState) -> GridViewModel {
+    let lower = state
+        .execution
+        .open_orders
+        .iter()
+        .map(|order| order.price)
+        .reduce(f64::min)
+        .unwrap_or(state.runtime.last_price);
+    let upper = state
+        .execution
+        .open_orders
+        .iter()
+        .map(|order| order.price)
+        .reduce(f64::max)
+        .unwrap_or(state.runtime.last_price);
+    let center = (lower + upper) / 2.0;
+    let span_pct = if center.abs() > f64::EPSILON {
+        ((upper - lower) / center) * 100.0
+    } else {
+        0.0
+    };
+    let buy_levels = state
+        .execution
+        .open_orders
+        .iter()
+        .filter(|order| order.side.eq_ignore_ascii_case("buy"))
+        .count();
+    let sell_levels = state.execution.open_orders.len().saturating_sub(buy_levels);
+
+    let mut orders = state.execution.open_orders.clone();
+    orders.sort_by(|a, b| {
+        a.price
+            .partial_cmp(&b.price)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    GridViewModel {
+        lower: format!("{lower:.2}"),
+        upper: format!("{upper:.2}"),
+        center: format!("{center:.2}"),
+        span_pct: format!("{span_pct:.2}%"),
+        active_levels: orders.len(),
+        buy_levels,
+        sell_levels,
+        inventory_bias: if state.runtime.position_qty > 0.0 {
+            "long inventory".into()
+        } else if state.runtime.position_qty < 0.0 {
+            "short inventory".into()
+        } else {
+            "flat inventory".into()
+        },
+        levels: orders
+            .iter()
+            .map(|order| grid_level(order, state.runtime.last_price))
+            .collect(),
+    }
+}
+
+fn grid_level(order: &OpenOrder, last_price: f64) -> GridLevelViewModel {
+    let distance_bps = if last_price.abs() > f64::EPSILON {
+        ((order.price - last_price) / last_price) * 10_000.0
+    } else {
+        0.0
+    };
+    GridLevelViewModel {
+        side: order.side.to_uppercase(),
+        price: format!("{:.2}", order.price),
+        qty: format!("{:.3}", order.qty),
+        distance_bps: format!("{distance_bps:+.1}"),
+        status: order.status.clone(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketViewModel {
+    pub last_price: String,
+    pub mark_price: String,
+    pub basis: String,
+    pub session_state: String,
+    pub http_status: String,
+    pub ws_status: String,
+    pub latency: String,
+    pub stale_age: String,
+    pub reconnect_attempt: String,
+    pub heartbeat: String,
+}
+
+pub fn market(state: &AppState) -> MarketViewModel {
+    MarketViewModel {
+        last_price: format!("{:.2}", state.runtime.last_price),
+        mark_price: format!("{:.2}", state.runtime.mark_price),
+        basis: format!(
+            "{:+.2}",
+            state.runtime.mark_price - state.runtime.last_price
+        ),
+        session_state: state.runtime.session_state.clone(),
+        http_status: if state.connection.http_available {
+            "UP"
+        } else {
+            "DOWN"
+        }
+        .into(),
+        ws_status: if state.connection.ws_connected {
+            "UP"
+        } else {
+            "DOWN"
+        }
+        .into(),
+        latency: format!("{}ms", state.connection.latency_ms.unwrap_or_default()),
+        stale_age: format!("{}ms", state.connection.stale_age_ms),
+        reconnect_attempt: state.connection.reconnect_attempt.to_string(),
+        heartbeat: state.connection.last_heartbeat_at.clone(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventsViewModel {
+    pub fills_count: usize,
+    pub alerts_count: usize,
+    pub system_count: usize,
+    pub pending_commands: usize,
+    pub timeline_count: usize,
+}
+
+pub fn events(state: &AppState) -> EventsViewModel {
+    EventsViewModel {
+        fills_count: state.execution.recent_fills.len(),
+        alerts_count: state.risk.alerts.len(),
+        system_count: state.system_events.len(),
+        pending_commands: state.execution.pending_commands.len(),
+        timeline_count: state.execution.command_timeline.len(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionHealthKind {
+    Healthy,
+    Degraded,
+    Stale,
+    Reconnecting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionHealthViewModel {
+    pub label: &'static str,
+    pub detail: String,
+    pub hint: String,
+    pub kind: ConnectionHealthKind,
+}
+
+pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
+    let latency_ms = state.connection.latency_ms.unwrap_or_default();
+    let stale_age_ms = state.connection.stale_age_ms;
+
+    if !state.connection.ws_connected {
+        return ConnectionHealthViewModel {
+            label: "RECONNECTING",
+            detail: format!(
+                "retry {} in {}ms",
+                state.connection.reconnect_attempt.max(1),
+                state.connection.reconnect_backoff_ms
+            ),
+            hint: "WebSocket is down. Treat prices as stale until the stream recovers.".into(),
+            kind: ConnectionHealthKind::Reconnecting,
+        };
+    }
+
+    if stale_age_ms >= 8_000 {
+        return ConnectionHealthViewModel {
+            label: "STALE",
+            detail: format!("feed lag {}ms", stale_age_ms),
+            hint: "Heartbeat is alive but market data is not advancing. Recheck before trading."
+                .into(),
+            kind: ConnectionHealthKind::Stale,
+        };
+    }
+
+    if !state.connection.http_available || latency_ms >= 750 || stale_age_ms >= 3_000 {
+        return ConnectionHealthViewModel {
+            label: "DEGRADED",
+            detail: format!(
+                "http {} / {}ms / stale {}ms",
+                status_word(state.connection.http_available),
+                latency_ms,
+                stale_age_ms
+            ),
+            hint: "Connection is usable but lagging. Avoid risky commands until it settles.".into(),
+            kind: ConnectionHealthKind::Degraded,
+        };
+    }
+
+    ConnectionHealthViewModel {
+        label: "HEALTHY",
+        detail: format!("{}ms / stale {}ms", latency_ms, stale_age_ms),
+        hint: "HTTP snapshot and WS stream are both healthy.".into(),
+        kind: ConnectionHealthKind::Healthy,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandTimelineItemViewModel {
+    pub command_id: String,
+    pub command_label: &'static str,
+    pub stage_label: &'static str,
+    pub stage: CommandTimelineStage,
+    pub summary: String,
+    pub timing: String,
+}
+
+pub fn command_timeline(state: &AppState, limit: usize) -> Vec<CommandTimelineItemViewModel> {
+    state
+        .execution
+        .command_timeline
+        .iter()
+        .take(limit)
+        .map(|entry| {
+            let timing = match (&entry.accepted_at, &entry.finished_at) {
+                (Some(accepted_at), Some(finished_at)) => format!(
+                    "req {} -> acc {} -> end {}",
+                    entry.requested_at, accepted_at, finished_at
+                ),
+                (Some(accepted_at), None) => {
+                    format!("req {} -> acc {}", entry.requested_at, accepted_at)
+                }
+                (None, Some(finished_at)) => {
+                    format!("req {} -> end {}", entry.requested_at, finished_at)
+                }
+                (None, None) => format!("req {}", entry.requested_at),
+            };
+
+            CommandTimelineItemViewModel {
+                command_id: entry.command_id.clone(),
+                command_label: command_label(entry.command),
+                stage_label: entry.stage.label(),
+                stage: entry.stage,
+                summary: entry.summary.clone(),
+                timing,
+            }
+        })
+        .collect()
+}
+
+pub fn command_label(command: CommandType) -> &'static str {
+    match command {
+        CommandType::Pause => "PAUSE",
+        CommandType::Resume => "RESUME",
+        CommandType::CancelAll => "CANCEL ALL",
+        CommandType::FlattenNow => "FLATTEN NOW",
+        CommandType::ShutdownAfterFlatten => "SHUTDOWN",
+    }
+}
+
+fn status_word(is_up: bool) -> &'static str {
+    if is_up { "up" } else { "down" }
+}

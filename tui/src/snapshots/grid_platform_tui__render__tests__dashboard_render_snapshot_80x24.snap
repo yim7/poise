@@ -1,0 +1,28 @@
+---
+source: src/render.rs
+expression: snapshot
+---
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Execution Focus         
+────────────────────────────────────────────────────────────────────────────────
+ Dashboard   Grid   Market   Events   Help                                      
+                                                                                
+                                                                                
+┌ Execution Focus ──────────────────────────┐┌ Risk + Alerts ──────────────────┐
+│Position  0.250 @ 2354.20                  ││Level  Watch   Breaker  OFF      │
+│U-PnL  1.84   R-PnL  14.52                 ││Notional  590/1500   Stop  4.0%  │
+│Orders  2   Pending  0   Health  HEALTHY   ││Alert  MARGIN_USAGE_WATCH        │
+└───────────────────────────────────────────┘└─────────────────────────────────┘
+┌ Open Orders ──────────────────────────────┐┌ Market + Health ────────────────┐
+│Side   Price     Qty      Status           ││Last  2361.48   Mark  2361.55    │
+│BUY    2352.80   0.100    NEW              ││HTTP  UP   WS  UP                │
+│SELL   2368.30   0.100    NEW              ││Health  HEALTHY                  │
+│                                           │└─────────────────────────────────┘
+└───────────────────────────────────────────┘┌ Command Timeline ───────────────┐
+┌ Recent Fills ─────────────────────────────┐│ ACK  PAUSE cmd_hist_0001        │
+│BUY 2349.10 x 0.050  pnl +2.51             ││Strategy acknowledged pause and s│
+│                                           ││req 2025-01-01T00:00:03Z -> acc 2│
+│                                           ││                                 │
+│                                           ││                                 │
+└───────────────────────────────────────────┘└─────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────
+ Focus Execution Focus | Tab panels | p/r run | c/f/s danger | Enter/Esc

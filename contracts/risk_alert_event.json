@@ -1,0 +1,13 @@
+{
+  "version": "v1alpha1",
+  "event_id": "evt_risk_alert_0001",
+  "type": "risk_alert",
+  "emitted_at": "2025-01-01T00:00:05Z",
+  "payload": {
+    "severity": "warning",
+    "code": "DAILY_LOSS_WARNING",
+    "message": "Daily realized PnL is within 10% of the configured stop line.",
+    "created_at": "2025-01-01T00:00:05Z",
+    "acknowledged_at": null
+  }
+}

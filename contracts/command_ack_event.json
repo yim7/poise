@@ -1,0 +1,14 @@
+{
+  "version": "v1alpha1",
+  "event_id": "evt_command_ack_0001",
+  "type": "command_ack",
+  "emitted_at": "2025-01-01T00:00:04Z",
+  "sequence": 12,
+  "payload": {
+    "command_id": "cmd_pause_01",
+    "command": "pause",
+    "status": "completed",
+    "message": "Strategy paused.",
+    "emitted_at": "2025-01-01T00:00:04Z"
+  }
+}

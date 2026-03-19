@@ -1,0 +1,89 @@
+{
+  "connection": {
+    "http_available": true,
+    "ws_connected": false,
+    "latency_ms": 42,
+    "last_heartbeat_at": "2025-01-01T00:00:00Z",
+    "reconnect_backoff_ms": 0,
+    "stale_age_ms": 0
+  },
+  "runtime": {
+    "symbol": "XAUUSDT",
+    "env": "testnet",
+    "session_state": "regular",
+    "strategy_state": "running",
+    "last_price": 2361.48,
+    "mark_price": 2361.55,
+    "position_qty": 0.25,
+    "position_avg_price": 2354.2,
+    "unrealized_pnl": 1.84,
+    "realized_pnl": 14.52
+  },
+  "execution": {
+    "open_orders": [
+      {
+        "order_id": "ord_1001",
+        "client_order_id": "grid_buy_01",
+        "side": "buy",
+        "price": 2352.8,
+        "qty": 0.1,
+        "filled_qty": 0.0,
+        "status": "NEW",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      },
+      {
+        "order_id": "ord_1002",
+        "client_order_id": "grid_sell_01",
+        "side": "sell",
+        "price": 2368.3,
+        "qty": 0.1,
+        "filled_qty": 0.0,
+        "status": "NEW",
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+      }
+    ],
+    "recent_fills": [
+      {
+        "trade_id": "fill_9001",
+        "order_id": "ord_0999",
+        "side": "buy",
+        "price": 2349.1,
+        "qty": 0.05,
+        "fee": 0.03,
+        "realized_pnl": 2.51,
+        "event_time": "2025-01-01T00:00:00Z"
+      }
+    ],
+    "pending_commands": [],
+    "last_command_ack": "cmd_resume_01",
+    "last_command_ack_event": {
+      "command_id": "cmd_resume_01",
+      "command": "resume",
+      "status": "completed",
+      "message": "Strategy resumed.",
+      "emitted_at": "2025-01-01T00:00:05Z"
+    },
+    "recent_commands": [
+      {
+        "command_id": "cmd_resume_01",
+        "command": "resume",
+        "status": "completed",
+        "summary": "Strategy resumed.",
+        "requested_at": "2025-01-01T00:00:03Z",
+        "accepted_at": "2025-01-01T00:00:04Z",
+        "finished_at": "2025-01-01T00:00:05Z"
+      }
+    ]
+  },
+  "risk": {
+    "current_notional": 590.39,
+    "max_notional": 1500.0,
+    "daily_loss_limit": -120.0,
+    "stop_loss_pct": 4.0,
+    "risk_level": "watch",
+    "breaker_engaged": false,
+    "unacked_alerts": 1
+  }
+}
