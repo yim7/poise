@@ -2,6 +2,7 @@ mod background;
 
 pub mod application;
 pub mod control_plane;
+pub mod execution;
 pub mod integrations;
 pub mod kernel;
 pub mod protocol;

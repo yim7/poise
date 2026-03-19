@@ -54,6 +54,7 @@
         {
           "trade_id": "fill_9001",
           "order_id": "ord_0999",
+          "client_order_id": "flatten_reduce_only_01",
           "side": "buy",
           "price": 2349.1,
           "qty": 0.05,
@@ -63,23 +64,29 @@
         }
       ],
       "pending_commands": [],
-      "last_command_ack": "cmd_resume_01",
+      "last_command_ack": "cmd_flatten_01",
       "last_command_ack_event": {
-        "command_id": "cmd_resume_01",
-        "command": "resume",
+        "command_id": "cmd_flatten_01",
+        "command": "flatten_now",
         "status": "completed",
-        "message": "Strategy resumed.",
+        "message": "Position flattened.",
+        "client_order_ids": ["flatten_reduce_only_01"],
+        "order_ids": ["ord_0999"],
+        "trade_ids": ["fill_9001"],
         "emitted_at": "2025-01-01T00:00:05Z"
       },
       "recent_commands": [
         {
-          "command_id": "cmd_resume_01",
-          "command": "resume",
+          "command_id": "cmd_flatten_01",
+          "command": "flatten_now",
           "status": "completed",
-          "summary": "Strategy resumed.",
+          "summary": "Position flattened.",
           "requested_at": "2025-01-01T00:00:03Z",
           "accepted_at": "2025-01-01T00:00:04Z",
-          "finished_at": "2025-01-01T00:00:05Z"
+          "finished_at": "2025-01-01T00:00:05Z",
+          "client_order_ids": ["flatten_reduce_only_01"],
+          "order_ids": ["ord_0999"],
+          "trade_ids": ["fill_9001"]
         }
       ]
     },

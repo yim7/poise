@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::protocol::{
-    CommandAck, CommandRecord, CommandStatus, CommandType, PendingCommand, RecentFill, RiskEvent,
-    RiskLevel, RuntimeSnapshot, SystemEvent,
+    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, PendingCommand,
+    RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, SystemEvent,
 };
 
 pub const COMMAND_TIMEOUT_TICKS: u64 = 15;
@@ -172,6 +172,7 @@ pub struct CommandTimelineEntry {
     pub requested_at: String,
     pub accepted_at: Option<String>,
     pub finished_at: Option<String>,
+    pub links: CommandLinks,
     pub timeout_at_tick: Option<u64>,
 }
 
@@ -255,6 +256,7 @@ impl AppState {
                 requested_at: "2025-01-01T00:00:09Z".into(),
                 accepted_at: Some("2025-01-01T00:00:10Z".into()),
                 finished_at: Some("2025-01-01T00:00:13Z".into()),
+                links: CommandLinks::default(),
                 timeout_at_tick: None,
             });
         state
@@ -268,6 +270,7 @@ impl AppState {
                 requested_at: "2025-01-01T00:00:03Z".into(),
                 accepted_at: Some("2025-01-01T00:00:04Z".into()),
                 finished_at: Some("2025-01-01T00:00:05Z".into()),
+                links: CommandLinks::default(),
                 timeout_at_tick: None,
             });
         state.trim_command_timeline();
@@ -354,6 +357,7 @@ impl AppState {
                 requested_at: self.local_timestamp(),
                 accepted_at: None,
                 finished_at: None,
+                links: CommandLinks::default(),
                 timeout_at_tick: Some(self.clock_ticks + COMMAND_TIMEOUT_TICKS),
             });
         self.trim_command_timeline();
@@ -441,6 +445,7 @@ fn command_timeline_from_pending(command: &PendingCommand) -> CommandTimelineEnt
         accepted_at: (stage == CommandTimelineStage::Accepted)
             .then(|| command.requested_at.clone()),
         finished_at: stage.is_terminal().then(|| command.requested_at.clone()),
+        links: CommandLinks::default(),
         timeout_at_tick: None,
     }
 }
@@ -461,6 +466,7 @@ fn command_timeline_from_record(command: &CommandRecord) -> CommandTimelineEntry
         requested_at: command.requested_at.clone(),
         accepted_at: command.accepted_at.clone(),
         finished_at: command.finished_at.clone(),
+        links: command.links.clone(),
         timeout_at_tick: None,
     }
 }

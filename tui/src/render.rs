@@ -232,17 +232,17 @@ fn draw_dashboard(
     .wrap(Wrap { trim: true });
     frame.render_widget(summary, left[0]);
 
-    let order_rows = state
-        .execution
-        .open_orders
-        .iter()
-        .take(table_capacity(left[1]))
+    let order_rows = selectors::open_order_items(state, table_capacity(left[1]))
+        .into_iter()
         .map(|order| {
             Row::new(vec![
-                Cell::from(order.side.to_uppercase()),
-                Cell::from(format!("{:.2}", order.price)),
-                Cell::from(format!("{:.3}", order.qty)),
-                Cell::from(order.status.clone()),
+                Cell::from(order.side),
+                Cell::from(order.price),
+                Cell::from(order.qty),
+                Cell::from(match order.command_ref {
+                    Some(command_ref) => format!("{} · {}", order.status, command_ref),
+                    None => order.status,
+                }),
             ])
         });
     frame.render_widget(
@@ -267,27 +267,28 @@ fn draw_dashboard(
     );
 
     let fill_items = list_from_lines(
-        state
-            .execution
-            .recent_fills
-            .iter()
-            .take(list_capacity(left[2]))
-            .map(|fill| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", fill.side.to_uppercase()), theme.emphasis()),
+        selectors::recent_fill_items(state, list_capacity(left[2]))
+            .into_iter()
+            .flat_map(|fill| {
+                let mut lines = vec![Line::from(vec![
+                    Span::styled(format!("{} ", fill.side), theme.emphasis()),
+                    Span::styled(fill.price_qty, theme.panel()),
                     Span::styled(
-                        format!("{:.2} x {:.3}", fill.price, fill.qty),
-                        theme.panel(),
-                    ),
-                    Span::styled(
-                        format!("  pnl {:+.2}", fill.realized_pnl),
+                        format!("  pnl {}", fill.pnl),
                         if fill.realized_pnl >= 0.0 {
                             theme.success()
                         } else {
                             theme.danger()
                         },
                     ),
-                ])
+                ])];
+                if let Some(command_ref) = fill.command_ref {
+                    lines.push(Line::from(Span::styled(
+                        format!("cmd {command_ref}"),
+                        theme.muted(),
+                    )));
+                }
+                lines
             })
             .collect(),
         theme,
@@ -762,19 +763,20 @@ fn draw_events(
         .split(rows[1]);
 
     let fills = list_from_lines(
-        state
-            .execution
-            .recent_fills
-            .iter()
-            .take(list_capacity(top[0]))
-            .map(|fill| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", fill.side.to_uppercase()), theme.emphasis()),
-                    Span::styled(
-                        format!("{:.2} x {:.3}", fill.price, fill.qty),
-                        theme.panel(),
-                    ),
-                ])
+        selectors::recent_fill_items(state, list_capacity(top[0]))
+            .into_iter()
+            .flat_map(|fill| {
+                let mut lines = vec![Line::from(vec![
+                    Span::styled(format!("{} ", fill.side), theme.emphasis()),
+                    Span::styled(fill.price_qty, theme.panel()),
+                ])];
+                if let Some(command_ref) = fill.command_ref {
+                    lines.push(Line::from(Span::styled(
+                        format!("cmd {command_ref}"),
+                        theme.muted(),
+                    )));
+                }
+                lines
             })
             .collect(),
         theme,
@@ -1225,7 +1227,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        protocol::{CommandStatus, CommandType, PendingCommand, RiskEvent, RiskLevel},
+        protocol::{
+            CommandLinks, CommandStatus, CommandType, PendingCommand, RiskEvent, RiskLevel,
+        },
         state::{AppState, CommandTimelineEntry, Page},
         theme::Theme,
     };
@@ -1380,6 +1384,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dashboard_render_snapshot_execution_links_100x16() {
+        assert_page_snapshot(
+            Page::Dashboard,
+            100,
+            16,
+            "dashboard_render_snapshot_execution_links_100x16",
+            |state| {
+                state.execution.command_timeline.clear();
+                state
+                    .execution
+                    .command_timeline
+                    .push_front(CommandTimelineEntry {
+                        command_id: "cmd_flatten_linked".into(),
+                        command: CommandType::FlattenNow,
+                        stage: crate::state::CommandTimelineStage::Ack,
+                        summary: "Position flattened.".into(),
+                        requested_at: "2025-01-01T00:00:03Z".into(),
+                        accepted_at: Some("2025-01-01T00:00:04Z".into()),
+                        finished_at: Some("2025-01-01T00:00:05Z".into()),
+                        links: CommandLinks {
+                            client_order_ids: vec!["flatten_reduce_only_01".into()],
+                            order_ids: vec!["ord_0999".into()],
+                            trade_ids: vec!["fill_9001".into()],
+                        },
+                        timeout_at_tick: None,
+                    });
+                state
+                    .execution
+                    .command_timeline
+                    .push_front(CommandTimelineEntry {
+                        command_id: "cmd_cancel_linked".into(),
+                        command: CommandType::CancelAll,
+                        stage: crate::state::CommandTimelineStage::Ack,
+                        summary: "All open orders cancelled.".into(),
+                        requested_at: "2025-01-01T00:00:01Z".into(),
+                        accepted_at: Some("2025-01-01T00:00:02Z".into()),
+                        finished_at: Some("2025-01-01T00:00:03Z".into()),
+                        links: CommandLinks {
+                            client_order_ids: vec!["grid_buy_01".into()],
+                            order_ids: vec!["ord_1001".into()],
+                            trade_ids: vec![],
+                        },
+                        timeout_at_tick: None,
+                    });
+            },
+        );
+    }
+
+    #[test]
+    fn events_render_snapshot_failure_details_100x16() {
+        assert_page_snapshot(
+            Page::Events,
+            100,
+            16,
+            "events_render_snapshot_failure_details_100x16",
+            |state| {
+                state.execution.command_timeline.clear();
+                state
+                    .execution
+                    .command_timeline
+                    .push_front(CommandTimelineEntry {
+                        command_id: "cmd_timeout_01".into(),
+                        command: CommandType::FlattenNow,
+                        stage: crate::state::CommandTimelineStage::TimedOut,
+                        summary: "flatten timed out while waiting for reduce-only fill".into(),
+                        requested_at: "2025-01-01T00:00:06Z".into(),
+                        accepted_at: Some("2025-01-01T00:00:07Z".into()),
+                        finished_at: Some("2025-01-01T00:00:22Z".into()),
+                        links: CommandLinks::default(),
+                        timeout_at_tick: None,
+                    });
+                state
+                    .execution
+                    .command_timeline
+                    .push_front(CommandTimelineEntry {
+                        command_id: "cmd_failed_01".into(),
+                        command: CommandType::CancelAll,
+                        stage: crate::state::CommandTimelineStage::Failed,
+                        summary: "exchange rejected cancel-all because the order set changed"
+                            .into(),
+                        requested_at: "2025-01-01T00:00:02Z".into(),
+                        accepted_at: Some("2025-01-01T00:00:03Z".into()),
+                        finished_at: Some("2025-01-01T00:00:04Z".into()),
+                        links: CommandLinks::default(),
+                        timeout_at_tick: None,
+                    });
+            },
+        );
+    }
+
     fn assert_page_snapshot<F>(page: Page, width: u16, height: u16, name: &str, mutate: F)
     where
         F: FnOnce(&mut AppState),
@@ -1438,6 +1533,7 @@ mod tests {
                 requested_at: "T+09s".into(),
                 accepted_at: Some("T+10s".into()),
                 finished_at: None,
+                links: CommandLinks::default(),
                 timeout_at_tick: Some(20),
             });
     }

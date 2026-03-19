@@ -1,6 +1,6 @@
 use crate::{
-    protocol::{CommandType, OpenOrder},
-    state::{AppState, CommandTimelineStage},
+    protocol::{CommandType, OpenOrder, RecentFill},
+    state::{AppState, CommandTimelineEntry, CommandTimelineStage},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +70,58 @@ pub fn dashboard_health_detail(state: &AppState) -> String {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenOrderItemViewModel {
+    pub side: String,
+    pub price: String,
+    pub qty: String,
+    pub status: String,
+    pub command_ref: Option<String>,
+}
+
+pub fn open_order_items(state: &AppState, limit: usize) -> Vec<OpenOrderItemViewModel> {
+    state
+        .execution
+        .open_orders
+        .iter()
+        .take(limit)
+        .map(|order| OpenOrderItemViewModel {
+            side: order.side.to_uppercase(),
+            price: format!("{:.2}", order.price),
+            qty: format!("{:.3}", order.qty),
+            status: order.status.clone(),
+            command_ref: linked_command_for_order(state, order)
+                .map(|entry| format!("{} {}", command_label(entry.command), entry.command_id)),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentFillItemViewModel {
+    pub side: String,
+    pub price_qty: String,
+    pub pnl: String,
+    pub realized_pnl: f64,
+    pub command_ref: Option<String>,
+}
+
+pub fn recent_fill_items(state: &AppState, limit: usize) -> Vec<RecentFillItemViewModel> {
+    state
+        .execution
+        .recent_fills
+        .iter()
+        .take(limit)
+        .map(|fill| RecentFillItemViewModel {
+            side: fill.side.to_uppercase(),
+            price_qty: format!("{:.2} x {:.3}", fill.price, fill.qty),
+            pnl: format!("{:+.2}", fill.realized_pnl),
+            realized_pnl: fill.realized_pnl,
+            command_ref: linked_command_for_fill(state, fill)
+                .map(|entry| format!("{} {}", command_label(entry.command), entry.command_id)),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -381,6 +433,40 @@ pub fn command_label(command: CommandType) -> &'static str {
     }
 }
 
+fn linked_command_for_order<'a>(
+    state: &'a AppState,
+    order: &OpenOrder,
+) -> Option<&'a CommandTimelineEntry> {
+    state.execution.command_timeline.iter().find(|entry| {
+        entry.links.order_ids.iter().any(|id| id == &order.order_id)
+            || entry
+                .links
+                .client_order_ids
+                .iter()
+                .any(|id| id == &order.client_order_id)
+    })
+}
+
+fn linked_command_for_fill<'a>(
+    state: &'a AppState,
+    fill: &RecentFill,
+) -> Option<&'a CommandTimelineEntry> {
+    state.execution.command_timeline.iter().find(|entry| {
+        entry.links.trade_ids.iter().any(|id| id == &fill.trade_id)
+            || entry.links.order_ids.iter().any(|id| id == &fill.order_id)
+            || fill
+                .client_order_id
+                .as_ref()
+                .is_some_and(|client_order_id| {
+                    entry
+                        .links
+                        .client_order_ids
+                        .iter()
+                        .any(|id| id == client_order_id)
+                })
+    })
+}
+
 fn status_word(is_up: bool) -> &'static str {
     if is_up { "up" } else { "down" }
 }
@@ -396,7 +482,7 @@ fn optional_status_word(is_up: Option<bool>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AppState;
+    use crate::{protocol::CommandLinks, state::AppState};
 
     #[test]
     fn degraded_connection_detail_uses_na_for_unconfigured_user_stream() {
@@ -410,5 +496,40 @@ mod tests {
 
         assert_eq!(health.kind, ConnectionHealthKind::Degraded);
         assert!(health.detail.contains("user n/a"));
+    }
+
+    #[test]
+    fn open_order_and_fill_items_surface_linked_command_refs() {
+        let mut state = AppState::sample();
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_cancel_01".into(),
+                command: CommandType::CancelAll,
+                stage: CommandTimelineStage::Ack,
+                summary: "All open orders cancelled.".into(),
+                requested_at: "2025-01-01T00:00:03Z".into(),
+                accepted_at: Some("2025-01-01T00:00:04Z".into()),
+                finished_at: Some("2025-01-01T00:00:05Z".into()),
+                links: CommandLinks {
+                    client_order_ids: vec!["grid_buy_01".into()],
+                    order_ids: vec!["ord_1001".into()],
+                    trade_ids: vec!["fill_9001".into()],
+                },
+                timeout_at_tick: None,
+            });
+
+        let order_items = open_order_items(&state, 4);
+        let fill_items = recent_fill_items(&state, 4);
+
+        assert_eq!(
+            order_items[0].command_ref.as_deref(),
+            Some("CANCEL ALL cmd_cancel_01")
+        );
+        assert_eq!(
+            fill_items[0].command_ref.as_deref(),
+            Some("CANCEL ALL cmd_cancel_01")
+        );
     }
 }

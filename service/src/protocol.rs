@@ -96,6 +96,8 @@ pub struct OpenOrder {
 pub struct RecentFill {
     pub trade_id: String,
     pub order_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
     pub side: String,
     pub price: f64,
     pub qty: f64,
@@ -112,6 +114,16 @@ pub struct PendingCommand {
     pub requested_at: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandLinks {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_order_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trade_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandRecord {
     pub command_id: String,
@@ -121,6 +133,8 @@ pub struct CommandRecord {
     pub requested_at: String,
     pub accepted_at: Option<String>,
     pub finished_at: Option<String>,
+    #[serde(flatten)]
+    pub links: CommandLinks,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +204,8 @@ pub struct CommandAck {
     pub command: CommandType,
     pub status: CommandStatus,
     pub message: String,
+    #[serde(flatten)]
+    pub links: CommandLinks,
     pub emitted_at: String,
 }
 
@@ -279,6 +295,7 @@ impl RuntimeSnapshot {
                 recent_fills: vec![RecentFill {
                     trade_id: "fill_9001".into(),
                     order_id: "ord_0999".into(),
+                    client_order_id: Some("flatten_reduce_only_01".into()),
                     side: "buy".into(),
                     price: 2349.1,
                     qty: 0.05,

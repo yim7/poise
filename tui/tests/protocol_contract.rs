@@ -13,12 +13,29 @@ fn fixtures_dir() -> PathBuf {
 fn runtime_snapshot_fixture_decodes() {
     let raw = fs::read_to_string(fixtures_dir().join("runtime_snapshot.json")).unwrap();
     let snapshot: RuntimeSnapshot = serde_json::from_str(&raw).unwrap();
+    let serialized = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(snapshot.runtime.symbol, "XAUUSDT");
     assert_eq!(snapshot.connection.user_stream_connected, None);
     assert_eq!(snapshot.execution.open_orders.len(), 2);
     assert_eq!(
         snapshot.execution.recent_commands[0].command_id,
-        "cmd_resume_01"
+        "cmd_flatten_01"
+    );
+    assert_eq!(
+        serialized["execution"]["recent_fills"][0]["client_order_id"],
+        "flatten_reduce_only_01"
+    );
+    assert_eq!(
+        serialized["execution"]["recent_commands"][0]["client_order_ids"][0],
+        "flatten_reduce_only_01"
+    );
+    assert_eq!(
+        serialized["execution"]["recent_commands"][0]["order_ids"][0],
+        "ord_0999"
+    );
+    assert_eq!(
+        serialized["execution"]["recent_commands"][0]["trade_ids"][0],
+        "fill_9001"
     );
 }
 
@@ -83,16 +100,23 @@ fn server_envelope_decodes_runtime_snapshot() {
 fn server_envelope_decodes_command_ack() {
     let raw = fs::read_to_string(fixtures_dir().join("command_ack_event.json")).unwrap();
     let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap();
+    let serialized = serde_json::to_value(&parsed).unwrap();
     assert_eq!(parsed.sequence, Some(12));
     match parsed.event {
         ServerEvent::CommandAck(CommandAck {
             command_id, status, ..
         }) => {
-            assert_eq!(command_id, "cmd_pause_01");
+            assert_eq!(command_id, "cmd_flatten_01");
             assert_eq!(status, CommandStatus::Completed);
         }
         _ => panic!("unexpected event type"),
     }
+    assert_eq!(
+        serialized["payload"]["client_order_ids"][0],
+        "flatten_reduce_only_01"
+    );
+    assert_eq!(serialized["payload"]["order_ids"][0], "ord_0999");
+    assert_eq!(serialized["payload"]["trade_ids"][0], "fill_9001");
 }
 
 #[test]

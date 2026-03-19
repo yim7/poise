@@ -1,0 +1,20 @@
+---
+source: tui/src/render.rs
+expression: snapshot
+---
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Fills                                       
+ Dashboard   Grid   Market   Events   Help                                                          
+                                                                                                    
+┌ Fills (1) ─────────────────────────────────────┐┌ Alerts (1) ────────────────────────────────────┐
+│BUY 2349.10 x 0.050                             ││MARGIN_USAGE_WATCH Margin usage reached 39% of c│
+│                                                ││                                                │
+│                                                ││                                                │
+│                                                ││                                                │
+└────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
+┌ Commands (2) ──────────────────────────────────┐┌ System (2) · pending 0 ────────────────────────┐
+│ FAILED  CANCEL ALL                             ││[info] WebSocket connected and streaming.       │
+│ TIMED OUT  FLATTEN NOW                         ││[info] Initial runtime snapshot loaded.         │
+│                                                ││                                                │
+└────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Focus Fills | Tab panels | p/r run | c/f/s danger | Enter/Esc

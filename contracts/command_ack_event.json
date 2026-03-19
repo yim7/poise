@@ -5,10 +5,13 @@
   "emitted_at": "2025-01-01T00:00:04Z",
   "sequence": 12,
   "payload": {
-    "command_id": "cmd_pause_01",
-    "command": "pause",
+    "command_id": "cmd_flatten_01",
+    "command": "flatten_now",
     "status": "completed",
-    "message": "Strategy paused.",
+    "message": "Position flattened.",
+    "client_order_ids": ["flatten_reduce_only_01"],
+    "order_ids": ["ord_0999"],
+    "trade_ids": ["fill_9001"],
     "emitted_at": "2025-01-01T00:00:04Z"
   }
 }

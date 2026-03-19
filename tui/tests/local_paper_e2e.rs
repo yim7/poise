@@ -320,10 +320,41 @@ async fn local_paper_bootstrap_market_tick_and_pause_ack_flow() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_cancel_all_clears_open_orders_and_records_ack() -> Result<()> {
+    let service = ServiceProcess::start().await?;
+    let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+
+    let initial_open_orders = app.state.execution.open_orders.len();
+    assert!(initial_open_orders > 0);
+
+    app.submit_key(KeyAction::CancelAll).await?;
+    app.submit_key(KeyAction::Confirm).await?;
+    app.drive_until(
+        |state| {
+            state.execution.open_orders.is_empty()
+                && state
+                    .execution
+                    .last_command_ack
+                    .as_ref()
+                    .is_some_and(|ack| ack.command == CommandType::CancelAll)
+                && state.execution.command_timeline.iter().any(|entry| {
+                    entry.command == CommandType::CancelAll
+                        && entry.stage == CommandTimelineStage::Ack
+                })
+        },
+        Duration::from_secs(3),
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_paper_reconnect_resyncs_runtime_snapshot_and_command_result() -> Result<()> {
     let service = ServiceProcess::start().await?;
     let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
     let initial_price = app.state.runtime.last_price;
+    let initial_fill_count = app.state.execution.recent_fills.len();
 
     let reconnect_effects = app.force_ws_disconnect("forced reconnect for e2e");
     assert!(!app.state.connection.ws_connected);
@@ -338,6 +369,7 @@ async fn local_paper_reconnect_resyncs_runtime_snapshot_and_command_result() -> 
             state.connection.ws_connected
                 && state.runtime.last_price > initial_price
                 && state.runtime.position_qty == 0.0
+                && state.execution.recent_fills.len() == initial_fill_count + 1
                 && state
                     .execution
                     .last_command_ack

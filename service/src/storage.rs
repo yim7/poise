@@ -9,7 +9,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::protocol::{
-    CommandRecord, OpenOrder, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, SystemEvent,
+    CommandLinks, CommandRecord, OpenOrder, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot,
+    SystemEvent,
 };
 
 const RECENT_COMMAND_WINDOW: usize = 24;
@@ -139,6 +140,21 @@ impl SqliteStorage {
         load_command_records(&connection, None)
     }
 
+    pub fn load_command_record(&self, command_id: &str) -> Result<Option<CommandRecord>> {
+        let connection = self.open_connection()?;
+        connection
+            .query_row(
+                "SELECT command_id, command_type, status, summary, requested_at, accepted_at,
+                        finished_at, client_order_ids_json, order_ids_json, trade_ids_json
+                 FROM commands
+                 WHERE command_id = ?1",
+                [command_id],
+                command_record_from_row,
+            )
+            .optional()
+            .context("failed to query command record by id")
+    }
+
     fn open_connection(&self) -> Result<Connection> {
         let connection = Connection::open(&self.path)
             .with_context(|| format!("failed to open sqlite db {}", self.path.display()))?;
@@ -172,7 +188,10 @@ impl SqliteStorage {
                     summary TEXT NOT NULL,
                     requested_at TEXT NOT NULL,
                     accepted_at TEXT,
-                    finished_at TEXT
+                    finished_at TEXT,
+                    client_order_ids_json TEXT NOT NULL DEFAULT '[]',
+                    order_ids_json TEXT NOT NULL DEFAULT '[]',
+                    trade_ids_json TEXT NOT NULL DEFAULT '[]'
                 );
 
                 CREATE TABLE IF NOT EXISTS open_orders (
@@ -192,6 +211,7 @@ impl SqliteStorage {
                     trade_id TEXT PRIMARY KEY,
                     list_index INTEGER NOT NULL,
                     order_id TEXT NOT NULL,
+                    client_order_id TEXT,
                     side TEXT NOT NULL,
                     price REAL NOT NULL,
                     qty REAL NOT NULL,
@@ -217,7 +237,26 @@ impl SqliteStorage {
                     created_at TEXT NOT NULL
                 );",
             )
-            .context("failed to initialize sqlite schema")
+            .context("failed to initialize sqlite schema")?;
+        ensure_column(
+            connection,
+            "commands",
+            "client_order_ids_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(
+            connection,
+            "commands",
+            "order_ids_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(
+            connection,
+            "commands",
+            "trade_ids_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(connection, "fills", "client_order_id", "TEXT")
     }
 }
 
@@ -258,9 +297,10 @@ fn replace_recent_fills(tx: &Transaction<'_>, fills: &[RecentFill]) -> Result<()
     let mut statement = tx
         .prepare(
             "INSERT INTO fills (
-                trade_id, list_index, order_id, side, price, qty, fee, realized_pnl, event_time
+                trade_id, list_index, order_id, client_order_id, side, price, qty, fee,
+                realized_pnl, event_time
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .context("failed to prepare fills insert")?;
     for (index, fill) in fills.iter().enumerate() {
@@ -269,6 +309,7 @@ fn replace_recent_fills(tx: &Transaction<'_>, fills: &[RecentFill]) -> Result<()
                 fill.trade_id,
                 index as i64,
                 fill.order_id,
+                fill.client_order_id,
                 fill.side,
                 fill.price,
                 fill.qty,
@@ -286,9 +327,9 @@ fn upsert_command_records(tx: &Transaction<'_>, commands: &[CommandRecord]) -> R
         .prepare(
             "INSERT INTO commands (
                 command_id, list_index, command_type, status, summary, requested_at, accepted_at,
-                finished_at
+                finished_at, client_order_ids_json, order_ids_json, trade_ids_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ON CONFLICT(command_id) DO UPDATE SET
                 list_index = excluded.list_index,
                 command_type = excluded.command_type,
@@ -296,7 +337,10 @@ fn upsert_command_records(tx: &Transaction<'_>, commands: &[CommandRecord]) -> R
                 summary = excluded.summary,
                 requested_at = excluded.requested_at,
                 accepted_at = excluded.accepted_at,
-                finished_at = excluded.finished_at",
+                finished_at = excluded.finished_at,
+                client_order_ids_json = excluded.client_order_ids_json,
+                order_ids_json = excluded.order_ids_json,
+                trade_ids_json = excluded.trade_ids_json",
         )
         .context("failed to prepare commands insert")?;
     for (index, command) in commands.iter().enumerate() {
@@ -309,7 +353,10 @@ fn upsert_command_records(tx: &Transaction<'_>, commands: &[CommandRecord]) -> R
                 command.summary,
                 command.requested_at,
                 command.accepted_at,
-                command.finished_at
+                command.finished_at,
+                string_list_to_text(&command.links.client_order_ids)?,
+                string_list_to_text(&command.links.order_ids)?,
+                string_list_to_text(&command.links.trade_ids)?
             ])
             .context("failed to insert command record")?;
     }
@@ -395,7 +442,8 @@ fn load_open_orders(connection: &Connection) -> Result<Vec<OpenOrder>> {
 fn load_recent_fills(connection: &Connection) -> Result<Vec<RecentFill>> {
     let mut statement = connection
         .prepare(
-            "SELECT trade_id, order_id, side, price, qty, fee, realized_pnl, event_time
+            "SELECT trade_id, order_id, client_order_id, side, price, qty, fee, realized_pnl,
+                    event_time
              FROM fills
              ORDER BY list_index ASC",
         )
@@ -405,12 +453,13 @@ fn load_recent_fills(connection: &Connection) -> Result<Vec<RecentFill>> {
             Ok(RecentFill {
                 trade_id: row.get(0)?,
                 order_id: row.get(1)?,
-                side: row.get(2)?,
-                price: row.get(3)?,
-                qty: row.get(4)?,
-                fee: row.get(5)?,
-                realized_pnl: row.get(6)?,
-                event_time: row.get(7)?,
+                client_order_id: row.get(2)?,
+                side: row.get(3)?,
+                price: row.get(4)?,
+                qty: row.get(5)?,
+                fee: row.get(6)?,
+                realized_pnl: row.get(7)?,
+                event_time: row.get(8)?,
             })
         })
         .context("failed to query fills")?;
@@ -423,13 +472,13 @@ fn load_command_records(
 ) -> Result<Vec<CommandRecord>> {
     let query = if limit.is_some() {
         "SELECT command_id, command_type, status, summary, requested_at, accepted_at,
-                finished_at
+                finished_at, client_order_ids_json, order_ids_json, trade_ids_json
          FROM commands
          ORDER BY COALESCE(finished_at, accepted_at, requested_at) DESC, rowid DESC
          LIMIT ?1"
     } else {
         "SELECT command_id, command_type, status, summary, requested_at, accepted_at,
-                finished_at
+                finished_at, client_order_ids_json, order_ids_json, trade_ids_json
          FROM commands
          ORDER BY COALESCE(finished_at, accepted_at, requested_at) DESC, rowid DESC"
     };
@@ -532,6 +581,56 @@ fn command_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandR
         requested_at: row.get(4)?,
         accepted_at: row.get(5)?,
         finished_at: row.get(6)?,
+        links: CommandLinks {
+            client_order_ids: string_list_from_sql(7, row.get::<_, String>(7)?)?,
+            order_ids: string_list_from_sql(8, row.get::<_, String>(8)?)?,
+            trade_ids: string_list_from_sql(9, row.get::<_, String>(9)?)?,
+        },
+    })
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut statement = connection
+        .prepare(&pragma)
+        .with_context(|| format!("failed to inspect sqlite table {table}"))?;
+    let existing = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .with_context(|| format!("failed to inspect sqlite table {table} columns"))?;
+    let existing = collect_rows(existing)?;
+    if existing.iter().any(|name| name == column) {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )
+        .with_context(|| format!("failed to add sqlite column {table}.{column}"))?;
+    Ok(())
+}
+
+fn string_list_to_text(values: &[String]) -> Result<String> {
+    serde_json::to_string(values).context("failed to encode sqlite string list")
+}
+
+fn string_list_from_text(value: &str) -> Result<Vec<String>> {
+    serde_json::from_str(value).context("failed to decode sqlite string list")
+}
+
+fn string_list_from_sql(column: usize, value: String) -> rusqlite::Result<Vec<String>> {
+    string_list_from_text(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(error.to_string())),
+        )
     })
 }
 

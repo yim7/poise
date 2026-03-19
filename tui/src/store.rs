@@ -251,6 +251,7 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
                 CommandTimelineStage::Accepted,
                 "Service accepted command; waiting for final acknowledgement.".into(),
                 accepted.accepted_at,
+                None,
             );
             state.mark_dirty(
                 DirtyFlags {
@@ -289,6 +290,7 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
                 CommandTimelineStage::Failed,
                 format!("Command request failed before ack: {error}"),
                 timestamp,
+                None,
             );
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Danger,
@@ -405,7 +407,7 @@ fn apply_command_ack(state: &mut AppState, ack: CommandAck) {
     state.execution.last_command_ack = Some(ack.clone());
     push_system_event(
         state,
-        "info",
+        command_status_level(ack.status),
         "service",
         &ack.message,
         ack.emitted_at.clone(),
@@ -425,6 +427,7 @@ fn apply_command_ack(state: &mut AppState, ack: CommandAck) {
         stage,
         ack.message.clone(),
         ack.emitted_at.clone(),
+        Some(ack.links.clone()),
     );
 
     if stage == CommandTimelineStage::Ack {
@@ -442,7 +445,10 @@ fn apply_command_ack(state: &mut AppState, ack: CommandAck) {
             state.runtime.position_qty = 0.0;
             state.runtime.unrealized_pnl = 0.0;
         }
-        if matches!(ack.command, CommandType::CancelAll) {
+        if matches!(
+            ack.command,
+            CommandType::CancelAll | CommandType::ShutdownAfterFlatten
+        ) {
             state.execution.open_orders.clear();
         }
     }
@@ -475,8 +481,10 @@ fn record_command_stage(
     stage: CommandTimelineStage,
     summary: String,
     timestamp: String,
+    links: Option<crate::protocol::CommandLinks>,
 ) {
     let next_timeout = (!stage.is_terminal()).then(|| state.clock_ticks + COMMAND_TIMEOUT_TICKS);
+    let incoming_links = links.unwrap_or_default();
 
     if let Some(entry) = state
         .execution
@@ -487,6 +495,12 @@ fn record_command_stage(
         entry.command = command;
         entry.stage = stage;
         entry.summary = summary;
+        if !incoming_links.client_order_ids.is_empty()
+            || !incoming_links.order_ids.is_empty()
+            || !incoming_links.trade_ids.is_empty()
+        {
+            entry.links = incoming_links.clone();
+        }
         match stage {
             CommandTimelineStage::Pending => {
                 entry.requested_at = timestamp;
@@ -517,6 +531,7 @@ fn record_command_stage(
                 accepted_at: matches!(stage, CommandTimelineStage::Accepted)
                     .then_some(timestamp.clone()),
                 finished_at: stage.is_terminal().then_some(timestamp),
+                links: incoming_links,
                 timeout_at_tick: next_timeout,
             });
     }
@@ -560,6 +575,7 @@ fn expire_stalled_commands(state: &mut AppState) -> bool {
             CommandTimelineStage::TimedOut,
             "No final acknowledgement arrived within the timeout window.".into(),
             timestamp.clone(),
+            None,
         );
     }
 
@@ -588,6 +604,14 @@ fn push_system_event(
         });
     while state.system_events.len() > 50 {
         state.system_events.pop_back();
+    }
+}
+
+fn command_status_level(status: CommandStatus) -> &'static str {
+    match status {
+        CommandStatus::Pending | CommandStatus::Accepted | CommandStatus::Completed => "info",
+        CommandStatus::TimedOut => "warn",
+        CommandStatus::Failed => "error",
     }
 }
 
@@ -707,6 +731,11 @@ mod tests {
             command: CommandType::FlattenNow,
             status: CommandStatus::Completed,
             message: "Position flattened.".into(),
+            links: crate::protocol::CommandLinks {
+                client_order_ids: vec!["flatten_reduce_only_cmd_flatten_recovered".into()],
+                order_ids: vec!["order_cmd_flatten_recovered".into()],
+                trade_ids: vec!["trade_cmd_flatten_recovered".into()],
+            },
             emitted_at: "2025-01-01T00:00:05Z".into(),
         });
         snapshot.execution.recent_commands = vec![CommandRecord {
@@ -717,6 +746,11 @@ mod tests {
             requested_at: "2025-01-01T00:00:03Z".into(),
             accepted_at: Some("2025-01-01T00:00:04Z".into()),
             finished_at: Some("2025-01-01T00:00:05Z".into()),
+            links: crate::protocol::CommandLinks {
+                client_order_ids: vec!["flatten_reduce_only_cmd_flatten_recovered".into()],
+                order_ids: vec!["order_cmd_flatten_recovered".into()],
+                trade_ids: vec!["trade_cmd_flatten_recovered".into()],
+            },
         }];
 
         reduce(
@@ -816,6 +850,7 @@ mod tests {
                 command: CommandType::Pause,
                 status: CommandStatus::Completed,
                 message: "Paused.".into(),
+                links: crate::protocol::CommandLinks::default(),
                 emitted_at: "2025-01-01T00:00:02Z".into(),
             })),
         );
@@ -879,5 +914,52 @@ mod tests {
                 .stage,
             CommandTimelineStage::TimedOut
         );
+    }
+
+    #[test]
+    fn failed_command_ack_uses_error_system_event_level() {
+        let mut state = AppState::sample();
+
+        reduce(
+            &mut state,
+            AppEvent::Protocol(ServerEvent::CommandAck(CommandAck {
+                command_id: "cmd_failed_level".into(),
+                command: CommandType::CancelAll,
+                status: CommandStatus::Failed,
+                message: "exchange rejected cancel-all".into(),
+                links: crate::protocol::CommandLinks::default(),
+                emitted_at: "2025-01-01T00:00:02Z".into(),
+            })),
+        );
+
+        assert_eq!(
+            state.system_events.front().expect("system event").level,
+            "error"
+        );
+    }
+
+    #[test]
+    fn shutdown_after_flatten_ack_clears_open_orders_locally() {
+        let mut state = AppState::sample();
+        assert!(!state.execution.open_orders.is_empty());
+
+        reduce(
+            &mut state,
+            AppEvent::Protocol(ServerEvent::CommandAck(CommandAck {
+                command_id: "cmd_shutdown_local".into(),
+                command: CommandType::ShutdownAfterFlatten,
+                status: CommandStatus::Completed,
+                message: "Position flattened and shutdown requested.".into(),
+                links: crate::protocol::CommandLinks {
+                    client_order_ids: vec!["grid_buy_01".into(), "reduce_only_cmd".into()],
+                    order_ids: vec!["ord_1001".into(), "order_cmd".into()],
+                    trade_ids: vec!["trade_cmd".into()],
+                },
+                emitted_at: "2025-01-01T00:00:02Z".into(),
+            })),
+        );
+
+        assert!(state.execution.open_orders.is_empty());
+        assert_eq!(state.runtime.strategy_state, "paused");
     }
 }

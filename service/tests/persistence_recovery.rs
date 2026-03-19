@@ -5,11 +5,12 @@ use anyhow::Result;
 use grid_platform_service::{
     Application,
     protocol::{
-        CommandAck, CommandRecord, CommandRequest, CommandStatus, CommandType, RuntimeSnapshot,
-        SystemEvent,
+        CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus, CommandType,
+        RuntimeSnapshot, SystemEvent,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
+use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::timeout;
 
@@ -29,6 +30,7 @@ fn sqlite_storage_persists_command_audit_and_recovers_latest_runtime() -> Result
         command: CommandType::Pause,
         status: CommandStatus::Completed,
         message: "Strategy paused.".into(),
+        links: CommandLinks::default(),
         emitted_at: "2025-01-01T00:01:00Z".into(),
     });
     snapshot.execution.recent_commands = vec![CommandRecord {
@@ -39,6 +41,7 @@ fn sqlite_storage_persists_command_audit_and_recovers_latest_runtime() -> Result
         requested_at: "2025-01-01T00:00:58Z".into(),
         accepted_at: Some("2025-01-01T00:00:59Z".into()),
         finished_at: Some("2025-01-01T00:01:00Z".into()),
+        links: CommandLinks::default(),
     }];
 
     storage.persist_runtime(&PersistedRuntime {
@@ -69,6 +72,189 @@ fn sqlite_storage_persists_command_audit_and_recovers_latest_runtime() -> Result
     assert_eq!(recovered.system_events[0].source, "commands");
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].command_id, "cmd_pause_storage");
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_storage_persists_failed_command_reason() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let storage = SqliteStorage::open(&db_path)?;
+
+    let mut snapshot = RuntimeSnapshot::sample();
+    snapshot.execution.last_command_ack = Some("cmd_failed_storage".into());
+    snapshot.execution.last_command_ack_event = Some(CommandAck {
+        command_id: "cmd_failed_storage".into(),
+        command: CommandType::CancelAll,
+        status: CommandStatus::Failed,
+        message: "exchange rejected cancel-all".into(),
+        links: CommandLinks::default(),
+        emitted_at: "2025-01-01T00:02:00Z".into(),
+    });
+    snapshot.execution.recent_commands = vec![CommandRecord {
+        command_id: "cmd_failed_storage".into(),
+        command: CommandType::CancelAll,
+        status: CommandStatus::Failed,
+        summary: "exchange rejected cancel-all".into(),
+        requested_at: "2025-01-01T00:01:58Z".into(),
+        accepted_at: Some("2025-01-01T00:01:59Z".into()),
+        finished_at: Some("2025-01-01T00:02:00Z".into()),
+        links: CommandLinks::default(),
+    }];
+
+    storage.persist_runtime(&PersistedRuntime {
+        snapshot,
+        risk_events: vec![],
+        system_events: vec![SystemEvent {
+            level: "error".into(),
+            source: "commands".into(),
+            message: "exchange rejected cancel-all".into(),
+            created_at: "2025-01-01T00:02:00Z".into(),
+        }],
+        last_sequence: 9,
+    })?;
+
+    let recovered = storage
+        .load_runtime()?
+        .expect("runtime should be persisted");
+
+    assert_eq!(
+        recovered
+            .snapshot
+            .execution
+            .recent_commands
+            .first()
+            .expect("recent command")
+            .status,
+        CommandStatus::Failed
+    );
+    assert_eq!(
+        recovered
+            .snapshot
+            .execution
+            .recent_commands
+            .first()
+            .expect("recent command")
+            .summary,
+        "exchange rejected cancel-all"
+    );
+    assert_eq!(
+        recovered
+            .snapshot
+            .execution
+            .last_command_ack_event
+            .as_ref()
+            .expect("ack event")
+            .status,
+        CommandStatus::Failed
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_storage_roundtrips_command_association_fields() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let storage = SqliteStorage::open(&db_path)?;
+
+    let snapshot_json = json!({
+        "connection": {
+            "http_available": true,
+            "ws_connected": false,
+            "user_stream_connected": null,
+            "latency_ms": 42,
+            "last_heartbeat_at": "2025-01-01T00:00:00Z",
+            "reconnect_backoff_ms": 0,
+            "stale_age_ms": 0
+        },
+        "runtime": {
+            "symbol": "XAUUSDT",
+            "env": "testnet",
+            "session_state": "regular",
+            "strategy_state": "running",
+            "last_price": 2361.48,
+            "mark_price": 2361.55,
+            "position_qty": 0.0,
+            "position_avg_price": 2354.2,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 14.52
+        },
+        "execution": {
+            "open_orders": [],
+            "recent_fills": [{
+                "trade_id": "fill_9001",
+                "order_id": "ord_0999",
+                "client_order_id": "flatten_reduce_only_01",
+                "side": "buy",
+                "price": 2349.1,
+                "qty": 0.05,
+                "fee": 0.03,
+                "realized_pnl": 2.51,
+                "event_time": "2025-01-01T00:00:00Z"
+            }],
+            "pending_commands": [],
+            "last_command_ack": "cmd_flatten_01",
+            "last_command_ack_event": {
+                "command_id": "cmd_flatten_01",
+                "command": "flatten_now",
+                "status": "completed",
+                "message": "Position flattened.",
+                "client_order_ids": ["flatten_reduce_only_01"],
+                "order_ids": ["ord_0999"],
+                "trade_ids": ["fill_9001"],
+                "emitted_at": "2025-01-01T00:00:05Z"
+            },
+            "recent_commands": [{
+                "command_id": "cmd_flatten_01",
+                "command": "flatten_now",
+                "status": "completed",
+                "summary": "Position flattened.",
+                "requested_at": "2025-01-01T00:00:03Z",
+                "accepted_at": "2025-01-01T00:00:04Z",
+                "finished_at": "2025-01-01T00:00:05Z",
+                "client_order_ids": ["flatten_reduce_only_01"],
+                "order_ids": ["ord_0999"],
+                "trade_ids": ["fill_9001"]
+            }]
+        },
+        "risk": {
+            "current_notional": 590.39,
+            "max_notional": 1500.0,
+            "daily_loss_limit": -120.0,
+            "stop_loss_pct": 4.0,
+            "risk_level": "watch",
+            "breaker_engaged": false,
+            "unacked_alerts": 1
+        }
+    });
+
+    let snapshot: RuntimeSnapshot = serde_json::from_value(snapshot_json).expect("snapshot json");
+    storage.persist_runtime(&PersistedRuntime {
+        snapshot,
+        risk_events: vec![],
+        system_events: vec![],
+        last_sequence: 10,
+    })?;
+
+    let recovered = storage
+        .load_runtime()?
+        .expect("runtime should be persisted");
+    let serialized = serde_json::to_value(&recovered.snapshot).expect("serialize recovered");
+
+    assert_eq!(
+        serialized["execution"]["recent_fills"][0]["client_order_id"],
+        "flatten_reduce_only_01"
+    );
+    assert_eq!(
+        serialized["execution"]["last_command_ack_event"]["order_ids"][0],
+        "ord_0999"
+    );
+    assert_eq!(
+        serialized["execution"]["recent_commands"][0]["trade_ids"][0],
+        "fill_9001"
+    );
 
     Ok(())
 }
@@ -187,6 +373,99 @@ async fn sqlite_storage_keeps_full_command_audit_beyond_recent_command_window() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_idempotent_hit_uses_command_audit_beyond_recent_window() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let application = Application::bootstrap_with_sqlite(&db_path)?;
+
+    for index in 0..30 {
+        let command = if index % 2 == 0 {
+            CommandType::Pause
+        } else {
+            CommandType::Resume
+        };
+        application
+            .submit_command(
+                command,
+                CommandRequest {
+                    command_id: format!("cmd_audit_{index:02}"),
+                },
+            )
+            .await?;
+    }
+
+    assert_eq!(application.snapshot().runtime.strategy_state, "running");
+
+    application
+        .submit_command(
+            CommandType::Pause,
+            CommandRequest {
+                command_id: "cmd_audit_00".into(),
+            },
+        )
+        .await?;
+
+    let snapshot = application.snapshot();
+    assert_eq!(snapshot.runtime.strategy_state, "running");
+    assert!(
+        snapshot
+            .execution
+            .last_command_ack_event
+            .as_ref()
+            .is_some_and(|ack| ack.message.contains("Idempotent hit"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_rejects_reused_command_id_with_different_command_type() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let application = Application::bootstrap_with_sqlite(&db_path)?;
+
+    for index in 0..30 {
+        let command = if index % 2 == 0 {
+            CommandType::Pause
+        } else {
+            CommandType::Resume
+        };
+        application
+            .submit_command(
+                command,
+                CommandRequest {
+                    command_id: format!("cmd_audit_{index:02}"),
+                },
+            )
+            .await?;
+    }
+
+    let before = application.snapshot();
+    let error = application
+        .submit_command(
+            CommandType::FlattenNow,
+            CommandRequest {
+                command_id: "cmd_audit_00".into(),
+            },
+        )
+        .await
+        .expect_err("mismatched command_id reuse should be rejected");
+    assert!(error.to_string().contains("different command"));
+
+    let after = application.snapshot();
+    assert_eq!(
+        after.execution.last_command_ack_event,
+        before.execution.last_command_ack_event
+    );
+    assert_eq!(
+        after.execution.recent_commands[0].command,
+        CommandType::Resume
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_persist_failure_rejects_command_and_rolls_back_runtime() -> Result<()> {
     let temp = tempdir()?;
     let db_path = temp.path().join("service.db");
@@ -206,11 +485,7 @@ async fn sqlite_persist_failure_rejects_command_and_rolls_back_runtime() -> Resu
         )
         .await
         .expect_err("command should fail when sqlite persistence fails");
-    assert!(
-        error
-            .to_string()
-            .contains("failed to persist command result")
-    );
+    assert!(error.to_string().contains("failed to open sqlite db"));
 
     let snapshot = application.snapshot();
     assert_eq!(snapshot.runtime.strategy_state, "running");
