@@ -49,6 +49,17 @@ impl Application {
         application
     }
 
+    pub fn bootstrap_with_runtime_and_binance(
+        runtime: PersistedRuntime,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+    ) -> Self {
+        let runtime = prepare_bootstrap_runtime(runtime, &config);
+        let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
+        application.start_binance_supervisor(config, transport);
+        application
+    }
+
     pub fn bootstrap_with_sqlite(path: impl AsRef<Path>) -> Result<Self> {
         let storage = SqliteStorage::open(path)?;
         let runtime = match storage.load_runtime()? {

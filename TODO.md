@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 当前主线：`K6` 回放 / paper / testnet 验证
-- 并行预研：`K7` Web UI 就绪与多实例预备
-- 最近完成：`K4` 执行闭环与命令语义做实；`K5` 网格策略与风控
-- 最近验证：`cargo test` 已通过，含 `service` / `tui` 全量测试；K5 的策略状态机、风险事件、协议契约、本地 E2E 与 TUI 快照回归均已跑通
+- 当前主线：`K7` Web UI 就绪与多实例预备
+- 并行预研：无
+- 最近完成：`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控
+- 最近验证：`cargo test` 已通过，含 `service` / `tui` 全量测试；K6 的 replay runner、paper fill、fake transport 链路、本地 paper E2E 与 testnet smoke 已复核
 
 ## 已完成里程碑
 
@@ -105,32 +105,33 @@
 
 ### K6.1 测试先补齐
 
-- [ ] 为 replay runner 增加场景测试
-- [ ] 为 paper fill 逻辑增加成交模拟测试
-- [ ] 为 fake service / fake transport 集成链路增加测试
-- [ ] 为 testnet 下单、撤单、恢复增加最小冒烟清单
+- [x] 为 replay runner 增加场景测试
+- [x] 为 paper fill 逻辑增加成交模拟测试
+- [x] 为 fake service / fake transport 集成链路增加测试
+- [x] 为 testnet 下单、撤单、恢复增加最小冒烟清单
 
 ### K6.2 回放与 paper
 
-- [ ] 设计 replay 输入格式
-- [ ] 实现 replay runner
-- [ ] 实现 paper execution 和 fill 模拟规则
-- [ ] 建立录制或构造的市场事件流夹具
+- [x] 设计 replay 输入格式
+- [x] 实现 replay runner
+- [x] 实现 paper execution 和 fill 模拟规则
+- [x] 建立录制或构造的市场事件流夹具
 
 ### K6.3 验证链路
 
-- [ ] 建立 fake service / fake transport 组合测试夹具
-- [ ] 跑通本地 replay 闭环
-- [ ] 跑通 paper 模式命令闭环
-- [ ] 跑通 testnet 最小执行闭环
+- [x] 建立 fake service / fake transport 组合测试夹具
+- [x] 跑通本地 replay 闭环
+- [x] 跑通 paper 模式命令闭环
+- [x] 跑通 testnet 最小执行闭环
 
 ### K6.4 运维与验收
 
-- [ ] 输出运维与验证手册
-- [ ] 固化验证命令和检查项
-- [ ] 跑通 `cargo test`
-- [ ] 复核 K6 验收标准
-- [ ] 更新 `docs/plan.md` 与本文件状态
+- [x] 输出运维与验证手册
+- [x] 固化验证命令和检查项
+- [x] 跑通 `cargo test`
+- [x] 复核 K6 验收标准
+- [x] 更新 `docs/plan.md` 与本文件状态
+- 验收结论：K6 已验收通过
 
 ## K7 Web UI 就绪与多实例预备
 
@@ -156,8 +157,7 @@
 
 ## 当前并行方式
 
-- `K6` 主线：回放 / paper / testnet 验证链路
-- `K7` 侧线：查询模型整理与 Web UI 预备边界
+- `K7` 主线：查询模型整理与 Web UI 预备边界
 
 ## 完成后必做
 

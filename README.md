@@ -23,6 +23,7 @@
 - [`docs/protocol-contract.md`](docs/protocol-contract.md)
 - [`docs/roadmap.md`](docs/roadmap.md)
 - [`docs/plan.md`](docs/plan.md)
+- [`docs/k6-validation.md`](docs/k6-validation.md)
 - [`TODO.md`](TODO.md)
 
 ## 验证方式

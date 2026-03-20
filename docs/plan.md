@@ -143,11 +143,19 @@
 - 关键路径有端到端验证证据
 - K6 对应测试矩阵全部通过
 
+### 当前状态
+
+- 已完成 replay JSON 输入格式、`service::replay` runner 与最小场景夹具
+- 已完成 paper fill 模拟规则，并在市场价穿价时更新挂单、成交与仓位
+- 已完成 fake transport 驱动的服务端验证链路，并补上“首个有效市场价前不提前挂单”的回归测试
+- 已输出 [`k6-validation.md`](k6-validation.md) 手册，固化 replay / paper / testnet smoke 的验证命令与检查项
+- 已手工跑通 testnet 市场流下的 `pause -> cancel-all -> flatten-now -> resume -> restart` 最小闭环
+- K6 验收条件已满足
+
 ## 6. 当前并行方式
 
-现在最适合并行的只有两条：
+现在最适合并行的主线只有一条：
 
-- `K6` 的 replay / paper / testnet 验证链路
 - `K7` 的查询模型整理与 Web UI 预备边界
 
-当前不建议并行展开新的交易功能，因为执行闭环和策略状态已经落稳，下一阶段更需要验证证据与控制面整理。
+当前不建议并行展开新的交易功能，因为验证链路已经补齐，下一阶段更需要控制面整理与 Web UI 预备边界。

@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -26,6 +26,7 @@ use tokio::time::{Instant, timeout};
 
 struct BlockingExecutionAdapter {
     ready: Arc<Notify>,
+    entered: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -35,6 +36,7 @@ impl ExecutionAdapter for BlockingExecutionAdapter {
         request: SubmitOrderRequest,
         snapshot: &RuntimeSnapshot,
     ) -> anyhow::Result<SubmitOrderResult> {
+        self.entered.store(true, Ordering::SeqCst);
         self.ready.notified().await;
         Ok(FakeExecutionAdapter.submit_order(request, snapshot).await?)
     }
@@ -44,6 +46,7 @@ impl ExecutionAdapter for BlockingExecutionAdapter {
         request: CancelOrdersRequest,
         snapshot: &RuntimeSnapshot,
     ) -> anyhow::Result<Vec<OpenOrder>> {
+        self.entered.store(true, Ordering::SeqCst);
         self.ready.notified().await;
         Ok(FakeExecutionAdapter
             .cancel_orders(request, snapshot)
@@ -685,8 +688,10 @@ async fn price_tick_updates_read_model_and_publishes_event() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execution_command_returns_accepted_before_async_completion() -> Result<()> {
     let ready = Arc::new(Notify::new());
+    let entered = Arc::new(AtomicBool::new(false));
     let adapter = BlockingExecutionAdapter {
         ready: ready.clone(),
+        entered: entered.clone(),
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_adapter(Arc::new(adapter));
 
@@ -704,6 +709,13 @@ async fn execution_command_returns_accepted_before_async_completion() -> Result<
             .any(|item| item.command_id == "cmd_async_cancel")
     );
     assert!(snapshot.execution.last_command_ack_event.is_none());
+
+    timeout(Duration::from_millis(100), async {
+        while !entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
     ready.notify_waiters();
 
@@ -725,6 +737,7 @@ async fn execution_command_returns_accepted_before_async_completion() -> Result<
 async fn execution_command_times_out_on_service_when_adapter_stalls() -> Result<()> {
     let adapter = BlockingExecutionAdapter {
         ready: Arc::new(Notify::new()),
+        entered: Arc::new(AtomicBool::new(false)),
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_adapter(Arc::new(adapter));
 
@@ -769,8 +782,10 @@ async fn execution_command_times_out_on_service_when_adapter_stalls() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_execution_result_does_not_override_timed_out_terminal_state() -> Result<()> {
     let ready = Arc::new(Notify::new());
+    let entered = Arc::new(AtomicBool::new(false));
     let adapter = BlockingExecutionAdapter {
         ready: ready.clone(),
+        entered,
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_adapter(Arc::new(adapter));
 
@@ -1102,6 +1117,7 @@ async fn price_tick_engages_breaker_and_broadcasts_risk_alert_when_stop_loss_is_
     runtime.snapshot.runtime.position_qty = -0.25;
     runtime.snapshot.runtime.position_avg_price = 100.0;
     runtime.snapshot.risk.stop_loss_pct = 0.05;
+    runtime.snapshot.execution.open_orders.clear();
     let open_orders_before = runtime.snapshot.execution.open_orders.len();
 
     let (engine, read_model, mut events_rx) =
@@ -1133,8 +1149,10 @@ async fn price_tick_engages_breaker_and_broadcasts_risk_alert_when_stop_loss_is_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_execution_command_fails_while_another_is_in_flight() -> Result<()> {
     let ready = Arc::new(Notify::new());
+    let entered = Arc::new(AtomicBool::new(false));
     let adapter = BlockingExecutionAdapter {
         ready: ready.clone(),
+        entered,
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_adapter(Arc::new(adapter));
 
@@ -1484,6 +1502,7 @@ async fn shutdown_after_flatten_completes_without_follow_up_query_refresh() -> R
 async fn timed_out_command_records_reason_without_side_effects() -> Result<()> {
     let adapter = BlockingExecutionAdapter {
         ready: Arc::new(Notify::new()),
+        entered: Arc::new(AtomicBool::new(false)),
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_adapter(Arc::new(adapter));
     let before = read_model.read().expect("read model").snapshot();

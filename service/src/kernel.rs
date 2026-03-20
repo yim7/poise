@@ -11,8 +11,8 @@ use tracing::warn;
 
 use crate::background::spawn_task;
 use crate::execution::{
-    CancelOrdersRequest, ExecutionAdapter, ExecutionOutcome, ExecutionRuntimePatch,
-    FakeExecutionAdapter, SubmitOrderRequest,
+    CancelOrdersRequest, ExecutionAdapter, ExecutionMode, ExecutionOutcome, ExecutionRuntimePatch,
+    ExecutionStatePatch, FakeExecutionAdapter, SubmitOrderRequest, simulate_paper_fills,
 };
 use crate::protocol::{
     CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
@@ -387,7 +387,8 @@ async fn run_engine(
             }
             EngineCommand::EmitPriceTick { reply_to } => {
                 let previous = aggregate.clone();
-                let (tick, mut events) = aggregate.emit_price_tick();
+                let (tick, mut events) =
+                    aggregate.emit_price_tick(execution_adapter.mode() == ExecutionMode::Paper);
                 match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
                     Ok(strategy_events) => events.extend(strategy_events),
                     Err(error) => {
@@ -478,7 +479,12 @@ async fn run_engine(
                 reply_to,
             } => {
                 let previous = aggregate.clone();
-                let mut events = aggregate.sync_market_prices(last_price, mark_price, emitted_at);
+                let mut events = aggregate.sync_market_prices(
+                    last_price,
+                    mark_price,
+                    emitted_at,
+                    execution_adapter.mode() == ExecutionMode::Paper,
+                );
                 match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
                     Ok(strategy_events) => events.extend(strategy_events),
                     Err(error) => {
@@ -878,6 +884,7 @@ fn upsert_open_order(open_orders: &mut Vec<OpenOrder>, open_order: OpenOrder) {
 
 fn strategy_orders_to_place(snapshot: &RuntimeSnapshot) -> Vec<SubmitOrderRequest> {
     if snapshot.runtime.strategy_state != "running"
+        || !has_valid_market_price(snapshot)
         || snapshot.risk.breaker_engaged
         || snapshot.strategy.status == StrategyStatus::PendingRebuild
         || snapshot
@@ -919,6 +926,11 @@ fn strategy_orders_to_place(snapshot: &RuntimeSnapshot) -> Vec<SubmitOrderReques
             })
         })
         .collect()
+}
+
+fn has_valid_market_price(snapshot: &RuntimeSnapshot) -> bool {
+    snapshot.runtime.mark_price.abs() > f64::EPSILON
+        || snapshot.runtime.last_price.abs() > f64::EPSILON
 }
 
 fn should_sync_strategy_after_command(command: CommandType) -> bool {
@@ -1018,12 +1030,16 @@ impl RuntimeAggregate {
         aggregate
     }
 
-    fn emit_price_tick(&mut self) -> (PriceUpdated, Vec<SequencedEngineEvent>) {
+    fn emit_price_tick(&mut self, paper_mode: bool) -> (PriceUpdated, Vec<SequencedEngineEvent>) {
         let emitted_at = now_utc();
         self.snapshot.runtime.last_price = round_price(self.snapshot.runtime.last_price + 0.11);
         self.snapshot.runtime.mark_price = round_price(self.snapshot.runtime.mark_price + 0.08);
         self.snapshot.connection.last_heartbeat_at = emitted_at.clone();
         self.snapshot.connection.stale_age_ms = 0;
+        if paper_mode {
+            let patch = simulate_paper_fills(&self.snapshot, &emitted_at);
+            self.apply_execution_patch(&patch);
+        }
         let tick = PriceUpdated {
             symbol: self.snapshot.runtime.symbol.clone(),
             last_price: self.snapshot.runtime.last_price,
@@ -1110,6 +1126,7 @@ impl RuntimeAggregate {
         last_price: Option<f64>,
         mark_price: Option<f64>,
         emitted_at: String,
+        paper_mode: bool,
     ) -> Vec<SequencedEngineEvent> {
         let mut changed = false;
 
@@ -1133,6 +1150,11 @@ impl RuntimeAggregate {
         if self.snapshot.connection.stale_age_ms != 0 {
             self.snapshot.connection.stale_age_ms = 0;
             changed = true;
+        }
+
+        if paper_mode {
+            let patch = simulate_paper_fills(&self.snapshot, &emitted_at);
+            changed |= self.apply_execution_patch(&patch);
         }
 
         if !changed {
@@ -1497,21 +1519,32 @@ impl RuntimeAggregate {
         if let Some(recent_fills) = &outcome.recent_fills {
             self.snapshot.execution.recent_fills = recent_fills.clone();
         }
-        if let Some(strategy_state) = &outcome.runtime_patch.strategy_state {
-            self.snapshot.runtime.strategy_state = strategy_state.clone();
+        apply_execution_runtime_patch(&mut self.snapshot, &outcome.runtime_patch);
+    }
+
+    fn apply_execution_patch(&mut self, patch: &ExecutionStatePatch) -> bool {
+        if patch.is_noop() {
+            return false;
         }
-        if let Some(position_qty) = outcome.runtime_patch.position_qty {
-            self.snapshot.runtime.position_qty = position_qty;
+
+        let mut changed = false;
+
+        if let Some(open_orders) = &patch.open_orders
+            && self.snapshot.execution.open_orders != *open_orders
+        {
+            self.snapshot.execution.open_orders = open_orders.clone();
+            changed = true;
         }
-        if let Some(position_avg_price) = outcome.runtime_patch.position_avg_price {
-            self.snapshot.runtime.position_avg_price = position_avg_price;
+
+        if !patch.recent_fills.is_empty() {
+            for fill in patch.recent_fills.iter().rev() {
+                self.snapshot.execution.recent_fills.insert(0, fill.clone());
+            }
+            changed = true;
         }
-        if let Some(unrealized_pnl) = outcome.runtime_patch.unrealized_pnl {
-            self.snapshot.runtime.unrealized_pnl = unrealized_pnl;
-        }
-        if let Some(realized_pnl) = outcome.runtime_patch.realized_pnl {
-            self.snapshot.runtime.realized_pnl = realized_pnl;
-        }
+
+        changed |= apply_execution_runtime_patch(&mut self.snapshot, &patch.runtime_patch);
+        changed
     }
 
     fn next_sequence(&mut self) -> u64 {
@@ -1541,6 +1574,46 @@ fn persist_runtime_state(
         system_events: aggregate.system_events.clone(),
         last_sequence: aggregate.last_sequence,
     })
+}
+
+fn apply_execution_runtime_patch(
+    snapshot: &mut RuntimeSnapshot,
+    runtime_patch: &ExecutionRuntimePatch,
+) -> bool {
+    let mut changed = false;
+
+    if let Some(strategy_state) = &runtime_patch.strategy_state
+        && snapshot.runtime.strategy_state != *strategy_state
+    {
+        snapshot.runtime.strategy_state = strategy_state.clone();
+        changed = true;
+    }
+    if let Some(position_qty) = runtime_patch.position_qty
+        && (snapshot.runtime.position_qty - position_qty).abs() > f64::EPSILON
+    {
+        snapshot.runtime.position_qty = position_qty;
+        changed = true;
+    }
+    if let Some(position_avg_price) = runtime_patch.position_avg_price
+        && (snapshot.runtime.position_avg_price - position_avg_price).abs() > f64::EPSILON
+    {
+        snapshot.runtime.position_avg_price = position_avg_price;
+        changed = true;
+    }
+    if let Some(unrealized_pnl) = runtime_patch.unrealized_pnl
+        && (snapshot.runtime.unrealized_pnl - unrealized_pnl).abs() > f64::EPSILON
+    {
+        snapshot.runtime.unrealized_pnl = unrealized_pnl;
+        changed = true;
+    }
+    if let Some(realized_pnl) = runtime_patch.realized_pnl
+        && (snapshot.runtime.realized_pnl - realized_pnl).abs() > f64::EPSILON
+    {
+        snapshot.runtime.realized_pnl = realized_pnl;
+        changed = true;
+    }
+
+    changed
 }
 
 impl From<&RuntimeAggregate> for ReadModel {

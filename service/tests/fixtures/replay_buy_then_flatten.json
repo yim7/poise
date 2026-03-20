@@ -1,0 +1,16 @@
+{
+  "name": "buy fill then flatten",
+  "steps": [
+    {
+      "type": "market",
+      "last_price": 99.5,
+      "mark_price": 99.5,
+      "emitted_at": "2025-01-01T00:00:01Z"
+    },
+    {
+      "type": "command",
+      "command": "flatten_now",
+      "command_id": "cmd_flatten_replay"
+    }
+  ]
+}
