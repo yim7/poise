@@ -34,11 +34,13 @@ fn runtime_snapshot_fixture_decodes() {
         .filter(|level| level.state == grid_platform_tui::protocol::GridLevelState::Occupied)
         .filter_map(|level| level.client_order_id.as_deref())
         .collect::<HashSet<_>>();
-    assert!(snapshot
-        .execution
-        .open_orders
-        .iter()
-        .all(|order| !occupied_client_order_ids.contains(order.client_order_id.as_str())));
+    assert!(
+        snapshot
+            .execution
+            .open_orders
+            .iter()
+            .all(|order| !occupied_client_order_ids.contains(order.client_order_id.as_str()))
+    );
     assert_eq!(
         serialized["execution"]["recent_fills"][0]["client_order_id"],
         "flatten_reduce_only_01"

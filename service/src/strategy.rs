@@ -1,6 +1,6 @@
 use crate::protocol::{
-    GridConfig, GridLevel, GridLevelState, GridSide, OpenOrder, RiskState, RuntimeState,
-    StrategyState, StrategyStatus,
+    GridConfig, GridLevel, GridLevelState, GridSide, RiskState, RuntimeState, StrategyState,
+    StrategyStatus,
 };
 
 const EPSILON: f64 = 1e-9;
@@ -24,7 +24,11 @@ pub fn validate_config(config: &GridConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub fn reconcile(runtime: &RuntimeState, risk: &RiskState, previous: &StrategyState) -> StrategyState {
+pub fn reconcile(
+    runtime: &RuntimeState,
+    risk: &RiskState,
+    previous: &StrategyState,
+) -> StrategyState {
     let config = if validate_config(&previous.config).is_ok() {
         previous.config.clone()
     } else {
@@ -108,58 +112,6 @@ pub fn reconcile(runtime: &RuntimeState, risk: &RiskState, previous: &StrategySt
     }
 }
 
-pub fn desired_open_orders(
-    strategy: &StrategyState,
-    runtime_strategy_state: &str,
-    breaker_engaged: bool,
-    existing_open_orders: &[OpenOrder],
-    timestamp: &str,
-) -> Vec<OpenOrder> {
-    if runtime_strategy_state == "paused"
-        || breaker_engaged
-        || strategy.status == StrategyStatus::PendingRebuild
-    {
-        return Vec::new();
-    }
-
-    strategy
-        .levels
-        .iter()
-        .filter(|level| level.state == GridLevelState::Active)
-        .map(|level| {
-            let order_id = level
-                .order_id
-                .clone()
-                .unwrap_or_else(|| format!("ord_{}", level.level_id));
-            let client_order_id = level
-                .client_order_id
-                .clone()
-                .unwrap_or_else(|| format!("grid_{}", level.level_id));
-            let existing = existing_open_orders.iter().find(|order| {
-                order.order_id == order_id || order.client_order_id == client_order_id
-            });
-
-            OpenOrder {
-                order_id,
-                client_order_id,
-                side: side_label(level.side).into(),
-                price: round_price(level.price),
-                qty: level.quantity,
-                filled_qty: existing.map(|order| order.filled_qty).unwrap_or(0.0),
-                status: existing
-                    .map(|order| order.status.clone())
-                    .unwrap_or_else(|| "NEW".into()),
-                created_at: existing
-                    .map(|order| order.created_at.clone())
-                    .unwrap_or_else(|| timestamp.into()),
-                updated_at: existing
-                    .map(|order| order.updated_at.clone())
-                    .unwrap_or_else(|| timestamp.into()),
-            }
-        })
-        .collect()
-}
-
 #[derive(Clone, Copy)]
 enum GridLifecycleMode {
     Normal,
@@ -191,7 +143,10 @@ fn pending_rebuild_reason(
     paused: bool,
 ) -> String {
     if occupied {
-        return format!("price drift {:.1}bps while inventory is still occupied", drift_bps);
+        return format!(
+            "price drift {:.1}bps while inventory is still occupied",
+            drift_bps
+        );
     }
     if breaker_engaged {
         return format!("price drift {:.1}bps while breaker is engaged", drift_bps);
@@ -296,13 +251,6 @@ fn bounds(levels: &[GridLevel]) -> (f64, f64) {
 
 fn round_price(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
-}
-
-fn side_label(side: GridSide) -> &'static str {
-    match side {
-        GridSide::Buy => "buy",
-        GridSide::Sell => "sell",
-    }
 }
 
 #[cfg(test)]

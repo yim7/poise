@@ -789,9 +789,7 @@ mod tests {
 
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(
-                RuntimeSnapshot::sample(),
-            )),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(RuntimeSnapshot::sample())),
         );
 
         assert_eq!(effects, vec![Effect::FetchRiskEvents]);

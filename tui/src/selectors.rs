@@ -1,5 +1,7 @@
 use crate::{
-    protocol::{CommandType, GridLevel, GridLevelState, GridSide, OpenOrder, RecentFill, StrategyStatus},
+    protocol::{
+        CommandType, GridLevel, GridLevelState, GridSide, OpenOrder, RecentFill, StrategyStatus,
+    },
     state::{AppState, CommandTimelineEntry, CommandTimelineStage},
 };
 

@@ -614,7 +614,11 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
         Line::from(vec![
             Span::styled("Breaker  ", theme.muted()),
             Span::styled(
-                if state.risk.breaker_engaged { "ON" } else { "OFF" },
+                if state.risk.breaker_engaged {
+                    "ON"
+                } else {
+                    "OFF"
+                },
                 if state.risk.breaker_engaged {
                     theme.danger()
                 } else {
@@ -627,7 +631,9 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
                 .strategy
                 .pending_rebuild_reason
                 .clone()
-                .unwrap_or_else(|| "Grid levels are aligned with the current strategy state.".into()),
+                .unwrap_or_else(|| {
+                    "Grid levels are aligned with the current strategy state.".into()
+                }),
         ),
     ];
     frame.render_widget(

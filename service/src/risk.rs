@@ -8,7 +8,11 @@ pub struct RiskEvaluation {
     pub new_events: Vec<RiskEvent>,
 }
 
-pub fn evaluate(runtime: &RuntimeState, previous: &RiskState, config: &GridConfig) -> RiskEvaluation {
+pub fn evaluate(
+    runtime: &RuntimeState,
+    previous: &RiskState,
+    config: &GridConfig,
+) -> RiskEvaluation {
     let price = market_price(runtime);
     let max_notional = round_price(config.max_position_qty.abs() * price);
     let current_notional = round_price(runtime.position_qty.abs() * price);
@@ -34,8 +38,8 @@ pub fn evaluate(runtime: &RuntimeState, previous: &RiskState, config: &GridConfi
         RiskLevel::Ok
     };
 
-    let previous_max_position_exceeded =
-        previous.max_position_exceeded || previous.current_notional > previous.max_notional + EPSILON;
+    let previous_max_position_exceeded = previous.max_position_exceeded
+        || previous.current_notional > previous.max_notional + EPSILON;
     let mut new_events = Vec::new();
     if max_position_exceeded && !previous_max_position_exceeded {
         new_events.push(risk_event(
@@ -54,8 +58,7 @@ pub fn evaluate(runtime: &RuntimeState, previous: &RiskState, config: &GridConfi
             "STOP_LOSS_TRIGGERED",
             format!(
                 "Mark price {:.2} crossed the configured stop-loss threshold {:.1}%.",
-                price,
-                previous.stop_loss_pct
+                price, previous.stop_loss_pct
             ),
         ));
     }
@@ -65,8 +68,7 @@ pub fn evaluate(runtime: &RuntimeState, previous: &RiskState, config: &GridConfi
             "DAILY_LOSS_LIMIT_BREACHED",
             format!(
                 "Combined daily PnL {:.2} breached the configured limit {:.2}.",
-                total_pnl,
-                previous.daily_loss_limit
+                total_pnl, previous.daily_loss_limit
             ),
         ));
     }
