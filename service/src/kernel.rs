@@ -1,28 +1,34 @@
 use std::{
+    future::Future,
     sync::{Arc, RwLock},
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use crate::background::spawn_task;
 use crate::execution::{
-    ExecutionAdapter, ExecutionOutcome, ExecutionRuntimePatch, FakeExecutionAdapter,
+    CancelOrdersRequest, ExecutionAdapter, ExecutionOutcome, ExecutionRuntimePatch,
+    FakeExecutionAdapter, SubmitOrderRequest,
 };
 use crate::protocol::{
     CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
-    CommandType, ConnectionState, PROTOCOL_VERSION, PendingCommand, PriceUpdated, RecentFill,
-    RiskEvent, RuntimeSnapshot, SystemEvent,
+    CommandType, ConnectionState, GridLevelState, GridSide, OpenOrder, PROTOCOL_VERSION,
+    PendingCommand, PriceUpdated, RecentFill, RiskEvent, RuntimeSnapshot, StrategyStatus,
+    SystemEvent,
 };
-use crate::{risk, strategy};
 use crate::storage::{PersistedRuntime, SqliteStorage};
+use crate::{risk, strategy};
 
 const ENGINE_COMMAND_BUFFER: usize = 256;
 const ENGINE_EVENT_BUFFER: usize = 256;
 const EXECUTION_TIMEOUT: Duration = Duration::from_millis(250);
+const EXECUTION_MAX_ATTEMPTS: usize = 3;
+const EXECUTION_RETRY_DELAY: Duration = Duration::from_millis(20);
+const STRATEGY_SYNC_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub type SharedReadModel = Arc<RwLock<ReadModel>>;
 
@@ -244,7 +250,7 @@ pub fn spawn_engine_with_runtime(
     spawn_engine_with_runtime_and_adapter(runtime, storage, Arc::new(FakeExecutionAdapter))
 }
 
-fn spawn_engine_with_runtime_and_adapter(
+pub fn spawn_engine_with_runtime_and_adapter(
     runtime: PersistedRuntime,
     storage: Option<SqliteStorage>,
     execution_adapter: Arc<dyn ExecutionAdapter>,
@@ -280,6 +286,7 @@ async fn run_engine(
     storage: Option<SqliteStorage>,
     execution_adapter: Arc<dyn ExecutionAdapter>,
 ) {
+    let mut active_execution: Option<ActiveExecutionTask> = None;
     while let Some(command) = commands_rx.recv().await {
         match command {
             EngineCommand::SubmitCommand {
@@ -287,21 +294,36 @@ async fn run_engine(
                 request,
                 reply_to,
             } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
+                let previous = aggregate.clone();
                 let issued = match aggregate.issue_command(command, request, storage.as_ref()) {
                     Ok(value) => value,
                     Err(error) => {
-                        if let Some(previous) = previous {
-                            aggregate = previous;
-                        }
+                        aggregate = previous;
                         let _ = reply_to.send(Err(error));
                         continue;
                     }
                 };
-                if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
+                let strategy_events = match &issued {
+                    IssuedCommand::Immediate { .. }
+                        if should_sync_strategy_after_command(command) =>
+                    {
+                        match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone())
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(error) => {
+                                aggregate = previous.clone();
+                                let error = error.context("failed to sync strategy orders");
+                                warn!(?error, "failed to sync strategy orders; reverting command");
+                                let _ = reply_to.send(Err(error));
+                                continue;
+                            }
+                        }
                     }
+                    _ => Vec::new(),
+                };
+                if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
+                    aggregate = previous;
                     let error = error.context("failed to persist command result");
                     warn!(
                         ?error,
@@ -312,7 +334,11 @@ async fn run_engine(
                 }
                 replace_read_model(&read_model, &aggregate);
                 match issued {
-                    IssuedCommand::Immediate { accepted, events } => {
+                    IssuedCommand::Immediate {
+                        accepted,
+                        mut events,
+                    } => {
+                        events.extend(strategy_events);
                         let _ = reply_to.send(Ok(accepted));
                         publish_events(&events_tx, events).await;
                     }
@@ -321,14 +347,13 @@ async fn run_engine(
                         let commands_tx = commands_tx.clone();
                         let timeout_tx = commands_tx.clone();
                         let timeout_command_id = launch.command_id.clone();
-                        spawn_task(async move {
-                            let outcome = match execution_adapter
-                                .execute(launch.command, &launch.command_id, &launch.snapshot)
-                                .await
-                            {
-                                Ok(outcome) => outcome,
-                                Err(error) => ExecutionOutcome::failed(error.to_string()),
-                            };
+                        let task_command_id = launch.command_id.clone();
+                        let execution_task = tokio::spawn(async move {
+                            let outcome =
+                                match run_deferred_execution(execution_adapter, &launch).await {
+                                    Ok(outcome) => outcome,
+                                    Err(error) => ExecutionOutcome::failed(error.to_string()),
+                                };
                             if commands_tx
                                 .send(EngineCommand::ExecutionFinished {
                                     command_id: launch.command_id,
@@ -339,6 +364,10 @@ async fn run_engine(
                             {
                                 warn!("engine command channel closed while finishing execution");
                             }
+                        });
+                        active_execution = Some(ActiveExecutionTask {
+                            command_id: task_command_id,
+                            task: execution_task,
                         });
                         spawn_task(async move {
                             tokio::time::sleep(EXECUTION_TIMEOUT).await;
@@ -357,12 +386,24 @@ async fn run_engine(
                 }
             }
             EngineCommand::EmitPriceTick { reply_to } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
-                let (tick, events) = aggregate.emit_price_tick();
-                if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
+                let previous = aggregate.clone();
+                let (tick, mut events) = aggregate.emit_price_tick();
+                match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
+                    Ok(strategy_events) => events.extend(strategy_events),
+                    Err(error) => {
+                        aggregate = previous.clone();
+                        let error =
+                            error.context("failed to sync strategy orders after price tick");
+                        warn!(
+                            ?error,
+                            "failed to sync strategy orders after price tick; reverting price update"
+                        );
+                        let _ = reply_to.send(Err(error));
+                        continue;
                     }
+                }
+                if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
+                    aggregate = previous;
                     let error = error.context("failed to persist price update");
                     warn!(
                         ?error,
@@ -379,14 +420,12 @@ async fn run_engine(
                 connection,
                 reply_to,
             } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
+                let previous = aggregate.clone();
                 let events = aggregate.sync_connection(connection);
                 if !events.is_empty()
                     && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
                 {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
-                    }
+                    aggregate = previous;
                     let error = error.context("failed to persist connection state");
                     warn!(
                         ?error,
@@ -400,14 +439,26 @@ async fn run_engine(
                 publish_events(&events_tx, events).await;
             }
             EngineCommand::SyncRuntime { patch, reply_to } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
-                let events = aggregate.sync_runtime(patch);
+                let previous = aggregate.clone();
+                let mut events = aggregate.sync_runtime(patch);
+                match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
+                    Ok(strategy_events) => events.extend(strategy_events),
+                    Err(error) => {
+                        aggregate = previous.clone();
+                        let error =
+                            error.context("failed to sync strategy orders after runtime sync");
+                        warn!(
+                            ?error,
+                            "failed to sync strategy orders after runtime sync; reverting runtime sync"
+                        );
+                        let _ = reply_to.send(Err(error));
+                        continue;
+                    }
+                }
                 if !events.is_empty()
                     && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
                 {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
-                    }
+                    aggregate = previous;
                     let error = error.context("failed to persist runtime sync");
                     warn!(
                         ?error,
@@ -426,14 +477,26 @@ async fn run_engine(
                 emitted_at,
                 reply_to,
             } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
-                let events = aggregate.sync_market_prices(last_price, mark_price, emitted_at);
+                let previous = aggregate.clone();
+                let mut events = aggregate.sync_market_prices(last_price, mark_price, emitted_at);
+                match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
+                    Ok(strategy_events) => events.extend(strategy_events),
+                    Err(error) => {
+                        aggregate = previous.clone();
+                        let error =
+                            error.context("failed to sync strategy orders after market price sync");
+                        warn!(
+                            ?error,
+                            "failed to sync strategy orders after market price sync; reverting market price sync"
+                        );
+                        let _ = reply_to.send(Err(error));
+                        continue;
+                    }
+                }
                 if !events.is_empty()
                     && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
                 {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
-                    }
+                    aggregate = previous;
                     let error = error.context("failed to persist market price sync");
                     warn!(
                         ?error,
@@ -450,15 +513,19 @@ async fn run_engine(
                 command_id,
                 outcome,
             } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
+                if active_execution
+                    .as_ref()
+                    .is_some_and(|active| active.command_id == command_id)
+                {
+                    active_execution = None;
+                }
+                let previous = aggregate.clone();
                 let events = aggregate.finish_execution(&command_id, outcome);
                 if events.is_empty() {
                     continue;
                 }
                 if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
-                    }
+                    aggregate = previous;
                     let error = error.context("failed to persist execution result");
                     warn!(
                         ?error,
@@ -470,15 +537,20 @@ async fn run_engine(
                 publish_events(&events_tx, events).await;
             }
             EngineCommand::ExecutionTimedOut { command_id } => {
-                let previous = storage.as_ref().map(|_| aggregate.clone());
+                if active_execution
+                    .as_ref()
+                    .is_some_and(|active| active.command_id == command_id)
+                    && let Some(active) = active_execution.take()
+                {
+                    active.task.abort();
+                }
+                let previous = aggregate.clone();
                 let events = aggregate.timeout_execution(&command_id);
                 if events.is_empty() {
                     continue;
                 }
                 if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
-                    if let Some(previous) = previous {
-                        aggregate = previous;
-                    }
+                    aggregate = previous;
                     let error = error.context("failed to persist execution timeout");
                     warn!(
                         ?error,
@@ -511,6 +583,392 @@ fn replace_read_model(read_model: &SharedReadModel, aggregate: &RuntimeAggregate
         .expect("service read model rwlock poisoned") = ReadModel::from(aggregate);
 }
 
+async fn run_deferred_execution(
+    execution_adapter: Arc<dyn ExecutionAdapter>,
+    launch: &DeferredExecution,
+) -> Result<ExecutionOutcome> {
+    match launch.command {
+        CommandType::CancelAll => execute_cancel_all(execution_adapter, launch).await,
+        CommandType::FlattenNow => execute_flatten(execution_adapter, launch, false).await,
+        CommandType::ShutdownAfterFlatten => execute_flatten(execution_adapter, launch, true).await,
+        CommandType::Pause | CommandType::Resume => {
+            unreachable!("local runtime commands do not use deferred execution")
+        }
+    }
+}
+
+async fn execute_cancel_all(
+    execution_adapter: Arc<dyn ExecutionAdapter>,
+    launch: &DeferredExecution,
+) -> Result<ExecutionOutcome> {
+    let request = CancelOrdersRequest {
+        command_id: Some(launch.command_id.clone()),
+        order_ids: launch
+            .snapshot
+            .execution
+            .open_orders
+            .iter()
+            .map(|order| order.order_id.clone())
+            .collect(),
+        client_order_ids: launch
+            .snapshot
+            .execution
+            .open_orders
+            .iter()
+            .map(|order| order.client_order_id.clone())
+            .collect(),
+    };
+    let mut working_snapshot = launch.snapshot.clone();
+    working_snapshot.execution.open_orders =
+        retry_execution(|| execution_adapter.cancel_orders(request.clone(), &working_snapshot))
+            .await?;
+
+    let mut outcome =
+        if targeted_open_orders_still_present(&working_snapshot.execution.open_orders, &request) {
+            ExecutionOutcome::failed("Cancel-all did not clear all targeted open orders.")
+        } else {
+            ExecutionOutcome::completed("All open orders cancelled.")
+        };
+    outcome.links.client_order_ids = request.client_order_ids;
+    outcome.links.order_ids = request.order_ids;
+    outcome.open_orders = Some(working_snapshot.execution.open_orders.clone());
+    outcome.recent_fills = Some(working_snapshot.execution.recent_fills.clone());
+    Ok(outcome)
+}
+
+async fn execute_flatten(
+    execution_adapter: Arc<dyn ExecutionAdapter>,
+    launch: &DeferredExecution,
+    pause_after_flatten: bool,
+) -> Result<ExecutionOutcome> {
+    let mut working_snapshot = launch.snapshot.clone();
+    let mut cancelled_links = CommandLinks::default();
+
+    if pause_after_flatten {
+        let cancel_request = CancelOrdersRequest {
+            command_id: Some(launch.command_id.clone()),
+            order_ids: working_snapshot
+                .execution
+                .open_orders
+                .iter()
+                .map(|order| order.order_id.clone())
+                .collect(),
+            client_order_ids: working_snapshot
+                .execution
+                .open_orders
+                .iter()
+                .map(|order| order.client_order_id.clone())
+                .collect(),
+        };
+        working_snapshot.execution.open_orders = retry_execution(|| {
+            execution_adapter.cancel_orders(cancel_request.clone(), &working_snapshot)
+        })
+        .await?;
+        if targeted_open_orders_still_present(
+            &working_snapshot.execution.open_orders,
+            &cancel_request,
+        ) {
+            let mut outcome =
+                ExecutionOutcome::failed("Shutdown-after-flatten did not clear all open orders.");
+            outcome.links.client_order_ids = cancel_request.client_order_ids;
+            outcome.links.order_ids = cancel_request.order_ids;
+            outcome.open_orders = Some(working_snapshot.execution.open_orders.clone());
+            outcome.recent_fills = Some(working_snapshot.execution.recent_fills.clone());
+            return Ok(outcome);
+        }
+        cancelled_links.client_order_ids = cancel_request.client_order_ids;
+        cancelled_links.order_ids = cancel_request.order_ids;
+    }
+
+    let qty = working_snapshot.runtime.position_qty.abs();
+    let mut flatten_links = CommandLinks::default();
+    if qty > f64::EPSILON {
+        let submit_request = SubmitOrderRequest {
+            command_id: Some(launch.command_id.clone()),
+            order_id: format!("order_{}", launch.command_id),
+            client_order_id: format!("reduce_only_{}", launch.command_id),
+            side: if working_snapshot.runtime.position_qty > 0.0 {
+                "sell".into()
+            } else {
+                "buy".into()
+            },
+            price: if working_snapshot.runtime.mark_price > 0.0 {
+                working_snapshot.runtime.mark_price
+            } else {
+                working_snapshot.runtime.last_price
+            },
+            qty,
+            reduce_only: true,
+        };
+        let submitted = retry_execution(|| {
+            execution_adapter.submit_order(submit_request.clone(), &working_snapshot)
+        })
+        .await?;
+        apply_submit_result(&mut working_snapshot, submitted.clone());
+        flatten_links
+            .client_order_ids
+            .push(submit_request.client_order_id.clone());
+        flatten_links
+            .order_ids
+            .push(submit_request.order_id.clone());
+        if let Some(fill) = submitted.fill {
+            flatten_links.trade_ids.push(fill.trade_id);
+        }
+
+        if !flatten_terminal_state_observed(&working_snapshot, &submit_request) {
+            let mut outcome =
+                ExecutionOutcome::failed("Flatten order did not produce a terminal fill.");
+            outcome.links = combine_links(cancelled_links, flatten_links);
+            outcome.open_orders = Some(working_snapshot.execution.open_orders.clone());
+            outcome.recent_fills = Some(working_snapshot.execution.recent_fills.clone());
+            return Ok(outcome);
+        }
+    }
+
+    let mut outcome = ExecutionOutcome::completed(if pause_after_flatten {
+        "Position flattened and shutdown requested."
+    } else {
+        "Position flattened."
+    });
+    outcome.links = combine_links(cancelled_links, flatten_links);
+    outcome.open_orders = Some(working_snapshot.execution.open_orders.clone());
+    outcome.recent_fills = Some(working_snapshot.execution.recent_fills.clone());
+    if pause_after_flatten {
+        outcome.runtime_patch.strategy_state = Some("paused".into());
+    }
+    outcome.runtime_patch.position_qty = Some(0.0);
+    outcome.runtime_patch.position_avg_price = Some(0.0);
+    outcome.runtime_patch.unrealized_pnl = Some(0.0);
+    Ok(outcome)
+}
+
+async fn maybe_sync_strategy_orders(
+    aggregate: &mut RuntimeAggregate,
+    execution_adapter: Arc<dyn ExecutionAdapter>,
+) -> Result<Vec<SequencedEngineEvent>> {
+    let missing_orders = strategy_orders_to_place(&aggregate.snapshot);
+    if missing_orders.is_empty()
+        || aggregate
+            .snapshot
+            .execution
+            .pending_commands
+            .iter()
+            .any(|item| is_execution_command(item.command))
+    {
+        return Ok(Vec::new());
+    }
+
+    let before = aggregate.snapshot.clone();
+    let mut working_snapshot = aggregate.snapshot.clone();
+    let deadline = tokio::time::Instant::now() + STRATEGY_SYNC_TIMEOUT;
+    let mut applied_any = false;
+    for order in missing_orders {
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            if applied_any {
+                warn!(
+                    "strategy sync budget exhausted after partial success; keeping applied placements"
+                );
+                break;
+            }
+            return Err(anyhow!(
+                "strategy placement timed out while waiting for adapter response"
+            ));
+        };
+        match strategy_sync_call(
+            remaining,
+            execution_adapter.submit_order(order.clone(), &working_snapshot),
+        )
+        .await
+        {
+            Ok(submitted) if submit_result_has_facts(&submitted) => {
+                apply_submit_result(&mut working_snapshot, submitted);
+                applied_any = true;
+            }
+            Ok(_) if applied_any => {
+                warn!(
+                    client_order_id = %order.client_order_id,
+                    "strategy sync submit returned no execution facts after partial success; keeping applied placements"
+                );
+                break;
+            }
+            Ok(_) => {
+                return Err(anyhow!(
+                    "strategy placement returned no execution facts for {}",
+                    order.client_order_id
+                ));
+            }
+            Err(error) if applied_any => {
+                warn!(
+                    ?error,
+                    client_order_id = %order.client_order_id,
+                    "strategy sync stopped after partial success; keeping applied placements"
+                );
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    aggregate.snapshot.execution.open_orders = working_snapshot.execution.open_orders.clone();
+    aggregate.snapshot.execution.recent_fills = working_snapshot.execution.recent_fills.clone();
+
+    if aggregate.snapshot == before {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![aggregate.sequenced_event(
+        EngineEvent::RuntimeSnapshot(aggregate.snapshot.clone()),
+    )])
+}
+
+async fn retry_execution<T, F, Fut>(mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut last_error = None;
+    for attempt in 0..EXECUTION_MAX_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < EXECUTION_MAX_ATTEMPTS {
+                    tokio::time::sleep(EXECUTION_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("retry loop should capture at least one error"))
+}
+
+async fn strategy_sync_call<T, Fut>(timeout_after: Duration, future: Fut) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
+    tokio::time::timeout(timeout_after, future)
+        .await
+        .map_err(|_| anyhow!("strategy placement timed out while waiting for adapter response"))?
+}
+
+fn apply_submit_result(
+    snapshot: &mut RuntimeSnapshot,
+    submitted: crate::execution::SubmitOrderResult,
+) {
+    if let Some(open_order) = submitted.open_order {
+        upsert_open_order(&mut snapshot.execution.open_orders, open_order);
+    }
+    if let Some(fill) = submitted.fill {
+        snapshot.execution.recent_fills.insert(0, fill);
+    }
+}
+
+fn submit_result_has_facts(submitted: &crate::execution::SubmitOrderResult) -> bool {
+    submitted.open_order.is_some() || submitted.fill.is_some()
+}
+
+fn upsert_open_order(open_orders: &mut Vec<OpenOrder>, open_order: OpenOrder) {
+    if let Some(index) = open_orders.iter().position(|current| {
+        current.order_id == open_order.order_id
+            || current.client_order_id == open_order.client_order_id
+    }) {
+        open_orders[index] = open_order;
+    } else {
+        open_orders.push(open_order);
+    }
+}
+
+fn strategy_orders_to_place(snapshot: &RuntimeSnapshot) -> Vec<SubmitOrderRequest> {
+    if snapshot.runtime.strategy_state != "running"
+        || snapshot.risk.breaker_engaged
+        || snapshot.strategy.status == StrategyStatus::PendingRebuild
+        || snapshot
+            .execution
+            .open_orders
+            .iter()
+            .any(|order| order.client_order_id.starts_with("reduce_only_"))
+    {
+        return Vec::new();
+    }
+
+    snapshot
+        .strategy
+        .levels
+        .iter()
+        .filter(|level| level.state == GridLevelState::Active)
+        .filter_map(|level| {
+            let client_order_id = level.client_order_id.clone()?;
+            let order_id = level.order_id.clone()?;
+            if snapshot
+                .execution
+                .open_orders
+                .iter()
+                .any(|order| order.client_order_id == client_order_id || order.order_id == order_id)
+            {
+                return None;
+            }
+            Some(SubmitOrderRequest {
+                command_id: None,
+                order_id,
+                client_order_id,
+                side: match level.side {
+                    GridSide::Buy => "buy".into(),
+                    GridSide::Sell => "sell".into(),
+                },
+                price: level.price,
+                qty: level.quantity,
+                reduce_only: false,
+            })
+        })
+        .collect()
+}
+
+fn should_sync_strategy_after_command(command: CommandType) -> bool {
+    matches!(command, CommandType::Resume)
+}
+
+fn targeted_open_orders_still_present(
+    open_orders: &[OpenOrder],
+    request: &CancelOrdersRequest,
+) -> bool {
+    open_orders.iter().any(|order| {
+        request.order_ids.iter().any(|id| id == &order.order_id)
+            || request
+                .client_order_ids
+                .iter()
+                .any(|id| id == &order.client_order_id)
+    })
+}
+
+fn flatten_terminal_state_observed(
+    snapshot: &RuntimeSnapshot,
+    request: &SubmitOrderRequest,
+) -> bool {
+    let filled_qty = snapshot
+        .execution
+        .recent_fills
+        .iter()
+        .filter(|fill| {
+            fill.order_id == request.order_id
+                || fill.client_order_id.as_deref() == Some(request.client_order_id.as_str())
+        })
+        .map(|fill| fill.qty)
+        .sum::<f64>();
+    filled_qty + f64::EPSILON >= request.qty
+        && snapshot.execution.open_orders.iter().all(|order| {
+            order.order_id != request.order_id && order.client_order_id != request.client_order_id
+        })
+}
+
+fn combine_links(left: CommandLinks, right: CommandLinks) -> CommandLinks {
+    let mut links = CommandLinks::default();
+    links.client_order_ids.extend(left.client_order_ids);
+    links.client_order_ids.extend(right.client_order_ids);
+    links.order_ids.extend(left.order_ids);
+    links.order_ids.extend(right.order_ids);
+    links.trade_ids.extend(left.trade_ids);
+    links.trade_ids.extend(right.trade_ids);
+    links
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeAggregate {
     snapshot: RuntimeSnapshot,
@@ -538,6 +996,11 @@ struct DeferredExecution {
     snapshot: RuntimeSnapshot,
 }
 
+struct ActiveExecutionTask {
+    command_id: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
 struct ReconcileOutcome {
     snapshot_changed: bool,
     risk_alerts: Vec<RiskEvent>,
@@ -551,8 +1014,7 @@ impl RuntimeAggregate {
             system_events: runtime.system_events,
             last_sequence: runtime.last_sequence,
         };
-        let timestamp = now_utc();
-        let _ = aggregate.reconcile_runtime(timestamp, false);
+        let _ = aggregate.reconcile_runtime();
         aggregate
     }
 
@@ -568,13 +1030,11 @@ impl RuntimeAggregate {
             mark_price: self.snapshot.runtime.mark_price,
             emitted_at,
         };
-        let reconcile = self.reconcile_runtime(tick.emitted_at.clone(), true);
+        let reconcile = self.reconcile_runtime();
         let mut events = vec![self.sequenced_event(EngineEvent::PriceUpdated(tick.clone()))];
         events.extend(self.risk_alert_events(reconcile.risk_alerts));
         if reconcile.snapshot_changed {
-            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(
-                self.snapshot.clone(),
-            )));
+            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone())));
         }
         (tick, events)
     }
@@ -638,10 +1098,9 @@ impl RuntimeAggregate {
             return Vec::new();
         }
 
-        let reconcile = self.reconcile_runtime(now_utc(), true);
-        let mut events = vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(
-            self.snapshot.clone(),
-        ))];
+        let reconcile = self.reconcile_runtime();
+        let mut events =
+            vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone()))];
         events.extend(self.risk_alert_events(reconcile.risk_alerts));
         events
     }
@@ -686,13 +1145,11 @@ impl RuntimeAggregate {
             mark_price: self.snapshot.runtime.mark_price,
             emitted_at,
         };
-        let reconcile = self.reconcile_runtime(tick.emitted_at.clone(), true);
+        let reconcile = self.reconcile_runtime();
         let mut events = vec![self.sequenced_event(EngineEvent::PriceUpdated(tick))];
         events.extend(self.risk_alert_events(reconcile.risk_alerts));
         if reconcile.snapshot_changed {
-            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(
-                self.snapshot.clone(),
-            )));
+            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone())));
         }
         events
     }
@@ -887,19 +1344,14 @@ impl RuntimeAggregate {
             },
         );
 
-        let reconcile = self.reconcile_runtime(
-            now_utc(),
-            outcome.open_orders.is_none() && runtime_patch_has_changes(&outcome.runtime_patch),
-        );
+        let reconcile = self.reconcile_runtime();
         let mut events = vec![SequencedEngineEvent {
             sequence,
             event: EngineEvent::CommandAck(ack),
         }];
         events.extend(self.risk_alert_events(reconcile.risk_alerts));
         if reconcile.snapshot_changed {
-            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(
-                self.snapshot.clone(),
-            )));
+            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone())));
         }
         events
     }
@@ -977,7 +1429,7 @@ impl RuntimeAggregate {
         })
     }
 
-    fn reconcile_runtime(&mut self, timestamp: String, sync_execution_orders: bool) -> ReconcileOutcome {
+    fn reconcile_runtime(&mut self) -> ReconcileOutcome {
         let previous_snapshot = self.snapshot.clone();
 
         let risk_evaluation = risk::evaluate(
@@ -990,20 +1442,11 @@ impl RuntimeAggregate {
             self.record_risk_event(event.clone());
         }
 
-        self.snapshot.strategy =
-            strategy::reconcile(&self.snapshot.runtime, &self.snapshot.risk, &self.snapshot.strategy);
-        if sync_execution_orders {
-            let desired_orders = strategy::desired_open_orders(
-                &self.snapshot.strategy,
-                &self.snapshot.runtime.strategy_state,
-                self.snapshot.risk.breaker_engaged,
-                &self.snapshot.execution.open_orders,
-                &timestamp,
-            );
-            if self.snapshot.execution.open_orders != desired_orders {
-                self.snapshot.execution.open_orders = desired_orders;
-            }
-        }
+        self.snapshot.strategy = strategy::reconcile(
+            &self.snapshot.runtime,
+            &self.snapshot.risk,
+            &self.snapshot.strategy,
+        );
         self.snapshot.risk.unacked_alerts = self
             .risk_events
             .iter()
@@ -1127,14 +1570,6 @@ fn local_command_outcome(summary: &str, strategy_state: &str) -> ExecutionOutcom
     };
     outcome.links = CommandLinks::default();
     outcome
-}
-
-fn runtime_patch_has_changes(patch: &ExecutionRuntimePatch) -> bool {
-    patch.strategy_state.is_some()
-        || patch.position_qty.is_some()
-        || patch.position_avg_price.is_some()
-        || patch.unrealized_pnl.is_some()
-        || patch.realized_pnl.is_some()
 }
 
 fn is_execution_command(command: CommandType) -> bool {

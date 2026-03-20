@@ -1,22 +1,50 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
-use anyhow::{Result, bail};
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 
-use crate::protocol::{
-    CommandLinks, CommandStatus, CommandType, OpenOrder, RecentFill, RuntimeSnapshot,
-};
+use crate::protocol::{CommandLinks, CommandStatus, OpenOrder, RecentFill, RuntimeSnapshot};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubmitOrderRequest {
+    pub command_id: Option<String>,
+    pub order_id: String,
+    pub client_order_id: String,
+    pub side: String,
+    pub price: f64,
+    pub qty: f64,
+    pub reduce_only: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubmitOrderResult {
+    pub open_order: Option<OpenOrder>,
+    pub fill: Option<RecentFill>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CancelOrdersRequest {
+    pub command_id: Option<String>,
+    pub order_ids: Vec<String>,
+    pub client_order_ids: Vec<String>,
+}
 
 #[async_trait]
 pub trait ExecutionAdapter: Send + Sync {
-    async fn execute(
+    async fn submit_order(
         &self,
-        command: CommandType,
-        command_id: &str,
+        request: SubmitOrderRequest,
         snapshot: &RuntimeSnapshot,
-    ) -> Result<ExecutionOutcome>;
+    ) -> Result<SubmitOrderResult>;
+
+    async fn cancel_orders(
+        &self,
+        request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Vec<OpenOrder>>;
+
+    async fn query_open_orders(&self, snapshot: &RuntimeSnapshot) -> Result<Vec<OpenOrder>>;
+
+    async fn list_recent_fills(&self, snapshot: &RuntimeSnapshot) -> Result<Vec<RecentFill>>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -78,147 +106,83 @@ pub struct FakeExecutionAdapter;
 
 #[async_trait]
 impl ExecutionAdapter for FakeExecutionAdapter {
-    async fn execute(
+    async fn submit_order(
         &self,
-        command: CommandType,
-        command_id: &str,
+        request: SubmitOrderRequest,
         snapshot: &RuntimeSnapshot,
-    ) -> Result<ExecutionOutcome> {
-        let outcome = match command {
-            CommandType::CancelAll => {
-                let mut outcome = ExecutionOutcome::completed("All open orders cancelled.");
-                outcome.links.client_order_ids = snapshot
-                    .execution
-                    .open_orders
-                    .iter()
-                    .map(|order| order.client_order_id.clone())
-                    .collect();
-                outcome.links.order_ids = snapshot
-                    .execution
-                    .open_orders
-                    .iter()
-                    .map(|order| order.order_id.clone())
-                    .collect();
-                outcome.open_orders = Some(Vec::new());
-                outcome
-            }
-            CommandType::FlattenNow => flatten_outcome(snapshot, command_id, false),
-            CommandType::ShutdownAfterFlatten => flatten_outcome(snapshot, command_id, true),
-            CommandType::Pause | CommandType::Resume => {
-                unreachable!("local runtime commands do not use the execution adapter")
-            }
-        };
-        Ok(outcome)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ScriptedExecutionAdapter {
-    outcomes: Mutex<HashMap<String, ExecutionOutcome>>,
-}
-
-impl ScriptedExecutionAdapter {
-    pub fn new() -> Self {
-        Self {
-            outcomes: Mutex::new(HashMap::new()),
+    ) -> Result<SubmitOrderResult> {
+        if request.reduce_only {
+            let trade_suffix = request.command_id.as_deref().unwrap_or(&request.order_id);
+            return Ok(SubmitOrderResult {
+                open_order: None,
+                fill: Some(RecentFill {
+                    trade_id: format!("trade_{trade_suffix}"),
+                    order_id: request.order_id,
+                    client_order_id: Some(request.client_order_id),
+                    side: request.side,
+                    price: request.price,
+                    qty: request.qty,
+                    fee: 0.0,
+                    realized_pnl: 0.0,
+                    event_time: now_utc(),
+                }),
+            });
         }
+
+        if let Some(existing) = snapshot.execution.open_orders.iter().find(|order| {
+            order.order_id == request.order_id || order.client_order_id == request.client_order_id
+        }) {
+            return Ok(SubmitOrderResult {
+                open_order: Some(existing.clone()),
+                fill: None,
+            });
+        }
+
+        Ok(SubmitOrderResult {
+            open_order: Some(OpenOrder {
+                order_id: request.order_id,
+                client_order_id: request.client_order_id,
+                side: request.side,
+                price: request.price,
+                qty: request.qty,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: now_utc(),
+                updated_at: now_utc(),
+            }),
+            fill: None,
+        })
     }
 
-    pub fn push_outcome(&self, command_id: impl Into<String>, outcome: ExecutionOutcome) {
-        let mut outcomes = self.outcomes.lock().expect("scripted adapter poisoned");
-        outcomes.insert(command_id.into(), outcome);
-    }
-}
-
-#[async_trait]
-impl ExecutionAdapter for ScriptedExecutionAdapter {
-    async fn execute(
+    async fn cancel_orders(
         &self,
-        _command: CommandType,
-        command_id: &str,
-        _snapshot: &RuntimeSnapshot,
-    ) -> Result<ExecutionOutcome> {
-        let mut outcomes = self.outcomes.lock().expect("scripted adapter poisoned");
-        if let Some(outcome) = outcomes.remove(command_id) {
-            return Ok(outcome);
-        }
-        bail!("no scripted outcome for command_id {command_id}")
+        request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Vec<OpenOrder>> {
+        Ok(snapshot
+            .execution
+            .open_orders
+            .iter()
+            .filter(|order| {
+                !request.order_ids.iter().any(|id| id == &order.order_id)
+                    && !request
+                        .client_order_ids
+                        .iter()
+                        .any(|id| id == &order.client_order_id)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn query_open_orders(&self, snapshot: &RuntimeSnapshot) -> Result<Vec<OpenOrder>> {
+        Ok(snapshot.execution.open_orders.clone())
+    }
+
+    async fn list_recent_fills(&self, snapshot: &RuntimeSnapshot) -> Result<Vec<RecentFill>> {
+        Ok(snapshot.execution.recent_fills.clone())
     }
 }
 
-fn flatten_outcome(
-    snapshot: &RuntimeSnapshot,
-    command_id: &str,
-    pause_after_flatten: bool,
-) -> ExecutionOutcome {
-    let mut outcome = ExecutionOutcome::completed(if pause_after_flatten {
-        "Position flattened and shutdown requested."
-    } else {
-        "Position flattened."
-    });
-
-    outcome.runtime_patch.position_qty = Some(0.0);
-    outcome.runtime_patch.position_avg_price = Some(0.0);
-    outcome.runtime_patch.unrealized_pnl = Some(0.0);
-
-    if pause_after_flatten {
-        outcome.runtime_patch.strategy_state = Some("paused".into());
-        outcome.links.client_order_ids.extend(
-            snapshot
-                .execution
-                .open_orders
-                .iter()
-                .map(|order| order.client_order_id.clone()),
-        );
-        outcome.links.order_ids.extend(
-            snapshot
-                .execution
-                .open_orders
-                .iter()
-                .map(|order| order.order_id.clone()),
-        );
-        outcome.open_orders = Some(Vec::new());
-    }
-
-    let qty = snapshot.runtime.position_qty.abs();
-    if qty <= f64::EPSILON {
-        return outcome;
-    }
-
-    let side = if snapshot.runtime.position_qty > 0.0 {
-        "sell"
-    } else {
-        "buy"
-    };
-    let price = if snapshot.runtime.mark_price > 0.0 {
-        snapshot.runtime.mark_price
-    } else {
-        snapshot.runtime.last_price
-    };
-    let client_order_id = format!("reduce_only_{command_id}");
-    let order_id = format!("order_{command_id}");
-    let trade_id = format!("trade_{command_id}");
-
-    let mut recent_fills = Vec::with_capacity(snapshot.execution.recent_fills.len() + 1);
-    recent_fills.push(RecentFill {
-        trade_id: trade_id.clone(),
-        order_id: order_id.clone(),
-        client_order_id: Some(client_order_id.clone()),
-        side: side.into(),
-        price,
-        qty,
-        fee: 0.0,
-        realized_pnl: 0.0,
-        event_time: now_utc(),
-    });
-    recent_fills.extend(snapshot.execution.recent_fills.iter().cloned());
-    outcome.recent_fills = Some(recent_fills);
-    outcome.links.client_order_ids.push(client_order_id);
-    outcome.links.order_ids.push(order_id);
-    outcome.links.trade_ids.push(trade_id);
-    outcome
-}
-
-fn now_utc() -> String {
+pub fn now_utc() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }

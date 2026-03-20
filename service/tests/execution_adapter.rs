@@ -2,10 +2,91 @@ use std::time::Duration;
 
 use anyhow::Result;
 use grid_platform_service::{
+    execution::{CancelOrdersRequest, ExecutionAdapter, FakeExecutionAdapter, SubmitOrderRequest},
     kernel::{EngineEvent, spawn_engine},
-    protocol::{CommandRequest, CommandStatus, CommandType},
+    protocol::{CommandRequest, CommandStatus, CommandType, RuntimeSnapshot},
 };
 use tokio::time::timeout;
+
+#[tokio::test]
+async fn fake_adapter_cancel_orders_filters_matching_open_orders() -> Result<()> {
+    let adapter = FakeExecutionAdapter;
+    let snapshot = RuntimeSnapshot::sample();
+
+    let open_orders = adapter
+        .cancel_orders(
+            CancelOrdersRequest {
+                command_id: Some("cmd_cancel_filter".into()),
+                order_ids: vec!["ord_1002".into()],
+                client_order_ids: vec!["grid_buy_01".into()],
+            },
+            &snapshot,
+        )
+        .await?;
+
+    assert!(open_orders.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fake_adapter_submit_grid_order_returns_open_order_fact() -> Result<()> {
+    let adapter = FakeExecutionAdapter;
+    let mut snapshot = RuntimeSnapshot::sample();
+    snapshot.execution.open_orders.clear();
+
+    let submitted = adapter
+        .submit_order(
+            SubmitOrderRequest {
+                command_id: None,
+                order_id: "ord_grid_buy_02".into(),
+                client_order_id: "grid_buy_02".into(),
+                side: "buy".into(),
+                price: 2344.95,
+                qty: 0.1,
+                reduce_only: false,
+            },
+            &snapshot,
+        )
+        .await?;
+
+    let open_order = submitted.open_order.expect("grid order fact");
+    snapshot.execution.open_orders.push(open_order.clone());
+
+    let open_orders = adapter.query_open_orders(&snapshot).await?;
+    assert_eq!(open_orders, vec![open_order]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fake_adapter_submit_reduce_only_order_returns_fill_fact() -> Result<()> {
+    let adapter = FakeExecutionAdapter;
+    let mut snapshot = RuntimeSnapshot::sample();
+
+    let submitted = adapter
+        .submit_order(
+            SubmitOrderRequest {
+                command_id: Some("cmd_reduce_only_fill".into()),
+                order_id: "order_cmd_reduce_only_fill".into(),
+                client_order_id: "reduce_only_cmd_reduce_only_fill".into(),
+                side: "sell".into(),
+                price: snapshot.runtime.mark_price,
+                qty: snapshot.runtime.position_qty,
+                reduce_only: true,
+            },
+            &snapshot,
+        )
+        .await?;
+
+    let fill = submitted.fill.expect("reduce-only fill fact");
+    snapshot.execution.recent_fills.insert(0, fill.clone());
+
+    let fills = adapter.list_recent_fills(&snapshot).await?;
+    assert_eq!(fills[0], fill);
+
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flatten_now_records_reduce_only_fill_in_execution_facts() -> Result<()> {
