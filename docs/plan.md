@@ -152,10 +152,43 @@
 - 已手工跑通 testnet 市场流下的 `pause -> cancel-all -> flatten-now -> resume -> restart` 最小闭环
 - K6 验收条件已满足
 
-## 6. 当前并行方式
+## 6. 里程碑 K7：Web UI 就绪与多实例预备
 
-现在最适合并行的主线只有一条：
+### 目标
 
-- `K7` 的查询模型整理与 Web UI 预备边界
+让控制面在不破坏现有 TUI 兼容性的前提下，补齐 Web UI 需要的查询模型、实例边界和能力描述。
 
-当前不建议并行展开新的交易功能，因为验证链路已经补齐，下一阶段更需要控制面整理与 Web UI 预备边界。
+### 先补的测试
+
+1. 为 Web 查询接口补 HTTP 路由测试，覆盖 `runtime / orders / fills / alerts / commands`。
+2. 为关键列表补分页、过滤和排序测试。
+3. 为控制面能力接口补实例、认证边界和 WebSocket 能力测试。
+
+### 实施任务
+
+1. 保留现有 `/runtime/snapshot`、`/orders/open` 等 TUI 兼容接口。
+2. 新增 `/query/runtime`、`/query/orders`、`/query/fills`、`/query/alerts`、`/query/commands`。
+3. 为列表接口统一补 `items + pagination + filters + sort` 响应模型。
+4. 为 `commands` 和 `alerts` 明确默认排序与可选排序规则。
+5. 通过 `/control-plane/capabilities` 暴露 `instance_id`、局域网部署模式、简单 token 边界、WebSocket 鉴权策略、endpoint 分组和最小 Web 控制面能力。
+
+### K7 验收标准
+
+- Web UI 可直接消费统一查询模型，不必复用 TUI 的数组型旧接口
+- 关键列表具备分页、过滤和排序约束
+- `instance_id`、局域网部署模式、认证边界和 WebSocket 策略有明确输出
+- K7 对应接口测试全部通过
+
+### 当前状态
+
+- 已新增 `/query/runtime`、`/query/orders`、`/query/fills`、`/query/alerts`、`/query/commands`
+- 已为 orders / fills / alerts / commands 补分页、过滤和排序响应模型
+- 已通过 `/control-plane/capabilities` 输出 `instance_id`、局域网部署模式、简单 token 边界、WebSocket `runtime_stream` 订阅和 endpoint 分组
+- 已补控制面验收测试，覆盖查询模型、排序规则与能力接口
+- K7 验收条件已满足
+
+## 7. 当前并行方式
+
+当前没有正在执行的并行主线，等待下一里程碑确认。
+
+当前不建议直接扩展新的交易功能，下一阶段应先明确 K8 目标，再决定是继续控制面扩展还是回到交易能力建设。

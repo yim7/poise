@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: &str = "v1alpha1";
+pub const DEFAULT_INSTANCE_ID: &str = "local";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HttpSuccessEnvelope<T> {
@@ -263,6 +264,134 @@ pub struct RuntimeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeQueryResult {
+    pub instance_id: String,
+    pub snapshot: RuntimeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pagination {
+    pub page: usize,
+    pub per_page: usize,
+    pub total_items: usize,
+    pub total_pages: usize,
+    pub has_next: bool,
+    pub has_prev: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryCollection<T, F> {
+    pub instance_id: String,
+    pub items: Vec<T>,
+    pub pagination: Pagination,
+    pub filters: F,
+    pub sort: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdersFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillsFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertsFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandsFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+pub type OrdersQueryResult = QueryCollection<OpenOrder, OrdersFilters>;
+pub type FillsQueryResult = QueryCollection<RecentFill, FillsFilters>;
+pub type AlertsQueryResult = QueryCollection<AlertRecord, AlertsFilters>;
+pub type CommandsQueryResult = QueryCollection<CommandRecord, CommandsFilters>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlertRecord {
+    pub category: String,
+    pub severity: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub message: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneCapabilities {
+    pub instance_id: String,
+    pub deployment: DeploymentDescriptor,
+    pub auth: AuthDescriptor,
+    pub endpoint_groups: Vec<EndpointGroup>,
+    pub websocket: WebSocketDescriptor,
+    pub minimal_web_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentDescriptor {
+    pub mode: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthDescriptor {
+    pub mode: String,
+    pub http: HttpAuthDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpAuthDescriptor {
+    pub header: String,
+    pub query_param: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointGroup {
+    pub name: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSocketDescriptor {
+    pub path: String,
+    pub subscriptions: Vec<String>,
+    pub auth: WebSocketAuthDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSocketAuthDescriptor {
+    pub query_param: String,
+    pub first_message: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RiskEvent {
     pub severity: RiskLevel,
     pub code: String,
@@ -416,6 +545,24 @@ impl RuntimeSnapshot {
                 unacked_alerts: 1,
             },
             strategy: sample_strategy(),
+        }
+    }
+}
+
+impl Pagination {
+    pub fn new(page: usize, per_page: usize, total_items: usize) -> Self {
+        let total_pages = if total_items == 0 {
+            0
+        } else {
+            (total_items + per_page.saturating_sub(1)) / per_page
+        };
+        Self {
+            page,
+            per_page,
+            total_items,
+            total_pages,
+            has_next: total_pages > 0 && page < total_pages,
+            has_prev: page > 1 && total_pages > 0,
         }
     }
 }

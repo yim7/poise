@@ -6,11 +6,15 @@ use futures_util::StreamExt;
 use grid_platform_service::{
     Application, build_app,
     protocol::{
-        CommandAccepted, CommandAck, CommandRequest, CommandType, HttpSuccessEnvelope,
-        RuntimeSnapshot, ServerEnvelope, ServerEvent,
+        CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
+        CommandType, HttpSuccessEnvelope, RiskEvent, RiskLevel, RuntimeSnapshot, ServerEnvelope,
+        ServerEvent, SystemEvent,
     },
+    storage::{PersistedRuntime, SqliteStorage},
 };
 use http_body_util::BodyExt;
+use serde_json::Value;
+use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
     task::JoinHandle,
@@ -145,13 +149,147 @@ async fn snapshot_sequence_covers_buffered_events_before_initial_snapshot() -> R
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_query_routes_support_runtime_and_list_filters() -> Result<()> {
+    let app = build_app(Application::bootstrap());
+
+    let runtime = decode_json::<Value>(
+        app.clone(),
+        Request::builder()
+            .uri("/query/runtime")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    assert_eq!(runtime["data"]["instance_id"], "local");
+    assert_eq!(runtime["data"]["snapshot"]["runtime"]["symbol"], "XAUUSDT");
+
+    let orders = decode_json::<Value>(
+        app.clone(),
+        Request::builder()
+            .uri("/query/orders?side=sell&page=1&per_page=1")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    assert_eq!(orders["data"]["instance_id"], "local");
+    assert_eq!(orders["data"]["filters"]["side"], "sell");
+    assert_eq!(orders["data"]["pagination"]["page"], 1);
+    assert_eq!(orders["data"]["pagination"]["per_page"], 1);
+    assert_eq!(orders["data"]["pagination"]["total_items"], 1);
+    assert_eq!(orders["data"]["items"][0]["side"], "sell");
+
+    let fills = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/query/fills?client_order_id=flatten_reduce_only_01")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    assert_eq!(
+        fills["data"]["filters"]["client_order_id"],
+        "flatten_reduce_only_01"
+    );
+    assert_eq!(fills["data"]["items"][0]["trade_id"], "fill_9001");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_query_routes_sort_and_filter_commands_and_alerts() -> Result<()> {
+    let (_temp_dir, app) = app_with_persisted_runtime(seed_query_runtime())?;
+
+    let commands = decode_json::<Value>(
+        app.clone(),
+        Request::builder()
+            .uri("/query/commands?status=completed")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    assert_eq!(commands["data"]["instance_id"], "local");
+    assert_eq!(commands["data"]["sort"], "requested_at_desc");
+    assert_eq!(commands["data"]["filters"]["status"], "completed");
+    assert_eq!(commands["data"]["items"][0]["command_id"], "cmd_pause_new");
+    assert_eq!(commands["data"]["items"][1]["command_id"], "cmd_pause_old");
+
+    let alerts = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/query/alerts?category=risk&sort=created_at_asc")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    assert_eq!(alerts["data"]["filters"]["category"], "risk");
+    assert_eq!(alerts["data"]["sort"], "created_at_asc");
+    assert_eq!(alerts["data"]["items"][0]["code"], "MARGIN_USAGE_WATCH");
+    assert_eq!(alerts["data"]["items"][1]["code"], "STOP_LOSS_TRIGGERED");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_plane_capabilities_expose_web_ui_boundary() -> Result<()> {
+    let app = build_app(Application::bootstrap());
+
+    let capabilities = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/control-plane/capabilities")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    assert_eq!(capabilities["data"]["instance_id"], "local");
+    assert_eq!(capabilities["data"]["deployment"]["mode"], "lan");
+    assert_eq!(
+        capabilities["data"]["auth"]["mode"],
+        "optional_static_token"
+    );
+    assert_eq!(
+        capabilities["data"]["auth"]["http"]["header"],
+        "authorization"
+    );
+    assert_eq!(
+        capabilities["data"]["auth"]["http"]["query_param"],
+        "access_token"
+    );
+    assert_eq!(capabilities["data"]["websocket"]["path"], "/ws");
+    assert_eq!(
+        capabilities["data"]["websocket"]["auth"]["query_param"],
+        "access_token"
+    );
+    assert_eq!(
+        capabilities["data"]["websocket"]["subscriptions"][0],
+        "runtime_stream"
+    );
+    assert!(
+        capabilities["data"]["endpoint_groups"]
+            .as_array()
+            .expect("endpoint groups array")
+            .iter()
+            .any(|group| group["name"] == "commands")
+    );
+
+    Ok(())
+}
+
 async fn decode_json<T>(app: Router, request: Request<Body>) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
     let response = app.oneshot(request).await.context("route call failed")?;
+    let status = response.status();
     let body = response.into_body().collect().await?.to_bytes();
-    serde_json::from_slice(&body).context("failed to decode json body")
+    serde_json::from_slice(&body).with_context(|| {
+        format!(
+            "failed to decode json body with status {status}: {}",
+            String::from_utf8_lossy(&body)
+        )
+    })
 }
 
 async fn next_event(
@@ -221,5 +359,75 @@ async fn wait_until_ready(http: &reqwest::Client, base_url: &str) -> Result<()> 
             anyhow::bail!("timed out waiting for test service");
         }
         sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn app_with_persisted_runtime(runtime: PersistedRuntime) -> Result<(TempDir, Router)> {
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("service.db");
+    let storage = SqliteStorage::open(&db_path)?;
+    storage.persist_runtime(&runtime)?;
+    let app = build_app(Application::bootstrap_with_sqlite(&db_path)?);
+    Ok((temp_dir, app))
+}
+
+fn seed_query_runtime() -> PersistedRuntime {
+    let mut snapshot = RuntimeSnapshot::sample();
+    snapshot.execution.recent_commands = vec![
+        CommandRecord {
+            command_id: "cmd_pause_old".into(),
+            command: CommandType::Pause,
+            status: CommandStatus::Completed,
+            summary: "Strategy paused.".into(),
+            requested_at: "2025-01-01T00:00:10Z".into(),
+            accepted_at: Some("2025-01-01T00:00:11Z".into()),
+            finished_at: Some("2025-01-01T00:00:12Z".into()),
+            links: CommandLinks::default(),
+        },
+        CommandRecord {
+            command_id: "cmd_pause_new".into(),
+            command: CommandType::Pause,
+            status: CommandStatus::Completed,
+            summary: "Strategy paused again.".into(),
+            requested_at: "2025-01-01T00:00:20Z".into(),
+            accepted_at: Some("2025-01-01T00:00:21Z".into()),
+            finished_at: Some("2025-01-01T00:00:22Z".into()),
+            links: CommandLinks::default(),
+        },
+    ];
+
+    PersistedRuntime {
+        snapshot,
+        risk_events: vec![
+            RiskEvent {
+                severity: RiskLevel::Watch,
+                code: "MARGIN_USAGE_WATCH".into(),
+                message: "Margin usage reached 39% of configured threshold.".into(),
+                created_at: "2025-01-01T00:00:01Z".into(),
+                acknowledged_at: None,
+            },
+            RiskEvent {
+                severity: RiskLevel::Danger,
+                code: "STOP_LOSS_TRIGGERED".into(),
+                message: "Stop-loss threshold reached.".into(),
+                created_at: "2025-01-01T00:00:03Z".into(),
+                acknowledged_at: Some("2025-01-01T00:00:05Z".into()),
+            },
+        ],
+        system_events: vec![
+            SystemEvent {
+                level: "info".into(),
+                source: "bootstrap".into(),
+                message: "Runtime restored for web query tests.".into(),
+                created_at: "2025-01-01T00:00:02Z".into(),
+            },
+            SystemEvent {
+                level: "warn".into(),
+                source: "ws".into(),
+                message: "WebSocket connection recovering.".into(),
+                created_at: "2025-01-01T00:00:04Z".into(),
+            },
+        ],
+        last_sequence: 9,
     }
 }

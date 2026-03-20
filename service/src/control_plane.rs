@@ -1,20 +1,23 @@
 use axum::{
     Json, Router,
     extract::{
-        State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Application,
     application::success,
     protocol::{
-        CommandAccepted, CommandRequest, CommandType, HttpErrorDetail, HttpErrorEnvelope,
-        HttpSuccessEnvelope, PROTOCOL_VERSION, PriceUpdated, RuntimeSnapshot, ServerEnvelope,
+        AlertsFilters, AlertsQueryResult, CommandAccepted, CommandRequest, CommandType,
+        CommandsFilters, CommandsQueryResult, ControlPlaneCapabilities, FillsFilters,
+        FillsQueryResult, HttpErrorDetail, HttpErrorEnvelope, HttpSuccessEnvelope, OrdersFilters,
+        OrdersQueryResult, PROTOCOL_VERSION, PriceUpdated, RuntimeQueryResult, RuntimeSnapshot,
+        ServerEnvelope,
     },
 };
 
@@ -26,6 +29,15 @@ pub fn build_app(application: Application) -> Router {
         .route("/fills/recent", get(recent_fills))
         .route("/risk/events", get(risk_events))
         .route("/system/events", get(system_events))
+        .route("/query/runtime", get(query_runtime))
+        .route("/query/orders", get(query_orders))
+        .route("/query/fills", get(query_fills))
+        .route("/query/alerts", get(query_alerts))
+        .route("/query/commands", get(query_commands))
+        .route(
+            "/control-plane/capabilities",
+            get(control_plane_capabilities),
+        )
         .route("/commands/pause", post(pause))
         .route("/commands/resume", post(resume))
         .route("/commands/cancel-all", post(cancel_all))
@@ -111,6 +123,120 @@ async fn system_events(
     State(application): State<Application>,
 ) -> Json<HttpSuccessEnvelope<Vec<crate::protocol::SystemEvent>>> {
     Json(success(application.system_events()))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OrdersQueryParams {
+    page: Option<usize>,
+    per_page: Option<usize>,
+    side: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FillsQueryParams {
+    page: Option<usize>,
+    per_page: Option<usize>,
+    side: Option<String>,
+    order_id: Option<String>,
+    client_order_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AlertsQueryParams {
+    page: Option<usize>,
+    per_page: Option<usize>,
+    category: Option<String>,
+    severity: Option<String>,
+    source: Option<String>,
+    acknowledged: Option<bool>,
+    sort: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CommandsQueryParams {
+    page: Option<usize>,
+    per_page: Option<usize>,
+    command: Option<String>,
+    status: Option<String>,
+    sort: Option<String>,
+}
+
+async fn query_runtime(
+    State(application): State<Application>,
+) -> Json<HttpSuccessEnvelope<RuntimeQueryResult>> {
+    Json(success(application.query_runtime()))
+}
+
+async fn query_orders(
+    State(application): State<Application>,
+    Query(params): Query<OrdersQueryParams>,
+) -> Json<HttpSuccessEnvelope<OrdersQueryResult>> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Json(success(application.query_orders(
+        page,
+        per_page,
+        OrdersFilters {
+            side: params.side,
+            status: params.status,
+        },
+    )))
+}
+
+async fn query_fills(
+    State(application): State<Application>,
+    Query(params): Query<FillsQueryParams>,
+) -> Json<HttpSuccessEnvelope<FillsQueryResult>> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Json(success(application.query_fills(
+        page,
+        per_page,
+        FillsFilters {
+            side: params.side,
+            order_id: params.order_id,
+            client_order_id: params.client_order_id,
+        },
+    )))
+}
+
+async fn query_alerts(
+    State(application): State<Application>,
+    Query(params): Query<AlertsQueryParams>,
+) -> Json<HttpSuccessEnvelope<AlertsQueryResult>> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Json(success(application.query_alerts(
+        page,
+        per_page,
+        AlertsFilters {
+            category: params.category,
+            severity: params.severity,
+            source: params.source,
+            acknowledged: params.acknowledged,
+        },
+        params.sort.as_deref().unwrap_or("created_at_desc"),
+    )))
+}
+
+async fn query_commands(
+    State(application): State<Application>,
+    Query(params): Query<CommandsQueryParams>,
+) -> Json<HttpSuccessEnvelope<CommandsQueryResult>> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Json(success(application.query_commands(
+        page,
+        per_page,
+        CommandsFilters {
+            command: params.command,
+            status: params.status,
+        },
+        params.sort.as_deref().unwrap_or("requested_at_desc"),
+    )))
+}
+
+async fn control_plane_capabilities(
+    State(application): State<Application>,
+) -> Json<HttpSuccessEnvelope<ControlPlaneCapabilities>> {
+    Json(success(application.control_plane_capabilities()))
 }
 
 async fn pause(
@@ -205,4 +331,8 @@ async fn send_ws_event(socket: &mut WebSocket, event: &ServerEnvelope) -> Result
         .send(Message::Text(payload.into()))
         .await
         .map_err(|_| ())
+}
+
+fn normalize_pagination(page: Option<usize>, per_page: Option<usize>) -> (usize, usize) {
+    (page.unwrap_or(1).max(1), per_page.unwrap_or(20))
 }

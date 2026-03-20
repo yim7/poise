@@ -51,6 +51,46 @@
 - `message` 是面向操作者的简短说明。
 - `details` 用于附带校验错误、下游错误或调试信息；调用方必须允许其为空或缺省。
 
+### 2.3 Web 查询接口
+
+为兼容现有 TUI，旧接口继续保留：
+
+- `/runtime/snapshot`
+- `/orders/open`
+- `/fills/recent`
+- `/risk/events`
+- `/system/events`
+
+为 Web UI 预备边界，新增查询接口：
+
+- `/query/runtime`
+- `/query/orders`
+- `/query/fills`
+- `/query/alerts`
+- `/query/commands`
+- `/control-plane/capabilities`
+
+其中：
+
+- `/query/runtime` 返回 `instance_id + snapshot`。
+- 列表型查询统一返回 `items + pagination + filters + sort`。
+- `pagination` 当前使用页码模型，参数为 `page` 和 `per_page`，默认值分别为 `1` 和 `20`，`per_page` 最大值为 `100`。
+- `/query/orders` 当前支持 `side`、`status` 过滤。
+- `/query/fills` 当前支持 `side`、`order_id`、`client_order_id` 过滤。
+- `/query/alerts` 把 `risk_events` 与 `system_events` 汇总为同一读模型，当前支持 `category`、`severity`、`source`、`acknowledged` 过滤。
+- `/query/commands` 当前支持 `command`、`status` 过滤。
+- `/query/commands` 默认排序为 `requested_at_desc`，可选 `requested_at_asc / finished_at_desc / finished_at_asc`。
+- `/query/alerts` 默认排序为 `created_at_desc`，可选 `created_at_asc`。
+
+`/control-plane/capabilities` 当前约定输出：
+
+- `instance_id`，用于为后续多实例接入预留稳定字段。
+- `deployment.mode=lan`，表示当前以局域网部署模式为边界。
+- `auth.mode=optional_static_token`，表示客户端应按静态 token 边界准备；默认部署可以不强制启用。
+- HTTP 认证入口使用 `Authorization` header 或 `access_token` query 参数。
+- WebSocket 当前只定义 `runtime_stream` 订阅，不要求额外订阅模型。
+- WebSocket 鉴权入口与 HTTP 保持一致，当前通过握手 query 参数 `access_token` 预留。
+
 ## 3. WebSocket envelope
 
 所有服务端事件统一使用以下结构：

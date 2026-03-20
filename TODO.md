@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 当前主线：`K7` Web UI 就绪与多实例预备
+- 当前主线：待确认下一里程碑
 - 并行预研：无
-- 最近完成：`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控
-- 最近验证：`cargo test` 已通过，含 `service` / `tui` 全量测试；K6 的 replay runner、paper fill、fake transport 链路、本地 paper E2E 与 testnet smoke 已复核
+- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控
+- 最近验证：`cargo test -p grid-platform-service --test control_plane -- --nocapture` 已通过；K7 的 Web 查询模型、分页/过滤、命令与风险排序规则、控制面能力接口已复核
 
 ## 已完成里程碑
 
@@ -137,23 +137,30 @@
 
 ### K7.1 查询模型整理
 
-- [ ] 梳理 `runtime / orders / fills / alerts / commands` 的 Web 友好查询模型
-- [ ] 为关键列表设计分页参数
-- [ ] 为关键列表设计过滤参数
-- [ ] 为命令与风险事件设计查询排序规则
+- [x] 梳理 `runtime / orders / fills / alerts / commands` 的 Web 友好查询模型
+- [x] 为关键列表设计分页参数
+- [x] 为关键列表设计过滤参数
+- [x] 为命令与风险事件设计查询排序规则
 
 ### K7.2 实例维度与认证边界
 
-- [ ] 预留 `instance_id`
-- [ ] 定义局域网部署模式
-- [ ] 设计简单认证与 token 边界
-- [ ] 明确 WebSocket 连接的鉴权策略
+- [x] 预留 `instance_id`
+- [x] 定义局域网部署模式
+- [x] 设计简单认证与 token 边界
+- [x] 明确 WebSocket 连接的鉴权策略
 
 ### K7.3 Web 客户端准备
 
-- [ ] 整理 Web UI 所需 endpoint 分组
-- [ ] 评估 WebSocket 订阅模型是否需要补充
-- [ ] 为 Web 客户端列出最小控制面能力清单
+- [x] 整理 Web UI 所需 endpoint 分组
+- [x] 评估 WebSocket 订阅模型是否需要补充
+- [x] 为 Web 客户端列出最小控制面能力清单
+
+### K7.4 收尾与验收
+
+- [x] 跑通 `cargo test -p grid-platform-service --test control_plane -- --nocapture`
+- [x] 复核 K7 验收标准
+- [x] 更新 `docs/plan.md` 与本文件状态
+- 验收结论：K7 已验收通过
 
 ## 当前并行方式
 
