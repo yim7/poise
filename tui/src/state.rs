@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::protocol::{
-    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, PendingCommand,
-    RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
+    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, OpenOrdersSource,
+    PendingCommand, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
 };
 
 pub const COMMAND_TIMEOUT_TICKS: u64 = 15;
@@ -179,6 +179,7 @@ pub struct CommandTimelineEntry {
 #[derive(Debug, Clone)]
 pub struct ExecutionViewState {
     pub open_orders: Vec<crate::protocol::OpenOrder>,
+    pub open_orders_source: OpenOrdersSource,
     pub recent_fills: VecDeque<RecentFill>,
     pub pending_commands: Vec<PendingCommand>,
     pub last_command_ack: Option<CommandAck>,
@@ -307,6 +308,7 @@ impl AppState {
             },
             execution: ExecutionViewState {
                 open_orders: snapshot.execution.open_orders,
+                open_orders_source: snapshot.execution.open_orders_source,
                 recent_fills: VecDeque::from(snapshot.execution.recent_fills),
                 pending_commands: snapshot.execution.pending_commands,
                 last_command_ack: snapshot.execution.last_command_ack_event,

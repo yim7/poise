@@ -1,6 +1,7 @@
 use crate::{
     protocol::{
-        CommandType, GridLevel, GridLevelState, GridSide, OpenOrder, RecentFill, StrategyStatus,
+        CommandType, GridLevel, GridLevelState, GridSide, OpenOrder, OpenOrdersSource, RecentFill,
+        StrategyStatus,
     },
     state::{AppState, CommandTimelineEntry, CommandTimelineStage},
 };
@@ -15,6 +16,7 @@ pub struct DashboardViewModel {
     pub unrealized_pnl: String,
     pub realized_pnl: String,
     pub open_orders: usize,
+    pub exchange_orders: Option<usize>,
     pub pending_commands: usize,
     pub fills: usize,
     pub risk_summary: String,
@@ -32,6 +34,8 @@ pub fn dashboard(state: &AppState) -> DashboardViewModel {
         unrealized_pnl: format!("{:.2}", state.runtime.unrealized_pnl),
         realized_pnl: format!("{:.2}", state.runtime.realized_pnl),
         open_orders: state.execution.open_orders.len(),
+        exchange_orders: (state.execution.open_orders_source == OpenOrdersSource::ExchangeLive)
+            .then_some(state.execution.open_orders.len()),
         pending_commands: state.execution.pending_commands.len(),
         fills: state.execution.recent_fills.len(),
         risk_summary: format!(
@@ -96,6 +100,57 @@ pub fn open_order_items(state: &AppState, limit: usize) -> Vec<OpenOrderItemView
             status: order.status.clone(),
             command_ref: linked_command_for_order(state, order)
                 .map(|entry| format!("{} {}", command_label(entry.command), entry.command_id)),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementState {
+    Live,
+    NotPlaced,
+    NotExpected,
+    Unknown,
+}
+
+impl PlacementState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::NotPlaced => "not_placed",
+            Self::NotExpected => "not_expected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyOrderItemViewModel {
+    pub side: String,
+    pub price: String,
+    pub qty: String,
+    pub strategy_state: String,
+    pub placement_state: PlacementState,
+}
+
+pub fn strategy_orders(state: &AppState) -> Vec<StrategyOrderItemViewModel> {
+    let mut levels = state.strategy.levels.clone();
+    levels.sort_by(|a, b| {
+        a.price
+            .partial_cmp(&b.price)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    levels
+        .iter()
+        .map(|level| StrategyOrderItemViewModel {
+            side: match level.side {
+                GridSide::Buy => "BUY".into(),
+                GridSide::Sell => "SELL".into(),
+            },
+            price: format!("{:.2}", level.price),
+            qty: format!("{:.3}", level.quantity),
+            strategy_state: grid_level_state_label(level.state).into(),
+            placement_state: placement_state_for_level(state, level),
         })
         .collect()
 }
@@ -215,6 +270,37 @@ fn grid_level(level: &GridLevel, last_price: f64) -> GridLevelViewModel {
     }
 }
 
+fn placement_state_for_level(state: &AppState, level: &GridLevel) -> PlacementState {
+    match level.state {
+        GridLevelState::Occupied | GridLevelState::PendingRebuild => PlacementState::NotExpected,
+        GridLevelState::Active => match state.execution.open_orders_source {
+            OpenOrdersSource::ExchangeLive => {
+                if has_matching_open_order(state, level) {
+                    PlacementState::Live
+                } else {
+                    PlacementState::NotPlaced
+                }
+            }
+            OpenOrdersSource::StrategyMirror | OpenOrdersSource::Unavailable => {
+                PlacementState::Unknown
+            }
+        },
+    }
+}
+
+fn has_matching_open_order(state: &AppState, level: &GridLevel) -> bool {
+    state.execution.open_orders.iter().any(|order| {
+        level
+            .client_order_id
+            .as_ref()
+            .is_some_and(|client_order_id| client_order_id == &order.client_order_id)
+            || level
+                .order_id
+                .as_ref()
+                .is_some_and(|order_id| order_id == &order.order_id)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketViewModel {
     pub last_price: String,
@@ -314,7 +400,7 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
 
     if !state.connection.ws_connected {
         return ConnectionHealthViewModel {
-            label: "RECONNECTING",
+            label: "SERVICE RECONNECTING",
             detail: format!(
                 "service ws retry {} in {}ms",
                 state.connection.reconnect_attempt.max(1),
@@ -328,7 +414,7 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
 
     if !state.connection.market_ws_connected {
         return ConnectionHealthViewModel {
-            label: "RECONNECTING",
+            label: "MARKET RECONNECTING",
             detail: format!(
                 "binance ws retry in {}ms",
                 state.connection.market_reconnect_backoff_ms
@@ -521,6 +607,32 @@ mod tests {
     }
 
     #[test]
+    fn service_reconnect_health_label_is_specific() {
+        let mut state = AppState::sample();
+        state.connection.ws_connected = false;
+        state.connection.reconnect_attempt = 2;
+        state.connection.reconnect_backoff_ms = 2_000;
+
+        let health = connection_health(&state);
+
+        assert_eq!(health.kind, ConnectionHealthKind::Reconnecting);
+        assert_eq!(health.label, "SERVICE RECONNECTING");
+    }
+
+    #[test]
+    fn market_reconnect_health_label_is_specific_when_service_ws_is_up() {
+        let mut state = AppState::sample();
+        state.connection.ws_connected = true;
+        state.connection.market_ws_connected = false;
+        state.connection.market_reconnect_backoff_ms = 2_000;
+
+        let health = connection_health(&state);
+
+        assert_eq!(health.kind, ConnectionHealthKind::Reconnecting);
+        assert_eq!(health.label, "MARKET RECONNECTING");
+    }
+
+    #[test]
     fn open_order_and_fill_items_surface_linked_command_refs() {
         let mut state = AppState::sample();
         state
@@ -566,5 +678,77 @@ mod tests {
         assert_eq!(vm.active_levels, 3);
         assert_eq!(vm.levels.len(), 6);
         assert_eq!(vm.levels[0].status, "OCCUPIED");
+    }
+
+    #[test]
+    fn placement_state_rules_cover_live_not_placed_not_expected_and_unknown() {
+        let mut live_state = strategy_order_fixture(OpenOrdersSource::ExchangeLive);
+        let vm = strategy_orders(&live_state);
+        assert_eq!(vm[0].placement_state, PlacementState::NotExpected);
+        assert_eq!(vm[1].placement_state, PlacementState::Live);
+        assert_eq!(vm[2].placement_state, PlacementState::NotPlaced);
+
+        live_state.strategy.levels[1].state = GridLevelState::Occupied;
+        let vm = strategy_orders(&live_state);
+        assert_eq!(vm[1].placement_state, PlacementState::NotExpected);
+
+        let mirror_state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
+        let vm = strategy_orders(&mirror_state);
+        assert_eq!(vm[1].placement_state, PlacementState::Unknown);
+    }
+
+    #[test]
+    fn dashboard_exchange_orders_are_na_when_source_is_not_exchange_live() {
+        let state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
+
+        let vm = dashboard(&state);
+
+        assert_eq!(vm.exchange_orders, None);
+    }
+
+    fn strategy_order_fixture(source: OpenOrdersSource) -> AppState {
+        let mut state = AppState::sample();
+        state.execution.open_orders_source = source;
+        state.strategy.levels = vec![
+            GridLevel {
+                level_id: "buy_01".into(),
+                side: GridSide::Buy,
+                price: 90.0,
+                quantity: 0.100,
+                state: GridLevelState::Occupied,
+                client_order_id: None,
+                order_id: None,
+            },
+            GridLevel {
+                level_id: "sell_01".into(),
+                side: GridSide::Sell,
+                price: 100.0,
+                quantity: 0.100,
+                state: GridLevelState::Active,
+                client_order_id: Some("grid_sell_01".into()),
+                order_id: Some("ord_1002".into()),
+            },
+            GridLevel {
+                level_id: "sell_02".into(),
+                side: GridSide::Sell,
+                price: 110.0,
+                quantity: 0.100,
+                state: GridLevelState::Active,
+                client_order_id: Some("grid_sell_02".into()),
+                order_id: Some("ord_1003".into()),
+            },
+        ];
+        state.execution.open_orders = vec![crate::protocol::OpenOrder {
+            order_id: "ord_1002".into(),
+            client_order_id: "grid_sell_01".into(),
+            side: "sell".into(),
+            price: 100.0,
+            qty: 0.100,
+            filled_qty: 0.0,
+            status: "NEW".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }];
+        state
     }
 }
