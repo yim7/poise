@@ -88,6 +88,37 @@ async fn fake_adapter_submit_reduce_only_order_returns_fill_fact() -> Result<()>
     Ok(())
 }
 
+#[tokio::test]
+async fn fake_adapter_submit_reduce_only_order_clips_fill_qty_to_position() -> Result<()> {
+    let adapter = FakeExecutionAdapter;
+    let snapshot = RuntimeSnapshot::sample();
+
+    let submitted = adapter
+        .submit_order(
+            SubmitOrderRequest {
+                command_id: Some("cmd_reduce_only_clip".into()),
+                order_id: "order_cmd_reduce_only_clip".into(),
+                client_order_id: "reduce_only_cmd_reduce_only_clip".into(),
+                side: "sell".into(),
+                price: snapshot.runtime.mark_price,
+                qty: snapshot.runtime.position_qty * 2.0,
+                reduce_only: true,
+            },
+            &snapshot,
+        )
+        .await?;
+
+    let fill = submitted.fill.expect("reduce-only fill fact");
+    assert_eq!(fill.qty, snapshot.runtime.position_qty);
+    assert_close(
+        fill.realized_pnl,
+        (snapshot.runtime.mark_price - snapshot.runtime.position_avg_price)
+            * snapshot.runtime.position_qty,
+    );
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flatten_now_records_reduce_only_fill_in_execution_facts() -> Result<()> {
     let (engine, read_model, mut events_rx) = spawn_engine();
@@ -121,6 +152,11 @@ async fn flatten_now_records_reduce_only_fill_in_execution_facts() -> Result<()>
 
     let snapshot = read_model.read().expect("read model").snapshot();
     assert_eq!(snapshot.runtime.position_qty, 0.0);
+    assert_close(
+        snapshot.runtime.realized_pnl,
+        before.runtime.realized_pnl
+            + (mark_price - before.runtime.position_avg_price) * position_qty,
+    );
     assert_eq!(
         snapshot.execution.recent_fills.len(),
         previous_fill_count + 1
@@ -134,6 +170,10 @@ async fn flatten_now_records_reduce_only_fill_in_execution_facts() -> Result<()>
     assert_eq!(fill.side, "sell");
     assert_eq!(fill.qty, position_qty);
     assert_eq!(fill.price, mark_price);
+    assert_close(
+        fill.realized_pnl,
+        (mark_price - before.runtime.position_avg_price) * position_qty,
+    );
 
     Ok(())
 }
@@ -192,6 +232,11 @@ async fn shutdown_after_flatten_pauses_strategy_and_records_fill_fact() -> Resul
     let snapshot = read_model.read().expect("read model").snapshot();
     assert_eq!(snapshot.runtime.strategy_state, "paused");
     assert_eq!(snapshot.runtime.position_qty, 0.0);
+    assert_close(
+        snapshot.runtime.realized_pnl,
+        before.runtime.realized_pnl
+            + (mark_price - before.runtime.position_avg_price) * position_qty,
+    );
     assert!(snapshot.execution.open_orders.is_empty());
     assert_eq!(
         snapshot.execution.recent_fills.len(),
@@ -206,6 +251,14 @@ async fn shutdown_after_flatten_pauses_strategy_and_records_fill_fact() -> Resul
     assert_eq!(fill.side, "sell");
     assert_eq!(fill.qty, position_qty);
     assert_eq!(fill.price, mark_price);
+    assert_close(
+        fill.realized_pnl,
+        (mark_price - before.runtime.position_avg_price) * position_qty,
+    );
 
     Ok(())
+}
+
+fn assert_close(left: f64, right: f64) {
+    assert!((left - right).abs() < 1e-9, "left={left} right={right}");
 }

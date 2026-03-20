@@ -7,8 +7,15 @@
 
 - 当前主线：待确认下一里程碑
 - 并行预研：无
-- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控
-- 最近验证：`cargo test -p grid-platform-service --test control_plane -- --nocapture` 已通过；K7 的 Web 查询模型、分页/过滤、命令与风险排序规则、控制面能力接口已复核
+- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`
+- 最近验证：`cargo test`、`cargo fmt --check`、`cargo clippy --workspace --all-targets` 已通过；整体验收补缺完成，paper 持仓行情刷新、空价格 replay step 和 reduce-only 成交数量口径已补回归测试并复核，无新的阻断项
+
+## 验收补缺
+
+- [x] 修复 paper 模式在持仓已建立且后续只有行情波动时 `runtime.unrealized_pnl` 不刷新
+- [x] 为 paper 模式持仓后的连续行情更新补回归测试
+- [x] 修复空价格 replay `market` step 复用旧价导致的幽灵成交
+- [x] 统一 reduce-only 成交数量与已实现盈亏口径
 
 ## 已完成里程碑
 

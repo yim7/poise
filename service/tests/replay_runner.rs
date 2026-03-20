@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use grid_platform_service::{
     execution::FakeExecutionAdapter,
     protocol::{CommandStatus, CommandType, OpenOrder, RuntimeSnapshot},
-    replay::{ReplayRunResult, ReplayScenario, run_replay_scenario},
+    replay::{ReplayAssertions, ReplayRunResult, ReplayScenario, ReplayStep, run_replay_scenario},
     storage::PersistedRuntime,
 };
 
@@ -44,6 +44,86 @@ async fn replay_runner_executes_json_fixture_and_records_market_fill_then_flatte
     assert_eq!(ack.command, CommandType::FlattenNow);
     assert_eq!(ack.status, CommandStatus::Completed);
     assert_eq!(ack.command_id, "cmd_flatten_replay");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_runner_rejects_unexpected_command_status() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.last_sequence = 1;
+    runtime.snapshot = paused_snapshot_with_buy_order();
+
+    let scenario = ReplayScenario {
+        name: "status mismatch".into(),
+        steps: vec![ReplayStep::Command {
+            command: CommandType::FlattenNow,
+            command_id: "cmd_expect_failed".into(),
+            expect_status: Some(CommandStatus::Failed),
+        }],
+        assertions: ReplayAssertions::default(),
+    };
+
+    let error = run_replay_scenario(runtime, Arc::new(FakeExecutionAdapter), &scenario)
+        .await
+        .expect_err("expected replay status mismatch");
+    assert!(error.to_string().contains("expected command status"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_runner_rejects_snapshot_assertion_mismatch() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.last_sequence = 1;
+    runtime.snapshot = paused_snapshot_with_buy_order();
+
+    let scenario = ReplayScenario {
+        name: "snapshot mismatch".into(),
+        steps: vec![ReplayStep::Market {
+            last_price: Some(99.5),
+            mark_price: Some(99.5),
+            emitted_at: "2025-01-01T00:00:01Z".into(),
+        }],
+        assertions: ReplayAssertions {
+            position_qty: Some(0.0),
+            ..ReplayAssertions::default()
+        },
+    };
+
+    let error = run_replay_scenario(runtime, Arc::new(FakeExecutionAdapter), &scenario)
+        .await
+        .expect_err("expected replay assertion mismatch");
+    assert!(error.to_string().contains("expected runtime.position_qty"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_runner_market_step_without_new_price_does_not_create_fill() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.last_sequence = 1;
+    runtime.snapshot = paused_snapshot_with_buy_order();
+
+    let scenario = ReplayScenario {
+        name: "heartbeat without price".into(),
+        steps: vec![ReplayStep::Market {
+            last_price: None,
+            mark_price: None,
+            emitted_at: "2025-01-01T00:00:01Z".into(),
+        }],
+        assertions: ReplayAssertions {
+            open_order_count: Some(1),
+            recent_fill_count: Some(0),
+            ..ReplayAssertions::default()
+        },
+    };
+
+    let ReplayRunResult { snapshot, .. } =
+        run_replay_scenario(runtime, Arc::new(FakeExecutionAdapter), &scenario).await?;
+
+    assert_eq!(snapshot.execution.open_orders.len(), 1);
+    assert!(snapshot.execution.recent_fills.is_empty());
 
     Ok(())
 }

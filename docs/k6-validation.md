@@ -24,9 +24,16 @@
     {
       "type": "command",
       "command": "flatten_now",
-      "command_id": "cmd_flatten_replay"
+      "command_id": "cmd_flatten_replay",
+      "expect_status": "completed"
     }
-  ]
+  ],
+  "assertions": {
+    "position_qty": 0.0,
+    "open_order_count": 0,
+    "recent_fill_count": 2,
+    "last_command_status": "completed"
+  }
 }
 ```
 
@@ -35,7 +42,8 @@
 - `name`：场景名
 - `steps`：按顺序执行的步骤
 - `market`：把价格事件送进内核；若当前 execution adapter 是 paper 模式，会在这一步做穿价成交模拟
-- `command`：向内核提交控制命令，并等待终态 ack
+- `command`：向内核提交控制命令，并等待终态 ack；可选 `expect_status`
+- `assertions`：场景结束后对关键快照字段做最小断言
 
 当前仓库内的最小夹具在 [`../service/tests/fixtures/replay_buy_then_flatten.json`](../service/tests/fixtures/replay_buy_then_flatten.json)。
 
@@ -99,6 +107,8 @@ curl http://127.0.0.1:8000/runtime/snapshot
 - `connection.http_available` 是 `true`
 - `connection.ws_connected` 是 `true`
 - `runtime.session_state` 不再停留在 `syncing`
+- `connection.last_heartbeat_at` 不为空
+- `runtime.last_price` 或 `runtime.mark_price` 已经变成非零值
 
 ### 3.3 跑命令闭环
 

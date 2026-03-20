@@ -12,7 +12,8 @@ use tracing::warn;
 use crate::background::spawn_task;
 use crate::execution::{
     CancelOrdersRequest, ExecutionAdapter, ExecutionMode, ExecutionOutcome, ExecutionRuntimePatch,
-    ExecutionStatePatch, FakeExecutionAdapter, SubmitOrderRequest, simulate_paper_fills,
+    ExecutionStatePatch, FakeExecutionAdapter, PaperFillMarketUpdate, SubmitOrderRequest,
+    simulate_paper_fills,
 };
 use crate::protocol::{
     CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
@@ -688,6 +689,7 @@ async fn execute_flatten(
 
     let qty = working_snapshot.runtime.position_qty.abs();
     let mut flatten_links = CommandLinks::default();
+    let mut flatten_realized_pnl = None;
     if qty > f64::EPSILON {
         let submit_request = SubmitOrderRequest {
             command_id: Some(launch.command_id.clone()),
@@ -718,6 +720,7 @@ async fn execute_flatten(
             .order_ids
             .push(submit_request.order_id.clone());
         if let Some(fill) = submitted.fill {
+            flatten_realized_pnl = Some(fill.realized_pnl);
             flatten_links.trade_ids.push(fill.trade_id);
         }
 
@@ -745,6 +748,10 @@ async fn execute_flatten(
     outcome.runtime_patch.position_qty = Some(0.0);
     outcome.runtime_patch.position_avg_price = Some(0.0);
     outcome.runtime_patch.unrealized_pnl = Some(0.0);
+    if let Some(realized_pnl) = flatten_realized_pnl {
+        outcome.runtime_patch.realized_pnl =
+            Some(working_snapshot.runtime.realized_pnl + realized_pnl);
+    }
     Ok(outcome)
 }
 
@@ -1037,7 +1044,14 @@ impl RuntimeAggregate {
         self.snapshot.connection.last_heartbeat_at = emitted_at.clone();
         self.snapshot.connection.stale_age_ms = 0;
         if paper_mode {
-            let patch = simulate_paper_fills(&self.snapshot, &emitted_at);
+            let patch = simulate_paper_fills(
+                &self.snapshot,
+                PaperFillMarketUpdate {
+                    last_price: Some(self.snapshot.runtime.last_price),
+                    mark_price: Some(self.snapshot.runtime.mark_price),
+                },
+                &emitted_at,
+            );
             self.apply_execution_patch(&patch);
         }
         let tick = PriceUpdated {
@@ -1153,7 +1167,14 @@ impl RuntimeAggregate {
         }
 
         if paper_mode {
-            let patch = simulate_paper_fills(&self.snapshot, &emitted_at);
+            let patch = simulate_paper_fills(
+                &self.snapshot,
+                PaperFillMarketUpdate {
+                    last_price,
+                    mark_price,
+                },
+                &emitted_at,
+            );
             changed |= self.apply_execution_patch(&patch);
         }
 

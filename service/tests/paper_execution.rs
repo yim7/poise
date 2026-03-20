@@ -1,5 +1,5 @@
 use grid_platform_service::{
-    execution::simulate_paper_fills,
+    execution::{PaperFillMarketUpdate, simulate_paper_fills},
     protocol::{OpenOrder, RuntimeSnapshot},
 };
 
@@ -11,7 +11,14 @@ fn paper_fill_simulation_crosses_buy_order_and_updates_long_position() {
     snapshot.runtime.last_price = 99.5;
     snapshot.runtime.mark_price = 99.5;
 
-    let patch = simulate_paper_fills(&snapshot, "2025-01-01T00:00:01Z");
+    let patch = simulate_paper_fills(
+        &snapshot,
+        PaperFillMarketUpdate {
+            last_price: Some(99.5),
+            mark_price: Some(99.5),
+        },
+        "2025-01-01T00:00:01Z",
+    );
 
     assert_eq!(patch.recent_fills.len(), 1);
     assert_eq!(patch.recent_fills[0].order_id, "ord_buy_01");
@@ -48,7 +55,14 @@ fn paper_fill_simulation_realizes_pnl_when_sell_closes_long_position() {
     snapshot.runtime.last_price = 105.5;
     snapshot.runtime.mark_price = 105.5;
 
-    let patch = simulate_paper_fills(&snapshot, "2025-01-01T00:00:02Z");
+    let patch = simulate_paper_fills(
+        &snapshot,
+        PaperFillMarketUpdate {
+            last_price: Some(105.5),
+            mark_price: Some(105.5),
+        },
+        "2025-01-01T00:00:02Z",
+    );
 
     assert_eq!(patch.recent_fills.len(), 1);
     assert_eq!(patch.recent_fills[0].order_id, "ord_sell_01");
@@ -63,6 +77,85 @@ fn paper_fill_simulation_realizes_pnl_when_sell_closes_long_position() {
     assert_eq!(patch.runtime_patch.position_avg_price, Some(0.0));
     assert_eq!(patch.runtime_patch.realized_pnl, Some(7.0));
     assert_eq!(patch.runtime_patch.unrealized_pnl, Some(0.0));
+}
+
+#[test]
+fn paper_fill_simulation_uses_trade_price_when_mark_price_is_stale() {
+    let mut snapshot = flat_snapshot();
+    snapshot.execution.open_orders = vec![open_order(
+        "ord_sell_01",
+        "grid_sell_01",
+        "sell",
+        105.0,
+        1.0,
+    )];
+    snapshot.runtime.last_price = 100.0;
+    snapshot.runtime.mark_price = 100.0;
+
+    let patch = simulate_paper_fills(
+        &snapshot,
+        PaperFillMarketUpdate {
+            last_price: Some(106.0),
+            mark_price: None,
+        },
+        "2025-01-01T00:00:03Z",
+    );
+
+    assert_eq!(patch.recent_fills.len(), 1);
+    assert_eq!(patch.recent_fills[0].order_id, "ord_sell_01");
+    assert!(
+        patch
+            .open_orders
+            .as_ref()
+            .is_some_and(|orders| orders.is_empty())
+    );
+}
+
+#[test]
+fn paper_fill_simulation_uses_mark_price_when_trade_price_is_stale() {
+    let mut snapshot = flat_snapshot();
+    snapshot.execution.open_orders =
+        vec![open_order("ord_buy_01", "grid_buy_01", "buy", 100.0, 1.0)];
+    snapshot.runtime.last_price = 110.0;
+    snapshot.runtime.mark_price = 110.0;
+
+    let patch = simulate_paper_fills(
+        &snapshot,
+        PaperFillMarketUpdate {
+            last_price: None,
+            mark_price: Some(99.0),
+        },
+        "2025-01-01T00:00:04Z",
+    );
+
+    assert_eq!(patch.recent_fills.len(), 1);
+    assert_eq!(patch.recent_fills[0].order_id, "ord_buy_01");
+    assert!(
+        patch
+            .open_orders
+            .as_ref()
+            .is_some_and(|orders| orders.is_empty())
+    );
+}
+
+#[test]
+fn paper_fill_simulation_updates_unrealized_pnl_without_new_fill() {
+    let mut snapshot = flat_snapshot();
+    snapshot.runtime.position_qty = 1.0;
+    snapshot.runtime.position_avg_price = 100.0;
+    snapshot.runtime.unrealized_pnl = 0.0;
+
+    let patch = simulate_paper_fills(
+        &snapshot,
+        PaperFillMarketUpdate {
+            last_price: None,
+            mark_price: Some(103.0),
+        },
+        "2025-01-01T00:00:05Z",
+    );
+
+    assert!(patch.recent_fills.is_empty());
+    assert_eq!(patch.runtime_patch.unrealized_pnl, Some(3.0));
 }
 
 fn flat_snapshot() -> RuntimeSnapshot {

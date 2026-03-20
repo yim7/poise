@@ -8,6 +8,7 @@ anyhow.workspace = true
 async-trait = "0.1.89"
 axum = { version = "0.8.1", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4.40", default-features = false, features = ["clock"] }
+clap = { version = "4.5", features = ["derive"] }
 futures-util.workspace = true
 reqwest.workspace = true
 rusqlite = { version = "0.37.0", features = ["bundled"] }

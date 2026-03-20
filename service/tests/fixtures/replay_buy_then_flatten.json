@@ -10,7 +10,14 @@
     {
       "type": "command",
       "command": "flatten_now",
-      "command_id": "cmd_flatten_replay"
+      "command_id": "cmd_flatten_replay",
+      "expect_status": "completed"
     }
-  ]
+  ],
+  "assertions": {
+    "position_qty": 0.0,
+    "open_order_count": 0,
+    "recent_fill_count": 2,
+    "last_command_status": "completed"
+  }
 }

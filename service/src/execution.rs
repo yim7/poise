@@ -30,6 +30,12 @@ pub struct CancelOrdersRequest {
     pub client_order_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PaperFillMarketUpdate {
+    pub last_price: Option<f64>,
+    pub mark_price: Option<f64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     External,
@@ -144,6 +150,8 @@ impl ExecutionAdapter for FakeExecutionAdapter {
     ) -> Result<SubmitOrderResult> {
         if request.reduce_only {
             let trade_suffix = request.command_id.as_deref().unwrap_or(&request.order_id);
+            let fill_qty = reduce_only_fill_qty(snapshot, &request);
+            let realized_pnl = reduce_only_realized_pnl(snapshot, &request, fill_qty);
             return Ok(SubmitOrderResult {
                 open_order: None,
                 fill: Some(RecentFill {
@@ -152,9 +160,9 @@ impl ExecutionAdapter for FakeExecutionAdapter {
                     client_order_id: Some(request.client_order_id),
                     side: request.side,
                     price: request.price,
-                    qty: request.qty,
+                    qty: fill_qty,
                     fee: 0.0,
-                    realized_pnl: 0.0,
+                    realized_pnl,
                     event_time: now_utc(),
                 }),
             });
@@ -218,11 +226,14 @@ pub fn now_utc() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-pub fn simulate_paper_fills(snapshot: &RuntimeSnapshot, event_time: &str) -> ExecutionStatePatch {
-    let market_price = market_price(snapshot);
-    if market_price.abs() <= EPSILON {
+pub fn simulate_paper_fills(
+    snapshot: &RuntimeSnapshot,
+    market_update: PaperFillMarketUpdate,
+    event_time: &str,
+) -> ExecutionStatePatch {
+    let Some(market_price) = market_price(market_update) else {
         return ExecutionStatePatch::default();
-    }
+    };
 
     let mut next_open_orders = Vec::with_capacity(snapshot.execution.open_orders.len());
     let mut recent_fills = Vec::new();
@@ -261,33 +272,48 @@ pub fn simulate_paper_fills(snapshot: &RuntimeSnapshot, event_time: &str) -> Exe
         }
     }
 
-    if recent_fills.is_empty() {
+    let next_unrealized_pnl = unrealized_pnl(position_qty, position_avg_price, market_price);
+    let unrealized_changed =
+        (snapshot.runtime.unrealized_pnl - next_unrealized_pnl).abs() > EPSILON;
+
+    if recent_fills.is_empty() && !unrealized_changed {
         return ExecutionStatePatch::default();
     }
 
-    ExecutionStatePatch {
-        open_orders: Some(next_open_orders),
+    let mut patch = ExecutionStatePatch {
+        open_orders: None,
         recent_fills,
         runtime_patch: ExecutionRuntimePatch {
             strategy_state: None,
-            position_qty: Some(position_qty),
-            position_avg_price: Some(position_avg_price),
-            unrealized_pnl: Some(unrealized_pnl(
-                position_qty,
-                position_avg_price,
-                market_price,
-            )),
-            realized_pnl: Some(realized_pnl),
+            position_qty: None,
+            position_avg_price: None,
+            unrealized_pnl: None,
+            realized_pnl: None,
         },
+    };
+
+    if !patch.recent_fills.is_empty() {
+        patch.open_orders = Some(next_open_orders);
+        patch.runtime_patch.position_qty = Some(position_qty);
+        patch.runtime_patch.position_avg_price = Some(position_avg_price);
+        patch.runtime_patch.unrealized_pnl = Some(next_unrealized_pnl);
+        patch.runtime_patch.realized_pnl = Some(realized_pnl);
+    } else if unrealized_changed {
+        patch.runtime_patch.unrealized_pnl = Some(next_unrealized_pnl);
     }
+
+    patch
 }
 
-fn market_price(snapshot: &RuntimeSnapshot) -> f64 {
-    if snapshot.runtime.mark_price.abs() > EPSILON {
-        snapshot.runtime.mark_price
-    } else {
-        snapshot.runtime.last_price
-    }
+fn market_price(market_update: PaperFillMarketUpdate) -> Option<f64> {
+    market_update
+        .mark_price
+        .filter(|price| price.abs() > EPSILON)
+        .or_else(|| {
+            market_update
+                .last_price
+                .filter(|price| price.abs() > EPSILON)
+        })
 }
 
 fn should_fill_order(order: &OpenOrder, market_price: f64) -> bool {
@@ -367,5 +393,32 @@ fn unrealized_pnl(position_qty: f64, position_avg_price: f64, market_price: f64)
         (market_price - position_avg_price) * position_qty
     } else {
         (position_avg_price - market_price) * position_qty.abs()
+    }
+}
+
+fn reduce_only_fill_qty(snapshot: &RuntimeSnapshot, request: &SubmitOrderRequest) -> f64 {
+    snapshot.runtime.position_qty.abs().min(request.qty.abs())
+}
+
+fn reduce_only_realized_pnl(
+    snapshot: &RuntimeSnapshot,
+    request: &SubmitOrderRequest,
+    fill_qty: f64,
+) -> f64 {
+    if fill_qty <= EPSILON {
+        return 0.0;
+    }
+
+    match (
+        snapshot.runtime.position_qty.partial_cmp(&0.0),
+        request.side.as_str(),
+    ) {
+        (Some(std::cmp::Ordering::Greater), "sell") => {
+            (request.price - snapshot.runtime.position_avg_price) * fill_qty
+        }
+        (Some(std::cmp::Ordering::Less), "buy") => {
+            (snapshot.runtime.position_avg_price - request.price) * fill_qty
+        }
+        _ => 0.0,
     }
 }

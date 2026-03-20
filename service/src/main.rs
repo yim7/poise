@@ -1,6 +1,7 @@
 use std::env;
 
 use anyhow::Context;
+use clap::Parser;
 use grid_platform_service::{
     Application, build_app,
     integrations::binance::{BinanceConfig, RealBinanceTransport},
@@ -9,8 +10,19 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "grid-platform-service",
+    version,
+    about = "网格平台服务端",
+    long_about = None
+)]
+struct Cli;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    Cli::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
