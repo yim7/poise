@@ -1,14 +1,19 @@
-use std::time::Duration;
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use axum::{Router, body::Body, http::Request};
 use futures_util::StreamExt;
 use grid_platform_service::{
     Application, build_app,
+    integrations::binance::{
+        BinanceConfig, BinanceTransport, ExchangeSymbol, MarketStreamEvent, TradingSchedule,
+        TradingSession,
+    },
     protocol::{
         CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
-        CommandType, HttpSuccessEnvelope, RiskEvent, RiskLevel, RuntimeSnapshot, ServerEnvelope,
-        ServerEvent, SystemEvent,
+        CommandType, HttpSuccessEnvelope, OpenOrdersSource, RiskEvent, RiskLevel, RuntimeSnapshot,
+        ServerEnvelope, ServerEvent, SystemEvent,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
@@ -17,11 +22,75 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
+    sync::Mutex,
     task::JoinHandle,
     time::{sleep, timeout},
 };
 use tokio_tungstenite::connect_async;
 use tower::ServiceExt;
+
+#[derive(Clone)]
+struct ScriptedBinanceTransport {
+    exchange_info: ExchangeSymbol,
+    trading_schedule: TradingSchedule,
+    market_streams: Arc<Mutex<VecDeque<tokio::sync::mpsc::Receiver<MarketStreamEvent>>>>,
+}
+
+impl ScriptedBinanceTransport {
+    fn new(exchange_info: ExchangeSymbol, trading_schedule: TradingSchedule) -> Self {
+        Self {
+            exchange_info,
+            trading_schedule,
+            market_streams: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    async fn push_market_stream(&self, receiver: tokio::sync::mpsc::Receiver<MarketStreamEvent>) {
+        self.market_streams.lock().await.push_back(receiver);
+    }
+}
+
+#[async_trait]
+impl BinanceTransport for ScriptedBinanceTransport {
+    async fn fetch_exchange_info(&self, symbol: &str) -> anyhow::Result<ExchangeSymbol> {
+        if self.exchange_info.symbol != symbol {
+            anyhow::bail!("unexpected symbol {symbol}");
+        }
+        Ok(self.exchange_info.clone())
+    }
+
+    async fn fetch_trading_schedule(&self) -> anyhow::Result<TradingSchedule> {
+        Ok(self.trading_schedule.clone())
+    }
+
+    async fn connect_market_stream(
+        &self,
+        _symbol: &str,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<MarketStreamEvent>> {
+        self.market_streams
+            .lock()
+            .await
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("no scripted market stream available"))
+    }
+
+    async fn create_user_stream(&self) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn connect_user_stream(
+        &self,
+        _listen_key: &str,
+    ) -> anyhow::Result<
+        tokio::sync::mpsc::Receiver<grid_platform_service::integrations::binance::UserStreamEvent>,
+    > {
+        anyhow::bail!("user stream not expected in this test")
+    }
+
+    async fn keepalive_user_stream(&self, _listen_key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_routes_query_snapshot_and_command_via_application() -> Result<()> {
@@ -90,6 +159,50 @@ async fn runtime_snapshot_payload_exposes_open_orders_source() -> Result<()> {
     assert_eq!(
         snapshot["data"]["execution"]["open_orders_source"],
         "strategy_mirror"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_snapshot_payload_normalizes_open_orders_source_for_binance_bootstrap() -> Result<()>
+{
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let transport = ScriptedBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: std::collections::HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    );
+    let (market_tx, market_rx) = tokio::sync::mpsc::channel(1);
+    transport.push_market_stream(market_rx).await;
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.metadata_refresh_interval = Duration::from_secs(3600);
+    config.health_tick_interval = Duration::from_secs(3600);
+    config.reconnect_base_delay = Duration::from_secs(3600);
+    config.reconnect_max_delay = Duration::from_secs(3600);
+
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot.execution.open_orders_source = OpenOrdersSource::ExchangeLive;
+
+    let app = Application::bootstrap_with_runtime_and_binance(runtime, config, Arc::new(transport));
+    drop(market_tx);
+
+    assert_eq!(
+        app.snapshot().execution.open_orders_source,
+        OpenOrdersSource::StrategyMirror
     );
 
     Ok(())

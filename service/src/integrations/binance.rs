@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::{
     background::spawn_task,
     kernel::{EngineHandle, RuntimePatch},
-    protocol::ConnectionState,
+    protocol::{ConnectionState, OpenOrdersSource},
     storage::PersistedRuntime,
 };
 
@@ -110,6 +110,8 @@ pub(crate) fn prepare_bootstrap_runtime(
         runtime.snapshot.execution.last_command_ack_event = None;
         runtime.snapshot.execution.recent_commands.clear();
     }
+
+    runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
 
     runtime
 }

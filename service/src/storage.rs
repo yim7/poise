@@ -9,8 +9,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::protocol::{
-    CommandLinks, CommandRecord, OpenOrder, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot,
-    SystemEvent,
+    CommandLinks, CommandRecord, OpenOrder, OpenOrdersSource, RecentFill, RiskEvent, RiskLevel,
+    RuntimeSnapshot, SystemEvent,
 };
 
 const RECENT_COMMAND_WINDOW: usize = 24;
@@ -34,8 +34,10 @@ impl PersistedRuntime {
 
     fn bootstrap_with_message(message: &str) -> Self {
         let now = now_utc();
+        let mut snapshot = RuntimeSnapshot::sample();
+        snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
         Self {
-            snapshot: RuntimeSnapshot::sample(),
+            snapshot,
             risk_events: vec![RiskEvent {
                 severity: RiskLevel::Watch,
                 code: "MARGIN_USAGE_WATCH".into(),

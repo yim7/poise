@@ -19,10 +19,10 @@ use crate::{
         AlertRecord, AlertsFilters, AlertsQueryResult, AuthDescriptor, CommandAccepted,
         CommandRequest, CommandType, CommandsFilters, CommandsQueryResult,
         ControlPlaneCapabilities, DEFAULT_INSTANCE_ID, DeploymentDescriptor, EndpointGroup,
-        FillsFilters, FillsQueryResult, HttpAuthDescriptor, HttpSuccessEnvelope, OrdersFilters,
-        OrdersQueryResult, PROTOCOL_VERSION, Pagination, PriceUpdated, QueryCollection,
-        RuntimeQueryResult, RuntimeSnapshot, ServerEnvelope, ServerEvent, WebSocketAuthDescriptor,
-        WebSocketDescriptor,
+        FillsFilters, FillsQueryResult, HttpAuthDescriptor, HttpSuccessEnvelope, OpenOrdersSource,
+        OrdersFilters, OrdersQueryResult, PROTOCOL_VERSION, Pagination, PriceUpdated,
+        QueryCollection, RuntimeQueryResult, RuntimeSnapshot, ServerEnvelope, ServerEvent,
+        WebSocketAuthDescriptor, WebSocketDescriptor,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
@@ -50,7 +50,9 @@ impl Application {
         config: BinanceConfig,
         transport: Arc<dyn BinanceTransport>,
     ) -> Self {
-        let runtime = prepare_bootstrap_runtime(PersistedRuntime::in_memory_bootstrap(), &config);
+        let mut runtime =
+            prepare_bootstrap_runtime(PersistedRuntime::in_memory_bootstrap(), &config);
+        runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
         let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
         application.start_binance_supervisor(config, transport);
         application
@@ -61,7 +63,8 @@ impl Application {
         config: BinanceConfig,
         transport: Arc<dyn BinanceTransport>,
     ) -> Self {
-        let runtime = prepare_bootstrap_runtime(runtime, &config);
+        let mut runtime = prepare_bootstrap_runtime(runtime, &config);
+        runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
         let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
         application.start_binance_supervisor(config, transport);
         application
@@ -93,7 +96,8 @@ impl Application {
             Some(runtime) => runtime,
             None => PersistedRuntime::sqlite_bootstrap(),
         };
-        let runtime = prepare_bootstrap_runtime(runtime, &config);
+        let mut runtime = prepare_bootstrap_runtime(runtime, &config);
+        runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
         storage.persist_runtime(&runtime)?;
         let application =
             Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
