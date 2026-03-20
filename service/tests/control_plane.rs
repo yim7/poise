@@ -75,6 +75,27 @@ async fn http_routes_query_snapshot_and_command_via_application() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_snapshot_payload_exposes_open_orders_source() -> Result<()> {
+    let app = build_app(Application::bootstrap());
+
+    let snapshot = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/runtime/snapshot")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    assert_eq!(
+        snapshot["data"]["execution"]["open_orders_source"],
+        "strategy_mirror"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_streams_initial_snapshot_and_command_ack() -> Result<()> {
     let server = TestServer::spawn().await?;
     let (mut ws, _) = connect_async(&server.ws_url)

@@ -106,6 +106,103 @@ fn runtime_snapshot_decodes_when_user_stream_field_is_omitted() {
 }
 
 #[test]
+fn runtime_snapshot_decodes_open_orders_source_and_legacy_payloads() {
+    let raw = r#"{
+        "connection": {
+            "http_available": true,
+            "ws_connected": false,
+            "user_stream_connected": null,
+            "latency_ms": 42,
+            "last_heartbeat_at": "2025-01-01T00:00:00Z",
+            "reconnect_backoff_ms": 0,
+            "stale_age_ms": 0
+        },
+        "runtime": {
+            "symbol": "XAUUSDT",
+            "env": "testnet",
+            "session_state": "regular",
+            "strategy_state": "running",
+            "last_price": 2361.48,
+            "mark_price": 2361.55,
+            "position_qty": 0.25,
+            "position_avg_price": 2354.2,
+            "unrealized_pnl": 1.84,
+            "realized_pnl": 14.52
+        },
+        "execution": {
+            "open_orders": [],
+            "recent_fills": [],
+            "pending_commands": [],
+            "last_command_ack": null,
+            "last_command_ack_event": null,
+            "recent_commands": [],
+            "open_orders_source": "strategy_mirror"
+        },
+        "risk": {
+            "current_notional": 590.39,
+            "max_notional": 1500.0,
+            "daily_loss_limit": -120.0,
+            "stop_loss_pct": 4.0,
+            "risk_level": "watch",
+            "breaker_engaged": false,
+            "unacked_alerts": 1
+        }
+    }"#;
+    let parsed: RuntimeSnapshot = serde_json::from_str(raw).unwrap();
+    let serialized = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(
+        serialized["execution"]["open_orders_source"],
+        "strategy_mirror"
+    );
+
+    let legacy_raw = r#"{
+        "connection": {
+            "http_available": true,
+            "ws_connected": false,
+            "latency_ms": 42,
+            "last_heartbeat_at": "2025-01-01T00:00:00Z",
+            "reconnect_backoff_ms": 0,
+            "stale_age_ms": 0
+        },
+        "runtime": {
+            "symbol": "XAUUSDT",
+            "env": "testnet",
+            "session_state": "regular",
+            "strategy_state": "running",
+            "last_price": 2361.48,
+            "mark_price": 2361.55,
+            "position_qty": 0.25,
+            "position_avg_price": 2354.2,
+            "unrealized_pnl": 1.84,
+            "realized_pnl": 14.52
+        },
+        "execution": {
+            "open_orders": [],
+            "recent_fills": [],
+            "pending_commands": [],
+            "last_command_ack": null,
+            "last_command_ack_event": null,
+            "recent_commands": []
+        },
+        "risk": {
+            "current_notional": 590.39,
+            "max_notional": 1500.0,
+            "daily_loss_limit": -120.0,
+            "stop_loss_pct": 4.0,
+            "risk_level": "watch",
+            "breaker_engaged": false,
+            "unacked_alerts": 1
+        }
+    }"#;
+    let legacy: RuntimeSnapshot = serde_json::from_str(legacy_raw).unwrap();
+    let legacy_serialized = serde_json::to_value(&legacy).unwrap();
+    assert_eq!(
+        legacy_serialized["execution"]["open_orders_source"],
+        "strategy_mirror"
+    );
+}
+
+#[test]
 fn server_envelope_decodes_runtime_snapshot() {
     let raw = fs::read_to_string(fixtures_dir().join("runtime_snapshot_event.json")).unwrap();
     let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap();
