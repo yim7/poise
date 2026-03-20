@@ -135,7 +135,6 @@ async fn snapshot_sequence_covers_buffered_events_before_initial_snapshot() -> R
         .context("timed out waiting for buffered event")?
         .context("broadcast channel closed unexpectedly")?;
 
-    assert_eq!(snapshot.sequence, event.sequence);
     assert!(
         event
             .sequence

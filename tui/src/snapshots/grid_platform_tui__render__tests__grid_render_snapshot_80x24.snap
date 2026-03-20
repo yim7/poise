@@ -1,5 +1,5 @@
 ---
-source: src/render.rs
+source: tui/src/render.rs
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Active Grid Levels      
@@ -9,20 +9,20 @@ expression: snapshot
                                                                                 
 ┌ Active Grid Levels ──────────────────────────────────────────────────────────┐
 │Side   Price      Qty      bps      Status                                    │
-│BUY    2352.80    0.100    -36.8    NEW                                       │
-│SELL   2368.30    0.100    +28.9    NEW                                       │
-│                                                                              │
+│BUY    2336.68    0.100    -105.0   OCCUPIED                                  │
+│BUY    2344.95    0.100    -70.0    OCCUPIED                                  │
+│BUY    2353.21    0.100    -35.0    OCCUPIED                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Grid Summary ────────────────────────────────────────────────────────────────┐
-│Lower  2352.80   Upper  2368.30                                               │
-│Center  2360.55   Span  0.66%                                                 │
-│Levels  2   Bias  long inventory                                              │
+│Status  OCCUPIED                                                              │
+│Lower  2336.76   Upper  2386.20                                               │
+│Center  2361.48   Span  2.09%                                                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Operator Notes ──────────────────────────────────────────────────────────────┐
 │Current Price  2361.48                                                        │
 │Session  regular                                                              │
 │Health  HEALTHY                                                               │
-│Monitor spacing drift before rebuilding grid levels.                          │
+│Breaker  OFF                                                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────
  Focus Active Grid Levels | Tab panels | p/r run | c/f/s danger | Enter/Esc

@@ -1,4 +1,6 @@
 mod background;
+mod risk;
+mod strategy;
 
 pub mod application;
 pub mod control_plane;

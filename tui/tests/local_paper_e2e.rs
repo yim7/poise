@@ -208,6 +208,13 @@ impl AppHarness {
                         AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
                     ));
                 }
+                Effect::FetchRiskEvents => {
+                    let alerts = self.transport.fetch_risk_events().await?;
+                    pending.extend(reduce(
+                        &mut self.state,
+                        AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded(alerts)),
+                    ));
+                }
                 Effect::ConnectWs => {
                     if let Some(task) = self.ws_task.take() {
                         task.abort();

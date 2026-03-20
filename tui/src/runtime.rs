@@ -166,6 +166,22 @@ async fn effect_task(
                         .await;
                 }
             },
+            Effect::FetchRiskEvents => match transport.fetch_risk_events().await {
+                Ok(alerts) => {
+                    let _ = app_tx
+                        .send(AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded(
+                            alerts,
+                        )))
+                        .await;
+                }
+                Err(error) => {
+                    let _ = app_tx
+                        .send(AppEvent::EffectResult(EffectResultEvent::RiskEventsFailed(
+                            error.to_string(),
+                        )))
+                        .await;
+                }
+            },
             Effect::ConnectWs => {
                 transport.spawn_ws_listener(app_tx.clone());
             }

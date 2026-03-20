@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use grid_platform_service::{
     execution::{ExecutionAdapter, ExecutionOutcome, ScriptedExecutionAdapter},
     kernel::{EngineEvent, spawn_engine, spawn_engine_with_adapter},
-    protocol::{CommandRequest, CommandStatus, CommandType, RuntimeSnapshot},
+    protocol::{CommandRequest, CommandStatus, CommandType, RiskLevel, RuntimeSnapshot, StrategyStatus},
+    storage::PersistedRuntime,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -276,6 +277,60 @@ async fn late_execution_result_does_not_override_timed_out_terminal_state() -> R
         snapshot.execution.recent_commands[0].summary,
         "Execution timed out while waiting for terminal result."
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn price_tick_marks_strategy_pending_rebuild_when_inventory_blocks_rebuild() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.strategy.config.rebuild_threshold_bps = 0.1;
+    runtime.snapshot.strategy.rebuild_reference_price = runtime.snapshot.runtime.last_price;
+
+    let (engine, read_model, _events_rx) = grid_platform_service::kernel::spawn_engine_with_runtime(runtime, None);
+
+    engine.emit_price_tick().await?;
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert_eq!(snapshot.strategy.status, StrategyStatus::PendingRebuild);
+    assert!(snapshot.strategy.pending_rebuild_reason.is_some());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn price_tick_engages_breaker_and_broadcasts_risk_alert_when_stop_loss_is_triggered(
+) -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.last_price = 100.0;
+    runtime.snapshot.runtime.mark_price = 100.0;
+    runtime.snapshot.runtime.position_qty = -0.25;
+    runtime.snapshot.runtime.position_avg_price = 100.0;
+    runtime.snapshot.risk.stop_loss_pct = 0.05;
+
+    let (engine, read_model, mut events_rx) =
+        grid_platform_service::kernel::spawn_engine_with_runtime(runtime, None);
+
+    engine.emit_price_tick().await?;
+
+    let risk_event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = events_rx.recv().await.expect("engine event");
+            match event.event {
+                EngineEvent::RiskAlert(alert) => break alert,
+                _ => continue,
+            }
+        }
+    })
+    .await?;
+
+    assert_eq!(risk_event.code, "STOP_LOSS_TRIGGERED");
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert!(snapshot.risk.breaker_engaged);
+    assert_eq!(snapshot.risk.risk_level, RiskLevel::Danger);
 
     Ok(())
 }

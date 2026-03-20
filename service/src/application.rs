@@ -191,6 +191,7 @@ impl From<EngineEvent> for ServerEvent {
         match value {
             EngineEvent::CommandAck(ack) => Self::CommandAck(ack),
             EngineEvent::PriceUpdated(price) => Self::PriceUpdated(price),
+            EngineEvent::RiskAlert(alert) => Self::RiskAlert(alert),
             EngineEvent::RuntimeSnapshot(snapshot) => Self::RuntimeSnapshot(snapshot),
             EngineEvent::ConnectionChanged(connection) => Self::ConnectionChanged(connection),
         }

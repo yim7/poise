@@ -1,5 +1,5 @@
 use crate::{
-    protocol::{CommandType, OpenOrder, RecentFill},
+    protocol::{CommandType, GridLevel, GridLevelState, GridSide, OpenOrder, RecentFill, StrategyStatus},
     state::{AppState, CommandTimelineEntry, CommandTimelineStage},
 };
 
@@ -135,61 +135,51 @@ pub struct GridLevelViewModel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GridViewModel {
+    pub status: String,
     pub lower: String,
     pub upper: String,
     pub center: String,
     pub span_pct: String,
     pub active_levels: usize,
-    pub buy_levels: usize,
-    pub sell_levels: usize,
+    pub occupied_levels: usize,
+    pub pending_levels: usize,
     pub inventory_bias: String,
+    pub pending_rebuild_reason: Option<String>,
     pub levels: Vec<GridLevelViewModel>,
 }
 
 pub fn grid(state: &AppState) -> GridViewModel {
-    let lower = state
-        .execution
-        .open_orders
-        .iter()
-        .map(|order| order.price)
-        .reduce(f64::min)
-        .unwrap_or(state.runtime.last_price);
-    let upper = state
-        .execution
-        .open_orders
-        .iter()
-        .map(|order| order.price)
-        .reduce(f64::max)
-        .unwrap_or(state.runtime.last_price);
-    let center = (lower + upper) / 2.0;
+    let center = state.strategy.center_price;
     let span_pct = if center.abs() > f64::EPSILON {
-        ((upper - lower) / center) * 100.0
+        ((state.strategy.upper_bound - state.strategy.lower_bound) / center) * 100.0
     } else {
         0.0
     };
-    let buy_levels = state
-        .execution
-        .open_orders
-        .iter()
-        .filter(|order| order.side.eq_ignore_ascii_case("buy"))
-        .count();
-    let sell_levels = state.execution.open_orders.len().saturating_sub(buy_levels);
-
-    let mut orders = state.execution.open_orders.clone();
-    orders.sort_by(|a, b| {
+    let mut levels = state.strategy.levels.clone();
+    levels.sort_by(|a, b| {
         a.price
             .partial_cmp(&b.price)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     GridViewModel {
-        lower: format!("{lower:.2}"),
-        upper: format!("{upper:.2}"),
+        status: strategy_status_label(state.strategy.status).into(),
+        lower: format!("{:.2}", state.strategy.lower_bound),
+        upper: format!("{:.2}", state.strategy.upper_bound),
         center: format!("{center:.2}"),
         span_pct: format!("{span_pct:.2}%"),
-        active_levels: orders.len(),
-        buy_levels,
-        sell_levels,
+        active_levels: levels
+            .iter()
+            .filter(|level| level.state == GridLevelState::Active)
+            .count(),
+        occupied_levels: levels
+            .iter()
+            .filter(|level| level.state == GridLevelState::Occupied)
+            .count(),
+        pending_levels: levels
+            .iter()
+            .filter(|level| level.state == GridLevelState::PendingRebuild)
+            .count(),
         inventory_bias: if state.runtime.position_qty > 0.0 {
             "long inventory".into()
         } else if state.runtime.position_qty < 0.0 {
@@ -197,25 +187,29 @@ pub fn grid(state: &AppState) -> GridViewModel {
         } else {
             "flat inventory".into()
         },
-        levels: orders
+        pending_rebuild_reason: state.strategy.pending_rebuild_reason.clone(),
+        levels: levels
             .iter()
-            .map(|order| grid_level(order, state.runtime.last_price))
+            .map(|level| grid_level(level, state.runtime.last_price))
             .collect(),
     }
 }
 
-fn grid_level(order: &OpenOrder, last_price: f64) -> GridLevelViewModel {
+fn grid_level(level: &GridLevel, last_price: f64) -> GridLevelViewModel {
     let distance_bps = if last_price.abs() > f64::EPSILON {
-        ((order.price - last_price) / last_price) * 10_000.0
+        ((level.price - last_price) / last_price) * 10_000.0
     } else {
         0.0
     };
     GridLevelViewModel {
-        side: order.side.to_uppercase(),
-        price: format!("{:.2}", order.price),
-        qty: format!("{:.3}", order.qty),
+        side: match level.side {
+            GridSide::Buy => "BUY".into(),
+            GridSide::Sell => "SELL".into(),
+        },
+        price: format!("{:.2}", level.price),
+        qty: format!("{:.3}", level.quantity),
         distance_bps: format!("{distance_bps:+.1}"),
-        status: order.status.clone(),
+        status: grid_level_state_label(level.state).into(),
     }
 }
 
@@ -479,6 +473,32 @@ fn optional_status_word(is_up: Option<bool>) -> &'static str {
     }
 }
 
+pub fn risk_action_hint(code: &str) -> &'static str {
+    match code {
+        "MAX_POSITION_EXCEEDED" => "Reduce exposure before placing new grid orders.",
+        "STOP_LOSS_TRIGGERED" => "Reduce exposure before resuming the grid.",
+        "DAILY_LOSS_LIMIT_BREACHED" => "Pause new orders and review daily loss limits.",
+        "BREAKER_RELEASED" => "Breaker released. Verify conditions before resuming.",
+        _ => "Review the risk configuration before resuming.",
+    }
+}
+
+fn strategy_status_label(status: StrategyStatus) -> &'static str {
+    match status {
+        StrategyStatus::Active => "ACTIVE",
+        StrategyStatus::Occupied => "OCCUPIED",
+        StrategyStatus::PendingRebuild => "PENDING REBUILD",
+    }
+}
+
+fn grid_level_state_label(state: GridLevelState) -> &'static str {
+    match state {
+        GridLevelState::Active => "ACTIVE",
+        GridLevelState::Occupied => "OCCUPIED",
+        GridLevelState::PendingRebuild => "PENDING REBUILD",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +551,18 @@ mod tests {
             fill_items[0].command_ref.as_deref(),
             Some("CANCEL ALL cmd_cancel_01")
         );
+    }
+
+    #[test]
+    fn grid_selector_prefers_strategy_levels_over_execution_orders() {
+        let mut state = AppState::sample();
+        state.execution.open_orders.clear();
+        state.strategy.pending_rebuild_reason = Some("price drift 18.0bps".into());
+
+        let vm = grid(&state);
+
+        assert_eq!(vm.active_levels, 3);
+        assert_eq!(vm.levels.len(), 6);
+        assert_eq!(vm.levels[0].status, "OCCUPIED");
     }
 }

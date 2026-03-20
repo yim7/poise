@@ -7,7 +7,7 @@ expression: snapshot
                                                                                                     
 ┌ Fills (1) ─────────────────────────────────────┐┌ Alerts (1) ────────────────────────────────────┐
 │BUY 2349.10 x 0.050                             ││MARGIN_USAGE_WATCH Margin usage reached 39% of c│
-│                                                ││                                                │
+│                                                ││Review the risk configuration before resuming.  │
 │                                                ││                                                │
 │                                                ││                                                │
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘

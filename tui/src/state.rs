@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::protocol::{
     CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, PendingCommand,
-    RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, SystemEvent,
+    RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
 };
 
 pub const COMMAND_TIMEOUT_TICKS: u64 = 15;
@@ -214,6 +214,7 @@ pub struct AppState {
     pub runtime: RuntimeViewState,
     pub execution: ExecutionViewState,
     pub risk: RiskViewState,
+    pub strategy: StrategyState,
     pub ui: UiState,
     pub system_events: VecDeque<SystemEvent>,
     pub dirty: DirtyFlags,
@@ -321,6 +322,7 @@ impl AppState {
                 unacked_alerts: snapshot.risk.unacked_alerts,
                 alerts: VecDeque::new(),
             },
+            strategy: snapshot.strategy,
             ui: UiState {
                 page: Page::Dashboard,
                 focus_index: 0,

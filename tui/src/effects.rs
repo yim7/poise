@@ -3,6 +3,7 @@ use crate::protocol::CommandType;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     FetchSnapshot,
+    FetchRiskEvents,
     ConnectWs,
     ReconnectWs {
         attempt: u32,

@@ -32,6 +32,93 @@ pub enum RiskLevel {
     Danger,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyStatus {
+    Active,
+    Occupied,
+    PendingRebuild,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridLevelState {
+    Active,
+    Occupied,
+    PendingRebuild,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridConfig {
+    pub spacing_bps: f64,
+    pub levels_per_side: u32,
+    pub quantity_per_level: f64,
+    pub max_position_qty: f64,
+    pub rebuild_threshold_bps: f64,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self {
+            spacing_bps: 35.0,
+            levels_per_side: 3,
+            quantity_per_level: 0.1,
+            max_position_qty: 0.3,
+            rebuild_threshold_bps: 120.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridLevel {
+    pub level_id: String,
+    pub side: GridSide,
+    pub price: f64,
+    pub quantity: f64,
+    pub state: GridLevelState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StrategyState {
+    #[serde(default)]
+    pub config: GridConfig,
+    pub status: StrategyStatus,
+    pub center_price: f64,
+    pub lower_bound: f64,
+    pub upper_bound: f64,
+    pub rebuild_reference_price: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_rebuild_reason: Option<String>,
+    #[serde(default)]
+    pub levels: Vec<GridLevel>,
+}
+
+impl Default for StrategyState {
+    fn default() -> Self {
+        Self {
+            config: GridConfig::default(),
+            status: StrategyStatus::Active,
+            center_price: 0.0,
+            lower_bound: 0.0,
+            upper_bound: 0.0,
+            rebuild_reference_price: 0.0,
+            pending_rebuild_reason: None,
+            levels: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionState {
     pub http_available: bool,
@@ -134,6 +221,12 @@ pub struct RiskState {
     pub daily_loss_limit: f64,
     pub stop_loss_pct: f64,
     pub risk_level: RiskLevel,
+    #[serde(default)]
+    pub max_position_exceeded: bool,
+    #[serde(default)]
+    pub stop_loss_triggered: bool,
+    #[serde(default)]
+    pub daily_loss_breached: bool,
     pub breaker_engaged: bool,
     pub unacked_alerts: u32,
 }
@@ -144,6 +237,8 @@ pub struct RuntimeSnapshot {
     pub runtime: RuntimeState,
     pub execution: ExecutionState,
     pub risk: RiskState,
+    #[serde(default)]
+    pub strategy: StrategyState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,9 +408,81 @@ impl RuntimeSnapshot {
                 daily_loss_limit: -120.0,
                 stop_loss_pct: 4.0,
                 risk_level: RiskLevel::Watch,
+                max_position_exceeded: false,
+                stop_loss_triggered: false,
+                daily_loss_breached: false,
                 breaker_engaged: false,
                 unacked_alerts: 1,
             },
+            strategy: sample_strategy(),
         }
+    }
+}
+
+fn sample_strategy() -> StrategyState {
+    StrategyState {
+        config: GridConfig::default(),
+        status: StrategyStatus::Occupied,
+        center_price: 2361.48,
+        lower_bound: 2336.76,
+        upper_bound: 2386.20,
+        rebuild_reference_price: 2361.48,
+        pending_rebuild_reason: None,
+        levels: vec![
+            GridLevel {
+                level_id: "buy_01".into(),
+                side: GridSide::Buy,
+                price: 2353.21,
+                quantity: 0.1,
+                state: GridLevelState::Occupied,
+                client_order_id: Some("grid_buy_01".into()),
+                order_id: Some("ord_1001".into()),
+            },
+            GridLevel {
+                level_id: "buy_02".into(),
+                side: GridSide::Buy,
+                price: 2344.95,
+                quantity: 0.1,
+                state: GridLevelState::Occupied,
+                client_order_id: None,
+                order_id: None,
+            },
+            GridLevel {
+                level_id: "buy_03".into(),
+                side: GridSide::Buy,
+                price: 2336.68,
+                quantity: 0.1,
+                state: GridLevelState::Occupied,
+                client_order_id: None,
+                order_id: None,
+            },
+            GridLevel {
+                level_id: "sell_01".into(),
+                side: GridSide::Sell,
+                price: 2369.75,
+                quantity: 0.1,
+                state: GridLevelState::Active,
+                client_order_id: Some("grid_sell_01".into()),
+                order_id: Some("ord_1002".into()),
+            },
+            GridLevel {
+                level_id: "sell_02".into(),
+                side: GridSide::Sell,
+                price: 2378.01,
+                quantity: 0.1,
+                state: GridLevelState::Active,
+                client_order_id: None,
+                order_id: None,
+            },
+            GridLevel {
+                level_id: "sell_03".into(),
+                side: GridSide::Sell,
+                price: 2386.28,
+                quantity: 0.1,
+                state: GridLevelState::Active,
+                client_order_id: None,
+                order_id: None,
+            },
+        ],
     }
 }
