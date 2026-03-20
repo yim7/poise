@@ -1,3 +1,5 @@
+use std::collections::{HashSet, VecDeque};
+
 use crate::effects::Effect;
 use crate::events::{
     AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent, SystemEvent,
@@ -42,6 +44,9 @@ fn handle_protocol_event(state: &mut AppState, event: ServerEvent) -> Vec<Effect
         }
         ServerEvent::RiskAlert(alert) => {
             state.risk.risk_level = alert.severity;
+            if alert.acknowledged_at.is_none() {
+                state.risk.unacked_alerts = state.risk.unacked_alerts.saturating_add(1);
+            }
             state.risk.alerts.push_front(alert);
             while state.risk.alerts.len() > 20 {
                 state.risk.alerts.pop_back();
@@ -157,16 +162,48 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
         EffectResultEvent::SnapshotLoaded(snapshot) => {
             if state.connection.ws_connected {
                 state.sync_runtime_snapshot(snapshot);
-                Vec::new()
+                vec![Effect::FetchRiskEvents]
             } else {
                 *state = AppState::from_snapshot(snapshot);
-                vec![Effect::ConnectWs]
+                vec![Effect::FetchRiskEvents, Effect::ConnectWs]
             }
         }
         EffectResultEvent::SnapshotFailed(error) => {
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Danger,
                 message: format!("snapshot failed: {error}"),
+                ttl_ticks: 24,
+            });
+            state.mark_dirty(
+                DirtyFlags {
+                    ui: true,
+                    ..DirtyFlags::default()
+                },
+                true,
+            );
+            Vec::new()
+        }
+        EffectResultEvent::RiskEventsLoaded(alerts) => {
+            state.risk.alerts = merge_risk_alerts(&state.risk.alerts, alerts);
+            state.risk.unacked_alerts = state
+                .risk
+                .alerts
+                .iter()
+                .filter(|alert| alert.acknowledged_at.is_none())
+                .count() as u32;
+            state.mark_dirty(
+                DirtyFlags {
+                    risk: true,
+                    ..DirtyFlags::default()
+                },
+                true,
+            );
+            Vec::new()
+        }
+        EffectResultEvent::RiskEventsFailed(error) => {
+            state.ui.toast = Some(Toast {
+                level: ToastLevel::Warning,
+                message: format!("risk events failed: {error}"),
                 ttl_ticks: 24,
             });
             state.mark_dirty(
@@ -301,6 +338,29 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             Vec::new()
         }
     }
+}
+
+fn merge_risk_alerts(
+    existing: &VecDeque<crate::protocol::RiskEvent>,
+    loaded: Vec<crate::protocol::RiskEvent>,
+) -> VecDeque<crate::protocol::RiskEvent> {
+    let mut combined = loaded;
+    combined.extend(existing.iter().cloned());
+    combined.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+
+    let mut seen = HashSet::new();
+    let mut merged = VecDeque::new();
+    for alert in combined {
+        let dedupe_key = (alert.code.clone(), alert.created_at.clone());
+        if seen.insert(dedupe_key) {
+            merged.push_back(alert);
+        }
+        if merged.len() == 20 {
+            break;
+        }
+    }
+
+    merged
 }
 
 fn handle_local_ui_event(state: &mut AppState, event: LocalUiEvent) -> Vec<Effect> {
@@ -699,7 +759,7 @@ mod tests {
             AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
         );
         assert_eq!(state.runtime.symbol, "TSLAUSDT");
-        assert_eq!(effects, vec![Effect::ConnectWs]);
+        assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
     }
 
     #[test]
@@ -720,6 +780,51 @@ mod tests {
         assert!(state.connection.ws_connected);
         assert_eq!(state.runtime.symbol, "TSLAUSDT");
         assert_eq!(state.ui.page, Page::Events);
+    }
+
+    #[test]
+    fn snapshot_loaded_while_connected_requests_risk_events_reload() {
+        let mut state = AppState::sample();
+        state.connection.ws_connected = true;
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(
+                RuntimeSnapshot::sample(),
+            )),
+        );
+
+        assert_eq!(effects, vec![Effect::FetchRiskEvents]);
+    }
+
+    #[test]
+    fn risk_events_loaded_merge_live_and_recovered_alerts() {
+        let mut state = AppState::sample();
+        state.risk.alerts.clear();
+        state.risk.alerts.push_back(crate::protocol::RiskEvent {
+            severity: crate::protocol::RiskLevel::Danger,
+            code: "STOP_LOSS_TRIGGERED".into(),
+            message: "live".into(),
+            created_at: "2025-01-01T00:00:06Z".into(),
+            acknowledged_at: None,
+        });
+
+        let alerts = vec![crate::protocol::RiskEvent {
+            severity: crate::protocol::RiskLevel::Watch,
+            code: "DAILY_LOSS_LIMIT_BREACHED".into(),
+            message: "recovered".into(),
+            created_at: "2025-01-01T00:00:05Z".into(),
+            acknowledged_at: None,
+        }];
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded(alerts)),
+        );
+
+        assert_eq!(state.risk.alerts.len(), 2);
+        assert_eq!(state.risk.alerts[0].code, "STOP_LOSS_TRIGGERED");
+        assert_eq!(state.risk.alerts[1].code, "DAILY_LOSS_LIMIT_BREACHED");
     }
 
     #[test]

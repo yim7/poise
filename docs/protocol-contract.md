@@ -95,6 +95,17 @@
 - `last_command_ack_event`: 提供最近一次完整 ack 内容，供重连恢复直接重建命令结果。
 - `recent_commands`: 提供最近的命令终态记录，供客户端在断线后重建命令时间线。
 
+`runtime_snapshot.strategy` 当前额外约定：
+
+- `config` 描述网格运行参数。
+- `status` 表示策略总体状态，当前取值为 `active / occupied / pending_rebuild`。
+- `levels` 是权威网格层级视图，客户端不得再从 `execution.open_orders` 反推策略状态。
+
+`runtime_snapshot.risk` 当前额外约定：
+
+- `max_position_exceeded / stop_loss_triggered / daily_loss_breached` 表示当前已激活的风控规则。
+- `unacked_alerts` 仍表示未确认风险事件数量，客户端恢复后应通过 `/risk/events` 拉回事件详情。
+
 ## 4. 启动与重连语义
 
 客户端必须遵循以下顺序：

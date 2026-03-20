@@ -23,21 +23,10 @@
   "execution": {
     "open_orders": [
       {
-        "order_id": "ord_1001",
-        "client_order_id": "grid_buy_01",
-        "side": "buy",
-        "price": 2352.8,
-        "qty": 0.1,
-        "filled_qty": 0.0,
-        "status": "NEW",
-        "created_at": "2025-01-01T00:00:00Z",
-        "updated_at": "2025-01-01T00:00:00Z"
-      },
-      {
         "order_id": "ord_1002",
         "client_order_id": "grid_sell_01",
         "side": "sell",
-        "price": 2368.3,
+        "price": 2369.75,
         "qty": 0.1,
         "filled_qty": 0.0,
         "status": "NEW",
@@ -59,7 +48,7 @@
       }
     ],
     "pending_commands": [],
-    "last_command_ack": "cmd_resume_01",
+    "last_command_ack": "cmd_flatten_01",
       "last_command_ack_event": {
         "command_id": "cmd_flatten_01",
         "command": "flatten_now",
@@ -91,7 +80,73 @@
     "daily_loss_limit": -120.0,
     "stop_loss_pct": 4.0,
     "risk_level": "watch",
+    "max_position_exceeded": false,
+    "stop_loss_triggered": false,
+    "daily_loss_breached": false,
     "breaker_engaged": false,
     "unacked_alerts": 1
+  },
+  "strategy": {
+    "config": {
+      "spacing_bps": 35.0,
+      "levels_per_side": 3,
+      "quantity_per_level": 0.1,
+      "max_position_qty": 0.3,
+      "rebuild_threshold_bps": 120.0
+    },
+    "status": "occupied",
+    "center_price": 2361.48,
+    "lower_bound": 2336.76,
+    "upper_bound": 2386.2,
+    "rebuild_reference_price": 2361.48,
+    "pending_rebuild_reason": null,
+    "levels": [
+      {
+        "level_id": "buy_01",
+        "side": "buy",
+        "price": 2353.21,
+        "quantity": 0.1,
+        "state": "occupied",
+        "client_order_id": "grid_buy_01",
+        "order_id": "ord_1001"
+      },
+      {
+        "level_id": "buy_02",
+        "side": "buy",
+        "price": 2344.95,
+        "quantity": 0.1,
+        "state": "occupied"
+      },
+      {
+        "level_id": "buy_03",
+        "side": "buy",
+        "price": 2336.68,
+        "quantity": 0.1,
+        "state": "occupied"
+      },
+      {
+        "level_id": "sell_01",
+        "side": "sell",
+        "price": 2369.75,
+        "quantity": 0.1,
+        "state": "active",
+        "client_order_id": "grid_sell_01",
+        "order_id": "ord_1002"
+      },
+      {
+        "level_id": "sell_02",
+        "side": "sell",
+        "price": 2378.01,
+        "quantity": 0.1,
+        "state": "active"
+      },
+      {
+        "level_id": "sell_03",
+        "side": "sell",
+        "price": 2386.28,
+        "quantity": 0.1,
+        "state": "active"
+      }
+    ]
   }
 }

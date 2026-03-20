@@ -1,5 +1,5 @@
 ---
-source: src/render.rs
+source: tui/src/render.rs
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  RECONNECTING  Focus Fills              
@@ -9,9 +9,9 @@ expression: snapshot
                                                                                 
 ┌ Fills (1) ───────────────────────────┐┌ Alerts (2) ──────────────────────────┐
 │BUY 2349.10 x 0.050                   ││BREAKER_NEAR Daily loss is close to br│
+│                                      ││Review the risk configuration before r│
 │                                      ││MARGIN_USAGE_WATCH Margin usage reache│
-│                                      ││                                      │
-│                                      ││                                      │
+│                                      ││Review the risk configuration before r│
 │                                      ││                                      │
 │                                      ││                                      │
 │                                      ││                                      │

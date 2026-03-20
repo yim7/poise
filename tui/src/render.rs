@@ -555,6 +555,10 @@ fn draw_grid_summary(
 ) {
     let summary = Paragraph::new(vec![
         Line::from(vec![
+            Span::styled("Status  ", theme.muted()),
+            Span::styled(vm.status.clone(), theme.emphasis()),
+        ]),
+        Line::from(vec![
             Span::styled("Lower  ", theme.muted()),
             Span::styled(vm.lower.clone(), theme.panel()),
             Span::styled("   Upper  ", theme.muted()),
@@ -567,8 +571,14 @@ fn draw_grid_summary(
             Span::styled(vm.span_pct.clone(), theme.warning()),
         ]),
         Line::from(vec![
-            Span::styled("Levels  ", theme.muted()),
+            Span::styled("Active  ", theme.muted()),
             Span::styled(vm.active_levels.to_string(), theme.panel()),
+            Span::styled("   Occupied  ", theme.muted()),
+            Span::styled(vm.occupied_levels.to_string(), theme.warning()),
+            Span::styled("   Pending  ", theme.muted()),
+            Span::styled(vm.pending_levels.to_string(), theme.warning()),
+        ]),
+        Line::from(vec![
             Span::styled("   Bias  ", theme.muted()),
             Span::styled(vm.inventory_bias.clone(), theme.warning()),
         ]),
@@ -601,7 +611,24 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
                 theme.status(status_tone_for_connection(health.kind)),
             ),
         ]),
-        Line::from("Monitor spacing drift before rebuilding grid levels."),
+        Line::from(vec![
+            Span::styled("Breaker  ", theme.muted()),
+            Span::styled(
+                if state.risk.breaker_engaged { "ON" } else { "OFF" },
+                if state.risk.breaker_engaged {
+                    theme.danger()
+                } else {
+                    theme.success()
+                },
+            ),
+        ]),
+        Line::from(
+            state
+                .strategy
+                .pending_rebuild_reason
+                .clone()
+                .unwrap_or_else(|| "Grid levels are aligned with the current strategy state.".into()),
+        ),
     ];
     frame.render_widget(
         Paragraph::new(notes)
@@ -798,11 +825,17 @@ fn draw_events(
             .alerts
             .iter()
             .take(list_capacity(top[1]))
-            .map(|alert| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", alert.code), theme.warning()),
-                    Span::styled(alert.message.clone(), theme.panel()),
-                ])
+            .flat_map(|alert| {
+                vec![
+                    Line::from(vec![
+                        Span::styled(format!("{} ", alert.code), theme.warning()),
+                        Span::styled(alert.message.clone(), theme.panel()),
+                    ]),
+                    Line::from(Span::styled(
+                        selectors::risk_action_hint(&alert.code),
+                        theme.muted(),
+                    )),
+                ]
             })
             .collect(),
         theme,
@@ -1473,6 +1506,22 @@ mod tests {
                     });
             },
         );
+    }
+
+    #[test]
+    fn events_page_shows_risk_action_hint() {
+        let rendered = render_page_to_string(Page::Events, 100, 16, |state| {
+            state.risk.alerts.clear();
+            state.risk.alerts.push_front(RiskEvent {
+                severity: RiskLevel::Danger,
+                code: "STOP_LOSS_TRIGGERED".into(),
+                message: "Mark price crossed the configured stop line.".into(),
+                created_at: "2025-01-01T00:00:12Z".into(),
+                acknowledged_at: None,
+            });
+        });
+
+        assert!(rendered.contains("Reduce exposure"));
     }
 
     fn assert_page_snapshot<F>(page: Page, width: u16, height: u16, name: &str, mutate: F)

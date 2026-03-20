@@ -1,8 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use grid_platform_tui::protocol::{
     CommandAck, CommandStatus, ConnectionState, HttpSuccessEnvelope, RiskEvent, RuntimeSnapshot,
-    ServerEnvelope, ServerEvent,
+    ServerEnvelope, ServerEvent, StrategyStatus,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -15,12 +15,30 @@ fn runtime_snapshot_fixture_decodes() {
     let snapshot: RuntimeSnapshot = serde_json::from_str(&raw).unwrap();
     let serialized = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(snapshot.runtime.symbol, "XAUUSDT");
+    assert_eq!(snapshot.strategy.status, StrategyStatus::Occupied);
+    assert_eq!(snapshot.strategy.levels.len(), 6);
     assert_eq!(snapshot.connection.user_stream_connected, None);
-    assert_eq!(snapshot.execution.open_orders.len(), 2);
+    assert_eq!(snapshot.execution.open_orders.len(), 1);
+    assert_eq!(
+        snapshot.execution.last_command_ack.as_deref(),
+        Some("cmd_flatten_01")
+    );
     assert_eq!(
         snapshot.execution.recent_commands[0].command_id,
         "cmd_flatten_01"
     );
+    let occupied_client_order_ids = snapshot
+        .strategy
+        .levels
+        .iter()
+        .filter(|level| level.state == grid_platform_tui::protocol::GridLevelState::Occupied)
+        .filter_map(|level| level.client_order_id.as_deref())
+        .collect::<HashSet<_>>();
+    assert!(snapshot
+        .execution
+        .open_orders
+        .iter()
+        .all(|order| !occupied_client_order_ids.contains(order.client_order_id.as_str())));
     assert_eq!(
         serialized["execution"]["recent_fills"][0]["client_order_id"],
         "flatten_reduce_only_01"
@@ -37,6 +55,7 @@ fn runtime_snapshot_fixture_decodes() {
         serialized["execution"]["recent_commands"][0]["trade_ids"][0],
         "fill_9001"
     );
+    assert_eq!(serialized["strategy"]["status"], "occupied");
 }
 
 #[test]
@@ -126,8 +145,8 @@ fn server_envelope_decodes_risk_alert() {
     assert_eq!(parsed.sequence, None);
     match parsed.event {
         ServerEvent::RiskAlert(RiskEvent { code, message, .. }) => {
-            assert_eq!(code, "DAILY_LOSS_WARNING");
-            assert!(message.contains("stop line"));
+            assert_eq!(code, "STOP_LOSS_TRIGGERED");
+            assert!(message.contains("stop-loss threshold"));
         }
         _ => panic!("unexpected event type"),
     }

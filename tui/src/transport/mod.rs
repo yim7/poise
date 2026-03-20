@@ -9,7 +9,7 @@ use crate::{
     events::{AppEvent, EffectResultEvent},
     protocol::{
         CommandAccepted, CommandRequest, CommandType, HttpErrorEnvelope, HttpSuccessEnvelope,
-        RuntimeSnapshot, ServerEnvelope,
+        RiskEvent, RuntimeSnapshot, ServerEnvelope,
     },
 };
 
@@ -37,6 +37,16 @@ impl TransportClient {
             .await
             .context("fetch snapshot request failed")?;
         Self::decode_response(response, "fetch snapshot").await
+    }
+
+    pub async fn fetch_risk_events(&self) -> Result<Vec<RiskEvent>> {
+        let response = self
+            .http
+            .get(format!("{}/risk/events", self.base_url))
+            .send()
+            .await
+            .context("fetch risk events request failed")?;
+        Self::decode_response(response, "fetch risk events").await
     }
 
     pub async fn send_command(

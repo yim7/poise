@@ -1,4 +1,4 @@
-use crate::protocol::{CommandAccepted, CommandType, RuntimeSnapshot, ServerEvent};
+use crate::protocol::{CommandAccepted, CommandType, RiskEvent, RuntimeSnapshot, ServerEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppEvent {
@@ -50,6 +50,8 @@ pub enum CommandEvent {
 pub enum EffectResultEvent {
     SnapshotLoaded(RuntimeSnapshot),
     SnapshotFailed(String),
+    RiskEventsLoaded(Vec<RiskEvent>),
+    RiskEventsFailed(String),
     WsConnected,
     WsDisconnected(String),
     CommandAccepted(CommandAccepted),

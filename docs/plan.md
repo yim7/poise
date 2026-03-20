@@ -45,100 +45,109 @@
 - 相关单测、集成测试和本地 E2E 通过
 - 对外协议和客户端体验没有无意回退
 
-## 3. 里程碑 K1：服务端内核重构
+## 3. 里程碑 K4：执行闭环与命令语义做实
 
 ### 目标
 
-把当前 `service` 从“路由 + 内存态运行时骨架”重构成“控制面 + 应用层 + 单写者内核”。
+把命令从“控制面已接收”推进到“真实执行已完成/失败/超时”的闭环语义。
 
 ### 先补的测试
 
-1. 为命令接收、状态流转和广播增加内核测试。
-2. 为现有 HTTP 查询与命令入口补路由层集成测试。
-3. 扩展本地 E2E，覆盖命令时间线和重连后重新同步。
+1. 为执行适配层补 fake execution transport 测试。
+2. 为 `pause / resume / cancel-all / flatten-now / shutdown-after-flatten` 补命令终态测试。
+3. 为幂等、重试和超时补内核测试。
+4. 扩展本地 E2E，覆盖撤单、平仓、重连后命令终态恢复。
 
 ### 实施任务
 
-1. 从 [`../service/src/lib.rs`](../service/src/lib.rs) 中拆出 `control_plane` 模块。
-2. 引入 `EngineCommand`、`EngineEvent` 和内核主循环。
-3. 让命令处理走统一入口，而不是直接在路由层改状态。
-4. 让 WebSocket 广播消费领域事件，而不是直接消费路由层拼装结果。
-5. 把查询模型和状态变更模型分开。
+1. 建立执行适配层边界，并把下单、撤单、查单、成交回报统一接线。
+2. 定义 `command_id` 与 `client_order_id / order_id / trade_id` 的关联模型。
+3. 让命令生命周期统一输出 `accepted / ack / failed / timed_out`。
+4. 让 `open orders`、`fills` 和命令时间线共享同一组执行事实。
+5. 把执行失败原因、超时原因和幂等命中原因纳入审计和 WebSocket 事件。
+6. 让 TUI 时间线和事件页能看到真实执行结果，而不是只看控制面回包。
 
-### K1 验收标准
+### K4 验收标准
 
-- 所有状态修改都经由单写者路径
-- 路由层不直接拥有业务状态变更逻辑
-- 现有协议与 TUI 不需要大改
-- K1 对应测试矩阵全部通过
-
-## 4. 里程碑 K2：持久化与恢复
-
-### 目标
-
-引入 SQLite，并打通恢复与审计。
-
-### 先补的测试
-
-1. 为命令审计增加存储层测试。
-2. 为服务重启恢复增加集成测试。
-3. 为 TUI 冷启动、断线重连和恢复场景增加端到端验证。
-
-### 实施任务
-
-1. 建立 `storage` 模块。
-2. 设计 `commands / runtime_snapshots / open_orders / fills / risk_events / system_events` 表。
-3. 让命令生命周期写入审计。
-4. 定义启动恢复流程。
-5. 增加 restart / resume / recovery 测试。
-
-### K2 验收标准
-
-- `service` 可恢复最近运行态
-- 命令审计完整
-- TUI 冷启动与重连闭环稳定
-
-## 5. 里程碑 K3：市场与账户接入准备
-
-### 目标
-
-在内核和恢复稳定后，再开始真实 Binance 接入。
+- 命令不再只是内存状态切换
+- `ack / failure / timeout` 有明确业务意义
+- open orders 与 fills 可与命令轨迹关联
+- K4 对应测试矩阵全部通过
 
 ### 当前状态
 
-已完成。当前已落地：
+- 已完成 execution adapter 显式接口、异步 `accepted / ack / failed / timed_out`、命令关联链路、执行重试与 TUI 联动
+- `pause / resume` 已通过策略执行 gate 真实作用于“是否继续新增网格挂单”
+- K4 验收条件已满足
 
-- `integrations/binance` 适配层与 fake transport 测试边界
-- `exchangeInfo`、`tradingSchedule`、市场流、用户流接入骨架
-- 连接健康、reconnect、heartbeat、stale 状态入内核
-- TUI 对真实连接状态与 session 状态的呈现回归
+## 4. 里程碑 K5：网格策略与风控
+
+### 目标
+
+让 `service` 进入真正的网格运行与风险控制阶段。
 
 ### 先补的测试
 
-1. 为 Binance 适配层建立 fake transport 测试。
-2. 为连接退化、重连和 stale 检测补集成测试。
-3. 为真实连接状态在 TUI 的呈现补回归验证。
+1. 为网格配置校验补单元测试。
+2. 为网格状态机和重建逻辑补状态流转测试。
+3. 为最大仓位、止损、单日亏损和 breaker 触发补风险测试。
+4. 为 TUI `Grid` 和风险态展示补回归快照。
 
 ### 实施任务
 
-1. 设计 `integrations/binance` 模块边界。
-2. 先接 `exchangeInfo` 和 `tradingSchedule`。
-3. 再接市场流与用户流。
-4. 把连接健康模型纳入内核状态。
-5. 让 TUI 能看到真实连接状态和 session 状态。
+1. 定义网格配置 schema 和运行参数。
+2. 实现 `active / occupied / pending_rebuild` 状态模型。
+3. 建立网格层生成与重建规则。
+4. 把策略输出接到执行适配层，而不是直接改订单镜像。
+5. 接入风险阈值、breaker 和风险事件。
+6. 让 TUI `Grid` 页面展示策略状态而不是单纯订单列表。
 
-### K3 验收标准
+### K5 验收标准
 
-- 真实市场状态进入 `service`
-- 连接健康模型可观测
-- 客户端体验没有倒退
+- `service` 内部有真实策略状态机
+- `Grid` 页面显示的是策略模型而非订单镜像
+- 风险事件可观测、可操作
+- K5 对应测试矩阵全部通过
+
+### 当前状态
+
+- 已完成 `strategy` 协议模型、网格配置 schema、层级生成、`active / occupied / pending_rebuild` 状态流转
+- 已完成最大仓位、止损、单日亏损与 breaker 的统一评估、`risk_alert` 广播与持久化
+- 已完成 TUI `Grid / Dashboard / Events` 对策略态、风险阈值和操作建议的联动展示
+- K5 验收条件已满足
+
+## 5. 里程碑 K6：回放 / paper / testnet 验证
+
+### 目标
+
+建立可重复验证链路，把系统从“能运行”推进到“能被证明”。
+
+### 先补的测试
+
+1. 为 replay runner 和 paper fill 逻辑补场景测试。
+2. 为 fake service / fake transport 集成链路补测试。
+3. 为 testnet 下单、撤单、恢复流程补最小冒烟验证。
+
+### 实施任务
+
+1. 实现 replay runner 和录制/回放输入格式。
+2. 实现 paper execution 与 fill 模拟规则。
+3. 建立 fake service / fake transport 测试夹具。
+4. 跑通 testnet 的最小命令执行与恢复闭环。
+5. 输出运维与验证手册。
+
+### K6 验收标准
+
+- 本地可重复回放
+- paper 与 testnet 可跑通关键操作
+- 关键路径有端到端验证证据
+- K6 对应测试矩阵全部通过
 
 ## 6. 当前并行方式
 
-现在最适合并行的只有三条：
+现在最适合并行的只有两条：
 
-- `execution` 适配层与命令终态统一
-- `strategy` 的网格状态机和风控阈值建模
-- `tui` 对真实订单、账户和风险事件的兼容验证
+- `K6` 的 replay / paper / testnet 验证链路
+- `K7` 的查询模型整理与 Web UI 预备边界
 
-当前不建议并行展开 Web UI 或复杂回放框架，因为这些都依赖执行闭环和策略状态先稳定。
+当前不建议并行展开新的交易功能，因为执行闭环和策略状态已经落稳，下一阶段更需要验证证据与控制面整理。

@@ -17,6 +17,7 @@ use crate::protocol::{
     CommandType, ConnectionState, PROTOCOL_VERSION, PendingCommand, PriceUpdated, RecentFill,
     RiskEvent, RuntimeSnapshot, SystemEvent,
 };
+use crate::{risk, strategy};
 use crate::storage::{PersistedRuntime, SqliteStorage};
 
 const ENGINE_COMMAND_BUFFER: usize = 256;
@@ -96,6 +97,7 @@ pub enum EngineCommand {
 pub enum EngineEvent {
     CommandAck(CommandAck),
     PriceUpdated(PriceUpdated),
+    RiskAlert(RiskEvent),
     RuntimeSnapshot(RuntimeSnapshot),
     ConnectionChanged(ConnectionState),
 }
@@ -310,11 +312,9 @@ async fn run_engine(
                 }
                 replace_read_model(&read_model, &aggregate);
                 match issued {
-                    IssuedCommand::Immediate { accepted, event } => {
+                    IssuedCommand::Immediate { accepted, events } => {
                         let _ = reply_to.send(Ok(accepted));
-                        if events_tx.send(event).await.is_err() {
-                            warn!("engine event channel closed while publishing command ack");
-                        }
+                        publish_events(&events_tx, events).await;
                     }
                     IssuedCommand::Deferred { accepted, launch } => {
                         let execution_adapter = execution_adapter.clone();
@@ -358,7 +358,7 @@ async fn run_engine(
             }
             EngineCommand::EmitPriceTick { reply_to } => {
                 let previous = storage.as_ref().map(|_| aggregate.clone());
-                let (tick, event) = aggregate.emit_price_tick();
+                let (tick, events) = aggregate.emit_price_tick();
                 if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
                     if let Some(previous) = previous {
                         aggregate = previous;
@@ -373,17 +373,15 @@ async fn run_engine(
                 }
                 replace_read_model(&read_model, &aggregate);
                 let _ = reply_to.send(Ok(tick.clone()));
-                if events_tx.send(event).await.is_err() {
-                    warn!("engine event channel closed while publishing price update");
-                }
+                publish_events(&events_tx, events).await;
             }
             EngineCommand::SyncConnection {
                 connection,
                 reply_to,
             } => {
                 let previous = storage.as_ref().map(|_| aggregate.clone());
-                let event = aggregate.sync_connection(connection);
-                if event.is_some()
+                let events = aggregate.sync_connection(connection);
+                if !events.is_empty()
                     && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
                 {
                     if let Some(previous) = previous {
@@ -399,16 +397,12 @@ async fn run_engine(
                 }
                 replace_read_model(&read_model, &aggregate);
                 let _ = reply_to.send(Ok(()));
-                if let Some(event) = event
-                    && events_tx.send(event).await.is_err()
-                {
-                    warn!("engine event channel closed while publishing connection change");
-                }
+                publish_events(&events_tx, events).await;
             }
             EngineCommand::SyncRuntime { patch, reply_to } => {
                 let previous = storage.as_ref().map(|_| aggregate.clone());
-                let event = aggregate.sync_runtime(patch);
-                if event.is_some()
+                let events = aggregate.sync_runtime(patch);
+                if !events.is_empty()
                     && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
                 {
                     if let Some(previous) = previous {
@@ -424,11 +418,7 @@ async fn run_engine(
                 }
                 replace_read_model(&read_model, &aggregate);
                 let _ = reply_to.send(Ok(()));
-                if let Some(event) = event
-                    && events_tx.send(event).await.is_err()
-                {
-                    warn!("engine event channel closed while publishing runtime snapshot");
-                }
+                publish_events(&events_tx, events).await;
             }
             EngineCommand::SyncMarketPrices {
                 last_price,
@@ -437,8 +427,8 @@ async fn run_engine(
                 reply_to,
             } => {
                 let previous = storage.as_ref().map(|_| aggregate.clone());
-                let event = aggregate.sync_market_prices(last_price, mark_price, emitted_at);
-                if event.is_some()
+                let events = aggregate.sync_market_prices(last_price, mark_price, emitted_at);
+                if !events.is_empty()
                     && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
                 {
                     if let Some(previous) = previous {
@@ -454,20 +444,17 @@ async fn run_engine(
                 }
                 replace_read_model(&read_model, &aggregate);
                 let _ = reply_to.send(Ok(()));
-                if let Some(event) = event
-                    && events_tx.send(event).await.is_err()
-                {
-                    warn!("engine event channel closed while publishing market prices");
-                }
+                publish_events(&events_tx, events).await;
             }
             EngineCommand::ExecutionFinished {
                 command_id,
                 outcome,
             } => {
                 let previous = storage.as_ref().map(|_| aggregate.clone());
-                let Some(event) = aggregate.finish_execution(&command_id, outcome) else {
+                let events = aggregate.finish_execution(&command_id, outcome);
+                if events.is_empty() {
                     continue;
-                };
+                }
                 if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
                     if let Some(previous) = previous {
                         aggregate = previous;
@@ -480,15 +467,14 @@ async fn run_engine(
                     continue;
                 }
                 replace_read_model(&read_model, &aggregate);
-                if events_tx.send(event).await.is_err() {
-                    warn!("engine event channel closed while publishing execution result");
-                }
+                publish_events(&events_tx, events).await;
             }
             EngineCommand::ExecutionTimedOut { command_id } => {
                 let previous = storage.as_ref().map(|_| aggregate.clone());
-                let Some(event) = aggregate.timeout_execution(&command_id) else {
+                let events = aggregate.timeout_execution(&command_id);
+                if events.is_empty() {
                     continue;
-                };
+                }
                 if let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate) {
                     if let Some(previous) = previous {
                         aggregate = previous;
@@ -501,10 +487,20 @@ async fn run_engine(
                     continue;
                 }
                 replace_read_model(&read_model, &aggregate);
-                if events_tx.send(event).await.is_err() {
-                    warn!("engine event channel closed while publishing execution timeout");
-                }
+                publish_events(&events_tx, events).await;
             }
+        }
+    }
+}
+
+async fn publish_events(
+    events_tx: &mpsc::Sender<SequencedEngineEvent>,
+    events: Vec<SequencedEngineEvent>,
+) {
+    for event in events {
+        if events_tx.send(event).await.is_err() {
+            warn!("engine event channel closed while publishing engine event");
+            break;
         }
     }
 }
@@ -527,7 +523,7 @@ struct RuntimeAggregate {
 enum IssuedCommand {
     Immediate {
         accepted: CommandAccepted,
-        event: SequencedEngineEvent,
+        events: Vec<SequencedEngineEvent>,
     },
     Deferred {
         accepted: CommandAccepted,
@@ -542,17 +538,25 @@ struct DeferredExecution {
     snapshot: RuntimeSnapshot,
 }
 
+struct ReconcileOutcome {
+    snapshot_changed: bool,
+    risk_alerts: Vec<RiskEvent>,
+}
+
 impl RuntimeAggregate {
     fn from_persisted(runtime: PersistedRuntime) -> Self {
-        Self {
+        let mut aggregate = Self {
             snapshot: runtime.snapshot,
             risk_events: runtime.risk_events,
             system_events: runtime.system_events,
             last_sequence: runtime.last_sequence,
-        }
+        };
+        let timestamp = now_utc();
+        let _ = aggregate.reconcile_runtime(timestamp, false);
+        aggregate
     }
 
-    fn emit_price_tick(&mut self) -> (PriceUpdated, SequencedEngineEvent) {
+    fn emit_price_tick(&mut self) -> (PriceUpdated, Vec<SequencedEngineEvent>) {
         let emitted_at = now_utc();
         self.snapshot.runtime.last_price = round_price(self.snapshot.runtime.last_price + 0.11);
         self.snapshot.runtime.mark_price = round_price(self.snapshot.runtime.mark_price + 0.08);
@@ -564,30 +568,27 @@ impl RuntimeAggregate {
             mark_price: self.snapshot.runtime.mark_price,
             emitted_at,
         };
-        let sequence = self.next_sequence();
-        (
-            tick.clone(),
-            SequencedEngineEvent {
-                sequence,
-                event: EngineEvent::PriceUpdated(tick),
-            },
-        )
+        let reconcile = self.reconcile_runtime(tick.emitted_at.clone(), true);
+        let mut events = vec![self.sequenced_event(EngineEvent::PriceUpdated(tick.clone()))];
+        events.extend(self.risk_alert_events(reconcile.risk_alerts));
+        if reconcile.snapshot_changed {
+            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(
+                self.snapshot.clone(),
+            )));
+        }
+        (tick, events)
     }
 
-    fn sync_connection(&mut self, connection: ConnectionState) -> Option<SequencedEngineEvent> {
+    fn sync_connection(&mut self, connection: ConnectionState) -> Vec<SequencedEngineEvent> {
         if self.snapshot.connection == connection {
-            return None;
+            return Vec::new();
         }
 
         self.snapshot.connection = connection.clone();
-        let sequence = self.next_sequence();
-        Some(SequencedEngineEvent {
-            sequence,
-            event: EngineEvent::ConnectionChanged(connection),
-        })
+        vec![self.sequenced_event(EngineEvent::ConnectionChanged(connection))]
     }
 
-    fn sync_runtime(&mut self, patch: RuntimePatch) -> Option<SequencedEngineEvent> {
+    fn sync_runtime(&mut self, patch: RuntimePatch) -> Vec<SequencedEngineEvent> {
         let mut changed = false;
 
         if let Some(symbol) = patch.symbol
@@ -634,14 +635,15 @@ impl RuntimeAggregate {
         }
 
         if !changed {
-            return None;
+            return Vec::new();
         }
 
-        let sequence = self.next_sequence();
-        Some(SequencedEngineEvent {
-            sequence,
-            event: EngineEvent::RuntimeSnapshot(self.snapshot.clone()),
-        })
+        let reconcile = self.reconcile_runtime(now_utc(), true);
+        let mut events = vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(
+            self.snapshot.clone(),
+        ))];
+        events.extend(self.risk_alert_events(reconcile.risk_alerts));
+        events
     }
 
     fn sync_market_prices(
@@ -649,7 +651,7 @@ impl RuntimeAggregate {
         last_price: Option<f64>,
         mark_price: Option<f64>,
         emitted_at: String,
-    ) -> Option<SequencedEngineEvent> {
+    ) -> Vec<SequencedEngineEvent> {
         let mut changed = false;
 
         if let Some(last_price) = last_price {
@@ -675,7 +677,7 @@ impl RuntimeAggregate {
         }
 
         if !changed {
-            return None;
+            return Vec::new();
         }
 
         let tick = PriceUpdated {
@@ -684,11 +686,15 @@ impl RuntimeAggregate {
             mark_price: self.snapshot.runtime.mark_price,
             emitted_at,
         };
-        let sequence = self.next_sequence();
-        Some(SequencedEngineEvent {
-            sequence,
-            event: EngineEvent::PriceUpdated(tick),
-        })
+        let reconcile = self.reconcile_runtime(tick.emitted_at.clone(), true);
+        let mut events = vec![self.sequenced_event(EngineEvent::PriceUpdated(tick))];
+        events.extend(self.risk_alert_events(reconcile.risk_alerts));
+        if reconcile.snapshot_changed {
+            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(
+                self.snapshot.clone(),
+            )));
+        }
+        events
     }
 
     fn issue_command(
@@ -724,22 +730,22 @@ impl RuntimeAggregate {
 
         match command {
             CommandType::Pause => {
-                let event = self.finalize_command(
+                let events = self.finalize_command(
                     request.command_id,
                     command,
                     accepted_at,
                     local_command_outcome("Strategy paused.", "paused"),
                 );
-                Ok(IssuedCommand::Immediate { accepted, event })
+                Ok(IssuedCommand::Immediate { accepted, events })
             }
             CommandType::Resume => {
-                let event = self.finalize_command(
+                let events = self.finalize_command(
                     request.command_id,
                     command,
                     accepted_at,
                     local_command_outcome("Strategy resumed.", "running"),
                 );
-                Ok(IssuedCommand::Immediate { accepted, event })
+                Ok(IssuedCommand::Immediate { accepted, events })
             }
             CommandType::CancelAll
             | CommandType::FlattenNow
@@ -751,7 +757,7 @@ impl RuntimeAggregate {
                     .iter()
                     .find(|item| is_execution_command(item.command))
                 {
-                    let event = self.finalize_command(
+                    let events = self.finalize_command(
                         request.command_id,
                         command,
                         accepted_at,
@@ -761,7 +767,7 @@ impl RuntimeAggregate {
                             in_flight.command_id
                         )),
                     );
-                    return Ok(IssuedCommand::Immediate { accepted, event });
+                    return Ok(IssuedCommand::Immediate { accepted, events });
                 }
                 let snapshot = self.snapshot.clone();
                 self.snapshot
@@ -789,44 +795,50 @@ impl RuntimeAggregate {
         &mut self,
         command_id: &str,
         outcome: ExecutionOutcome,
-    ) -> Option<SequencedEngineEvent> {
+    ) -> Vec<SequencedEngineEvent> {
         let pending = self
             .snapshot
             .execution
             .pending_commands
             .iter()
             .find(|item| item.command_id == command_id)
-            .cloned()?;
+            .cloned();
+        let Some(pending) = pending else {
+            return Vec::new();
+        };
         self.snapshot
             .execution
             .pending_commands
             .retain(|item| item.command_id != command_id);
-        Some(self.finalize_command(
+        self.finalize_command(
             command_id.into(),
             pending.command,
             pending.requested_at,
             outcome,
-        ))
+        )
     }
 
-    fn timeout_execution(&mut self, command_id: &str) -> Option<SequencedEngineEvent> {
+    fn timeout_execution(&mut self, command_id: &str) -> Vec<SequencedEngineEvent> {
         let pending = self
             .snapshot
             .execution
             .pending_commands
             .iter()
             .find(|item| item.command_id == command_id)
-            .cloned()?;
+            .cloned();
+        let Some(pending) = pending else {
+            return Vec::new();
+        };
         self.snapshot
             .execution
             .pending_commands
             .retain(|item| item.command_id != command_id);
-        Some(self.finalize_command(
+        self.finalize_command(
             command_id.into(),
             pending.command,
             pending.requested_at,
             ExecutionOutcome::timed_out("Execution timed out while waiting for terminal result."),
-        ))
+        )
     }
 
     fn finalize_command(
@@ -835,7 +847,7 @@ impl RuntimeAggregate {
         command: CommandType,
         accepted_at: String,
         outcome: ExecutionOutcome,
-    ) -> SequencedEngineEvent {
+    ) -> Vec<SequencedEngineEvent> {
         self.apply_execution_outcome(&outcome);
 
         let ack = CommandAck {
@@ -875,10 +887,21 @@ impl RuntimeAggregate {
             },
         );
 
-        SequencedEngineEvent {
+        let reconcile = self.reconcile_runtime(
+            now_utc(),
+            outcome.open_orders.is_none() && runtime_patch_has_changes(&outcome.runtime_patch),
+        );
+        let mut events = vec![SequencedEngineEvent {
             sequence,
             event: EngineEvent::CommandAck(ack),
+        }];
+        events.extend(self.risk_alert_events(reconcile.risk_alerts));
+        if reconcile.snapshot_changed {
+            events.push(self.sequenced_event(EngineEvent::RuntimeSnapshot(
+                self.snapshot.clone(),
+            )));
         }
+        events
     }
 
     fn idempotent_hit(
@@ -947,11 +970,81 @@ impl RuntimeAggregate {
         };
         Ok(IssuedCommand::Immediate {
             accepted,
-            event: SequencedEngineEvent {
+            events: vec![SequencedEngineEvent {
                 sequence,
                 event: EngineEvent::CommandAck(ack),
-            },
+            }],
         })
+    }
+
+    fn reconcile_runtime(&mut self, timestamp: String, sync_execution_orders: bool) -> ReconcileOutcome {
+        let previous_snapshot = self.snapshot.clone();
+
+        let risk_evaluation = risk::evaluate(
+            &self.snapshot.runtime,
+            &self.snapshot.risk,
+            &self.snapshot.strategy.config,
+        );
+        self.snapshot.risk = risk_evaluation.state;
+        for event in &risk_evaluation.new_events {
+            self.record_risk_event(event.clone());
+        }
+
+        self.snapshot.strategy =
+            strategy::reconcile(&self.snapshot.runtime, &self.snapshot.risk, &self.snapshot.strategy);
+        if sync_execution_orders {
+            let desired_orders = strategy::desired_open_orders(
+                &self.snapshot.strategy,
+                &self.snapshot.runtime.strategy_state,
+                self.snapshot.risk.breaker_engaged,
+                &self.snapshot.execution.open_orders,
+                &timestamp,
+            );
+            if self.snapshot.execution.open_orders != desired_orders {
+                self.snapshot.execution.open_orders = desired_orders;
+            }
+        }
+        self.snapshot.risk.unacked_alerts = self
+            .risk_events
+            .iter()
+            .filter(|event| event.acknowledged_at.is_none())
+            .count() as u32;
+
+        ReconcileOutcome {
+            snapshot_changed: self.snapshot != previous_snapshot,
+            risk_alerts: risk_evaluation.new_events,
+        }
+    }
+
+    fn record_risk_event(&mut self, event: RiskEvent) {
+        self.risk_events.insert(0, event.clone());
+        while self.risk_events.len() > 50 {
+            self.risk_events.pop();
+        }
+        self.system_events.insert(
+            0,
+            SystemEvent {
+                level: match event.severity {
+                    crate::protocol::RiskLevel::Ok | crate::protocol::RiskLevel::Watch => "info",
+                    crate::protocol::RiskLevel::Warning => "warn",
+                    crate::protocol::RiskLevel::Danger => "error",
+                }
+                .into(),
+                source: "risk".into(),
+                message: format!("{}: {}", event.code, event.message),
+                created_at: event.created_at.clone(),
+            },
+        );
+        while self.system_events.len() > 50 {
+            self.system_events.pop();
+        }
+    }
+
+    fn risk_alert_events(&mut self, alerts: Vec<RiskEvent>) -> Vec<SequencedEngineEvent> {
+        alerts
+            .into_iter()
+            .map(|alert| self.sequenced_event(EngineEvent::RiskAlert(alert)))
+            .collect()
     }
 
     fn apply_execution_outcome(&mut self, outcome: &ExecutionOutcome) {
@@ -981,6 +1074,13 @@ impl RuntimeAggregate {
     fn next_sequence(&mut self) -> u64 {
         self.last_sequence += 1;
         self.last_sequence
+    }
+
+    fn sequenced_event(&mut self, event: EngineEvent) -> SequencedEngineEvent {
+        SequencedEngineEvent {
+            sequence: self.next_sequence(),
+            event,
+        }
     }
 }
 
@@ -1027,6 +1127,14 @@ fn local_command_outcome(summary: &str, strategy_state: &str) -> ExecutionOutcom
     };
     outcome.links = CommandLinks::default();
     outcome
+}
+
+fn runtime_patch_has_changes(patch: &ExecutionRuntimePatch) -> bool {
+    patch.strategy_state.is_some()
+        || patch.position_qty.is_some()
+        || patch.position_avg_price.is_some()
+        || patch.unrealized_pnl.is_some()
+        || patch.realized_pnl.is_some()
 }
 
 fn is_execution_command(command: CommandType) -> bool {
