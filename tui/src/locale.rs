@@ -735,7 +735,7 @@ impl MarketCopy {
     pub fn stale_label(self) -> &'static str {
         match self.locale {
             Locale::EnUs => "Stale  ",
-            Locale::ZhCn => "陈旧  ",
+            Locale::ZhCn => "滞后  ",
         }
     }
 
@@ -1238,14 +1238,14 @@ impl SelectorCopy {
             Locale::EnUs => {
                 "Service is online, but Binance market stream is reconnecting. Treat market data as stale."
             }
-            Locale::ZhCn => "服务在线，但 Binance 行情流正在重连。请按陈旧数据处理行情。",
+            Locale::ZhCn => "服务在线，但 Binance 行情流正在重连。请按滞后数据处理行情。",
         }
     }
 
     pub fn stale_label(self) -> &'static str {
         match self.locale {
             Locale::EnUs => "STALE",
-            Locale::ZhCn => "陈旧",
+            Locale::ZhCn => "滞后",
         }
     }
 
@@ -1286,7 +1286,7 @@ impl SelectorCopy {
                 self.optional_status_word(user_stream_connected)
             ),
             Locale::ZhCn => format!(
-                "http {} / 陈旧 {}ms / 用户 {}",
+                "http {} / 滞后 {}ms / 用户 {}",
                 self.status_word(http_available),
                 stale_age_ms,
                 self.optional_status_word(user_stream_connected)
@@ -1313,7 +1313,7 @@ impl SelectorCopy {
     pub fn healthy_detail(self, stale_age_ms: u64) -> String {
         match self.locale {
             Locale::EnUs => format!("stale {stale_age_ms}ms"),
-            Locale::ZhCn => format!("陈旧 {stale_age_ms}ms"),
+            Locale::ZhCn => format!("滞后 {stale_age_ms}ms"),
         }
     }
 
@@ -1532,7 +1532,7 @@ impl ModalCopy {
             (Locale::ZhCn, CommandType::Resume) => (
                 "确认恢复",
                 "收到确认后，策略将恢复正常订单管理。",
-                "如果客户端显示陈旧或重连状态，请先确认行情健康。",
+                "如果客户端显示滞后或重连状态，请先确认行情健康。",
             ),
         }
     }

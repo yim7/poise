@@ -569,6 +569,24 @@ mod tests {
     }
 
     #[test]
+    fn healthy_connection_detail_uses_lagging_copy_in_chinese() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+        state.connection.ws_connected = true;
+        state.connection.market_ws_connected = true;
+        state.connection.http_available = true;
+        state.connection.user_stream_connected = Some(true);
+        state.connection.stale_age_ms = 0;
+
+        let health = connection_health(&state);
+        let detail = dashboard_health_detail(&state);
+
+        assert_eq!(health.kind, ConnectionHealthKind::Healthy);
+        assert_eq!(health.detail, "滞后 0ms");
+        assert_eq!(detail, "滞后 0ms");
+    }
+
+    #[test]
     fn service_reconnect_health_label_is_specific() {
         let mut state = AppState::sample();
         state.connection.ws_connected = false;
