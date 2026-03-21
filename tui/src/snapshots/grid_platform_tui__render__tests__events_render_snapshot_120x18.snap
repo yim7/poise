@@ -2,7 +2,7 @@
 source: tui/src/render.rs
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  HEALTHY  42ms / stale 0ms  Focus Fills  Pending 0                              
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  stale 0ms  Focus Fills  Pending 0                                     
  Dashboard   Grid   Market   Events   Help                                                                              
                                                                                                                         
                                                                                                                         

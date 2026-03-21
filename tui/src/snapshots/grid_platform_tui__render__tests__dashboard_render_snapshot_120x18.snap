@@ -2,7 +2,7 @@
 source: tui/src/render.rs
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  HEALTHY  42ms / stale 0ms  Focus Execution Focus  Pending 0                    
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  stale 0ms  Focus Execution Focus  Pending 0                           
  Dashboard   Grid   Market   Events   Help                                                                              
                                                                                                                         
                                                                                                                         
@@ -12,7 +12,7 @@ expression: snapshot
 └────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 ┌ 交 易 所 挂 单  ────────────────────────────────────────────────────────────┐┌ Market + Health ───────────────────────────┐
 │当 前 模 式 只 提 供 策 略 挂 单 镜 像 。                                             ││Last  2361.48   Mark  2361.55               │
-│尚 未 接 入 真 实 交 易 所 挂 单 查 询 。                                             ││Svc WS  UP   Mkt WS  UP   42ms stale 0ms    │
+│尚 未 接 入 真 实 交 易 所 挂 单 查 询 。                                             ││Svc WS  UP   Mkt WS  UP   stale 0ms         │
 └────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 ┌ Recent Fills ──────────────────────────────────────────────────────────┐┌ Command Timeline ──────────────────────────┐
 │BUY 2349.10 x 0.050  pnl +2.51                                          ││ ACK  PAUSE                                 │

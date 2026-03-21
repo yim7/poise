@@ -147,7 +147,6 @@ pub struct ConnectionState {
     pub ws_connected: bool,
     #[serde(default)]
     pub user_stream_connected: Option<bool>,
-    pub latency_ms: Option<u32>,
     pub last_heartbeat_at: String,
     pub reconnect_backoff_ms: u64,
     pub stale_age_ms: u64,
@@ -498,7 +497,6 @@ impl RuntimeSnapshot {
                 http_available: true,
                 ws_connected: false,
                 user_stream_connected: None,
-                latency_ms: None,
                 last_heartbeat_at: String::new(),
                 reconnect_backoff_ms: 0,
                 stale_age_ms: 0,
@@ -548,7 +546,6 @@ impl RuntimeSnapshot {
                 http_available: true,
                 ws_connected: false,
                 user_stream_connected: None,
-                latency_ms: Some(42),
                 last_heartbeat_at: "2025-01-01T00:00:00Z".into(),
                 reconnect_backoff_ms: 0,
                 stale_age_ms: 0,
@@ -741,13 +738,18 @@ mod tests {
     }
 
     #[test]
+    fn runtime_snapshot_sample_does_not_serialize_connection_latency() {
+        let serialized = serde_json::to_value(RuntimeSnapshot::sample()).expect("serialize sample");
+        assert!(serialized["connection"].get("latency_ms").is_none());
+    }
+
+    #[test]
     fn runtime_snapshot_decodes_when_open_orders_source_is_omitted() {
         let raw = json!({
             "connection": {
                 "http_available": true,
                 "ws_connected": false,
                 "user_stream_connected": null,
-                "latency_ms": 42,
                 "last_heartbeat_at": "2025-01-01T00:00:00Z",
                 "reconnect_backoff_ms": 0,
                 "stale_age_ms": 0

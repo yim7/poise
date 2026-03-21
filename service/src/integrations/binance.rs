@@ -95,7 +95,6 @@ pub(crate) fn prepare_bootstrap_runtime(
     runtime.snapshot.connection.http_available = false;
     runtime.snapshot.connection.ws_connected = false;
     runtime.snapshot.connection.user_stream_connected = config.api_key.as_ref().map(|_| false);
-    runtime.snapshot.connection.latency_ms = None;
     runtime.snapshot.connection.last_heartbeat_at.clear();
     runtime.snapshot.connection.reconnect_backoff_ms = 0;
     runtime.snapshot.connection.stale_age_ms = 0;
@@ -561,7 +560,6 @@ async fn run_metadata_loop(
 ) {
     let mut ticker = interval(config.metadata_refresh_interval);
     loop {
-        let started = Instant::now();
         let result = async {
             let exchange_info = transport.fetch_exchange_info(&config.symbol).await?;
             let schedule = transport.fetch_trading_schedule().await?;
@@ -576,8 +574,6 @@ async fn run_metadata_loop(
             reporter
                 .update(|state| {
                     state.http_available = true;
-                    state.latency_ms =
-                        Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32);
                 })
                 .await
         }
@@ -585,11 +581,9 @@ async fn run_metadata_loop(
 
         if let Err(error) = result {
             warn!(?error, "binance metadata sync failed");
-            let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
             let _ = reporter
                 .update(|state| {
                     state.http_available = false;
-                    state.latency_ms = Some(latency_ms);
                 })
                 .await;
         }

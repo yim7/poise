@@ -68,7 +68,6 @@ fn handle_protocol_event(state: &mut AppState, event: ServerEvent) -> Vec<Effect
             state.connection.http_available = connection.http_available;
             state.connection.market_ws_connected = connection.ws_connected;
             state.connection.user_stream_connected = connection.user_stream_connected;
-            state.connection.latency_ms = connection.latency_ms;
             state.connection.stale_age_ms = connection.stale_age_ms;
             state.connection.last_heartbeat_at = connection.last_heartbeat_at;
             state.connection.market_reconnect_backoff_ms = connection.reconnect_backoff_ms;

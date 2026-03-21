@@ -1170,15 +1170,13 @@ fn draw_market(
             Span::styled(vm.user_stream_status, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Latency  ", theme.muted()),
-            Span::styled(vm.latency, theme.panel()),
-            Span::styled("   Stale  ", theme.muted()),
+            Span::styled("Stale  ", theme.muted()),
             Span::styled(vm.stale_age, theme.warning()),
+            Span::styled("   Retry  ", theme.muted()),
+            Span::styled(vm.reconnect_attempt, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Retry  ", theme.muted()),
-            Span::styled(vm.reconnect_attempt, theme.panel()),
-            Span::styled("   Market Backoff  ", theme.muted()),
+            Span::styled("Market Backoff  ", theme.muted()),
             Span::styled(vm.market_backoff, theme.panel()),
         ]),
         Line::from(vec![
@@ -1982,7 +1980,6 @@ mod tests {
             state.connection.http_available = true;
             state.connection.user_stream_connected = Some(false);
             state.connection.stale_age_ms = 0;
-            state.connection.latency_ms = Some(42);
         });
 
         assert!(rendered.contains("Last"));

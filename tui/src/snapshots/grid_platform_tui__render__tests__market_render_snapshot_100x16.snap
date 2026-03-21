@@ -1,6 +1,5 @@
 ---
 source: tui/src/render.rs
-assertion_line: 1322
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Tape                                        
@@ -9,8 +8,8 @@ expression: snapshot
 ┌ Tape ──────────────────────────┐┌ Connectivity ─────────────────┐┌ Runtime ──────────────────────┐
 │Last  2361.48                   ││Service WS  UP   HTTP  UP      ││Session  regular               │
 │Mark  2361.55                   ││Market WS  UP   User WS  N/A   ││Heartbeat  2025-01-01T00:00:00Z│
-│Basis  +0.07                    ││Latency  42ms   Stale  0ms     ││Strategy  running              │
-│                                ││Retry  0   Market Backoff  0ms ││                               │
+│Basis  +0.07                    ││Stale  0ms   Retry  0          ││Strategy  running              │
+│                                ││Market Backoff  0ms            ││                               │
 │                                ││Mode  HEALTHY                  ││                               │
 │                                ││Service and Binance streams are││                               │
 │                                ││both healthy.                  ││                               │

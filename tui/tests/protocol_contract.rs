@@ -66,7 +66,6 @@ fn runtime_snapshot_decodes_when_user_stream_field_is_omitted() {
         "connection": {
             "http_available": true,
             "ws_connected": false,
-            "latency_ms": 42,
             "last_heartbeat_at": "2025-01-01T00:00:00Z",
             "reconnect_backoff_ms": 0,
             "stale_age_ms": 0
@@ -112,7 +111,6 @@ fn runtime_snapshot_decodes_open_orders_source_and_legacy_payloads() {
             "http_available": true,
             "ws_connected": false,
             "user_stream_connected": null,
-            "latency_ms": 42,
             "last_heartbeat_at": "2025-01-01T00:00:00Z",
             "reconnect_backoff_ms": 0,
             "stale_age_ms": 0
@@ -163,7 +161,6 @@ fn runtime_snapshot_decodes_open_orders_source_and_legacy_payloads() {
         "connection": {
             "http_available": true,
             "ws_connected": false,
-            "latency_ms": 42,
             "last_heartbeat_at": "2025-01-01T00:00:00Z",
             "reconnect_backoff_ms": 0,
             "stale_age_ms": 0
@@ -268,12 +265,10 @@ fn server_envelope_decodes_connection_changed() {
         ServerEvent::ConnectionChanged(ConnectionState {
             ws_connected,
             user_stream_connected,
-            latency_ms,
             ..
         }) => {
             assert!(ws_connected);
             assert_eq!(user_stream_connected, None);
-            assert_eq!(latency_ms, Some(87));
         }
         _ => panic!("unexpected event type"),
     }
@@ -290,7 +285,6 @@ fn connection_changed_decodes_when_user_stream_field_is_omitted() {
         "payload": {
             "http_available": true,
             "ws_connected": true,
-            "latency_ms": 87,
             "last_heartbeat_at": "2025-01-01T00:00:06Z",
             "reconnect_backoff_ms": 0,
             "stale_age_ms": 0
@@ -307,6 +301,37 @@ fn connection_changed_decodes_when_user_stream_field_is_omitted() {
 }
 
 #[test]
+fn connection_changed_decodes_when_latency_field_is_omitted() {
+    let raw = r#"{
+        "version": "v1alpha1",
+        "event_id": "evt_connection_changed_no_latency",
+        "type": "connection_changed",
+        "emitted_at": "2025-01-01T00:00:06Z",
+        "sequence": 14,
+        "payload": {
+            "http_available": true,
+            "ws_connected": true,
+            "user_stream_connected": null,
+            "last_heartbeat_at": "2025-01-01T00:00:06Z",
+            "reconnect_backoff_ms": 0,
+            "stale_age_ms": 0
+        }
+    }"#;
+    let parsed: ServerEnvelope = serde_json::from_str(raw).unwrap();
+    match parsed.event {
+        ServerEvent::ConnectionChanged(ConnectionState {
+            ws_connected,
+            user_stream_connected,
+            ..
+        }) => {
+            assert!(ws_connected);
+            assert_eq!(user_stream_connected, None);
+        }
+        _ => panic!("unexpected event type"),
+    }
+}
+
+#[test]
 fn http_success_envelope_decodes_runtime_snapshot() {
     let raw = r#"{
         "version": "v1alpha1",
@@ -316,7 +341,6 @@ fn http_success_envelope_decodes_runtime_snapshot() {
                 "http_available": true,
                 "ws_connected": false,
                 "user_stream_connected": null,
-                "latency_ms": 42,
                 "last_heartbeat_at": "2025-01-01T00:00:00Z",
                 "reconnect_backoff_ms": 0,
                 "stale_age_ms": 0
