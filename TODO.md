@@ -7,8 +7,19 @@
 
 - 当前主线：待确认下一里程碑
 - 并行预研：无
-- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`
-- 最近验证：`cargo test`、`cargo fmt --check`、`cargo clippy --workspace --all-targets` 已通过；整体验收补缺完成，paper 持仓行情刷新、空价格 replay step 和 reduce-only 成交数量口径已补回归测试并复核，无新的阻断项
+- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI 首次快照等待/失败重试空态与服务端空 bootstrap 已验收
+- 最近验证：`cargo fmt --all --check`、`cargo test` 已通过；首次快照等待态、失败重试态、真实空态和运行态操作禁用链路已补验收
+
+## 首次快照空态验收
+
+- [x] 服务端默认 bootstrap 返回已知空业务态，不再走 `sample`
+- [x] TUI 启动默认进入 `WaitingFirstSnapshot`
+- [x] 首次快照失败后进入 `SnapshotRetrying` 并自动退避重试
+- [x] 首次快照未就绪前禁用 `p / r / c / f / s` 操作并显示正确 toast
+- [x] `Help` 页在 bootstrap 期间保持可访问
+- [x] 首次快照成功后进入 `Ready`，空 bootstrap 显示真实空态
+- [x] 渲染快照已覆盖 waiting / retrying / help bootstrap 页面
+- [x] 本地 E2E 已覆盖 waiting 禁用操作与首次成功后的真实空态
 
 ## 验收补缺
 

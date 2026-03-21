@@ -363,7 +363,11 @@ async fn local_paper_first_snapshot_bootstrap_enables_runtime_ops_only_after_rea
 
     app.submit_key(KeyAction::Pause).await?;
     assert_eq!(
-        app.state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+        app.state
+            .ui
+            .toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
         Some("首次快照未就绪，操作已禁用")
     );
     assert!(matches!(

@@ -2020,8 +2020,13 @@ mod tests {
         assert_snapshot!(name, snapshot);
     }
 
-    fn assert_page_snapshot_after_mutate<F>(page: Page, width: u16, height: u16, name: &str, mutate: F)
-    where
+    fn assert_page_snapshot_after_mutate<F>(
+        page: Page,
+        width: u16,
+        height: u16,
+        name: &str,
+        mutate: F,
+    ) where
         F: FnOnce(&mut AppState),
     {
         let snapshot = render_page_to_string_after_mutate(page, width, height, mutate);
