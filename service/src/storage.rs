@@ -9,8 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::protocol::{
-    CommandLinks, CommandRecord, OpenOrder, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot,
-    SystemEvent,
+    CommandLinks, CommandRecord, OpenOrder, RecentFill, RiskEvent, RuntimeSnapshot, SystemEvent,
 };
 
 const RECENT_COMMAND_WINDOW: usize = 24;

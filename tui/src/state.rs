@@ -264,7 +264,6 @@ impl AppState {
             },
             execution: ExecutionViewState {
                 open_orders: Vec::new(),
-                open_orders_source: OpenOrdersSource::Unavailable,
                 recent_fills: VecDeque::new(),
                 pending_commands: Vec::new(),
                 last_command_ack: None,

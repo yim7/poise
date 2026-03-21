@@ -8,7 +8,7 @@ expression: snapshot
                                                                                                     
 ┌ Keymap ─────────────────────────────────────────────┐┌ Ops Notes ────────────────────────────────┐
 │1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││Focus  Keymap                              │
-│Tab / Shift-Tab cycle real panel focus with          ││Health  SERVICE RECONNECTING               │
+│Tab / Shift-Tab cycle real panel focus with          ││Health  RECONNECTING                       │
 │highlighted borders.                                 ││pending -> accepted -> ack marks the normal│
 │p pause   r resume                                   ││command path.                              │
 │c cancel all   f flatten now   s shutdown after      ││failed / timed_out require checking service│

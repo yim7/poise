@@ -1,9 +1,9 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2030
+assertion_line: 2020
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Execution Focus                
+ GRID PLATFORM  XAUUSDT testnet running  RECONNECTING  Focus Execution Focus                        
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
