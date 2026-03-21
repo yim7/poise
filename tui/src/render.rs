@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     selectors::{self, ConnectionHealthKind},
-    state::{AppState, CommandTimelineStage, Modal, Page, ToastLevel},
+    state::{AppState, CommandTimelineStage, Modal, Page, SnapshotBootstrapState, ToastLevel},
     theme::{PanelTone, StatusTone, Theme},
 };
 
@@ -77,30 +77,58 @@ fn draw_status(
     theme: &Theme,
     viewport: Viewport,
 ) {
-    let vm = selectors::dashboard(state);
-    let health = selectors::connection_health(state);
     let focus = state.ui.page.focus_label(state.ui.focus_index);
-    let mut spans = vec![
-        Span::styled(" GRID PLATFORM ", theme.emphasis()),
-        Span::styled(
-            format!(
-                " {} {} {} ",
-                vm.symbol, state.runtime.env, vm.strategy_state
-            ),
-            theme.panel().add_modifier(Modifier::BOLD),
-        ),
-        badge_span(health.label, theme, status_tone_for_connection(health.kind)),
-    ];
+    let mut spans = vec![Span::styled(" GRID PLATFORM ", theme.emphasis())];
 
-    if viewport.narrow() {
-        spans.push(Span::styled(format!(" Focus {} ", focus), theme.info()));
-    } else {
-        spans.push(Span::styled(format!(" {} ", health.detail), theme.muted()));
-        spans.push(Span::styled(format!(" Focus {} ", focus), theme.info()));
-        spans.push(Span::styled(
-            format!(" Pending {} ", state.execution.pending_commands.len()),
-            theme.warning(),
-        ));
+    match &state.snapshot_state {
+        SnapshotBootstrapState::WaitingFirstSnapshot => {
+            spans.push(badge_span("WAITING SNAPSHOT", theme, StatusTone::Warning));
+            if viewport.narrow() {
+                spans.push(Span::styled(" 等待首次快照 ", theme.muted()));
+            } else {
+                spans.push(Span::styled(
+                    " 等待 /runtime/snapshot 返回后再显示真实数据 ",
+                    theme.muted(),
+                ));
+            }
+        }
+        SnapshotBootstrapState::SnapshotRetrying {
+            last_error: _,
+            retry_count,
+            retry_in_ms,
+        } => {
+            spans.push(badge_span("SNAPSHOT FAILED", theme, StatusTone::Danger));
+            spans.push(Span::styled(
+                format!(" retry {} in {}ms ", retry_count, retry_in_ms),
+                theme.danger(),
+            ));
+        }
+        SnapshotBootstrapState::Ready => {
+            let vm = selectors::dashboard(state);
+            let health = selectors::connection_health(state);
+            spans.push(Span::styled(
+                format!(
+                    " {} {} {} ",
+                    vm.symbol, state.runtime.env, vm.strategy_state
+                ),
+                theme.panel().add_modifier(Modifier::BOLD),
+            ));
+            spans.push(badge_span(
+                health.label,
+                theme,
+                status_tone_for_connection(health.kind),
+            ));
+            if viewport.narrow() {
+                spans.push(Span::styled(format!(" Focus {} ", focus), theme.info()));
+            } else {
+                spans.push(Span::styled(format!(" {} ", health.detail), theme.muted()));
+                spans.push(Span::styled(format!(" Focus {} ", focus), theme.info()));
+                spans.push(Span::styled(
+                    format!(" Pending {} ", state.execution.pending_commands.len()),
+                    theme.warning(),
+                ));
+            }
+        }
     }
 
     if area.height == 1 {
@@ -149,12 +177,390 @@ fn draw_main(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    if !state.is_snapshot_ready() {
+        draw_bootstrap_main(frame, area, state, theme, viewport);
+        return;
+    }
+
     match state.ui.page {
         Page::Dashboard => draw_dashboard(frame, area, state, theme, viewport),
         Page::Grid => draw_grid(frame, area, state, theme, viewport),
         Page::Market => draw_market(frame, area, state, theme, viewport),
         Page::Events => draw_events(frame, area, state, theme, viewport),
         Page::Help => draw_help(frame, area, state, theme, viewport),
+    }
+}
+
+fn draw_bootstrap_main(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    viewport: Viewport,
+) {
+    match state.ui.page {
+        Page::Dashboard => draw_bootstrap_dashboard(frame, area, state, theme, viewport),
+        Page::Grid => draw_bootstrap_grid(frame, area, state, theme, viewport),
+        Page::Market => draw_bootstrap_market(frame, area, state, theme, viewport),
+        Page::Events => draw_bootstrap_events(frame, area, state, theme, viewport),
+        Page::Help => draw_bootstrap_help(frame, area, state, theme, viewport),
+    }
+}
+
+fn draw_bootstrap_dashboard(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    viewport: Viewport,
+) {
+    let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(if viewport.narrow() {
+            [Constraint::Percentage(56), Constraint::Percentage(44)]
+        } else {
+            [Constraint::Percentage(62), Constraint::Percentage(38)]
+        })
+        .split(area);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(dashboard_left_constraints(area.height))
+        .split(split[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(dashboard_right_constraints(area.height))
+        .split(split[1]);
+
+    bootstrap_block(
+        frame,
+        left[0],
+        theme,
+        "Execution Focus",
+        panel_focused(state, 0),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        left[1],
+        theme,
+        "Open Orders",
+        panel_focused(state, 1),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        left[2],
+        theme,
+        "Recent Fills",
+        panel_focused(state, 2),
+        PanelTone::Success,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        right[0],
+        theme,
+        "Risk + Alerts",
+        panel_focused(state, 3),
+        PanelTone::Warning,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        right[1],
+        theme,
+        "Market + Health",
+        panel_focused(state, 4),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        right[2],
+        theme,
+        "Command Timeline",
+        panel_focused(state, 5),
+        PanelTone::Neutral,
+        state,
+    );
+}
+
+fn draw_bootstrap_grid(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    viewport: Viewport,
+) {
+    if viewport.compact() {
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(6),
+                Constraint::Length(5),
+                Constraint::Min(4),
+            ])
+            .split(area);
+        bootstrap_block(
+            frame,
+            layout[0],
+            theme,
+            "Active Grid Levels",
+            panel_focused(state, 0),
+            PanelTone::Neutral,
+            state,
+        );
+        bootstrap_block(
+            frame,
+            layout[1],
+            theme,
+            "Grid Summary",
+            panel_focused(state, 1),
+            PanelTone::Neutral,
+            state,
+        );
+        bootstrap_block(
+            frame,
+            layout[2],
+            theme,
+            "Operator Notes",
+            panel_focused(state, 2),
+            PanelTone::Neutral,
+            state,
+        );
+    } else {
+        let layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+            .split(area);
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(6), Constraint::Min(5)])
+            .split(layout[1]);
+        bootstrap_block(
+            frame,
+            layout[0],
+            theme,
+            "Active Grid Levels",
+            panel_focused(state, 0),
+            PanelTone::Neutral,
+            state,
+        );
+        bootstrap_block(
+            frame,
+            right[0],
+            theme,
+            "Grid Summary",
+            panel_focused(state, 1),
+            PanelTone::Neutral,
+            state,
+        );
+        bootstrap_block(
+            frame,
+            right[1],
+            theme,
+            "Operator Notes",
+            panel_focused(state, 2),
+            PanelTone::Neutral,
+            state,
+        );
+    }
+}
+
+fn draw_bootstrap_market(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    viewport: Viewport,
+) {
+    let layout = if viewport.compact() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Length(5),
+                Constraint::Min(4),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(area)
+    };
+
+    bootstrap_block(
+        frame,
+        layout[0],
+        theme,
+        "Tape",
+        panel_focused(state, 0),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        layout[1],
+        theme,
+        "Connectivity",
+        panel_focused(state, 1),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        layout[2],
+        theme,
+        "Runtime",
+        panel_focused(state, 2),
+        PanelTone::Neutral,
+        state,
+    );
+}
+
+fn draw_bootstrap_events(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    _viewport: Viewport,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    bootstrap_block(
+        frame,
+        top[0],
+        theme,
+        "Fills",
+        panel_focused(state, 0),
+        PanelTone::Success,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        top[1],
+        theme,
+        "Alerts",
+        panel_focused(state, 1),
+        PanelTone::Warning,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        bottom[0],
+        theme,
+        "Commands",
+        panel_focused(state, 2),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        bottom[1],
+        theme,
+        "System",
+        panel_focused(state, 3),
+        PanelTone::Neutral,
+        state,
+    );
+}
+
+fn draw_bootstrap_help(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    viewport: Viewport,
+) {
+    let layout = if viewport.compact() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area)
+    };
+    bootstrap_block(
+        frame,
+        layout[0],
+        theme,
+        "Keymap",
+        panel_focused(state, 0),
+        PanelTone::Neutral,
+        state,
+    );
+    bootstrap_block(
+        frame,
+        layout[1],
+        theme,
+        "Ops Notes",
+        panel_focused(state, 1),
+        PanelTone::Neutral,
+        state,
+    );
+}
+
+fn bootstrap_block(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    title: &str,
+    focused: bool,
+    tone: PanelTone,
+    state: &AppState,
+) {
+    let body = bootstrap_lines(state, theme, title);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(panel_block(theme, title, focused, tone))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn bootstrap_lines(state: &AppState, theme: &Theme, title: &str) -> Vec<Line<'static>> {
+    match &state.snapshot_state {
+        SnapshotBootstrapState::WaitingFirstSnapshot => vec![
+            Line::from(vec![Span::styled("首次快照未就绪", theme.warning())]),
+            Line::from("等待 /runtime/snapshot 返回后再显示真实数据。"),
+            Line::from("p/r/c/f/s 已禁用。"),
+            Line::from(format!("当前面板：{title}")),
+        ],
+        SnapshotBootstrapState::SnapshotRetrying {
+            last_error,
+            retry_count,
+            retry_in_ms,
+        } => vec![
+            Line::from(vec![Span::styled("首次快照获取失败", theme.danger())]),
+            Line::from(format!(
+                "第 {retry_count} 次重试，{retry_in_ms}ms 后再次获取。"
+            )),
+            Line::from(format!("错误：{last_error}")),
+            Line::from("p/r/c/f/s 已禁用，等待重试后再操作。"),
+            Line::from(format!("当前面板：{title}")),
+        ],
+        SnapshotBootstrapState::Ready => Vec::new(),
     }
 }
 
@@ -981,6 +1387,42 @@ fn draw_footer(
             ToastLevel::Danger => theme.danger(),
         };
         Line::from(vec![Span::styled(format!(" {} ", toast.message), style)])
+    } else if !state.is_snapshot_ready() {
+        match &state.snapshot_state {
+            SnapshotBootstrapState::WaitingFirstSnapshot => {
+                if viewport.narrow() {
+                    Line::from(vec![Span::styled(
+                        " 首次快照未就绪 | p/r/c/f/s 已禁用 | 1-4 页面 ? help ",
+                        theme.muted(),
+                    )])
+                } else {
+                    Line::from(vec![Span::styled(
+                        " 首次快照未就绪 | p/r/c/f/s 已禁用 | 1-4 页面 ? help | Tab/Shift-Tab 面板 ",
+                        theme.muted(),
+                    )])
+                }
+            }
+            SnapshotBootstrapState::SnapshotRetrying { retry_in_ms, .. } => {
+                if viewport.narrow() {
+                    Line::from(vec![Span::styled(
+                        format!(
+                            " 首次快照失败，{}ms 后重试 | p/r/c/f/s 已禁用 ",
+                            retry_in_ms
+                        ),
+                        theme.muted(),
+                    )])
+                } else {
+                    Line::from(vec![Span::styled(
+                        format!(
+                            " 首次快照失败，{}ms 后重试 | p/r/c/f/s 已禁用 | 1-4 页面 ? help | Tab/Shift-Tab 面板 ",
+                            retry_in_ms
+                        ),
+                        theme.muted(),
+                    )])
+                }
+            }
+            SnapshotBootstrapState::Ready => unreachable!(),
+        }
     } else if viewport.narrow() {
         Line::from(vec![Span::styled(
             format!(
@@ -1266,10 +1708,12 @@ mod tests {
 
     use super::*;
     use crate::{
+        events::{AppEvent, EffectResultEvent},
         protocol::{
             CommandLinks, CommandStatus, CommandType, PendingCommand, RiskEvent, RiskLevel,
         },
         state::{AppState, CommandTimelineEntry, Page},
+        store::reduce,
         theme::Theme,
     };
 
@@ -1382,6 +1826,38 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_render_snapshot_waiting_first_snapshot_100x16() {
+        assert_page_snapshot(
+            Page::Dashboard,
+            100,
+            16,
+            "dashboard_render_snapshot_waiting_first_snapshot_100x16",
+            |state| {
+                *state = AppState::waiting_first_snapshot();
+            },
+        );
+    }
+
+    #[test]
+    fn market_render_snapshot_snapshot_retrying_100x16() {
+        assert_page_snapshot(
+            Page::Market,
+            100,
+            16,
+            "market_render_snapshot_snapshot_retrying_100x16",
+            |state| {
+                *state = AppState::waiting_first_snapshot();
+                reduce(
+                    state,
+                    AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
+                        "upstream timeout".into(),
+                    )),
+                );
+            },
+        );
+    }
+
+    #[test]
     fn dashboard_renders_service_ws_status_when_transport_is_down() {
         let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
             state.connection.ws_connected = false;
@@ -1410,6 +1886,36 @@ mod tests {
         assert!(rendered.contains("Last"));
         assert!(rendered.contains("Mark"));
         assert!(rendered.to_ascii_lowercase().contains("user down"));
+    }
+
+    #[test]
+    fn waiting_first_snapshot_hides_sample_business_data() {
+        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+            *state = AppState::waiting_first_snapshot();
+        });
+
+        assert!(rendered.contains("WAITING SNAPSHOT"));
+        assert!(!rendered.contains("2361.48"));
+        assert!(!rendered.contains("ord_1001"));
+        assert!(!rendered.contains("fill_9001"));
+    }
+
+    #[test]
+    fn snapshot_retrying_hides_sample_business_data() {
+        let rendered = render_page_to_string(Page::Events, 80, 24, |state| {
+            *state = AppState::waiting_first_snapshot();
+            reduce(
+                state,
+                AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
+                    "upstream timeout".into(),
+                )),
+            );
+        });
+
+        assert!(rendered.contains("SNAPSHOT FAILED"));
+        assert!(!rendered.contains("2361.48"));
+        assert!(!rendered.contains("ord_1001"));
+        assert!(!rendered.contains("fill_9001"));
     }
 
     #[test]

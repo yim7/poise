@@ -63,8 +63,7 @@ async fn run_loop(
     config: AppConfig,
 ) -> Result<()> {
     let theme = Theme::default();
-    let mut state = AppState::sample();
-    state.connection.ws_connected = false;
+    let mut state = AppState::waiting_first_snapshot();
     let (app_tx, mut app_rx) = mpsc::channel::<AppEvent>(512);
     let (effect_tx, effect_rx) = mpsc::channel::<Effect>(256);
     let transport = TransportClient::new(config.base_url, config.ws_url);
@@ -166,6 +165,25 @@ async fn effect_task(
                         .await;
                 }
             },
+            Effect::FetchSnapshotAfterDelay { retry_in_ms } => {
+                sleep(Duration::from_millis(retry_in_ms)).await;
+                match transport.fetch_snapshot().await {
+                    Ok(snapshot) => {
+                        let _ = app_tx
+                            .send(AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(
+                                snapshot,
+                            )))
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = app_tx
+                            .send(AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
+                                error.to_string(),
+                            )))
+                            .await;
+                    }
+                }
+            }
             Effect::FetchRiskEvents => match transport.fetch_risk_events().await {
                 Ok(alerts) => {
                     let _ = app_tx

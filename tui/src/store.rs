@@ -7,7 +7,7 @@ use crate::events::{
 use crate::protocol::{CommandAck, CommandStatus, CommandType, ServerEvent};
 use crate::state::{
     AppState, COMMAND_TIMEOUT_TICKS, CommandTimelineEntry, CommandTimelineStage, DirtyFlags, Modal,
-    Page, Toast, ToastLevel,
+    Page, SnapshotBootstrapState, Toast, ToastLevel,
 };
 
 pub fn reduce(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
@@ -160,29 +160,56 @@ fn handle_system_event(state: &mut AppState, event: SystemEvent) -> Vec<Effect> 
 fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<Effect> {
     match event {
         EffectResultEvent::SnapshotLoaded(snapshot) => {
-            if state.connection.ws_connected {
-                state.sync_runtime_snapshot(snapshot);
+            let was_connected = state.connection.ws_connected;
+            state.sync_runtime_snapshot(snapshot);
+            if was_connected {
                 vec![Effect::FetchRiskEvents]
             } else {
-                *state = AppState::from_snapshot(snapshot);
                 vec![Effect::FetchRiskEvents, Effect::ConnectWs]
             }
         }
-        EffectResultEvent::SnapshotFailed(error) => {
-            state.ui.toast = Some(Toast {
-                level: ToastLevel::Danger,
-                message: format!("snapshot failed: {error}"),
-                ttl_ticks: 24,
-            });
-            state.mark_dirty(
-                DirtyFlags {
-                    ui: true,
-                    ..DirtyFlags::default()
-                },
-                true,
-            );
-            Vec::new()
-        }
+        EffectResultEvent::SnapshotFailed(error) => match &state.snapshot_state {
+            SnapshotBootstrapState::Ready => {
+                state.ui.toast = Some(Toast {
+                    level: ToastLevel::Danger,
+                    message: format!("snapshot failed: {error}"),
+                    ttl_ticks: 24,
+                });
+                state.mark_dirty(
+                    DirtyFlags {
+                        ui: true,
+                        ..DirtyFlags::default()
+                    },
+                    true,
+                );
+                Vec::new()
+            }
+            SnapshotBootstrapState::WaitingFirstSnapshot
+            | SnapshotBootstrapState::SnapshotRetrying { .. } => {
+                let retry_count = match &state.snapshot_state {
+                    SnapshotBootstrapState::WaitingFirstSnapshot => 1,
+                    SnapshotBootstrapState::SnapshotRetrying { retry_count, .. } => {
+                        retry_count.saturating_add(1)
+                    }
+                    SnapshotBootstrapState::Ready => unreachable!(),
+                };
+                let retry_in_ms = AppState::snapshot_retry_backoff_ms(retry_count);
+                state.snapshot_state = SnapshotBootstrapState::SnapshotRetrying {
+                    last_error: error,
+                    retry_count,
+                    retry_in_ms,
+                };
+                state.ui.modal = None;
+                state.mark_dirty(
+                    DirtyFlags {
+                        ui: true,
+                        ..DirtyFlags::default()
+                    },
+                    true,
+                );
+                vec![Effect::FetchSnapshotAfterDelay { retry_in_ms }]
+            }
+        },
         EffectResultEvent::RiskEventsLoaded(alerts) => {
             state.risk.alerts = merge_risk_alerts(&state.risk.alerts, alerts);
             state.risk.unacked_alerts = state
@@ -363,9 +390,41 @@ fn merge_risk_alerts(
     merged
 }
 
+fn bootstrap_blocked_message(state: &AppState) -> Option<&'static str> {
+    match state.snapshot_state {
+        SnapshotBootstrapState::WaitingFirstSnapshot => Some("首次快照未就绪，操作已禁用"),
+        SnapshotBootstrapState::SnapshotRetrying { .. } => {
+            Some("首次快照获取失败，等待重试后再操作")
+        }
+        SnapshotBootstrapState::Ready => None,
+    }
+}
+
+fn set_bootstrap_blocked_toast(state: &mut AppState) {
+    if let Some(message) = bootstrap_blocked_message(state) {
+        state.ui.modal = None;
+        state.ui.toast = Some(Toast {
+            level: ToastLevel::Warning,
+            message: message.into(),
+            ttl_ticks: 24,
+        });
+        state.mark_dirty(
+            DirtyFlags {
+                ui: true,
+                ..DirtyFlags::default()
+            },
+            true,
+        );
+    }
+}
+
 fn handle_local_ui_event(state: &mut AppState, event: LocalUiEvent) -> Vec<Effect> {
     match event {
         LocalUiEvent::OpenConfirm(command) => {
+            if bootstrap_blocked_message(state).is_some() {
+                set_bootstrap_blocked_toast(state);
+                return Vec::new();
+            }
             state.ui.modal = Some(Modal::Confirm(command));
             state.mark_dirty(
                 DirtyFlags {
@@ -377,6 +436,11 @@ fn handle_local_ui_event(state: &mut AppState, event: LocalUiEvent) -> Vec<Effec
             Vec::new()
         }
         LocalUiEvent::ConfirmModal => {
+            if bootstrap_blocked_message(state).is_some() {
+                state.ui.modal = None;
+                set_bootstrap_blocked_toast(state);
+                return Vec::new();
+            }
             if let Some(Modal::Confirm(command)) = state.ui.modal.take() {
                 submit_command(state, command)
             } else {
@@ -409,6 +473,10 @@ fn handle_local_ui_event(state: &mut AppState, event: LocalUiEvent) -> Vec<Effec
 }
 
 fn submit_command(state: &mut AppState, command: CommandType) -> Vec<Effect> {
+    if bootstrap_blocked_message(state).is_some() {
+        set_bootstrap_blocked_toast(state);
+        return Vec::new();
+    }
     let command_id = state.queue_command(command);
     state.ui.modal = None;
     state.mark_dirty(
@@ -680,6 +748,114 @@ mod tests {
     use super::*;
     use crate::events::{AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent};
     use crate::protocol::{CommandAccepted, CommandRecord, RuntimeSnapshot};
+    use crate::state::SnapshotBootstrapState;
+
+    #[test]
+    fn startup_defaults_to_waiting_first_snapshot() {
+        let state = AppState::waiting_first_snapshot();
+
+        assert!(matches!(
+            state.snapshot_state,
+            SnapshotBootstrapState::WaitingFirstSnapshot
+        ));
+        assert!(state.runtime.symbol.is_empty());
+        assert!(state.execution.open_orders.is_empty());
+        assert!(state.execution.recent_fills.is_empty());
+        assert!(state.risk.alerts.is_empty());
+    }
+
+    #[test]
+    fn first_snapshot_failure_enters_retrying_state() {
+        let mut state = AppState::waiting_first_snapshot();
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+        );
+
+        assert_eq!(
+            effects,
+            vec![Effect::FetchSnapshotAfterDelay { retry_in_ms: 1_000 }]
+        );
+        match state.snapshot_state {
+            SnapshotBootstrapState::SnapshotRetrying {
+                ref last_error,
+                retry_count,
+                retry_in_ms,
+            } => {
+                assert_eq!(last_error, "boom");
+                assert_eq!(retry_count, 1);
+                assert_eq!(retry_in_ms, 1_000);
+            }
+            other => panic!("unexpected snapshot state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retrying_snapshot_success_returns_to_ready() {
+        let mut state = AppState::waiting_first_snapshot();
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+        );
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(RuntimeSnapshot::sample())),
+        );
+
+        assert!(matches!(
+            state.snapshot_state,
+            SnapshotBootstrapState::Ready
+        ));
+        assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
+    }
+
+    #[test]
+    fn waiting_snapshot_blocks_runtime_shortcuts_and_toasts() {
+        let mut state = AppState::waiting_first_snapshot();
+
+        for action in [
+            KeyAction::Pause,
+            KeyAction::Resume,
+            KeyAction::CancelAll,
+            KeyAction::FlattenNow,
+            KeyAction::ShutdownAfterFlatten,
+        ] {
+            let effects = reduce(&mut state, AppEvent::Input(InputEvent::Key(action)));
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+                Some("首次快照未就绪，操作已禁用")
+            );
+            state.ui.toast = None;
+        }
+    }
+
+    #[test]
+    fn retrying_snapshot_blocks_runtime_shortcuts_and_toasts() {
+        let mut state = AppState::waiting_first_snapshot();
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+        );
+
+        for action in [
+            KeyAction::Pause,
+            KeyAction::Resume,
+            KeyAction::CancelAll,
+            KeyAction::FlattenNow,
+            KeyAction::ShutdownAfterFlatten,
+        ] {
+            let effects = reduce(&mut state, AppEvent::Input(InputEvent::Key(action)));
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+                Some("首次快照获取失败，等待重试后再操作")
+            );
+            state.ui.toast = None;
+        }
+    }
 
     #[test]
     fn pause_shortcut_creates_send_command_effect() {

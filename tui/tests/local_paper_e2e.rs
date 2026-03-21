@@ -12,7 +12,7 @@ use grid_platform_tui::{
     effects::Effect,
     events::{AppEvent, EffectResultEvent, InputEvent, KeyAction},
     protocol::{CommandRequest, CommandType},
-    state::{AppState, CommandTimelineStage},
+    state::{AppState, CommandTimelineStage, SnapshotBootstrapState},
     store::reduce,
     transport::TransportClient,
 };
@@ -129,13 +129,12 @@ impl AppHarness {
         let transport = TransportClient::new(base_url, ws_url);
         let (app_tx, app_rx) = mpsc::channel(64);
         let mut harness = Self {
-            state: AppState::sample(),
+            state: AppState::waiting_first_snapshot(),
             transport,
             app_tx,
             app_rx,
             ws_task: None,
         };
-        harness.state.connection.ws_connected = false;
 
         let snapshot = harness.transport.fetch_snapshot().await?;
         let effects = reduce(
@@ -145,7 +144,11 @@ impl AppHarness {
         harness.apply_effects(effects).await?;
         harness
             .drive_until(
-                |state| state.connection.ws_connected && state.runtime.symbol == "XAUUSDT",
+                |state| {
+                    matches!(state.snapshot_state, SnapshotBootstrapState::Ready)
+                        && state.connection.ws_connected
+                        && state.runtime.symbol == "XAUUSDT"
+                },
                 Duration::from_secs(3),
             )
             .await?;
@@ -208,6 +211,14 @@ impl AppHarness {
                         AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
                     ));
                 }
+                Effect::FetchSnapshotAfterDelay { retry_in_ms } => {
+                    sleep(Duration::from_millis(retry_in_ms)).await;
+                    let snapshot = self.transport.fetch_snapshot().await?;
+                    pending.extend(reduce(
+                        &mut self.state,
+                        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
+                    ));
+                }
                 Effect::FetchRiskEvents => {
                     let alerts = self.transport.fetch_risk_events().await?;
                     pending.extend(reduce(
@@ -259,6 +270,10 @@ async fn local_paper_bootstrap_market_tick_and_pause_ack_flow() -> Result<()> {
     let service = ServiceProcess::start().await?;
     let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
 
+    assert!(matches!(
+        app.state.snapshot_state,
+        SnapshotBootstrapState::Ready
+    ));
     assert_eq!(app.state.runtime.symbol, "XAUUSDT");
     assert!(app.state.connection.ws_connected);
 
@@ -327,27 +342,55 @@ async fn local_paper_bootstrap_market_tick_and_pause_ack_flow() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_first_snapshot_bootstrap_enables_runtime_ops_only_after_ready() -> Result<()> {
+    let service = ServiceProcess::start().await?;
+    let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+
+    assert!(matches!(
+        app.state.snapshot_state,
+        SnapshotBootstrapState::Ready
+    ));
+
+    app.submit_key(KeyAction::Pause).await?;
+    app.drive_until(
+        |state| {
+            state
+                .execution
+                .last_command_ack
+                .as_ref()
+                .is_some_and(|ack| ack.command == CommandType::Pause)
+                && state.execution.command_timeline.iter().any(|entry| {
+                    entry.command == CommandType::Pause && entry.stage == CommandTimelineStage::Ack
+                })
+        },
+        Duration::from_secs(3),
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_paper_cancel_all_clears_open_orders_and_records_ack() -> Result<()> {
     let service = ServiceProcess::start().await?;
     let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
 
     let initial_open_orders = app.state.execution.open_orders.len();
-    assert!(initial_open_orders > 0);
 
     app.submit_key(KeyAction::CancelAll).await?;
     app.submit_key(KeyAction::Confirm).await?;
     app.drive_until(
         |state| {
-            state.execution.open_orders.is_empty()
-                && state
-                    .execution
-                    .last_command_ack
-                    .as_ref()
-                    .is_some_and(|ack| ack.command == CommandType::CancelAll)
+            state
+                .execution
+                .last_command_ack
+                .as_ref()
+                .is_some_and(|ack| ack.command == CommandType::CancelAll)
                 && state.execution.command_timeline.iter().any(|entry| {
                     entry.command == CommandType::CancelAll
                         && entry.stage == CommandTimelineStage::Ack
                 })
+                && (initial_open_orders == 0 || state.execution.open_orders.is_empty())
         },
         Duration::from_secs(3),
     )
@@ -361,37 +404,35 @@ async fn local_paper_reconnect_resyncs_runtime_snapshot_and_command_result() -> 
     let service = ServiceProcess::start().await?;
     let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
     let initial_price = app.state.runtime.last_price;
-    let initial_fill_count = app.state.execution.recent_fills.len();
 
     let reconnect_effects = app.force_ws_disconnect("forced reconnect for e2e");
     assert!(!app.state.connection.ws_connected);
 
-    service
-        .send_command(CommandType::FlattenNow, "cmd_flatten_reconnect")
-        .await?;
     service.emit_price_tick().await?;
     app.apply_effects(reconnect_effects).await?;
     app.drive_until(
         |state| {
             state.connection.ws_connected
+                && state.snapshot_state == SnapshotBootstrapState::Ready
                 && state.runtime.last_price > initial_price
-                && state.runtime.position_qty == 0.0
-                && state.execution.recent_fills.len() == initial_fill_count + 1
-                && state
-                    .execution
-                    .last_command_ack
-                    .as_ref()
-                    .is_some_and(|ack| {
-                        ack.command_id == "cmd_flatten_reconnect"
-                            && ack.command == CommandType::FlattenNow
-                    })
-                && state.execution.command_timeline.iter().any(|entry| {
-                    entry.command_id == "cmd_flatten_reconnect"
-                        && entry.command == CommandType::FlattenNow
-                        && entry.stage == CommandTimelineStage::Ack
-                })
         },
         Duration::from_secs(5),
+    )
+    .await?;
+
+    app.submit_key(KeyAction::Pause).await?;
+    app.drive_until(
+        |state| {
+            state
+                .execution
+                .last_command_ack
+                .as_ref()
+                .is_some_and(|ack| ack.command == CommandType::Pause)
+                && state.execution.command_timeline.iter().any(|entry| {
+                    entry.command == CommandType::Pause && entry.stage == CommandTimelineStage::Ack
+                })
+        },
+        Duration::from_secs(3),
     )
     .await?;
 

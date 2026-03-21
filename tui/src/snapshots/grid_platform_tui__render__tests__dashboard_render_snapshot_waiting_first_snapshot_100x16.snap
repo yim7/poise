@@ -3,19 +3,19 @@ source: tui/src/render.rs
 assertion_line: 2030
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Execution Focus                
+ GRID PLATFORM  WAITING SNAPSHOT  等 待 首 次 快 照                                                       
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
-│Position  0.250 @ 2354.20                             ││Level  Danger   Breaker  OFF              │
-│U-PnL  1.84   R-PnL  14.52                            ││Notional  590/1500   Stop  4.0%           │
+│首 次 快 照 未 就 绪                                         ││首 次 快 照 未 就 绪                             │
+│等 待  /runtime/snapshot 返 回 后 再 显 示 真 实 数 据 。          ││等 待  /runtime/snapshot                    │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
-│Side   Price     Qty      Status                      ││Last  2361.48   Mark  2361.55             │
-│BUY    2352.80   0.100    NEW                         ││Svc WS  DOWN   Mkt WS  DOWN   svc retry   │
+│首 次 快 照 未 就 绪                                         ││首 次 快 照 未 就 绪                             │
+│等 待  /runtime/snapshot 返 回 后 再 显 示 真 实 数 据 。          ││等 待  /runtime/snapshot                    │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
-│BUY 2349.10 x 0.050  pnl +2.51                        ││ ACCEPTED  SHUTDOWN                       │
+│首 次 快 照 未 就 绪                                         ││首 次 快 照 未 就 绪                             │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- Focus Execution Focus | Tab panels | p/r run | c/f/s danger | Enter/Esc
+ 首 次 快 照 未 就 绪  | p/r/c/f/s 已 禁 用  | 1-4 页 面  ? help

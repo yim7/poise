@@ -68,6 +68,17 @@ pub enum Modal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotBootstrapState {
+    WaitingFirstSnapshot,
+    SnapshotRetrying {
+        last_error: String,
+        retry_count: u32,
+        retry_in_ms: u64,
+    },
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToastLevel {
     Info,
     Warning,
@@ -216,6 +227,7 @@ pub struct AppState {
     pub risk: RiskViewState,
     pub strategy: StrategyState,
     pub ui: UiState,
+    pub snapshot_state: SnapshotBootstrapState,
     pub system_events: VecDeque<SystemEvent>,
     pub dirty: DirtyFlags,
     pub immediate_render: bool,
@@ -224,6 +236,69 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn waiting_first_snapshot() -> Self {
+        Self {
+            connection: ConnectionViewState {
+                http_available: false,
+                market_ws_connected: false,
+                user_stream_connected: None,
+                latency_ms: None,
+                last_heartbeat_at: String::new(),
+                market_reconnect_backoff_ms: 0,
+                stale_age_ms: 0,
+                ws_connected: false,
+                reconnect_attempt: 0,
+                reconnect_backoff_ms: 0,
+            },
+            runtime: RuntimeViewState {
+                symbol: String::new(),
+                env: String::new(),
+                session_state: String::new(),
+                strategy_state: String::new(),
+                last_price: 0.0,
+                mark_price: 0.0,
+                position_qty: 0.0,
+                position_avg_price: 0.0,
+                unrealized_pnl: 0.0,
+                realized_pnl: 0.0,
+            },
+            execution: ExecutionViewState {
+                open_orders: Vec::new(),
+                open_orders_source: OpenOrdersSource::Unavailable,
+                recent_fills: VecDeque::new(),
+                pending_commands: Vec::new(),
+                last_command_ack: None,
+                command_timeline: VecDeque::new(),
+            },
+            risk: RiskViewState {
+                current_notional: 0.0,
+                max_notional: 0.0,
+                daily_loss_limit: 0.0,
+                stop_loss_pct: 0.0,
+                risk_level: RiskLevel::Ok,
+                breaker_engaged: false,
+                unacked_alerts: 0,
+                alerts: VecDeque::new(),
+            },
+            strategy: StrategyState::default(),
+            ui: UiState {
+                page: Page::Dashboard,
+                focus_index: 0,
+                modal: None,
+                toast: None,
+                should_quit: false,
+                width: 160,
+                height: 44,
+            },
+            snapshot_state: SnapshotBootstrapState::WaitingFirstSnapshot,
+            system_events: VecDeque::new(),
+            dirty: DirtyFlags::all(),
+            immediate_render: true,
+            clock_ticks: 0,
+            next_command_seq: 1,
+        }
+    }
+
     pub fn sample() -> Self {
         let mut state = Self::from_snapshot(RuntimeSnapshot::sample());
         state.connection.ws_connected = true;
@@ -332,6 +407,7 @@ impl AppState {
                 width: 160,
                 height: 44,
             },
+            snapshot_state: SnapshotBootstrapState::Ready,
             system_events: VecDeque::new(),
             dirty: DirtyFlags::all(),
             immediate_render: true,
@@ -389,6 +465,15 @@ impl AppState {
         while self.execution.command_timeline.len() > COMMAND_TIMELINE_LIMIT {
             self.execution.command_timeline.pop_back();
         }
+    }
+
+    pub fn is_snapshot_ready(&self) -> bool {
+        matches!(self.snapshot_state, SnapshotBootstrapState::Ready)
+    }
+
+    pub fn snapshot_retry_backoff_ms(retry_count: u32) -> u64 {
+        let shift = retry_count.saturating_sub(1).min(3);
+        1_000u64.saturating_mul(2u64.saturating_pow(shift))
     }
 
     pub fn sync_runtime_snapshot(&mut self, snapshot: RuntimeSnapshot) {
