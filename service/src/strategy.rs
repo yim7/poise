@@ -256,6 +256,50 @@ fn round_price(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::RiskLevel;
+
+    fn runtime_state() -> RuntimeState {
+        RuntimeState {
+            symbol: "XAUUSDT".into(),
+            env: "paper".into(),
+            session_state: "regular".into(),
+            strategy_state: "running".into(),
+            last_price: 100.0,
+            mark_price: 100.0,
+            position_qty: 0.0,
+            position_avg_price: 0.0,
+            unrealized_pnl: 0.0,
+            realized_pnl: 0.0,
+        }
+    }
+
+    fn risk_state() -> RiskState {
+        RiskState {
+            current_notional: 0.0,
+            max_notional: 30.0,
+            daily_loss_limit: -120.0,
+            stop_loss_pct: 4.0,
+            risk_level: RiskLevel::Ok,
+            max_position_exceeded: false,
+            stop_loss_triggered: false,
+            daily_loss_breached: false,
+            breaker_engaged: false,
+            unacked_alerts: 0,
+        }
+    }
+
+    fn previous_state() -> StrategyState {
+        StrategyState {
+            config: GridConfig::default(),
+            status: StrategyStatus::Active,
+            center_price: 100.0,
+            lower_bound: 0.0,
+            upper_bound: 0.0,
+            rebuild_reference_price: 100.0,
+            pending_rebuild_reason: None,
+            levels: Vec::new(),
+        }
+    }
 
     #[test]
     fn validate_config_rejects_zero_levels() {
@@ -265,5 +309,63 @@ mod tests {
         };
 
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn reconcile_marks_levels_pending_rebuild_when_paused_blocks_rebuild() {
+        let mut runtime = runtime_state();
+        runtime.strategy_state = "paused".into();
+        runtime.last_price = 102.0;
+        runtime.mark_price = 102.0;
+
+        let risk = risk_state();
+        let mut previous = previous_state();
+        previous.config.rebuild_threshold_bps = 50.0;
+
+        let strategy = reconcile(&runtime, &risk, &previous);
+
+        assert_eq!(strategy.status, StrategyStatus::PendingRebuild);
+        assert!(
+            strategy
+                .pending_rebuild_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("paused"))
+        );
+        assert!(
+            strategy
+                .levels
+                .iter()
+                .all(|level| level.state == GridLevelState::PendingRebuild)
+        );
+    }
+
+    #[test]
+    fn reconcile_marks_buy_levels_occupied_for_long_inventory() {
+        let mut runtime = runtime_state();
+        runtime.position_qty = 0.15;
+        runtime.position_avg_price = 99.0;
+
+        let strategy = reconcile(&runtime, &risk_state(), &previous_state());
+
+        assert_eq!(strategy.status, StrategyStatus::Occupied);
+        assert_eq!(
+            strategy
+                .levels
+                .iter()
+                .filter(|level| level.side == GridSide::Buy)
+                .filter(|level| level.state == GridLevelState::Occupied)
+                .count(),
+            2
+        );
+        assert_eq!(
+            strategy
+                .levels
+                .iter()
+                .filter(|level| level.side == GridSide::Sell)
+                .filter(|level| level.state == GridLevelState::Occupied)
+                .count(),
+            0
+        );
+        assert!(strategy.pending_rebuild_reason.is_none());
     }
 }

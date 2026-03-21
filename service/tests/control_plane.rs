@@ -446,6 +446,50 @@ async fn web_query_routes_sort_and_filter_commands_and_alerts() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_query_alerts_acknowledged_false_keeps_unacknowledged_system_alerts() -> Result<()> {
+    let (_temp_dir, app) = app_with_persisted_runtime(seed_query_runtime())?;
+
+    let alerts = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/query/alerts?acknowledged=false")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    let items = alerts["data"]["items"].as_array().expect("alerts items");
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["source"], "ws");
+    assert_eq!(items[1]["source"], "bootstrap");
+    assert_eq!(items[2]["code"], "MARGIN_USAGE_WATCH");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_query_alerts_acknowledged_false_still_allows_system_source_filter() -> Result<()> {
+    let (_temp_dir, app) = app_with_persisted_runtime(seed_query_runtime())?;
+
+    let alerts = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/query/alerts?acknowledged=false&source=ws")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    let items = alerts["data"]["items"].as_array().expect("alerts items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["category"], "system");
+    assert_eq!(items[0]["source"], "ws");
+    assert_eq!(items[0]["message"], "WebSocket connection recovering.");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_plane_capabilities_expose_web_ui_boundary() -> Result<()> {
     let app = build_app(Application::bootstrap());
 

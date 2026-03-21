@@ -7,8 +7,8 @@
 
 - 当前主线：待确认下一里程碑
 - 并行预研：无
-- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新
-- 最近验证：`cargo fmt --check`、`cargo test -p grid-platform-service`、`cargo test -p grid-platform-tui`、`cargo test` 已通过；订单来源协议兼容、Binance 真实挂单同步、TUI 双轴状态模型，以及本地 E2E service 启动并发超时回归已复核，无新的阻断项
+- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新；补齐 `/query/alerts` `acknowledged` 过滤回归测试，并补上 `strategy / risk` 直接单元测试
+- 最近验证：`2026-03-21` 对照 [`docs/roadmap.md`](docs/roadmap.md) 与 [`docs/plan.md`](docs/plan.md) 复核 `K4` 到 `K7`，`cargo fmt --check`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test control_plane web_query_alerts_acknowledged_false` 与 `cargo test` 已通过；执行闭环、网格策略与风控、replay / paper / fake transport 验证链路、Web 查询模型与能力接口均已复核，未发现新的阻断项；testnet 最小闭环仍维持手工冒烟验证结论
 
 ## 首次快照空态验收
 
@@ -190,7 +190,7 @@
 
 ## 当前并行方式
 
-- `K7` 主线：查询模型整理与 Web UI 预备边界
+- 无，等待下一里程碑确认
 
 ## 完成后必做
 

@@ -213,4 +213,60 @@ mod tests {
 
         assert!(codes.contains(&"STOP_LOSS_TRIGGERED"));
     }
+
+    #[test]
+    fn evaluate_emits_breaker_released_after_metrics_recover() {
+        let mut previous = risk_state();
+        previous.breaker_engaged = true;
+        previous.stop_loss_triggered = true;
+        previous.risk_level = RiskLevel::Danger;
+        previous.unacked_alerts = 2;
+
+        let evaluation = evaluate(&runtime_state(), &previous, &GridConfig::default());
+
+        assert!(!evaluation.state.breaker_engaged);
+        assert_eq!(evaluation.state.risk_level, RiskLevel::Ok);
+        assert!(
+            evaluation
+                .new_events
+                .iter()
+                .any(|event| event.code == "BREAKER_RELEASED")
+        );
+    }
+
+    #[test]
+    fn evaluate_triggers_stop_loss_for_short_position_on_adverse_mark_move() {
+        let mut runtime = runtime_state();
+        runtime.position_qty = -1.0;
+        runtime.position_avg_price = 100.0;
+        runtime.mark_price = 105.0;
+
+        let evaluation = evaluate(&runtime, &risk_state(), &GridConfig::default());
+
+        assert!(evaluation.state.stop_loss_triggered);
+        assert!(
+            evaluation
+                .new_events
+                .iter()
+                .any(|event| event.code == "STOP_LOSS_TRIGGERED")
+        );
+    }
+
+    #[test]
+    fn evaluate_does_not_trigger_stop_loss_without_position() {
+        let mut runtime = runtime_state();
+        runtime.position_qty = 0.0;
+        runtime.position_avg_price = 100.0;
+        runtime.mark_price = 90.0;
+
+        let evaluation = evaluate(&runtime, &risk_state(), &GridConfig::default());
+
+        assert!(!evaluation.state.stop_loss_triggered);
+        assert!(
+            !evaluation
+                .new_events
+                .iter()
+                .any(|event| event.code == "STOP_LOSS_TRIGGERED")
+        );
+    }
 }

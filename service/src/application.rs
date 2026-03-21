@@ -260,9 +260,7 @@ impl Application {
             items.retain(|alert| alert.source.eq_ignore_ascii_case(source));
         }
         if let Some(acknowledged) = filters.acknowledged {
-            items.retain(|alert| {
-                alert.category == "risk" && (alert.acknowledged_at.is_some() == acknowledged)
-            });
+            items.retain(|alert| alert.acknowledged_at.is_some() == acknowledged);
         }
 
         match sort {
