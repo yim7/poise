@@ -468,6 +468,53 @@ pub enum ServerEvent {
 }
 
 impl RuntimeSnapshot {
+    pub fn empty_bootstrap() -> Self {
+        Self {
+            connection: ConnectionState {
+                http_available: true,
+                ws_connected: false,
+                user_stream_connected: None,
+                latency_ms: None,
+                last_heartbeat_at: String::new(),
+                reconnect_backoff_ms: 0,
+                stale_age_ms: 0,
+            },
+            runtime: RuntimeState {
+                symbol: "XAUUSDT".into(),
+                env: "testnet".into(),
+                session_state: "regular".into(),
+                strategy_state: "running".into(),
+                last_price: 0.0,
+                mark_price: 0.0,
+                position_qty: 0.0,
+                position_avg_price: 0.0,
+                unrealized_pnl: 0.0,
+                realized_pnl: 0.0,
+            },
+            execution: ExecutionState {
+                open_orders: vec![],
+                recent_fills: vec![],
+                pending_commands: vec![],
+                last_command_ack: None,
+                last_command_ack_event: None,
+                recent_commands: vec![],
+            },
+            risk: RiskState {
+                current_notional: 0.0,
+                max_notional: 1500.0,
+                daily_loss_limit: -120.0,
+                stop_loss_pct: 4.0,
+                risk_level: RiskLevel::Ok,
+                max_position_exceeded: false,
+                stop_loss_triggered: false,
+                daily_loss_breached: false,
+                breaker_engaged: false,
+                unacked_alerts: 0,
+            },
+            strategy: StrategyState::default(),
+        }
+    }
+
     pub fn sample() -> Self {
         Self {
             connection: ConnectionState {

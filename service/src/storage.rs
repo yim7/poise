@@ -35,14 +35,8 @@ impl PersistedRuntime {
     fn bootstrap_with_message(message: &str) -> Self {
         let now = now_utc();
         Self {
-            snapshot: RuntimeSnapshot::sample(),
-            risk_events: vec![RiskEvent {
-                severity: RiskLevel::Watch,
-                code: "MARGIN_USAGE_WATCH".into(),
-                message: "Margin usage reached 39% of configured threshold.".into(),
-                created_at: now.clone(),
-                acknowledged_at: None,
-            }],
+            snapshot: RuntimeSnapshot::empty_bootstrap(),
+            risk_events: vec![],
             system_events: vec![SystemEvent {
                 level: "info".into(),
                 source: "bootstrap".into(),

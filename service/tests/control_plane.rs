@@ -75,6 +75,90 @@ async fn http_routes_query_snapshot_and_command_via_application() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_snapshot_payload_defaults_to_empty_business_state() -> Result<()> {
+    let app = build_app(Application::bootstrap());
+
+    let snapshot = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/runtime/snapshot")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    assert_eq!(snapshot["data"]["runtime"]["position_qty"], 0.0);
+    assert_eq!(snapshot["data"]["runtime"]["unrealized_pnl"], 0.0);
+    assert_eq!(
+        snapshot["data"]["execution"]["open_orders"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        snapshot["data"]["execution"]["recent_fills"],
+        serde_json::json!([])
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrap_runtime_does_not_emit_fake_risk_alerts() -> Result<()> {
+    let app = build_app(Application::bootstrap());
+
+    let snapshot = decode_json::<Value>(
+        app.clone(),
+        Request::builder()
+            .uri("/runtime/snapshot")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    let risk_events = decode_json::<HttpSuccessEnvelope<Vec<RiskEvent>>>(
+        app,
+        Request::builder()
+            .uri("/risk/events")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    assert!(risk_events.data.is_empty());
+    assert_eq!(snapshot["data"]["risk"]["current_notional"], 0.0);
+    assert_eq!(snapshot["data"]["risk"]["unacked_alerts"], 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_first_bootstrap_matches_empty_in_memory_snapshot() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("service.db");
+    let app = build_app(Application::bootstrap_with_sqlite(&db_path)?);
+
+    let snapshot = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/runtime/snapshot")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    assert_eq!(snapshot["data"]["runtime"]["position_qty"], 0.0);
+    assert_eq!(snapshot["data"]["runtime"]["unrealized_pnl"], 0.0);
+    assert_eq!(
+        snapshot["data"]["execution"]["open_orders"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        snapshot["data"]["execution"]["recent_fills"],
+        serde_json::json!([])
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_streams_initial_snapshot_and_command_ack() -> Result<()> {
     let server = TestServer::spawn().await?;
     let (mut ws, _) = connect_async(&server.ws_url)
@@ -151,7 +235,7 @@ async fn snapshot_sequence_covers_buffered_events_before_initial_snapshot() -> R
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_query_routes_support_runtime_and_list_filters() -> Result<()> {
-    let app = build_app(Application::bootstrap());
+    let (_temp_dir, app) = app_with_persisted_runtime(seed_query_runtime())?;
 
     let runtime = decode_json::<Value>(
         app.clone(),
