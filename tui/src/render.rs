@@ -1816,7 +1816,7 @@ mod tests {
 
     #[test]
     fn market_render_snapshot_snapshot_retrying_100x16() {
-        assert_page_snapshot(
+        assert_page_snapshot_after_mutate(
             Page::Market,
             100,
             16,
@@ -1878,7 +1878,7 @@ mod tests {
 
     #[test]
     fn snapshot_retrying_hides_sample_business_data() {
-        let rendered = render_page_to_string(Page::Events, 80, 24, |state| {
+        let rendered = render_page_to_string_after_mutate(Page::Events, 80, 24, |state| {
             *state = AppState::waiting_first_snapshot();
             reduce(
                 state,
@@ -2020,6 +2020,14 @@ mod tests {
         assert_snapshot!(name, snapshot);
     }
 
+    fn assert_page_snapshot_after_mutate<F>(page: Page, width: u16, height: u16, name: &str, mutate: F)
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let snapshot = render_page_to_string_after_mutate(page, width, height, mutate);
+        assert_snapshot!(name, snapshot);
+    }
+
     fn render_page_to_string<F>(page: Page, width: u16, height: u16, mutate: F) -> String
     where
         F: FnOnce(&mut AppState),
@@ -2031,6 +2039,27 @@ mod tests {
         state.ui.width = width;
         state.ui.height = height;
         mutate(&mut state);
+        let theme = Theme::default();
+        terminal.draw(|frame| draw(frame, &state, &theme)).unwrap();
+        buffer_to_string(terminal.backend().buffer(), width, height)
+    }
+
+    fn render_page_to_string_after_mutate<F>(
+        page: Page,
+        width: u16,
+        height: u16,
+        mutate: F,
+    ) -> String
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::sample();
+        state.ui.width = width;
+        state.ui.height = height;
+        mutate(&mut state);
+        state.ui.page = page;
         let theme = Theme::default();
         terminal.draw(|frame| draw(frame, &state, &theme)).unwrap();
         buffer_to_string(terminal.backend().buffer(), width, height)

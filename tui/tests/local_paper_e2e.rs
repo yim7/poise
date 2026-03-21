@@ -128,22 +128,21 @@ struct AppHarness {
 }
 
 impl AppHarness {
-    async fn connect(base_url: String, ws_url: String) -> Result<Self> {
+    async fn new_waiting(base_url: String, ws_url: String) -> Result<Self> {
         let transport = TransportClient::new(base_url, ws_url);
         let (app_tx, app_rx) = mpsc::channel(64);
-        let mut harness = Self {
+        Ok(Self {
             state: AppState::waiting_first_snapshot(),
             transport,
             app_tx,
             app_rx,
             ws_task: None,
-        };
+        })
+    }
 
-        let snapshot = harness.transport.fetch_snapshot().await?;
-        let effects = reduce(
-            &mut harness.state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
-        );
+    async fn connect(base_url: String, ws_url: String) -> Result<Self> {
+        let mut harness = Self::new_waiting(base_url, ws_url).await?;
+        let effects = harness.bootstrap_once().await?;
         harness.apply_effects(effects).await?;
         harness
             .drive_until(
@@ -156,6 +155,14 @@ impl AppHarness {
             )
             .await?;
         Ok(harness)
+    }
+
+    async fn bootstrap_once(&mut self) -> Result<Vec<Effect>> {
+        let snapshot = self.transport.fetch_snapshot().await?;
+        Ok(reduce(
+            &mut self.state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
+        ))
     }
 
     async fn submit_key(&mut self, action: KeyAction) -> Result<()> {
@@ -347,12 +354,30 @@ async fn local_paper_bootstrap_market_tick_and_pause_ack_flow() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_paper_first_snapshot_bootstrap_enables_runtime_ops_only_after_ready() -> Result<()> {
     let service = ServiceProcess::start().await?;
-    let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+    let mut app = AppHarness::new_waiting(service.base_url.clone(), service.ws_url.clone()).await?;
 
     assert!(matches!(
         app.state.snapshot_state,
-        SnapshotBootstrapState::Ready
+        SnapshotBootstrapState::WaitingFirstSnapshot
     ));
+
+    app.submit_key(KeyAction::Pause).await?;
+    assert_eq!(
+        app.state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+        Some("首次快照未就绪，操作已禁用")
+    );
+    assert!(matches!(
+        app.state.snapshot_state,
+        SnapshotBootstrapState::WaitingFirstSnapshot
+    ));
+
+    let effects = app.bootstrap_once().await?;
+    app.apply_effects(effects).await?;
+    app.drive_until(
+        |state| matches!(state.snapshot_state, SnapshotBootstrapState::Ready),
+        Duration::from_secs(3),
+    )
+    .await?;
 
     app.submit_key(KeyAction::Pause).await?;
     app.drive_until(
@@ -376,43 +401,22 @@ async fn local_paper_first_snapshot_bootstrap_enables_runtime_ops_only_after_rea
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_paper_first_snapshot_success_shows_real_empty_state() -> Result<()> {
     let service = ServiceProcess::start().await?;
-    let app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+    let mut app = AppHarness::new_waiting(service.base_url.clone(), service.ws_url.clone()).await?;
 
-    let mut empty_snapshot = app.transport.fetch_snapshot().await?;
-    empty_snapshot.execution.open_orders.clear();
-    empty_snapshot.execution.recent_fills.clear();
-    empty_snapshot.execution.pending_commands.clear();
-    empty_snapshot.execution.recent_commands.clear();
-    empty_snapshot.risk.unacked_alerts = 0;
-    empty_snapshot.risk.current_notional = 0.0;
-    empty_snapshot.risk.breaker_engaged = false;
-    empty_snapshot.strategy.levels.clear();
-    empty_snapshot.strategy.pending_rebuild_reason = None;
-    empty_snapshot.runtime.position_qty = 0.0;
-    empty_snapshot.runtime.position_avg_price = 0.0;
-    empty_snapshot.runtime.unrealized_pnl = 0.0;
-    empty_snapshot.runtime.realized_pnl = 0.0;
-    empty_snapshot.runtime.last_price = 0.0;
-    empty_snapshot.runtime.mark_price = 0.0;
-
-    let mut state = AppState::waiting_first_snapshot();
-    let effects = reduce(
-        &mut state,
-        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(empty_snapshot)),
-    );
+    let effects = app.bootstrap_once().await?;
 
     assert!(matches!(
-        state.snapshot_state,
+        app.state.snapshot_state,
         SnapshotBootstrapState::Ready
     ));
     assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
-    assert!(state.execution.open_orders.is_empty());
-    assert!(state.execution.recent_fills.is_empty());
-    assert!(state.execution.command_timeline.is_empty());
-    assert!(state.risk.alerts.is_empty());
+    assert!(app.state.execution.open_orders.is_empty());
+    assert!(app.state.execution.recent_fills.is_empty());
+    assert!(app.state.execution.command_timeline.is_empty());
+    assert!(app.state.risk.alerts.is_empty());
 
-    state.ui.page = Page::Events;
-    let rendered = render_state_to_string(&state, 100, 24);
+    app.state.ui.page = Page::Events;
+    let rendered = render_state_to_string(&app.state, 100, 24);
     assert!(rendered.contains("No fills"));
     assert!(rendered.contains("No alerts"));
     assert!(rendered.contains("No recent commands"));
