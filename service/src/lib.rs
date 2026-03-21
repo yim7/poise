@@ -1,4 +1,5 @@
 mod background;
+pub mod config;
 mod risk;
 mod strategy;
 

@@ -30,6 +30,18 @@ fn version_flag_prints_version_and_exits_promptly() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn config_flag_reads_file_and_reports_missing_path_promptly() -> Result<()> {
+    let output = run_cli_and_wait(&["--config", "tests/fixtures/does-not-exist.toml"])?;
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("--config"));
+    assert!(stderr.contains("does-not-exist.toml"));
+
+    Ok(())
+}
+
 fn run_cli_and_wait(args: &[&str]) -> Result<Output> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_grid-platform-service"))
         .args(args)

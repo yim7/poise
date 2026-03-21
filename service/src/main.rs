@@ -1,9 +1,10 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use anyhow::Context;
 use clap::Parser;
 use grid_platform_service::{
     Application, build_app,
+    config::ServiceConfig,
     integrations::binance::{BinanceConfig, RealBinanceTransport},
 };
 use tokio::net::TcpListener;
@@ -17,11 +18,14 @@ use tracing_subscriber::EnvFilter;
     about = "网格平台服务端",
     long_about = None
 )]
-struct Cli;
+struct Cli {
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    Cli::parse();
+    let cli = Cli::parse();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -29,6 +33,23 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| EnvFilter::new("grid_platform_service=info,tower_http=info")),
         )
         .init();
+
+    let loaded_config = cli
+        .config
+        .as_ref()
+        .map(|path| {
+            ServiceConfig::load_from_path(path)
+                .with_context(|| format!("failed to load config from --config {}", path.display()))
+        })
+        .transpose()?;
+    if let Some(config) = &loaded_config {
+        info!(
+            environment = %config.environment,
+            instances = config.instances.len(),
+            default_symbol = ?config.default_symbol,
+            "loaded service config from --config"
+        );
+    }
 
     let addr = env::var("GRID_PLATFORM_SERVICE_ADDR").unwrap_or_else(|_| "127.0.0.1:8000".into());
     let listener = TcpListener::bind(&addr)
