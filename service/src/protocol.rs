@@ -180,6 +180,20 @@ pub struct OpenOrder {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenOrdersSource {
+    ExchangeLive,
+    StrategyMirror,
+    Unavailable,
+}
+
+impl Default for OpenOrdersSource {
+    fn default() -> Self {
+        Self::StrategyMirror
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentFill {
     pub trade_id: String,
@@ -228,6 +242,12 @@ pub struct CommandRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionState {
     pub open_orders: Vec<OpenOrder>,
+    #[serde(default)]
+    pub open_orders_source: OpenOrdersSource,
+    #[serde(default)]
+    pub exchange_open_orders: Vec<OpenOrder>,
+    #[serde(default = "default_exchange_open_orders_source")]
+    pub exchange_open_orders_source: OpenOrdersSource,
     pub recent_fills: Vec<RecentFill>,
     pub pending_commands: Vec<PendingCommand>,
     pub last_command_ack: Option<String>,
@@ -261,6 +281,10 @@ pub struct RuntimeSnapshot {
     pub risk: RiskState,
     #[serde(default)]
     pub strategy: StrategyState,
+}
+
+fn default_exchange_open_orders_source() -> OpenOrdersSource {
+    OpenOrdersSource::Unavailable
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -493,6 +517,9 @@ impl RuntimeSnapshot {
             },
             execution: ExecutionState {
                 open_orders: vec![],
+                open_orders_source: OpenOrdersSource::StrategyMirror,
+                exchange_open_orders: vec![],
+                exchange_open_orders_source: OpenOrdersSource::Unavailable,
                 recent_fills: vec![],
                 pending_commands: vec![],
                 last_command_ack: None,
@@ -563,6 +590,9 @@ impl RuntimeSnapshot {
                         updated_at: "2025-01-01T00:00:00Z".into(),
                     },
                 ],
+                open_orders_source: OpenOrdersSource::StrategyMirror,
+                exchange_open_orders: vec![],
+                exchange_open_orders_source: OpenOrdersSource::Unavailable,
                 recent_fills: vec![RecentFill {
                     trade_id: "fill_9001".into(),
                     order_id: "ord_0999".into(),
@@ -685,6 +715,7 @@ fn sample_strategy() -> StrategyState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn runtime_snapshot_sample_matches_expected_symbol() {
@@ -694,6 +725,75 @@ mod tests {
         assert_eq!(snapshot.strategy.status, StrategyStatus::Occupied);
         assert_eq!(snapshot.strategy.levels.len(), 6);
         assert_eq!(snapshot.strategy.config.levels_per_side, 3);
+    }
+
+    #[test]
+    fn runtime_snapshot_sample_serializes_open_orders_source() {
+        let serialized = serde_json::to_value(RuntimeSnapshot::sample()).expect("serialize sample");
+        assert_eq!(
+            serialized["execution"]["open_orders_source"],
+            "strategy_mirror"
+        );
+        assert_eq!(
+            serialized["execution"]["exchange_open_orders_source"],
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn runtime_snapshot_decodes_when_open_orders_source_is_omitted() {
+        let raw = json!({
+            "connection": {
+                "http_available": true,
+                "ws_connected": false,
+                "user_stream_connected": null,
+                "latency_ms": 42,
+                "last_heartbeat_at": "2025-01-01T00:00:00Z",
+                "reconnect_backoff_ms": 0,
+                "stale_age_ms": 0
+            },
+            "runtime": {
+                "symbol": "XAUUSDT",
+                "env": "testnet",
+                "session_state": "regular",
+                "strategy_state": "running",
+                "last_price": 2361.48,
+                "mark_price": 2361.55,
+                "position_qty": 0.25,
+                "position_avg_price": 2354.2,
+                "unrealized_pnl": 1.84,
+                "realized_pnl": 14.52
+            },
+            "execution": {
+                "open_orders": [],
+                "recent_fills": [],
+                "pending_commands": [],
+                "last_command_ack": null,
+                "last_command_ack_event": null,
+                "recent_commands": []
+            },
+            "risk": {
+                "current_notional": 590.39,
+                "max_notional": 1500.0,
+                "daily_loss_limit": -120.0,
+                "stop_loss_pct": 4.0,
+                "risk_level": "watch",
+                "breaker_engaged": false,
+                "unacked_alerts": 1
+            }
+        });
+        let snapshot: RuntimeSnapshot =
+            serde_json::from_value(raw).expect("decode legacy snapshot");
+        let serialized = serde_json::to_value(snapshot).expect("serialize decoded snapshot");
+
+        assert_eq!(
+            serialized["execution"]["open_orders_source"],
+            "strategy_mirror"
+        );
+        assert_eq!(
+            serialized["execution"]["exchange_open_orders_source"],
+            "unavailable"
+        );
     }
 
     #[test]

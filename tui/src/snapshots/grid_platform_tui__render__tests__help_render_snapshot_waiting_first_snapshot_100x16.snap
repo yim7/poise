@@ -1,21 +1,21 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2020
+assertion_line: 2207
 expression: snapshot
 ---
  GRID PLATFORM  WAITING SNAPSHOT  等 待 首 次 快 照                                                       
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
-┌ Keymap ─────────────────────────────────────────────┐┌ Ops Notes ────────────────────────────────┐
-│1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││Focus  Keymap                              │
-│Tab / Shift-Tab cycle real panel focus with          ││Health  RECONNECTING                       │
-│highlighted borders.                                 ││pending -> accepted -> ack marks the normal│
-│p pause   r resume                                   ││command path.                              │
-│c cancel all   f flatten now   s shutdown after      ││failed / timed_out require checking service│
-│flatten                                              ││logs before retrying.                      │
-│Enter confirms modal actions. Esc or n cancels.      ││Flatten and shutdown can cross the spread  │
-│q exits the client only; it does not stop the        ││or leave the strategy paused.              │
-│service.                                             ││                                           │
+┌ 快 捷 键  ─────────────────────────────────────────────┐┌ 术 语 说 明  ─────────────────────────────────┐
+│1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││当 前 焦 点   快 捷 键                            │
+│Tab / Shift-Tab 在 当 前 页 面 切 换 焦 点 面 板 。              ││连 接 健 康   SERVICE RECONNECTING             │
+│p 暂 停    r 恢 复                                       ││策 略 订 单 ： 看 的 是 策 略 目 标 。                  │
+│c 撤 全 部    f 立 即 平 仓    s 平 仓 后 停 机                  ││交 易 所 挂 单 ： 只 在 真 实 挂 单 可 用 时 展 示 。        │
+│Enter 确 认 危 险 操 作 ， Esc 或  n 取 消 。                   ││首 页 若 显 示 不 可 用 说 明 ，                      │
+│q / Ctrl-C 只 退 出 客 户 端 ， 不 会 停 止  service。           ││表 示 当 前 模 式 无 法 证 明 策 略 单 已 真 实 挂 出 。      │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
 └─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  首 次 快 照 未 就 绪  | p/r/c/f/s 已 禁 用  | 1-4 页 面  ? help

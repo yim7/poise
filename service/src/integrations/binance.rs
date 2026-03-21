@@ -4,8 +4,10 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::{SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
+use hmac::{Hmac, Mac};
 use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
+use sha2::Sha256;
 use tokio::{
     select,
     sync::{Mutex, mpsc},
@@ -17,7 +19,7 @@ use tracing::warn;
 use crate::{
     background::spawn_task,
     kernel::{EngineHandle, RuntimePatch},
-    protocol::ConnectionState,
+    protocol::{ConnectionState, OpenOrder, OpenOrdersSource},
     storage::PersistedRuntime,
 };
 
@@ -31,6 +33,7 @@ pub struct BinanceConfig {
     pub rest_base_url: String,
     pub ws_base_url: String,
     pub api_key: Option<String>,
+    pub api_secret: Option<String>,
     pub metadata_refresh_interval: Duration,
     pub health_tick_interval: Duration,
     pub reconnect_base_delay: Duration,
@@ -53,6 +56,7 @@ impl BinanceConfig {
             rest_base_url: "https://fapi.binance.com".into(),
             ws_base_url: "wss://fstream.binance.com".into(),
             api_key: None,
+            api_secret: None,
             metadata_refresh_interval: Duration::from_secs(300),
             health_tick_interval: Duration::from_secs(1),
             reconnect_base_delay: Duration::from_secs(1),
@@ -68,6 +72,7 @@ impl BinanceConfig {
             rest_base_url: "https://demo-fapi.binance.com".into(),
             ws_base_url: "wss://fstream.binancefuture.com".into(),
             api_key: None,
+            api_secret: None,
             metadata_refresh_interval: Duration::from_secs(300),
             health_tick_interval: Duration::from_secs(1),
             reconnect_base_delay: Duration::from_secs(1),
@@ -94,6 +99,8 @@ pub(crate) fn prepare_bootstrap_runtime(
     runtime.snapshot.connection.last_heartbeat_at.clear();
     runtime.snapshot.connection.reconnect_backoff_ms = 0;
     runtime.snapshot.connection.stale_age_ms = 0;
+    runtime.snapshot.execution.exchange_open_orders.clear();
+    runtime.snapshot.execution.exchange_open_orders_source = OpenOrdersSource::Unavailable;
 
     if should_reset_runtime {
         runtime.snapshot.runtime.session_state = "syncing".into();
@@ -109,7 +116,10 @@ pub(crate) fn prepare_bootstrap_runtime(
         runtime.snapshot.execution.last_command_ack = None;
         runtime.snapshot.execution.last_command_ack_event = None;
         runtime.snapshot.execution.recent_commands.clear();
+        runtime.snapshot.execution.exchange_open_orders.clear();
     }
+
+    runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
 
     runtime
 }
@@ -145,6 +155,7 @@ pub struct MarketStreamEvent {
 pub struct UserStreamEvent {
     pub event_time_ms: i64,
     pub positions: Vec<PositionSnapshot>,
+    pub order_updates: Vec<UserStreamOrderUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +165,13 @@ pub struct PositionSnapshot {
     pub avg_price: f64,
     pub unrealized_pnl: f64,
     pub realized_pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserStreamOrderUpdate {
+    pub symbol: String,
+    pub order: OpenOrder,
+    pub is_terminal: bool,
 }
 
 #[async_trait]
@@ -170,6 +188,9 @@ pub trait BinanceTransport: Send + Sync + 'static {
         listen_key: &str,
     ) -> Result<mpsc::Receiver<UserStreamEvent>>;
     async fn keepalive_user_stream(&self, listen_key: &str) -> Result<()>;
+    async fn fetch_open_orders(&self, _symbol: &str) -> Result<Option<Vec<OpenOrder>>> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +199,7 @@ pub struct RealBinanceTransport {
     rest_base_url: String,
     ws_base_url: String,
     api_key: Option<String>,
+    api_secret: Option<String>,
 }
 
 impl RealBinanceTransport {
@@ -190,6 +212,7 @@ impl RealBinanceTransport {
             rest_base_url: config.rest_base_url.clone(),
             ws_base_url: config.ws_base_url.clone(),
             api_key: config.api_key.clone(),
+            api_secret: config.api_secret.clone(),
         })
     }
 
@@ -203,6 +226,33 @@ impl RealBinanceTransport {
             request = request.header("X-MBX-APIKEY", api_key);
         }
         let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to call {url}"))?;
+        decode_response(response).await
+    }
+
+    async fn get_signed_json<T>(&self, path: &str, query: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let api_key = self
+            .api_key
+            .as_ref()
+            .context("binance api_key is required for signed requests")?;
+        let api_secret = self
+            .api_secret
+            .as_ref()
+            .context("binance api_secret is required for signed requests")?;
+        let signature = sign_query(query, api_secret)?;
+        let url = format!(
+            "{}{}?{}&signature={}",
+            self.rest_base_url, path, query, signature
+        );
+        let response = self
+            .http
+            .get(&url)
+            .header("X-MBX-APIKEY", api_key)
             .send()
             .await
             .with_context(|| format!("failed to call {url}"))?;
@@ -382,6 +432,25 @@ impl BinanceTransport for RealBinanceTransport {
 
     async fn keepalive_user_stream(&self, _listen_key: &str) -> Result<()> {
         self.keepalive_listen_key().await
+    }
+
+    async fn fetch_open_orders(&self, symbol: &str) -> Result<Option<Vec<OpenOrder>>> {
+        if self.api_key.is_none() || self.api_secret.is_none() {
+            return Ok(None);
+        }
+
+        let query = format!(
+            "symbol={symbol}&timestamp={}",
+            Utc::now().timestamp_millis()
+        );
+        let orders: Vec<OpenOrdersResponseOrder> =
+            self.get_signed_json("/fapi/v1/openOrders", &query).await?;
+        Ok(Some(
+            orders
+                .into_iter()
+                .map(OpenOrdersResponseOrder::into_open_order)
+                .collect(),
+        ))
     }
 }
 
@@ -675,6 +744,43 @@ async fn run_user_stream_loop(
                         "binance user stream connected",
                     )
                     .await;
+                let mut exchange_open_orders =
+                    match transport.fetch_open_orders(&config.symbol).await {
+                        Ok(Some(orders)) => {
+                            sync_exchange_open_orders_until_applied(
+                                &engine,
+                                orders.clone(),
+                                OpenOrdersSource::ExchangeLive,
+                                config.reconnect_base_delay,
+                                "binance open orders bootstrap",
+                            )
+                            .await;
+                            orders
+                        }
+                        Ok(None) => {
+                            sync_exchange_open_orders_until_applied(
+                                &engine,
+                                Vec::new(),
+                                OpenOrdersSource::Unavailable,
+                                config.reconnect_base_delay,
+                                "binance open orders unavailable",
+                            )
+                            .await;
+                            Vec::new()
+                        }
+                        Err(error) => {
+                            warn!(?error, "binance open orders bootstrap failed");
+                            sync_exchange_open_orders_until_applied(
+                                &engine,
+                                Vec::new(),
+                                OpenOrdersSource::Unavailable,
+                                config.reconnect_base_delay,
+                                "binance open orders bootstrap failed",
+                            )
+                            .await;
+                            Vec::new()
+                        }
+                    };
                 let mut keepalive = interval(config.user_stream_keepalive_interval);
                 loop {
                     select! {
@@ -682,6 +788,22 @@ async fn run_user_stream_loop(
                             let Some(event) = maybe_event else {
                                 break;
                             };
+                            if !event.order_updates.is_empty() && config.api_secret.is_some() {
+                                for update in event.order_updates {
+                                    if update.symbol != config.symbol {
+                                        continue;
+                                    }
+                                    apply_order_update(&mut exchange_open_orders, update);
+                                }
+                                sync_exchange_open_orders_until_applied(
+                                    &engine,
+                                    exchange_open_orders.clone(),
+                                    OpenOrdersSource::ExchangeLive,
+                                    config.reconnect_base_delay,
+                                    "binance user stream order sync",
+                                )
+                                .await;
+                            }
                             if let Some(position) = event
                                 .positions
                                 .into_iter()
@@ -809,18 +931,82 @@ fn decode_market_stream(payload: &str) -> Result<MarketStreamEvent> {
 fn decode_user_stream(payload: &str) -> Result<Option<UserStreamEvent>> {
     let event: UserStreamEnvelope =
         serde_json::from_str(payload).context("failed to decode user stream payload")?;
-    if event.event_type != "ACCOUNT_UPDATE" {
-        return Ok(None);
+    match event.event_type.as_str() {
+        "ACCOUNT_UPDATE" => {
+            let positions = event
+                .account_update
+                .map(|update| summarize_positions(update.positions))
+                .unwrap_or_default();
+            Ok(Some(UserStreamEvent {
+                event_time_ms: event.event_time,
+                positions,
+                order_updates: vec![],
+            }))
+        }
+        "ORDER_TRADE_UPDATE" => {
+            let Some(order_trade_update) = event.order_trade_update else {
+                return Ok(None);
+            };
+            Ok(Some(UserStreamEvent {
+                event_time_ms: event.event_time,
+                positions: vec![],
+                order_updates: vec![translate_order_update(
+                    order_trade_update.order,
+                    event.event_time,
+                )],
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn translate_order_update(
+    order: OrderTradeUpdateOrder,
+    event_time_ms: i64,
+) -> UserStreamOrderUpdate {
+    let updated_at = timestamp_millis_to_rfc3339(event_time_ms);
+    let status = order.order_status;
+    UserStreamOrderUpdate {
+        symbol: order.symbol,
+        is_terminal: is_terminal_order_status(&status),
+        order: OpenOrder {
+            order_id: order.order_id.to_string(),
+            client_order_id: order.client_order_id,
+            side: order.side.to_ascii_lowercase(),
+            price: order.price,
+            qty: order.quantity,
+            filled_qty: order.accumulated_filled_qty,
+            status,
+            created_at: updated_at.clone(),
+            updated_at,
+        },
+    }
+}
+
+fn apply_order_update(open_orders: &mut Vec<OpenOrder>, update: UserStreamOrderUpdate) {
+    if update.is_terminal {
+        open_orders.retain(|current| {
+            current.order_id != update.order.order_id
+                && current.client_order_id != update.order.client_order_id
+        });
+        return;
     }
 
-    let positions = event
-        .account_update
-        .map(|update| summarize_positions(update.positions))
-        .unwrap_or_default();
-    Ok(Some(UserStreamEvent {
-        event_time_ms: event.event_time,
-        positions,
-    }))
+    if let Some(index) = open_orders.iter().position(|current| {
+        current.order_id == update.order.order_id
+            || current.client_order_id == update.order.client_order_id
+    }) {
+        open_orders[index] = update.order;
+    } else {
+        open_orders.push(update.order);
+    }
+}
+
+fn is_terminal_order_status(status: &str) -> bool {
+    matches!(
+        status,
+        "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" | "REJECTED"
+    )
 }
 
 fn summarize_positions(positions: Vec<AccountUpdatePosition>) -> Vec<PositionSnapshot> {
@@ -916,6 +1102,31 @@ async fn sync_runtime_patch_until_applied(
     }
 }
 
+async fn sync_exchange_open_orders_until_applied(
+    engine: &EngineHandle,
+    orders: Vec<OpenOrder>,
+    source: OpenOrdersSource,
+    retry_delay: Duration,
+    context: &'static str,
+) {
+    loop {
+        match engine
+            .sync_exchange_open_orders(orders.clone(), source)
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    %context,
+                    "failed to persist exchange open orders; retrying"
+                );
+                sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ExchangeInfoResponse {
     symbols: Vec<ExchangeInfoSymbol>,
@@ -988,6 +1199,8 @@ struct UserStreamEnvelope {
     event_time: i64,
     #[serde(rename = "a")]
     account_update: Option<AccountUpdatePayload>,
+    #[serde(rename = "o")]
+    order_trade_update: Option<OrderTradeUpdatePayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1020,6 +1233,75 @@ impl AccountUpdatePosition {
             _ => self.position_amount,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct OrderTradeUpdatePayload {
+    #[serde(flatten)]
+    order: OrderTradeUpdateOrder,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrderTradeUpdateOrder {
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "c")]
+    client_order_id: String,
+    #[serde(rename = "S")]
+    side: String,
+    #[serde(rename = "q", deserialize_with = "deserialize_string_number")]
+    quantity: f64,
+    #[serde(rename = "p", deserialize_with = "deserialize_string_number")]
+    price: f64,
+    #[serde(rename = "X")]
+    order_status: String,
+    #[serde(rename = "i")]
+    order_id: i64,
+    #[serde(rename = "z", deserialize_with = "deserialize_string_number")]
+    accumulated_filled_qty: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenOrdersResponseOrder {
+    #[serde(rename = "orderId")]
+    order_id: i64,
+    #[serde(rename = "clientOrderId")]
+    client_order_id: String,
+    side: String,
+    #[serde(rename = "price", deserialize_with = "deserialize_string_number")]
+    price: f64,
+    #[serde(rename = "origQty", deserialize_with = "deserialize_string_number")]
+    orig_qty: f64,
+    #[serde(rename = "executedQty", deserialize_with = "deserialize_string_number")]
+    executed_qty: f64,
+    status: String,
+    #[serde(rename = "time")]
+    created_at_ms: i64,
+    #[serde(rename = "updateTime")]
+    updated_at_ms: i64,
+}
+
+impl OpenOrdersResponseOrder {
+    fn into_open_order(self) -> OpenOrder {
+        OpenOrder {
+            order_id: self.order_id.to_string(),
+            client_order_id: self.client_order_id,
+            side: self.side.to_ascii_lowercase(),
+            price: self.price,
+            qty: self.orig_qty,
+            filled_qty: self.executed_qty,
+            status: self.status,
+            created_at: timestamp_millis_to_rfc3339(self.created_at_ms),
+            updated_at: timestamp_millis_to_rfc3339(self.updated_at_ms),
+        }
+    }
+}
+
+fn sign_query(query: &str, api_secret: &str) -> Result<String> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(api_secret.as_bytes()).context("invalid hmac key")?;
+    mac.update(query.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 fn default_position_side() -> String {

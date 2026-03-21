@@ -17,9 +17,9 @@ use crate::execution::{
 };
 use crate::protocol::{
     CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
-    CommandType, ConnectionState, GridLevelState, GridSide, OpenOrder, PROTOCOL_VERSION,
-    PendingCommand, PriceUpdated, RecentFill, RiskEvent, RuntimeSnapshot, StrategyStatus,
-    SystemEvent,
+    CommandType, ConnectionState, GridLevelState, GridSide, OpenOrder, OpenOrdersSource,
+    PROTOCOL_VERSION, PendingCommand, PriceUpdated, RecentFill, RiskEvent, RuntimeSnapshot,
+    StrategyStatus, SystemEvent,
 };
 use crate::storage::{PersistedRuntime, SqliteStorage};
 use crate::{risk, strategy};
@@ -83,6 +83,11 @@ pub enum EngineCommand {
     },
     SyncRuntime {
         patch: RuntimePatch,
+        reply_to: oneshot::Sender<Result<()>>,
+    },
+    SyncExchangeOpenOrders {
+        orders: Vec<OpenOrder>,
+        source: OpenOrdersSource,
         reply_to: oneshot::Sender<Result<()>>,
     },
     SyncMarketPrices {
@@ -188,6 +193,26 @@ impl EngineHandle {
         let result = reply_rx
             .await
             .context("engine loop dropped before syncing runtime state")?;
+        result
+    }
+
+    pub(crate) async fn sync_exchange_open_orders(
+        &self,
+        orders: Vec<OpenOrder>,
+        source: OpenOrdersSource,
+    ) -> Result<()> {
+        let (reply_to, reply_rx) = oneshot::channel();
+        self.commands_tx
+            .send(EngineCommand::SyncExchangeOpenOrders {
+                orders,
+                source,
+                reply_to,
+            })
+            .await
+            .context("failed to enqueue exchange open orders sync")?;
+        let result = reply_rx
+            .await
+            .context("engine loop dropped before syncing exchange open orders")?;
         result
     }
 
@@ -465,6 +490,29 @@ async fn run_engine(
                     warn!(
                         ?error,
                         "failed to persist runtime state to sqlite; reverting runtime sync"
+                    );
+                    let _ = reply_to.send(Err(error));
+                    continue;
+                }
+                replace_read_model(&read_model, &aggregate);
+                let _ = reply_to.send(Ok(()));
+                publish_events(&events_tx, events).await;
+            }
+            EngineCommand::SyncExchangeOpenOrders {
+                orders,
+                source,
+                reply_to,
+            } => {
+                let previous = aggregate.clone();
+                let events = aggregate.sync_exchange_open_orders(orders, source);
+                if !events.is_empty()
+                    && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
+                {
+                    aggregate = previous;
+                    let error = error.context("failed to persist exchange open orders sync");
+                    warn!(
+                        ?error,
+                        "failed to persist runtime state to sqlite; reverting exchange open orders sync"
                     );
                     let _ = reply_to.send(Err(error));
                     continue;
@@ -1133,6 +1181,22 @@ impl RuntimeAggregate {
             vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone()))];
         events.extend(self.risk_alert_events(reconcile.risk_alerts));
         events
+    }
+
+    fn sync_exchange_open_orders(
+        &mut self,
+        orders: Vec<OpenOrder>,
+        source: OpenOrdersSource,
+    ) -> Vec<SequencedEngineEvent> {
+        if self.snapshot.execution.exchange_open_orders == orders
+            && self.snapshot.execution.exchange_open_orders_source == source
+        {
+            return Vec::new();
+        }
+
+        self.snapshot.execution.exchange_open_orders = orders;
+        self.snapshot.execution.exchange_open_orders_source = source;
+        vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone()))]
     }
 
     fn sync_market_prices(

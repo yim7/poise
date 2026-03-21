@@ -1,20 +1,21 @@
 ---
 source: tui/src/render.rs
+assertion_line: 1725
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Active Grid Levels                          
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus 策 略 订 单                                     
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
-┌ Active Grid Levels ──────────────────────────────────────────┐┌ Grid Summary ────────────────────┐
-│Side   Price      Qty      bps      Status                    ││Status  OCCUPIED                  │
-│BUY    2336.68    0.100    -105.0   OCCUPIED                  ││Lower  2336.76   Upper  2386.20   │
-│BUY    2344.95    0.100    -70.0    OCCUPIED                  ││Center  2361.48   Span  2.09%     │
-│BUY    2353.21    0.100    -35.0    OCCUPIED                  ││Active  3   Occupied  3   Pending │
-│SELL   2369.75    0.100    +35.0    ACTIVE                    │└──────────────────────────────────┘
-│SELL   2378.01    0.100    +70.0    ACTIVE                    │┌ Operator Notes ──────────────────┐
-│SELL   2386.28    0.100    +105.0   ACTIVE                    ││Current Price  2361.48            │
+┌ 策 略 订 单  ────────────────────────────────────────────────────┐┌ Grid Summary ────────────────────┐
+│方 向    价 格        数 量      策 略 状 态    挂 单 状 态                 ││Status  OCCUPIED                  │
+│BUY    2336.68    0.100    占 用        无 需 挂 单                 ││Lower  2336.76   Upper  2386.20   │
+│BUY    2344.95    0.100    占 用        无 需 挂 单                 ││Center  2361.48   Span  2.09%     │
+│BUY    2353.21    0.100    占 用        无 需 挂 单                 ││Active  3   Occupied  3   Pending │
+│SELL   2369.75    0.100    生 效        未 知                     │└──────────────────────────────────┘
+│SELL   2378.01    0.100    生 效        未 知                     │┌ Operator Notes ──────────────────┐
+│SELL   2386.28    0.100    生 效        未 知                     ││Current Price  2361.48            │
 │                                                              ││Session  regular                  │
 │                                                              ││Health  HEALTHY                   │
 └──────────────────────────────────────────────────────────────┘└──────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- Focus Active Grid Levels | Tab panels | p/r run | c/f/s danger | Enter/Esc
+ Focus 策 略 订 单  | Tab panels | p/r run | c/f/s danger | Enter/Esc

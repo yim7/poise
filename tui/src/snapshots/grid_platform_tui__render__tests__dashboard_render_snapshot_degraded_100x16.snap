@@ -1,18 +1,18 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2020
+assertion_line: 2207
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  RECONNECTING  Focus Execution Focus                        
+ GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Execution Focus                
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
-│Position  0.250 @ 2354.20                             ││Level  Danger   Breaker  OFF              │
-│U-PnL  1.84   R-PnL  14.52                            ││Notional  590/1500   Stop  4.0%           │
+│Pos  0.250 @ 2354.20   U  1.84   R  14.52             ││Level  Danger   Breaker  OFF              │
+│交 易 所   N/A   Pending  1   Health  SERVICE            ││Notional  590/1500   Stop  4.0%           │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
-┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
-│Side   Price     Qty      Status                      ││Last  2361.48   Mark  2361.55             │
-│BUY    2352.80   0.100    NEW                         ││Svc WS  DOWN   Mkt WS  DOWN   svc retry   │
+┌ 交 易 所 挂 单  ──────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
+│当 前 模 式 只 提 供 策 略 挂 单 镜 像 。                           ││Last  2361.48   Mark  2361.55             │
+│尚 未 接 入 真 实 交 易 所 挂 单 查 询 。                           ││Svc WS  DOWN   Mkt WS  DOWN   svc retry   │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
 │BUY 2349.10 x 0.050  pnl +2.51                        ││ ACCEPTED  SHUTDOWN                       │

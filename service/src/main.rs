@@ -84,5 +84,6 @@ fn binance_config_from_env() -> anyhow::Result<Option<BinanceConfig>> {
         config.ws_base_url = ws_base_url;
     }
     config.api_key = env::var("GRID_PLATFORM_BINANCE_API_KEY").ok();
+    config.api_secret = env::var("GRID_PLATFORM_BINANCE_API_SECRET").ok();
     Ok(Some(config))
 }

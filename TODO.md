@@ -7,8 +7,8 @@
 
 - 当前主线：待确认下一里程碑
 - 并行预研：无
-- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI 首次快照等待/失败重试空态与服务端空 bootstrap 已验收
-- 最近验证：`cargo fmt --all --check`、`cargo test` 已通过；首次快照等待态、失败重试态、真实空态和运行态操作禁用链路已补验收
+- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新
+- 最近验证：`cargo fmt --check`、`cargo test -p grid-platform-service`、`cargo test -p grid-platform-tui`、`cargo test` 已通过；订单来源协议兼容、Binance 真实挂单同步、TUI 双轴状态模型，以及本地 E2E service 启动并发超时回归已复核，无新的阻断项
 
 ## 首次快照空态验收
 
@@ -27,6 +27,14 @@
 - [x] 为 paper 模式持仓后的连续行情更新补回归测试
 - [x] 修复空价格 replay `market` step 复用旧价导致的幽灵成交
 - [x] 统一 reduce-only 成交数量与已实现盈亏口径
+- [x] 修复 TUI 将 `Ctrl-C` 误判为 `cancel-all` 的问题
+- [x] 为 `Ctrl-C` 退出与带修饰键快捷键补回归测试
+- [x] 区分 TUI 服务控制面与行情流的重连状态文案
+- [x] 为连接状态标签补回归测试
+- [x] 区分 TUI 策略订单与交易所挂单视图
+- [x] 为执行快照补 `open_orders_source` 并兼容旧 payload / 旧快照
+- [x] 接入 Binance 真实交易所挂单同步到 `exchange_open_orders`
+- [x] 修复本地 E2E 并发启动 service 时的 Cargo 构建锁超时
 
 ## 已完成里程碑
 

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::protocol::{
-    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, PendingCommand,
-    RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
+    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, OpenOrdersSource,
+    PendingCommand, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
 };
 
 pub const COMMAND_TIMEOUT_TICKS: u64 = 15;
@@ -40,16 +40,16 @@ impl Page {
     pub fn focus_label(self, focus_index: usize) -> &'static str {
         const DASHBOARD: [&str; 6] = [
             "Execution Focus",
-            "Open Orders",
+            "交易所挂单",
             "Recent Fills",
             "Risk + Alerts",
             "Market + Health",
             "Command Timeline",
         ];
-        const GRID: [&str; 3] = ["Active Grid Levels", "Grid Summary", "Operator Notes"];
+        const GRID: [&str; 3] = ["策略订单", "Grid Summary", "Operator Notes"];
         const MARKET: [&str; 3] = ["Tape", "Connectivity", "Runtime"];
         const EVENTS: [&str; 4] = ["Fills", "Alerts", "Commands", "System"];
-        const HELP: [&str; 2] = ["Keymap", "Ops Notes"];
+        const HELP: [&str; 2] = ["快捷键", "术语说明"];
 
         let labels = match self {
             Self::Dashboard => &DASHBOARD[..],
@@ -190,6 +190,9 @@ pub struct CommandTimelineEntry {
 #[derive(Debug, Clone)]
 pub struct ExecutionViewState {
     pub open_orders: Vec<crate::protocol::OpenOrder>,
+    pub open_orders_source: OpenOrdersSource,
+    pub exchange_open_orders: Vec<crate::protocol::OpenOrder>,
+    pub exchange_open_orders_source: OpenOrdersSource,
     pub recent_fills: VecDeque<RecentFill>,
     pub pending_commands: Vec<PendingCommand>,
     pub last_command_ack: Option<CommandAck>,
@@ -264,6 +267,9 @@ impl AppState {
             },
             execution: ExecutionViewState {
                 open_orders: Vec::new(),
+                open_orders_source: OpenOrdersSource::StrategyMirror,
+                exchange_open_orders: Vec::new(),
+                exchange_open_orders_source: OpenOrdersSource::Unavailable,
                 recent_fills: VecDeque::new(),
                 pending_commands: Vec::new(),
                 last_command_ack: None,
@@ -381,6 +387,9 @@ impl AppState {
             },
             execution: ExecutionViewState {
                 open_orders: snapshot.execution.open_orders,
+                open_orders_source: snapshot.execution.open_orders_source,
+                exchange_open_orders: snapshot.execution.exchange_open_orders,
+                exchange_open_orders_source: snapshot.execution.exchange_open_orders_source,
                 recent_fills: VecDeque::from(snapshot.execution.recent_fills),
                 pending_commands: snapshot.execution.pending_commands,
                 last_command_ack: snapshot.execution.last_command_ack_event,

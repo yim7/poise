@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::{
+    protocol::OpenOrdersSource,
     selectors::{self, ConnectionHealthKind},
     state::{AppState, CommandTimelineStage, Modal, Page, SnapshotBootstrapState, ToastLevel},
     theme::{PanelTone, StatusTone, Theme},
@@ -552,87 +553,163 @@ fn draw_dashboard(
 
     let vm = selectors::dashboard(state);
     let health = selectors::connection_health(state);
-    let summary = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("Position  ", theme.muted()),
-            Span::styled(vm.position_qty, theme.emphasis()),
-            Span::styled(" @ ", theme.muted()),
-            Span::styled(vm.position_avg_price, theme.panel()),
-        ]),
-        Line::from(vec![
-            Span::styled("U-PnL  ", theme.muted()),
-            Span::styled(
-                vm.unrealized_pnl,
-                if state.runtime.unrealized_pnl >= 0.0 {
-                    theme.success()
-                } else {
-                    theme.danger()
-                },
-            ),
-            Span::styled("   R-PnL  ", theme.muted()),
-            Span::styled(
-                vm.realized_pnl,
-                if state.runtime.realized_pnl >= 0.0 {
-                    theme.success()
-                } else {
-                    theme.danger()
-                },
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Orders  ", theme.muted()),
-            Span::styled(vm.open_orders.to_string(), theme.panel()),
-            Span::styled("   Pending  ", theme.muted()),
-            Span::styled(vm.pending_commands.to_string(), theme.warning()),
-            Span::styled("   Health  ", theme.muted()),
-            Span::styled(
-                health.label,
-                theme.status(status_tone_for_connection(health.kind)),
-            ),
-        ]),
-    ])
-    .block(panel_block(
-        theme,
-        "Execution Focus",
-        panel_focused(state, 0),
-        PanelTone::Neutral,
-    ))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(summary, left[0]);
-
-    let order_rows = selectors::open_order_items(state, table_capacity(left[1]))
-        .into_iter()
-        .map(|order| {
-            Row::new(vec![
-                Cell::from(order.side),
-                Cell::from(order.price),
-                Cell::from(order.qty),
-                Cell::from(match order.command_ref {
-                    Some(command_ref) => format!("{} · {}", order.status, command_ref),
-                    None => order.status,
-                }),
-            ])
-        });
-    frame.render_widget(
-        Table::new(
-            order_rows,
-            [
-                Constraint::Length(6),
-                Constraint::Length(9),
-                Constraint::Length(8),
-                Constraint::Min(7),
-            ],
-        )
-        .header(Row::new(vec!["Side", "Price", "Qty", "Status"]).style(theme.emphasis()))
-        .column_spacing(1)
+    let exchange_orders = vm
+        .exchange_orders
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "N/A".into());
+    let summary_lines = if left[0].height <= 4 {
+        vec![
+            Line::from(vec![
+                Span::styled("Pos  ", theme.muted()),
+                Span::styled(vm.position_qty, theme.emphasis()),
+                Span::styled(" @ ", theme.muted()),
+                Span::styled(vm.position_avg_price, theme.panel()),
+                Span::styled("   U  ", theme.muted()),
+                Span::styled(
+                    vm.unrealized_pnl.clone(),
+                    if state.runtime.unrealized_pnl >= 0.0 {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+                Span::styled("   R  ", theme.muted()),
+                Span::styled(
+                    vm.realized_pnl.clone(),
+                    if state.runtime.realized_pnl >= 0.0 {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("交易所  ", theme.muted()),
+                Span::styled(
+                    exchange_orders,
+                    if vm.exchange_orders.is_some() {
+                        theme.panel()
+                    } else {
+                        theme.warning()
+                    },
+                ),
+                Span::styled("   Pending  ", theme.muted()),
+                Span::styled(vm.pending_commands.to_string(), theme.warning()),
+                Span::styled("   Health  ", theme.muted()),
+                Span::styled(
+                    health.label,
+                    theme.status(status_tone_for_connection(health.kind)),
+                ),
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled("Position  ", theme.muted()),
+                Span::styled(vm.position_qty, theme.emphasis()),
+                Span::styled(" @ ", theme.muted()),
+                Span::styled(vm.position_avg_price, theme.panel()),
+            ]),
+            Line::from(vec![
+                Span::styled("U-PnL  ", theme.muted()),
+                Span::styled(
+                    vm.unrealized_pnl.clone(),
+                    if state.runtime.unrealized_pnl >= 0.0 {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+                Span::styled("   R-PnL  ", theme.muted()),
+                Span::styled(
+                    vm.realized_pnl.clone(),
+                    if state.runtime.realized_pnl >= 0.0 {
+                        theme.success()
+                    } else {
+                        theme.danger()
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("交易所  ", theme.muted()),
+                Span::styled(
+                    exchange_orders,
+                    if vm.exchange_orders.is_some() {
+                        theme.panel()
+                    } else {
+                        theme.warning()
+                    },
+                ),
+                Span::styled("   Pending  ", theme.muted()),
+                Span::styled(vm.pending_commands.to_string(), theme.warning()),
+                Span::styled("   Health  ", theme.muted()),
+                Span::styled(
+                    health.label,
+                    theme.status(status_tone_for_connection(health.kind)),
+                ),
+            ]),
+        ]
+    };
+    let summary = Paragraph::new(summary_lines)
         .block(panel_block(
             theme,
-            "Open Orders",
-            panel_focused(state, 1),
+            "Execution Focus",
+            panel_focused(state, 0),
             PanelTone::Neutral,
-        )),
-        left[1],
-    );
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(summary, left[0]);
+
+    match state.execution.exchange_open_orders_source {
+        OpenOrdersSource::ExchangeLive => {
+            let order_rows = selectors::open_order_items(state, table_capacity(left[1]))
+                .into_iter()
+                .map(|order| {
+                    Row::new(vec![
+                        Cell::from(order.side),
+                        Cell::from(order.price),
+                        Cell::from(order.qty),
+                        Cell::from(match order.command_ref {
+                            Some(command_ref) => format!("{} · {}", order.status, command_ref),
+                            None => order.status,
+                        }),
+                    ])
+                });
+            frame.render_widget(
+                Table::new(
+                    order_rows,
+                    [
+                        Constraint::Length(6),
+                        Constraint::Length(9),
+                        Constraint::Length(8),
+                        Constraint::Min(7),
+                    ],
+                )
+                .header(Row::new(vec!["方向", "价格", "数量", "状态"]).style(theme.emphasis()))
+                .column_spacing(1)
+                .block(panel_block(
+                    theme,
+                    "交易所挂单",
+                    panel_focused(state, 1),
+                    PanelTone::Neutral,
+                )),
+                left[1],
+            );
+        }
+        OpenOrdersSource::StrategyMirror | OpenOrdersSource::Unavailable => {
+            frame.render_widget(
+                Paragraph::new(exchange_orders_unavailable_lines(state, theme))
+                    .block(panel_block(
+                        theme,
+                        "交易所挂单",
+                        panel_focused(state, 1),
+                        PanelTone::Warning,
+                    ))
+                    .wrap(Wrap { trim: true }),
+                left[1],
+            );
+        }
+    }
 
     let fill_items = list_from_lines(
         selectors::recent_fill_items(state, list_capacity(left[2]))
@@ -861,7 +938,7 @@ fn draw_grid(
             ])
             .split(area);
 
-        draw_grid_levels(frame, layout[0], state, theme);
+        draw_strategy_orders(frame, layout[0], state, theme);
         draw_grid_summary(frame, layout[1], state, theme, &vm);
         draw_grid_notes(frame, layout[2], state, theme);
     } else {
@@ -874,39 +951,43 @@ fn draw_grid(
             .constraints([Constraint::Length(6), Constraint::Min(5)])
             .split(layout[1]);
 
-        draw_grid_levels(frame, layout[0], state, theme);
+        draw_strategy_orders(frame, layout[0], state, theme);
         draw_grid_summary(frame, right[0], state, theme, &vm);
         draw_grid_notes(frame, right[1], state, theme);
     }
 }
 
-fn draw_grid_levels(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
-    let vm = selectors::grid(state);
-    let level_rows = vm.levels.iter().take(table_capacity(area)).map(|level| {
-        Row::new(vec![
-            Cell::from(level.side.clone()),
-            Cell::from(level.price.clone()),
-            Cell::from(level.qty.clone()),
-            Cell::from(level.distance_bps.clone()),
-            Cell::from(level.status.clone()),
-        ])
-    });
+fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let order_rows = selectors::strategy_orders(state)
+        .into_iter()
+        .take(table_capacity(area))
+        .map(|order| {
+            Row::new(vec![
+                Cell::from(order.side),
+                Cell::from(order.price),
+                Cell::from(order.qty),
+                Cell::from(strategy_state_label(&order.strategy_state)),
+                Cell::from(placement_state_label(order.placement_state)),
+            ])
+        });
     frame.render_widget(
         Table::new(
-            level_rows,
+            order_rows,
             [
                 Constraint::Length(6),
                 Constraint::Length(10),
                 Constraint::Length(8),
-                Constraint::Length(8),
-                Constraint::Min(8),
+                Constraint::Length(10),
+                Constraint::Min(10),
             ],
         )
-        .header(Row::new(vec!["Side", "Price", "Qty", "bps", "Status"]).style(theme.emphasis()))
+        .header(
+            Row::new(vec!["方向", "价格", "数量", "策略状态", "挂单状态"]).style(theme.emphasis()),
+        )
         .column_spacing(1)
         .block(panel_block(
             theme,
-            "Active Grid Levels",
+            "策略订单",
             panel_focused(state, 0),
             PanelTone::Neutral,
         )),
@@ -1288,15 +1369,15 @@ fn draw_help(
     frame.render_widget(
         Paragraph::new(vec![
             Line::from("1 Dashboard   2 Grid   3 Market   4 Events   ? Help"),
-            Line::from("Tab / Shift-Tab cycle real panel focus with highlighted borders."),
-            Line::from("p pause   r resume"),
-            Line::from("c cancel all   f flatten now   s shutdown after flatten"),
-            Line::from("Enter confirms modal actions. Esc or n cancels."),
-            Line::from("q exits the client only; it does not stop the service."),
+            Line::from("Tab / Shift-Tab 在当前页面切换焦点面板。"),
+            Line::from("p 暂停   r 恢复"),
+            Line::from("c 撤全部   f 立即平仓   s 平仓后停机"),
+            Line::from("Enter 确认危险操作，Esc 或 n 取消。"),
+            Line::from("q / Ctrl-C 只退出客户端，不会停止 service。"),
         ])
         .block(panel_block(
             theme,
-            "Keymap",
+            "快捷键",
             panel_focused(state, 0),
             PanelTone::Neutral,
         ))
@@ -1307,26 +1388,27 @@ fn draw_help(
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Focus  ", theme.muted()),
+                Span::styled("当前焦点  ", theme.muted()),
                 Span::styled(
                     state.ui.page.focus_label(state.ui.focus_index),
                     theme.emphasis(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Health  ", theme.muted()),
+                Span::styled("连接健康  ", theme.muted()),
                 Span::styled(
                     health.label,
                     theme.status(status_tone_for_connection(health.kind)),
                 ),
             ]),
-            Line::from("pending -> accepted -> ack marks the normal command path."),
-            Line::from("failed / timed_out require checking service logs before retrying."),
-            Line::from("Flatten and shutdown can cross the spread or leave the strategy paused."),
+            Line::from("策略订单：看的是策略目标。"),
+            Line::from("交易所挂单：只在真实挂单可用时展示。"),
+            Line::from("首页若显示不可用说明，"),
+            Line::from("表示当前模式无法证明策略单已真实挂出。"),
         ])
         .block(panel_block(
             theme,
-            "Ops Notes",
+            "术语说明",
             panel_focused(state, 1),
             panel_tone_for_connection(health.kind),
         ))
@@ -1487,6 +1569,50 @@ fn panel_block(theme: &Theme, title: &str, focused: bool, tone: PanelTone) -> Bl
 
 fn badge_span(label: &str, theme: &Theme, tone: StatusTone) -> Span<'static> {
     Span::styled(format!(" {} ", label), theme.badge(tone))
+}
+
+fn exchange_orders_unavailable_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+    if state.execution.exchange_open_orders_source == OpenOrdersSource::ExchangeLive {
+        Vec::new()
+    } else if state.execution.open_orders_source == OpenOrdersSource::StrategyMirror {
+        vec![
+            Line::from(Span::styled(
+                "当前模式只提供策略挂单镜像。",
+                theme.warning(),
+            )),
+            Line::from("尚未接入真实交易所挂单查询。"),
+            Line::from(Span::styled("请到 Grid 页查看策略订单。", theme.muted())),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "当前模式未提供交易所挂单数据。",
+                theme.warning(),
+            )),
+            Line::from(Span::styled(
+                "请先确认运行模式与执行适配器。",
+                theme.muted(),
+            )),
+        ]
+    }
+}
+
+fn strategy_state_label(state: &str) -> String {
+    match state {
+        "ACTIVE" => "生效".into(),
+        "OCCUPIED" => "占用".into(),
+        "PENDING REBUILD" => "待重建".into(),
+        other => other.into(),
+    }
+}
+
+fn placement_state_label(state: selectors::PlacementState) -> &'static str {
+    match state {
+        selectors::PlacementState::Live => "已挂出",
+        selectors::PlacementState::NotPlaced => "未挂出",
+        selectors::PlacementState::NotExpected => "无需挂单",
+        selectors::PlacementState::Unknown => "未知",
+    }
 }
 
 fn list_from_lines(
@@ -2012,6 +2138,67 @@ mod tests {
         assert!(rendered.contains("Reduce exposure"));
     }
 
+    #[test]
+    fn dashboard_exchange_orders_unavailable_message() {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |state| {
+            state.execution.open_orders_source = crate::protocol::OpenOrdersSource::StrategyMirror;
+        });
+
+        assert!(rendered.contains("交易所挂单"));
+        assert!(rendered.contains("当前模式只提供策略挂单镜像"));
+        assert!(rendered.contains("N/A"));
+    }
+
+    #[test]
+    fn grid_page_shows_strategy_orders_columns() {
+        let rendered = normalized_page_string(Page::Grid, 100, 16, |state| {
+            state.execution.open_orders_source = crate::protocol::OpenOrdersSource::ExchangeLive;
+        });
+
+        assert!(rendered.contains("策略订单"));
+        assert!(rendered.contains("策略状态"));
+        assert!(rendered.contains("挂单状态"));
+    }
+
+    #[test]
+    fn dashboard_uses_exchange_open_orders_when_real_source_is_live() {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |state| {
+            state.execution.open_orders_source = crate::protocol::OpenOrdersSource::StrategyMirror;
+            state.execution.exchange_open_orders_source =
+                crate::protocol::OpenOrdersSource::ExchangeLive;
+            state.execution.exchange_open_orders = vec![crate::protocol::OpenOrder {
+                order_id: "real_ord_01".into(),
+                client_order_id: "real_grid_sell_01".into(),
+                side: "sell".into(),
+                price: 4510.25,
+                qty: 0.2,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            }];
+        });
+
+        assert!(rendered.contains("4510.25"));
+        assert!(!rendered.contains("当前模式只提供策略挂单镜像"));
+    }
+
+    #[test]
+    fn help_page_explains_strategy_and_exchange_orders() {
+        let rendered = normalized_page_string(Page::Help, 100, 16, |_| {});
+
+        assert!(rendered.contains("策略订单"));
+        assert!(rendered.contains("交易所挂单"));
+        assert!(rendered.contains("无法证明策略单已真实挂出"));
+    }
+
+    #[test]
+    fn help_page_mentions_ctrl_c_exit_shortcut() {
+        let rendered = normalized_page_string(Page::Help, 100, 16, |_| {});
+
+        assert!(rendered.contains("q/Ctrl-C"));
+    }
+
     fn assert_page_snapshot<F>(page: Page, width: u16, height: u16, name: &str, mutate: F)
     where
         F: FnOnce(&mut AppState),
@@ -2068,6 +2255,16 @@ mod tests {
         let theme = Theme::default();
         terminal.draw(|frame| draw(frame, &state, &theme)).unwrap();
         buffer_to_string(terminal.backend().buffer(), width, height)
+    }
+
+    fn normalized_page_string<F>(page: Page, width: u16, height: u16, mutate: F) -> String
+    where
+        F: FnOnce(&mut AppState),
+    {
+        render_page_to_string(page, width, height, mutate)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect()
     }
 
     fn apply_degraded_state(state: &mut AppState) {
