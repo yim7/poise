@@ -15,9 +15,9 @@ use grid_platform_service::{
     Application,
     integrations::binance::{
         BinanceConfig, BinanceTransport, ExchangeSymbol, MarketStreamEvent, PositionSnapshot,
-        TradingSchedule, TradingSession, UserStreamEvent,
+        TradingSchedule, TradingSession, UserStreamEvent, UserStreamOrderUpdate,
     },
-    protocol::{RuntimeSnapshot, SystemEvent},
+    protocol::{OpenOrder, OpenOrdersSource, RuntimeSnapshot, SystemEvent},
     storage::{PersistedRuntime, SqliteStorage},
 };
 use tempfile::tempdir;
@@ -36,6 +36,7 @@ struct FakeBinanceTransport {
     user_connects: Arc<AtomicUsize>,
     keepalive_calls: Arc<AtomicUsize>,
     listen_key: Option<String>,
+    open_orders: Option<Vec<OpenOrder>>,
 }
 
 impl FakeBinanceTransport {
@@ -49,6 +50,7 @@ impl FakeBinanceTransport {
             user_connects: Arc::new(AtomicUsize::new(0)),
             keepalive_calls: Arc::new(AtomicUsize::new(0)),
             listen_key: None,
+            open_orders: None,
         }
     }
 
@@ -62,6 +64,11 @@ impl FakeBinanceTransport {
 
     fn with_listen_key(mut self, listen_key: impl Into<String>) -> Self {
         self.listen_key = Some(listen_key.into());
+        self
+    }
+
+    fn with_open_orders(mut self, open_orders: Vec<OpenOrder>) -> Self {
+        self.open_orders = Some(open_orders);
         self
     }
 
@@ -118,6 +125,10 @@ impl BinanceTransport for FakeBinanceTransport {
     async fn keepalive_user_stream(&self, _listen_key: &str) -> Result<()> {
         self.keepalive_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn fetch_open_orders(&self, _symbol: &str) -> Result<Option<Vec<OpenOrder>>> {
+        Ok(self.open_orders.clone())
     }
 }
 
@@ -368,6 +379,7 @@ async fn sqlite_binance_sync_persists_latest_runtime_for_recovery() -> Result<()
                 unrealized_pnl: 18.4,
                 realized_pnl: 7.1,
             }],
+            order_updates: vec![],
         })
         .await
         .context("failed to send persisted user event")?;
@@ -532,6 +544,7 @@ async fn sqlite_binance_stream_sync_retries_after_temporary_persist_failure() ->
                 unrealized_pnl: 12.4,
                 realized_pnl: 4.8,
             }],
+            order_updates: vec![],
         })
         .await
         .context("failed to send user stream event during persistence outage")?;
@@ -626,6 +639,7 @@ async fn fake_binance_user_stream_updates_position_snapshot() -> Result<()> {
                     realized_pnl: 6.4,
                 },
             ],
+            order_updates: vec![],
         })
         .await
         .context("failed to send user stream event")?;
@@ -639,6 +653,96 @@ async fn fake_binance_user_stream_updates_position_snapshot() -> Result<()> {
     })
     .await?;
     wait_until(Duration::from_secs(2), || transport.keepalive_calls() > 0).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_binance_bootstrap_and_user_stream_sync_real_exchange_open_orders() -> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_listen_key("listen-key-orders")
+    .with_open_orders(vec![OpenOrder {
+        order_id: "real_ord_01".into(),
+        client_order_id: "real_grid_sell_01".into(),
+        side: "sell".into(),
+        price: 4510.25,
+        qty: 0.2,
+        filled_qty: 0.0,
+        status: "NEW".into(),
+        created_at: "2025-01-01T00:00:00Z".into(),
+        updated_at: "2025-01-01T00:00:00Z".into(),
+    }]);
+    let (_market_tx, market_rx) = mpsc::channel(16);
+    let (user_tx, user_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+    transport.push_user_stream(user_rx).await;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.user_stream_keepalive_interval = Duration::from_millis(30);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_binance(config, Arc::new(transport.clone()));
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.execution.exchange_open_orders_source == OpenOrdersSource::ExchangeLive
+            && snapshot.execution.exchange_open_orders.len() == 1
+            && snapshot.execution.exchange_open_orders[0].order_id == "real_ord_01"
+    })
+    .await?;
+
+    user_tx
+        .send(UserStreamEvent {
+            event_time_ms: now_ms + 2_000,
+            positions: vec![],
+            order_updates: vec![UserStreamOrderUpdate {
+                symbol: "XAUUSDT".into(),
+                order: OpenOrder {
+                    order_id: "real_ord_01".into(),
+                    client_order_id: "real_grid_sell_01".into(),
+                    side: "sell".into(),
+                    price: 4510.25,
+                    qty: 0.2,
+                    filled_qty: 0.2,
+                    status: "FILLED".into(),
+                    created_at: "2025-01-01T00:00:00Z".into(),
+                    updated_at: "2025-01-01T00:00:02Z".into(),
+                },
+                is_terminal: true,
+            }],
+        })
+        .await
+        .context("failed to send order update event")?;
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.execution.exchange_open_orders_source == OpenOrdersSource::ExchangeLive
+            && snapshot.execution.exchange_open_orders.is_empty()
+    })
+    .await?;
 
     Ok(())
 }

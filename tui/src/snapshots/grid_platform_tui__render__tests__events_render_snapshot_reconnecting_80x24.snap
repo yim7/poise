@@ -1,8 +1,9 @@
 ---
 source: tui/src/render.rs
+assertion_line: 1725
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  RECONNECTING  Focus Fills              
+ GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Fills      
 ────────────────────────────────────────────────────────────────────────────────
  Dashboard   Grid   Market   Events   Help                                      
                                                                                 

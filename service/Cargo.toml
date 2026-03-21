@@ -10,10 +10,13 @@ axum = { version = "0.8.1", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4.40", default-features = false, features = ["clock"] }
 clap = { version = "4.5", features = ["derive"] }
 futures-util.workspace = true
+hmac = "0.12.1"
+hex = "0.4.3"
 reqwest.workspace = true
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.9"
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true

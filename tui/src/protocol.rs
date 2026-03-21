@@ -222,6 +222,10 @@ pub struct ExecutionState {
     pub open_orders: Vec<OpenOrder>,
     #[serde(default)]
     pub open_orders_source: OpenOrdersSource,
+    #[serde(default)]
+    pub exchange_open_orders: Vec<OpenOrder>,
+    #[serde(default = "default_exchange_open_orders_source")]
+    pub exchange_open_orders_source: OpenOrdersSource,
     pub recent_fills: Vec<RecentFill>,
     pub pending_commands: Vec<PendingCommand>,
     pub last_command_ack: Option<String>,
@@ -255,6 +259,10 @@ pub struct RuntimeSnapshot {
     pub risk: RiskState,
     #[serde(default)]
     pub strategy: StrategyState,
+}
+
+fn default_exchange_open_orders_source() -> OpenOrdersSource {
+    OpenOrdersSource::Unavailable
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -403,6 +411,8 @@ impl RuntimeSnapshot {
                     },
                 ],
                 open_orders_source: OpenOrdersSource::StrategyMirror,
+                exchange_open_orders: vec![],
+                exchange_open_orders_source: OpenOrdersSource::Unavailable,
                 recent_fills: vec![RecentFill {
                     trade_id: "fill_9001".into(),
                     order_id: "ord_0999".into(),

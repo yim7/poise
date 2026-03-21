@@ -154,6 +154,10 @@ fn runtime_snapshot_decodes_open_orders_source_and_legacy_payloads() {
         serialized["execution"]["open_orders_source"],
         "strategy_mirror"
     );
+    assert_eq!(
+        serialized["execution"]["exchange_open_orders_source"],
+        "unavailable"
+    );
 
     let legacy_raw = r#"{
         "connection": {
@@ -199,6 +203,10 @@ fn runtime_snapshot_decodes_open_orders_source_and_legacy_payloads() {
     assert_eq!(
         legacy_serialized["execution"]["open_orders_source"],
         "strategy_mirror"
+    );
+    assert_eq!(
+        legacy_serialized["execution"]["exchange_open_orders_source"],
+        "unavailable"
     );
 }
 

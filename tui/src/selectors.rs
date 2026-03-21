@@ -15,7 +15,6 @@ pub struct DashboardViewModel {
     pub position_avg_price: String,
     pub unrealized_pnl: String,
     pub realized_pnl: String,
-    pub open_orders: usize,
     pub exchange_orders: Option<usize>,
     pub pending_commands: usize,
     pub fills: usize,
@@ -33,9 +32,9 @@ pub fn dashboard(state: &AppState) -> DashboardViewModel {
         position_avg_price: format!("{:.2}", state.runtime.position_avg_price),
         unrealized_pnl: format!("{:.2}", state.runtime.unrealized_pnl),
         realized_pnl: format!("{:.2}", state.runtime.realized_pnl),
-        open_orders: state.execution.open_orders.len(),
-        exchange_orders: (state.execution.open_orders_source == OpenOrdersSource::ExchangeLive)
-            .then_some(state.execution.open_orders.len()),
+        exchange_orders: (state.execution.exchange_open_orders_source
+            == OpenOrdersSource::ExchangeLive)
+            .then_some(state.execution.exchange_open_orders.len()),
         pending_commands: state.execution.pending_commands.len(),
         fills: state.execution.recent_fills.len(),
         risk_summary: format!(
@@ -90,7 +89,7 @@ pub struct OpenOrderItemViewModel {
 pub fn open_order_items(state: &AppState, limit: usize) -> Vec<OpenOrderItemViewModel> {
     state
         .execution
-        .open_orders
+        .exchange_open_orders
         .iter()
         .take(limit)
         .map(|order| OpenOrderItemViewModel {
@@ -273,7 +272,7 @@ fn grid_level(level: &GridLevel, last_price: f64) -> GridLevelViewModel {
 fn placement_state_for_level(state: &AppState, level: &GridLevel) -> PlacementState {
     match level.state {
         GridLevelState::Occupied | GridLevelState::PendingRebuild => PlacementState::NotExpected,
-        GridLevelState::Active => match state.execution.open_orders_source {
+        GridLevelState::Active => match state.execution.exchange_open_orders_source {
             OpenOrdersSource::ExchangeLive => {
                 if has_matching_open_order(state, level) {
                     PlacementState::Live
@@ -289,7 +288,7 @@ fn placement_state_for_level(state: &AppState, level: &GridLevel) -> PlacementSt
 }
 
 fn has_matching_open_order(state: &AppState, level: &GridLevel) -> bool {
-    state.execution.open_orders.iter().any(|order| {
+    state.execution.exchange_open_orders.iter().any(|order| {
         level
             .client_order_id
             .as_ref()
@@ -635,6 +634,18 @@ mod tests {
     #[test]
     fn open_order_and_fill_items_surface_linked_command_refs() {
         let mut state = AppState::sample();
+        state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
+        state.execution.exchange_open_orders = vec![OpenOrder {
+            order_id: "ord_1001".into(),
+            client_order_id: "grid_buy_01".into(),
+            side: "buy".into(),
+            price: 2332.80,
+            qty: 0.100,
+            filled_qty: 0.0,
+            status: "NEW".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }];
         state
             .execution
             .command_timeline
@@ -682,7 +693,9 @@ mod tests {
 
     #[test]
     fn placement_state_rules_cover_live_not_placed_not_expected_and_unknown() {
-        let mut live_state = strategy_order_fixture(OpenOrdersSource::ExchangeLive);
+        let mut live_state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
+        live_state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
+        live_state.execution.exchange_open_orders = live_state.execution.open_orders.clone();
         let vm = strategy_orders(&live_state);
         assert_eq!(vm[0].placement_state, PlacementState::NotExpected);
         assert_eq!(vm[1].placement_state, PlacementState::Live);
@@ -704,6 +717,27 @@ mod tests {
         let vm = dashboard(&state);
 
         assert_eq!(vm.exchange_orders, None);
+    }
+
+    #[test]
+    fn dashboard_exchange_orders_use_real_exchange_count_instead_of_strategy_mirror_count() {
+        let mut state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
+        state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
+        state.execution.exchange_open_orders = vec![crate::protocol::OpenOrder {
+            order_id: "real_ord_01".into(),
+            client_order_id: "real_grid_sell_01".into(),
+            side: "sell".into(),
+            price: 100.0,
+            qty: 0.1,
+            filled_qty: 0.0,
+            status: "NEW".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }];
+
+        let vm = dashboard(&state);
+
+        assert_eq!(vm.exchange_orders, Some(1));
     }
 
     fn strategy_order_fixture(source: OpenOrdersSource) -> AppState {

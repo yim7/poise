@@ -325,6 +325,10 @@ fn sqlite_storage_roundtrips_command_association_fields() -> Result<()> {
         serialized["execution"]["recent_commands"][0]["trade_ids"][0],
         "fill_9001"
     );
+    assert_eq!(
+        serialized["execution"]["exchange_open_orders_source"],
+        "unavailable"
+    );
 
     Ok(())
 }
@@ -449,6 +453,10 @@ fn sqlite_storage_recovers_open_orders_source_from_legacy_snapshot() -> Result<(
     assert_eq!(
         serialized["execution"]["open_orders_source"],
         "strategy_mirror"
+    );
+    assert_eq!(
+        serialized["execution"]["exchange_open_orders_source"],
+        "unavailable"
     );
 
     Ok(())

@@ -160,6 +160,14 @@ async fn runtime_snapshot_payload_exposes_open_orders_source() -> Result<()> {
         snapshot["data"]["execution"]["open_orders_source"],
         "strategy_mirror"
     );
+    assert_eq!(
+        snapshot["data"]["execution"]["exchange_open_orders_source"],
+        "unavailable"
+    );
+    assert_eq!(
+        snapshot["data"]["execution"]["exchange_open_orders"],
+        serde_json::json!([])
+    );
 
     Ok(())
 }

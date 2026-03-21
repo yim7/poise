@@ -1,8 +1,20 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::events::KeyAction;
 
 pub fn map_key_event(event: KeyEvent) -> Option<KeyAction> {
+    let has_control_modifier = event
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+
+    if event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(KeyAction::Quit);
+    }
+
+    if has_control_modifier {
+        return None;
+    }
+
     match event.code {
         KeyCode::Char('1') => Some(KeyAction::ViewDashboard),
         KeyCode::Char('2') => Some(KeyAction::ViewGrid),
@@ -20,5 +32,41 @@ pub fn map_key_event(event: KeyEvent) -> Option<KeyAction> {
         KeyCode::Esc | KeyCode::Char('n') => Some(KeyAction::Cancel),
         KeyCode::Char('q') => Some(KeyAction::Quit),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::map_key_event;
+    use crate::events::KeyAction;
+
+    #[test]
+    fn plain_c_opens_cancel_all_confirm() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert_eq!(action, Some(KeyAction::CancelAll));
+    }
+
+    #[test]
+    fn ctrl_c_quits_instead_of_opening_cancel_all_confirm() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, Some(KeyAction::Quit));
+    }
+
+    #[test]
+    fn ctrl_modified_danger_shortcuts_are_ignored() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn shifted_question_mark_still_opens_help() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+        assert_eq!(action, Some(KeyAction::ToggleHelp));
     }
 }

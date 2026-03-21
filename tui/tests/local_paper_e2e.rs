@@ -4,6 +4,7 @@ use std::{
     path::Path,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -40,6 +41,7 @@ impl ServiceProcess {
     }
 
     async fn start_inner(db_path: Option<&Path>) -> Result<Self> {
+        let _startup_guard = service_start_lock().lock().await;
         let port = reserve_port()?;
         let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let base_url = format!("http://127.0.0.1:{port}");
@@ -105,6 +107,11 @@ impl ServiceProcess {
             .context("command endpoint returned non-success status")?;
         Ok(())
     }
+}
+
+fn service_start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 impl Drop for ServiceProcess {

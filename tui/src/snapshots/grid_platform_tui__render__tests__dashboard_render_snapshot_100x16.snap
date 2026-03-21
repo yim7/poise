@@ -6,12 +6,12 @@ expression: snapshot
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
-│Position  0.250 @ 2354.20                             ││Level  Watch   Breaker  OFF               │
-│U-PnL  1.84   R-PnL  14.52                            ││Notional  590/1500   Stop  4.0%           │
+│Pos  0.250 @ 2354.20   U  1.84   R  14.52             ││Level  Watch   Breaker  OFF               │
+│交 易 所   N/A   Pending  0   Health  HEALTHY            ││Notional  590/1500   Stop  4.0%           │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
-┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
-│Side   Price     Qty      Status                      ││Last  2361.48   Mark  2361.55             │
-│BUY    2352.80   0.100    NEW                         ││Svc WS  UP   Mkt WS  UP   42ms stale 0ms  │
+┌ 交 易 所 挂 单  ──────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
+│当 前 模 式 只 提 供 策 略 挂 单 镜 像 。                           ││Last  2361.48   Mark  2361.55             │
+│尚 未 接 入 真 实 交 易 所 挂 单 查 询 。                           ││Svc WS  UP   Mkt WS  UP   42ms stale 0ms  │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
 │BUY 2349.10 x 0.050  pnl +2.51                        ││ ACK  PAUSE                               │
