@@ -1,0 +1,21 @@
+---
+source: tui/src/render.rs
+assertion_line: 2020
+expression: snapshot
+---
+ GRID PLATFORM  WAITING SNAPSHOT  等 待 首 次 快 照                                                       
+ Dashboard   Grid   Market   Events   Help                                                          
+                                                                                                    
+┌ Keymap ─────────────────────────────────────────────┐┌ Ops Notes ────────────────────────────────┐
+│1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││Focus  Keymap                              │
+│Tab / Shift-Tab cycle real panel focus with          ││Health  SERVICE RECONNECTING               │
+│highlighted borders.                                 ││pending -> accepted -> ack marks the normal│
+│p pause   r resume                                   ││command path.                              │
+│c cancel all   f flatten now   s shutdown after      ││failed / timed_out require checking service│
+│flatten                                              ││logs before retrying.                      │
+│Enter confirms modal actions. Esc or n cancels.      ││Flatten and shutdown can cross the spread  │
+│q exits the client only; it does not stop the        ││or leave the strategy paused.              │
+│service.                                             ││                                           │
+└─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ 首 次 快 照 未 就 绪  | p/r/c/f/s 已 禁 用  | 1-4 页 面  ? help

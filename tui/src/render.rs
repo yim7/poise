@@ -177,7 +177,7 @@ fn draw_main(
     theme: &Theme,
     viewport: Viewport,
 ) {
-    if !state.is_snapshot_ready() {
+    if !state.is_snapshot_ready() && !matches!(state.ui.page, Page::Help) {
         draw_bootstrap_main(frame, area, state, theme, viewport);
         return;
     }
@@ -203,7 +203,7 @@ fn draw_bootstrap_main(
         Page::Grid => draw_bootstrap_grid(frame, area, state, theme, viewport),
         Page::Market => draw_bootstrap_market(frame, area, state, theme, viewport),
         Page::Events => draw_bootstrap_events(frame, area, state, theme, viewport),
-        Page::Help => draw_bootstrap_help(frame, area, state, theme, viewport),
+        Page::Help => draw_help(frame, area, state, theme, viewport),
     }
 }
 
@@ -478,44 +478,6 @@ fn draw_bootstrap_events(
         theme,
         "System",
         panel_focused(state, 3),
-        PanelTone::Neutral,
-        state,
-    );
-}
-
-fn draw_bootstrap_help(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    theme: &Theme,
-    viewport: Viewport,
-) {
-    let layout = if viewport.compact() {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(area)
-    };
-    bootstrap_block(
-        frame,
-        layout[0],
-        theme,
-        "Keymap",
-        panel_focused(state, 0),
-        PanelTone::Neutral,
-        state,
-    );
-    bootstrap_block(
-        frame,
-        layout[1],
-        theme,
-        "Ops Notes",
-        panel_focused(state, 1),
         PanelTone::Neutral,
         state,
     );
@@ -1834,6 +1796,20 @@ mod tests {
             "dashboard_render_snapshot_waiting_first_snapshot_100x16",
             |state| {
                 *state = AppState::waiting_first_snapshot();
+            },
+        );
+    }
+
+    #[test]
+    fn help_render_snapshot_waiting_first_snapshot_100x16() {
+        assert_page_snapshot(
+            Page::Help,
+            100,
+            16,
+            "help_render_snapshot_waiting_first_snapshot_100x16",
+            |state| {
+                *state = AppState::waiting_first_snapshot();
+                state.ui.page = Page::Help;
             },
         );
     }

@@ -12,10 +12,13 @@ use grid_platform_tui::{
     effects::Effect,
     events::{AppEvent, EffectResultEvent, InputEvent, KeyAction},
     protocol::{CommandRequest, CommandType},
-    state::{AppState, CommandTimelineStage, SnapshotBootstrapState},
+    render::draw,
+    state::{AppState, CommandTimelineStage, Page, SnapshotBootstrapState},
     store::reduce,
+    theme::Theme,
     transport::TransportClient,
 };
+use ratatui::{Terminal, backend::TestBackend};
 use tempfile::tempdir;
 use tokio::{
     sync::mpsc,
@@ -371,6 +374,55 @@ async fn local_paper_first_snapshot_bootstrap_enables_runtime_ops_only_after_rea
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_first_snapshot_success_shows_real_empty_state() -> Result<()> {
+    let service = ServiceProcess::start().await?;
+    let app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+
+    let mut empty_snapshot = app.transport.fetch_snapshot().await?;
+    empty_snapshot.execution.open_orders.clear();
+    empty_snapshot.execution.recent_fills.clear();
+    empty_snapshot.execution.pending_commands.clear();
+    empty_snapshot.execution.recent_commands.clear();
+    empty_snapshot.risk.unacked_alerts = 0;
+    empty_snapshot.risk.current_notional = 0.0;
+    empty_snapshot.risk.breaker_engaged = false;
+    empty_snapshot.strategy.levels.clear();
+    empty_snapshot.strategy.pending_rebuild_reason = None;
+    empty_snapshot.runtime.position_qty = 0.0;
+    empty_snapshot.runtime.position_avg_price = 0.0;
+    empty_snapshot.runtime.unrealized_pnl = 0.0;
+    empty_snapshot.runtime.realized_pnl = 0.0;
+    empty_snapshot.runtime.last_price = 0.0;
+    empty_snapshot.runtime.mark_price = 0.0;
+
+    let mut state = AppState::waiting_first_snapshot();
+    let effects = reduce(
+        &mut state,
+        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(empty_snapshot)),
+    );
+
+    assert!(matches!(
+        state.snapshot_state,
+        SnapshotBootstrapState::Ready
+    ));
+    assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
+    assert!(state.execution.open_orders.is_empty());
+    assert!(state.execution.recent_fills.is_empty());
+    assert!(state.execution.command_timeline.is_empty());
+    assert!(state.risk.alerts.is_empty());
+
+    state.ui.page = Page::Events;
+    let rendered = render_state_to_string(&state, 100, 24);
+    assert!(rendered.contains("No fills"));
+    assert!(rendered.contains("No alerts"));
+    assert!(rendered.contains("No recent commands"));
+    assert!(rendered.contains("No system events"));
+    assert!(!rendered.contains("WAITING SNAPSHOT"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_paper_cancel_all_clears_open_orders_and_records_ack() -> Result<()> {
     let service = ServiceProcess::start().await?;
     let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
@@ -546,4 +598,24 @@ async fn wait_until_ready(http: &reqwest::Client, base_url: &str, child: &mut Ch
 
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn render_state_to_string(state: &AppState, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::default();
+    terminal.draw(|frame| draw(frame, state, &theme)).unwrap();
+    buffer_to_string(terminal.backend().buffer(), width, height)
+}
+
+fn buffer_to_string(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
+    let mut output = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            let cell = buffer.cell((x, y)).unwrap();
+            output.push_str(cell.symbol());
+        }
+        output.push('\n');
+    }
+    output
 }
