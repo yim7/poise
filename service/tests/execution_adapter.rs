@@ -3,8 +3,9 @@ use std::time::Duration;
 use anyhow::Result;
 use grid_platform_service::{
     execution::{CancelOrdersRequest, ExecutionAdapter, FakeExecutionAdapter, SubmitOrderRequest},
-    kernel::{EngineEvent, spawn_engine},
-    protocol::{CommandRequest, CommandStatus, CommandType, RuntimeSnapshot},
+    kernel::{EngineEvent, spawn_engine_with_runtime},
+    protocol::{CommandRequest, CommandStatus, CommandType, OpenOrder, RuntimeSnapshot},
+    storage::PersistedRuntime,
 };
 use tokio::time::timeout;
 
@@ -121,7 +122,8 @@ async fn fake_adapter_submit_reduce_only_order_clips_fill_qty_to_position() -> R
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flatten_now_records_reduce_only_fill_in_execution_facts() -> Result<()> {
-    let (engine, read_model, mut events_rx) = spawn_engine();
+    let (engine, read_model, mut events_rx) =
+        spawn_engine_with_runtime(seed_runtime_with_position_and_orders(), None);
     let before = read_model.read().expect("read model").snapshot();
     let previous_fill_count = before.execution.recent_fills.len();
     let position_qty = before.runtime.position_qty;
@@ -180,7 +182,8 @@ async fn flatten_now_records_reduce_only_fill_in_execution_facts() -> Result<()>
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_after_flatten_pauses_strategy_and_records_fill_fact() -> Result<()> {
-    let (engine, read_model, mut events_rx) = spawn_engine();
+    let (engine, read_model, mut events_rx) =
+        spawn_engine_with_runtime(seed_runtime_with_position_and_orders(), None);
     let before = read_model.read().expect("read model").snapshot();
     let previous_fill_count = before.execution.recent_fills.len();
     let position_qty = before.runtime.position_qty;
@@ -257,6 +260,35 @@ async fn shutdown_after_flatten_pauses_strategy_and_records_fill_fact() -> Resul
     );
 
     Ok(())
+}
+
+fn seed_runtime_with_position_and_orders() -> PersistedRuntime {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::empty_bootstrap();
+    runtime.snapshot.runtime.last_price = 2361.48;
+    runtime.snapshot.runtime.mark_price = 2361.55;
+    runtime.snapshot.runtime.position_qty = 0.25;
+    runtime.snapshot.runtime.position_avg_price = 2354.2;
+    runtime.snapshot.runtime.realized_pnl = 14.52;
+    runtime.snapshot.execution.open_orders = vec![
+        open_order("ord_1001", "grid_buy_01", "buy", 2352.8),
+        open_order("ord_1002", "grid_sell_01", "sell", 2368.3),
+    ];
+    runtime
+}
+
+fn open_order(order_id: &str, client_order_id: &str, side: &str, price: f64) -> OpenOrder {
+    OpenOrder {
+        order_id: order_id.into(),
+        client_order_id: client_order_id.into(),
+        side: side.into(),
+        price,
+        qty: 0.10,
+        filled_qty: 0.0,
+        status: "NEW".into(),
+        created_at: "2025-01-01T00:00:00Z".into(),
+        updated_at: "2025-01-01T00:00:00Z".into(),
+    }
 }
 
 fn assert_close(left: f64, right: f64) {

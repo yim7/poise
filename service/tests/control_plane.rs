@@ -7,8 +7,8 @@ use grid_platform_service::{
     Application, build_app,
     protocol::{
         CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
-        CommandType, HttpSuccessEnvelope, RiskEvent, RiskLevel, RuntimeSnapshot, ServerEnvelope,
-        ServerEvent, SystemEvent,
+        CommandType, HttpSuccessEnvelope, OpenOrder, RecentFill, RiskEvent, RiskLevel,
+        RuntimeSnapshot, ServerEnvelope, ServerEvent, SystemEvent,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
@@ -130,15 +130,23 @@ async fn bootstrap_runtime_does_not_emit_fake_risk_alerts() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sqlite_first_bootstrap_matches_empty_in_memory_snapshot() -> Result<()> {
+async fn sqlite_first_bootstrap_matches_empty_in_memory_runtime_and_risk_state() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let db_path = temp_dir.path().join("service.db");
     let app = build_app(Application::bootstrap_with_sqlite(&db_path)?);
 
     let snapshot = decode_json::<Value>(
-        app,
+        app.clone(),
         Request::builder()
             .uri("/runtime/snapshot")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+    let risk_events = decode_json::<HttpSuccessEnvelope<Vec<RiskEvent>>>(
+        app,
+        Request::builder()
+            .uri("/risk/events")
             .body(Body::empty())
             .expect("request"),
     )
@@ -154,6 +162,7 @@ async fn sqlite_first_bootstrap_matches_empty_in_memory_snapshot() -> Result<()>
         snapshot["data"]["execution"]["recent_fills"],
         serde_json::json!([])
     );
+    assert!(risk_events.data.is_empty());
 
     Ok(())
 }
@@ -456,7 +465,29 @@ fn app_with_persisted_runtime(runtime: PersistedRuntime) -> Result<(TempDir, Rou
 }
 
 fn seed_query_runtime() -> PersistedRuntime {
-    let mut snapshot = RuntimeSnapshot::sample();
+    let mut snapshot = RuntimeSnapshot::empty_bootstrap();
+    snapshot.execution.open_orders = vec![OpenOrder {
+        order_id: "ord_1002".into(),
+        client_order_id: "grid_sell_01".into(),
+        side: "sell".into(),
+        price: 2368.3,
+        qty: 0.10,
+        filled_qty: 0.0,
+        status: "NEW".into(),
+        created_at: "2025-01-01T00:00:00Z".into(),
+        updated_at: "2025-01-01T00:00:00Z".into(),
+    }];
+    snapshot.execution.recent_fills = vec![RecentFill {
+        trade_id: "fill_9001".into(),
+        order_id: "ord_0999".into(),
+        client_order_id: Some("flatten_reduce_only_01".into()),
+        side: "buy".into(),
+        price: 2349.1,
+        qty: 0.05,
+        fee: 0.03,
+        realized_pnl: 2.51,
+        event_time: "2025-01-01T00:00:00Z".into(),
+    }];
     snapshot.execution.recent_commands = vec![
         CommandRecord {
             command_id: "cmd_pause_old".into(),
