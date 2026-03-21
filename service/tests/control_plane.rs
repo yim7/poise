@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+#[path = "support/runtime_seed.rs"]
+mod runtime_seed;
+
 use anyhow::{Context, Result};
 use axum::{Router, body::Body, http::Request};
 use futures_util::StreamExt;
@@ -7,8 +10,8 @@ use grid_platform_service::{
     Application, build_app,
     protocol::{
         CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
-        CommandType, HttpSuccessEnvelope, OpenOrder, RecentFill, RiskEvent, RiskLevel,
-        RuntimeSnapshot, ServerEnvelope, ServerEvent, SystemEvent,
+        CommandType, HttpSuccessEnvelope, RiskEvent, RiskLevel, RuntimeSnapshot, ServerEnvelope,
+        ServerEvent, SystemEvent,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
@@ -162,6 +165,9 @@ async fn sqlite_first_bootstrap_matches_empty_in_memory_runtime_and_risk_state()
         snapshot["data"]["execution"]["recent_fills"],
         serde_json::json!([])
     );
+    assert_eq!(snapshot["data"]["risk"]["current_notional"], 0.0);
+    assert_eq!(snapshot["data"]["risk"]["risk_level"], "ok");
+    assert_eq!(snapshot["data"]["risk"]["unacked_alerts"], 0);
     assert!(risk_events.data.is_empty());
 
     Ok(())
@@ -466,28 +472,23 @@ fn app_with_persisted_runtime(runtime: PersistedRuntime) -> Result<(TempDir, Rou
 
 fn seed_query_runtime() -> PersistedRuntime {
     let mut snapshot = RuntimeSnapshot::empty_bootstrap();
-    snapshot.execution.open_orders = vec![OpenOrder {
-        order_id: "ord_1002".into(),
-        client_order_id: "grid_sell_01".into(),
-        side: "sell".into(),
-        price: 2368.3,
-        qty: 0.10,
-        filled_qty: 0.0,
-        status: "NEW".into(),
-        created_at: "2025-01-01T00:00:00Z".into(),
-        updated_at: "2025-01-01T00:00:00Z".into(),
-    }];
-    snapshot.execution.recent_fills = vec![RecentFill {
-        trade_id: "fill_9001".into(),
-        order_id: "ord_0999".into(),
-        client_order_id: Some("flatten_reduce_only_01".into()),
-        side: "buy".into(),
-        price: 2349.1,
-        qty: 0.05,
-        fee: 0.03,
-        realized_pnl: 2.51,
-        event_time: "2025-01-01T00:00:00Z".into(),
-    }];
+    snapshot.execution.open_orders = vec![runtime_seed::open_order(
+        "ord_1002",
+        "grid_sell_01",
+        "sell",
+        2368.3,
+    )];
+    snapshot.execution.recent_fills = vec![runtime_seed::recent_fill(
+        "fill_9001",
+        "ord_0999",
+        Some("flatten_reduce_only_01"),
+        "buy",
+        2349.1,
+        0.05,
+        0.03,
+        2.51,
+        "2025-01-01T00:00:00Z",
+    )];
     snapshot.execution.recent_commands = vec![
         CommandRecord {
             command_id: "cmd_pause_old".into(),

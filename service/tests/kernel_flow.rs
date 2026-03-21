@@ -4,6 +4,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
+#[path = "support/runtime_seed.rs"]
+mod runtime_seed;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use grid_platform_service::{
@@ -740,7 +743,7 @@ async fn execution_command_times_out_on_service_when_adapter_stalls() -> Result<
         entered: Arc::new(AtomicBool::new(false)),
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(adapter),
     );
@@ -792,7 +795,7 @@ async fn late_execution_result_does_not_override_timed_out_terminal_state() -> R
         entered,
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(adapter),
     );
@@ -860,7 +863,7 @@ async fn late_execution_result_does_not_override_timed_out_terminal_state() -> R
 async fn timed_out_execution_aborts_background_task_before_next_command() -> Result<()> {
     let adapter = Arc::new(AbortAwareExecutionAdapter::default());
     let (engine, _read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         adapter.clone(),
     );
@@ -1294,7 +1297,7 @@ async fn cancel_all_completes_without_follow_up_query_refresh() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_all_fails_when_targeted_orders_remain_open() -> Result<()> {
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(StickyCancelExecutionAdapter),
     );
@@ -1390,7 +1393,7 @@ async fn failed_command_records_reason_without_side_effects_after_retry_budget_i
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flatten_now_fails_when_reduce_only_order_has_no_terminal_fill() -> Result<()> {
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(OpenReduceOnlyExecutionAdapter),
     );
@@ -1440,7 +1443,7 @@ async fn flatten_now_fails_when_reduce_only_order_has_no_terminal_fill() -> Resu
 async fn shutdown_after_flatten_does_not_pause_when_reduce_only_order_has_no_terminal_fill()
 -> Result<()> {
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(OpenReduceOnlyExecutionAdapter),
     );
@@ -1484,7 +1487,7 @@ async fn shutdown_after_flatten_does_not_pause_when_reduce_only_order_has_no_ter
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_after_flatten_completes_without_follow_up_query_refresh() -> Result<()> {
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(NoRefreshCommandExecutionAdapter),
     );
@@ -1529,7 +1532,7 @@ async fn timed_out_command_records_reason_without_side_effects() -> Result<()> {
         entered: Arc::new(AtomicBool::new(false)),
     };
     let (engine, read_model, mut events_rx) = spawn_engine_with_runtime_and_adapter(
-        seed_runtime_with_position_and_orders(),
+        runtime_seed::seed_runtime_with_position_and_orders(),
         None,
         Arc::new(adapter),
     );
@@ -1711,33 +1714,4 @@ async fn reusing_command_id_with_different_command_type_is_rejected() -> Result<
     );
 
     Ok(())
-}
-
-fn seed_runtime_with_position_and_orders() -> PersistedRuntime {
-    let mut runtime = PersistedRuntime::in_memory_bootstrap();
-    runtime.snapshot = RuntimeSnapshot::empty_bootstrap();
-    runtime.snapshot.runtime.last_price = 2361.48;
-    runtime.snapshot.runtime.mark_price = 2361.55;
-    runtime.snapshot.runtime.position_qty = 0.25;
-    runtime.snapshot.runtime.position_avg_price = 2354.2;
-    runtime.snapshot.runtime.realized_pnl = 14.52;
-    runtime.snapshot.execution.open_orders = vec![
-        open_order("ord_1001", "grid_buy_01", "buy", 2352.8),
-        open_order("ord_1002", "grid_sell_01", "sell", 2368.3),
-    ];
-    runtime
-}
-
-fn open_order(order_id: &str, client_order_id: &str, side: &str, price: f64) -> OpenOrder {
-    OpenOrder {
-        order_id: order_id.into(),
-        client_order_id: client_order_id.into(),
-        side: side.into(),
-        price,
-        qty: 0.10,
-        filled_qty: 0.0,
-        status: "NEW".into(),
-        created_at: "2025-01-01T00:00:00Z".into(),
-        updated_at: "2025-01-01T00:00:00Z".into(),
-    }
 }
