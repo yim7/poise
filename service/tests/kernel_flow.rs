@@ -134,11 +134,19 @@ impl ExecutionAdapter for FlakyCancelExecutionAdapter {
 #[derive(Default)]
 struct CountingExecutionAdapter {
     submit_calls: Mutex<Vec<String>>,
+    cancel_calls: Mutex<Vec<String>>,
 }
 
 impl CountingExecutionAdapter {
     fn submit_calls(&self) -> Vec<String> {
         self.submit_calls
+            .lock()
+            .expect("counting adapter poisoned")
+            .clone()
+    }
+
+    fn cancel_calls(&self) -> Vec<String> {
+        self.cancel_calls
             .lock()
             .expect("counting adapter poisoned")
             .clone()
@@ -164,6 +172,10 @@ impl ExecutionAdapter for CountingExecutionAdapter {
         request: CancelOrdersRequest,
         snapshot: &RuntimeSnapshot,
     ) -> anyhow::Result<Vec<OpenOrder>> {
+        self.cancel_calls
+            .lock()
+            .expect("counting adapter poisoned")
+            .extend(request.client_order_ids.iter().cloned());
         Ok(FakeExecutionAdapter
             .cancel_orders(request, snapshot)
             .await?)
@@ -933,7 +945,7 @@ async fn price_tick_places_missing_active_grid_orders_when_strategy_is_running()
     runtime.snapshot.runtime.position_qty = 0.0;
     runtime.snapshot.runtime.position_avg_price = 0.0;
     runtime.snapshot.execution.open_orders.clear();
-    runtime.snapshot.strategy.config.levels_per_side = 1;
+    runtime.snapshot.strategy.config.grid_levels = 3;
 
     let adapter = Arc::new(CountingExecutionAdapter::default());
     let (engine, read_model, _events_rx) =
@@ -944,7 +956,7 @@ async fn price_tick_places_missing_active_grid_orders_when_strategy_is_running()
     timeout(Duration::from_secs(1), async {
         loop {
             let snapshot = read_model.read().expect("read model").snapshot();
-            if snapshot.execution.open_orders.len() == 2 {
+            if snapshot.execution.open_orders.len() == 3 {
                 break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -953,10 +965,14 @@ async fn price_tick_places_missing_active_grid_orders_when_strategy_is_running()
     .await?;
 
     let snapshot = read_model.read().expect("read model").snapshot();
-    assert_eq!(snapshot.execution.open_orders.len(), 2);
+    assert_eq!(snapshot.execution.open_orders.len(), 3);
     assert_eq!(
         adapter.submit_calls(),
-        vec!["grid_buy_01".to_string(), "grid_sell_01".to_string()]
+        vec![
+            "grid_buy_01".to_string(),
+            "grid_buy_02".to_string(),
+            "grid_sell_03".to_string()
+        ]
     );
 
     Ok(())
@@ -969,7 +985,7 @@ async fn failed_strategy_placement_rolls_back_runtime_without_storage() -> Resul
     runtime.snapshot.runtime.position_qty = 0.0;
     runtime.snapshot.runtime.position_avg_price = 0.0;
     runtime.snapshot.execution.open_orders.clear();
-    runtime.snapshot.strategy.config.levels_per_side = 1;
+    runtime.snapshot.strategy.config.grid_levels = 3;
 
     let initial_price = runtime.snapshot.runtime.last_price;
     let adapter = Arc::new(FailingPlacementExecutionAdapter::with_failures(1));
@@ -990,7 +1006,7 @@ async fn failed_strategy_placement_rolls_back_runtime_without_storage() -> Resul
     let recovered_snapshot = read_model.read().expect("read model").snapshot();
     assert_eq!(tick.last_price, initial_price + 0.11);
     assert_eq!(recovered_snapshot.runtime.last_price, initial_price + 0.11);
-    assert_eq!(recovered_snapshot.execution.open_orders.len(), 2);
+    assert_eq!(recovered_snapshot.execution.open_orders.len(), 3);
 
     Ok(())
 }
@@ -1002,7 +1018,7 @@ async fn factless_strategy_submit_does_not_count_as_partial_success() -> Result<
     runtime.snapshot.runtime.position_qty = 0.0;
     runtime.snapshot.runtime.position_avg_price = 0.0;
     runtime.snapshot.execution.open_orders.clear();
-    runtime.snapshot.strategy.config.levels_per_side = 1;
+    runtime.snapshot.strategy.config.grid_levels = 3;
 
     let initial_price = runtime.snapshot.runtime.last_price;
     let adapter = Arc::new(FactlessThenFailPlacementExecutionAdapter::default());
@@ -1030,7 +1046,7 @@ async fn pause_blocks_grid_replacement_until_resume() -> Result<()> {
     runtime.snapshot.runtime.position_avg_price = 0.0;
     runtime.snapshot.runtime.strategy_state = "paused".into();
     runtime.snapshot.execution.open_orders.clear();
-    runtime.snapshot.strategy.config.levels_per_side = 1;
+    runtime.snapshot.strategy.config.grid_levels = 3;
 
     let adapter = Arc::new(CountingExecutionAdapter::default());
     let (engine, read_model, _events_rx) =
@@ -1055,7 +1071,7 @@ async fn pause_blocks_grid_replacement_until_resume() -> Result<()> {
     timeout(Duration::from_secs(1), async {
         loop {
             let snapshot = read_model.read().expect("read model").snapshot();
-            if snapshot.execution.open_orders.len() == 2 {
+            if snapshot.execution.open_orders.len() == 3 {
                 break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1065,11 +1081,40 @@ async fn pause_blocks_grid_replacement_until_resume() -> Result<()> {
 
     let snapshot = read_model.read().expect("read model").snapshot();
     assert_eq!(snapshot.runtime.strategy_state, "running");
-    assert_eq!(snapshot.execution.open_orders.len(), 2);
+    assert_eq!(snapshot.execution.open_orders.len(), 3);
     assert_eq!(
         adapter.submit_calls(),
-        vec!["grid_buy_01".to_string(), "grid_sell_01".to_string()]
+        vec![
+            "grid_buy_01".to_string(),
+            "grid_buy_02".to_string(),
+            "grid_sell_03".to_string()
+        ]
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn out_of_range_start_keeps_instance_waiting_without_orders() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.last_price = 2400.0;
+    runtime.snapshot.runtime.mark_price = 2400.0;
+    runtime.snapshot.runtime.position_qty = 0.0;
+    runtime.snapshot.runtime.position_avg_price = 0.0;
+    runtime.snapshot.execution.open_orders.clear();
+
+    let adapter = Arc::new(CountingExecutionAdapter::default());
+    let (_engine, read_model, _events_rx) =
+        spawn_engine_with_runtime_and_adapter(runtime, None, adapter.clone());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert_eq!(snapshot.strategy.status, StrategyStatus::WaitingRangeEntry);
+    assert!(snapshot.execution.open_orders.is_empty());
+    assert!(adapter.submit_calls().is_empty());
+    assert!(adapter.cancel_calls().is_empty());
 
     Ok(())
 }
@@ -1081,7 +1126,7 @@ async fn stalled_strategy_placement_times_out_instead_of_blocking_engine_loop() 
     runtime.snapshot.runtime.position_qty = 0.0;
     runtime.snapshot.runtime.position_avg_price = 0.0;
     runtime.snapshot.execution.open_orders.clear();
-    runtime.snapshot.strategy.config.levels_per_side = 1;
+    runtime.snapshot.strategy.config.grid_levels = 3;
 
     let adapter = Arc::new(BlockingPlacementExecutionAdapter {
         ready: Arc::new(Notify::new()),
@@ -1102,12 +1147,65 @@ async fn stalled_strategy_placement_times_out_instead_of_blocking_engine_loop() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn price_tick_marks_strategy_pending_rebuild_when_inventory_blocks_rebuild() -> Result<()> {
+async fn price_tick_marks_strategy_occupied_when_inventory_moves_outside_range() -> Result<()> {
     let mut runtime = PersistedRuntime::in_memory_bootstrap();
     runtime.snapshot = RuntimeSnapshot::sample();
-    runtime.snapshot.strategy.config.rebuild_threshold_bps = 0.1;
-    runtime.snapshot.strategy.rebuild_reference_price = runtime.snapshot.runtime.last_price;
-    let open_orders_before = runtime.snapshot.execution.open_orders.len();
+    runtime.snapshot.runtime.last_price = 2400.0;
+    runtime.snapshot.runtime.mark_price = 2400.0;
+    runtime.snapshot.execution.open_orders.clear();
+
+    let adapter = Arc::new(CountingExecutionAdapter::default());
+    let (engine, read_model, _events_rx) =
+        spawn_engine_with_runtime_and_adapter(runtime, None, adapter.clone());
+
+    engine.emit_price_tick().await?;
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert_eq!(snapshot.strategy.status, StrategyStatus::Occupied);
+    assert!(snapshot.strategy.status_reason.is_some());
+    assert!(snapshot.execution.open_orders.is_empty());
+    assert!(adapter.submit_calls().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn price_tick_clears_strategy_orders_when_flat_moves_outside_range() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.last_price = 2386.20;
+    runtime.snapshot.runtime.mark_price = 2386.21;
+    runtime.snapshot.runtime.position_qty = 0.0;
+    runtime.snapshot.runtime.position_avg_price = 0.0;
+
+    let adapter = Arc::new(CountingExecutionAdapter::default());
+    let (engine, read_model, _events_rx) =
+        spawn_engine_with_runtime_and_adapter(runtime, None, adapter.clone());
+
+    engine.emit_price_tick().await?;
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert_eq!(snapshot.strategy.status, StrategyStatus::WaitingRangeEntry);
+    assert!(snapshot.execution.open_orders.is_empty());
+    assert_eq!(
+        adapter.cancel_calls(),
+        vec!["grid_buy_01".to_string(), "grid_sell_01".to_string()]
+    );
+    assert!(adapter.submit_calls().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paper_price_tick_clears_strategy_orders_before_fill_when_flat_moves_outside_range()
+-> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.last_price = 2386.20;
+    runtime.snapshot.runtime.mark_price = 2386.21;
+    runtime.snapshot.runtime.position_qty = 0.0;
+    runtime.snapshot.runtime.position_avg_price = 0.0;
+    runtime.snapshot.execution.recent_fills.clear();
 
     let (engine, read_model, _events_rx) =
         grid_platform_service::kernel::spawn_engine_with_runtime(runtime, None);
@@ -1115,9 +1213,59 @@ async fn price_tick_marks_strategy_pending_rebuild_when_inventory_blocks_rebuild
     engine.emit_price_tick().await?;
 
     let snapshot = read_model.read().expect("read model").snapshot();
-    assert_eq!(snapshot.strategy.status, StrategyStatus::PendingRebuild);
-    assert!(snapshot.strategy.pending_rebuild_reason.is_some());
-    assert_eq!(snapshot.execution.open_orders.len(), open_orders_before);
+    assert_eq!(snapshot.strategy.status, StrategyStatus::WaitingRangeEntry);
+    assert_eq!(snapshot.runtime.position_qty, 0.0);
+    assert!(snapshot.execution.open_orders.is_empty());
+    assert!(snapshot.execution.recent_fills.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn price_reentering_range_places_orders_automatically() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.last_price = 2336.57;
+    runtime.snapshot.runtime.mark_price = 2336.60;
+    runtime.snapshot.runtime.position_qty = 0.0;
+    runtime.snapshot.runtime.position_avg_price = 0.0;
+    runtime.snapshot.execution.open_orders.clear();
+
+    let adapter = Arc::new(CountingExecutionAdapter::default());
+    let (engine, read_model, _events_rx) =
+        spawn_engine_with_runtime_and_adapter(runtime, None, adapter.clone());
+
+    let initial_snapshot = read_model.read().expect("read model").snapshot();
+    assert_eq!(initial_snapshot.strategy.status, StrategyStatus::WaitingRangeEntry);
+    assert!(initial_snapshot.execution.open_orders.is_empty());
+
+    engine.emit_price_tick().await?;
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = read_model.read().expect("read model").snapshot();
+            if snapshot.execution.open_orders.len() == 6 {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert_eq!(snapshot.strategy.status, StrategyStatus::Active);
+    assert_eq!(snapshot.execution.open_orders.len(), 6);
+    assert_eq!(
+        adapter.submit_calls(),
+        vec![
+            "grid_sell_02".to_string(),
+            "grid_sell_03".to_string(),
+            "grid_sell_04".to_string(),
+            "grid_sell_05".to_string(),
+            "grid_sell_06".to_string(),
+            "grid_sell_07".to_string()
+        ]
+    );
 
     Ok(())
 }
@@ -1588,7 +1736,7 @@ async fn strategy_sync_uses_total_time_budget_and_keeps_successful_placements() 
     runtime.snapshot.runtime.position_qty = 0.0;
     runtime.snapshot.runtime.position_avg_price = 0.0;
     runtime.snapshot.execution.open_orders.clear();
-    runtime.snapshot.strategy.config.levels_per_side = 1;
+    runtime.snapshot.strategy.config.grid_levels = 3;
     let initial_price = runtime.snapshot.runtime.last_price;
 
     let adapter = Arc::new(SlowPlacementExecutionAdapter::new(Duration::from_millis(

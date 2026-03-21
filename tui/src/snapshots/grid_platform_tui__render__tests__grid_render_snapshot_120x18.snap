@@ -1,5 +1,6 @@
 ---
 source: tui/src/render.rs
+assertion_line: 2334
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  stale 0ms  Focus Strategy Orders  Pending 0                           
@@ -8,8 +9,8 @@ expression: snapshot
                                                                                                                         
 ┌ Strategy Orders ──────────────────────────────────────────────────────────┐┌ Grid Summary ───────────────────────────┐
 │Side   Price      Qty      Strategy   Placement                            ││Status  OCCUPIED                         │
-│BUY    2336.68    0.100    Occupied   N/A                                  ││Lower  2336.76   Upper  2386.20          │
-│BUY    2344.95    0.100    Occupied   N/A                                  ││Center  2361.48   Span  2.09%            │
+│BUY    2336.68    0.100    Occupied   N/A                                  ││Lower  2336.68   Upper  2386.28          │
+│BUY    2344.95    0.100    Occupied   N/A                                  ││Center  2361.48   Span  2.10%            │
 │BUY    2353.21    0.100    Occupied   N/A                                  ││Active  3   Occupied  3   Pending  0     │
 │SELL   2369.75    0.100    Active     Unknown                              │└─────────────────────────────────────────┘
 │SELL   2378.01    0.100    Active     Unknown                              │┌ Operator Notes ─────────────────────────┐

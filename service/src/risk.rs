@@ -13,13 +13,17 @@ pub fn evaluate(
     previous: &RiskState,
     config: &GridConfig,
 ) -> RiskEvaluation {
-    let price = market_price(runtime);
-    let max_notional = round_price(config.max_position_qty.abs() * price);
+    let market_price = market_price(runtime);
+    let price = market_price.unwrap_or_else(|| config.midpoint_price());
+    let max_position_qty = config.max_position_qty().abs();
+    let max_notional = round_price(max_position_qty * price);
     let current_notional = round_price(runtime.position_qty.abs() * price);
     let total_pnl = runtime.realized_pnl + runtime.unrealized_pnl;
 
-    let max_position_exceeded = runtime.position_qty.abs() > config.max_position_qty + EPSILON;
-    let stop_loss_triggered = stop_loss_triggered(runtime, price, previous.stop_loss_pct);
+    let max_position_exceeded = runtime.position_qty.abs() > max_position_qty + EPSILON;
+    let stop_loss_triggered = market_price
+        .map(|price| stop_loss_triggered(runtime, price, previous.stop_loss_pct))
+        .unwrap_or(false);
     let daily_loss_breached = total_pnl <= previous.daily_loss_limit;
     let breaker_engaged = max_position_exceeded || stop_loss_triggered || daily_loss_breached;
 
@@ -48,7 +52,7 @@ pub fn evaluate(
             format!(
                 "Position quantity {:.3} exceeded configured max {:.3}.",
                 runtime.position_qty.abs(),
-                config.max_position_qty
+                max_position_qty
             ),
         ));
     }
@@ -111,13 +115,13 @@ fn risk_event(severity: RiskLevel, code: &str, message: String) -> RiskEvent {
     }
 }
 
-fn market_price(runtime: &RuntimeState) -> f64 {
+fn market_price(runtime: &RuntimeState) -> Option<f64> {
     if runtime.mark_price.abs() > EPSILON {
-        runtime.mark_price
+        Some(runtime.mark_price)
     } else if runtime.last_price.abs() > EPSILON {
-        runtime.last_price
+        Some(runtime.last_price)
     } else {
-        1.0
+        None
     }
 }
 
@@ -162,7 +166,7 @@ mod tests {
     fn risk_state() -> RiskState {
         RiskState {
             current_notional: 0.0,
-            max_notional: 30.0,
+            max_notional: 3000.0,
             daily_loss_limit: -120.0,
             stop_loss_pct: 4.0,
             risk_level: RiskLevel::Ok,
@@ -174,13 +178,52 @@ mod tests {
         }
     }
 
+    fn config() -> GridConfig {
+        GridConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            grid_levels: 6,
+            max_position_notional: 3000.0,
+        }
+    }
+
+    #[test]
+    fn evaluate_derives_position_limit_from_range_midpoint() {
+        let mut runtime = runtime_state();
+        runtime.position_qty = 31.0;
+
+        let evaluation = evaluate(&runtime, &risk_state(), &config());
+
+        assert!(evaluation.state.max_position_exceeded);
+        assert_eq!(evaluation.state.max_notional, 3000.0);
+        assert!(
+            evaluation
+                .new_events
+                .iter()
+                .any(|event| event.code == "MAX_POSITION_EXCEEDED")
+        );
+    }
+
+    #[test]
+    fn evaluate_uses_range_midpoint_when_market_price_is_missing() {
+        let mut runtime = runtime_state();
+        runtime.last_price = 0.0;
+        runtime.mark_price = 0.0;
+
+        let evaluation = evaluate(&runtime, &risk_state(), &config());
+
+        assert_eq!(evaluation.state.max_notional, 3000.0);
+        assert_eq!(evaluation.state.current_notional, 0.0);
+        assert!(!evaluation.state.stop_loss_triggered);
+    }
+
     #[test]
     fn evaluate_emits_multiple_new_rule_events_in_same_pass() {
         let mut runtime = runtime_state();
-        runtime.position_qty = 0.5;
+        runtime.position_qty = 31.0;
         runtime.unrealized_pnl = -130.0;
 
-        let evaluation = evaluate(&runtime, &risk_state(), &GridConfig::default());
+        let evaluation = evaluate(&runtime, &risk_state(), &config());
         let codes = evaluation
             .new_events
             .iter()
@@ -204,7 +247,7 @@ mod tests {
         runtime.position_qty = 0.5;
         runtime.mark_price = 95.0;
 
-        let evaluation = evaluate(&runtime, &previous, &GridConfig::default());
+        let evaluation = evaluate(&runtime, &previous, &config());
         let codes = evaluation
             .new_events
             .iter()
@@ -222,7 +265,7 @@ mod tests {
         previous.risk_level = RiskLevel::Danger;
         previous.unacked_alerts = 2;
 
-        let evaluation = evaluate(&runtime_state(), &previous, &GridConfig::default());
+        let evaluation = evaluate(&runtime_state(), &previous, &config());
 
         assert!(!evaluation.state.breaker_engaged);
         assert_eq!(evaluation.state.risk_level, RiskLevel::Ok);
@@ -241,7 +284,7 @@ mod tests {
         runtime.position_avg_price = 100.0;
         runtime.mark_price = 105.0;
 
-        let evaluation = evaluate(&runtime, &risk_state(), &GridConfig::default());
+        let evaluation = evaluate(&runtime, &risk_state(), &config());
 
         assert!(evaluation.state.stop_loss_triggered);
         assert!(
@@ -259,7 +302,7 @@ mod tests {
         runtime.position_avg_price = 100.0;
         runtime.mark_price = 90.0;
 
-        let evaluation = evaluate(&runtime, &risk_state(), &GridConfig::default());
+        let evaluation = evaluate(&runtime, &risk_state(), &config());
 
         assert!(!evaluation.state.stop_loss_triggered);
         assert!(

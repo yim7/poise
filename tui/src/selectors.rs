@@ -255,7 +255,7 @@ pub fn grid(state: &AppState) -> GridViewModel {
         } else {
             selector_copy.flat_inventory().into()
         },
-        pending_rebuild_reason: state.strategy.pending_rebuild_reason.clone(),
+        pending_rebuild_reason: state.strategy.status_reason.clone(),
         levels: levels
             .iter()
             .map(|level| grid_level(state.ui.locale, level, state.runtime.last_price))
@@ -723,7 +723,7 @@ mod tests {
     fn grid_selector_prefers_strategy_levels_over_execution_orders() {
         let mut state = AppState::sample();
         state.execution.open_orders.clear();
-        state.strategy.pending_rebuild_reason = Some("price drift 18.0bps".into());
+        state.strategy.status_reason = Some("price drift 18.0bps".into());
 
         let vm = grid(&state);
 

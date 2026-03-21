@@ -807,20 +807,45 @@ async fn maybe_sync_strategy_orders(
     aggregate: &mut RuntimeAggregate,
     execution_adapter: Arc<dyn ExecutionAdapter>,
 ) -> Result<Vec<SequencedEngineEvent>> {
-    let missing_orders = strategy_orders_to_place(&aggregate.snapshot);
-    if missing_orders.is_empty()
-        || aggregate
-            .snapshot
-            .execution
-            .pending_commands
-            .iter()
-            .any(|item| is_execution_command(item.command))
+    if aggregate
+        .snapshot
+        .execution
+        .pending_commands
+        .iter()
+        .any(|item| is_execution_command(item.command))
     {
         return Ok(Vec::new());
     }
 
     let before = aggregate.snapshot.clone();
     let mut working_snapshot = aggregate.snapshot.clone();
+    if let Some(cancel_request) = strategy_orders_to_cancel(&working_snapshot) {
+        working_snapshot.execution.open_orders = retry_execution(|| {
+            execution_adapter.cancel_orders(cancel_request.clone(), &working_snapshot)
+        })
+        .await?;
+        if targeted_open_orders_still_present(&working_snapshot.execution.open_orders, &cancel_request)
+        {
+            return Err(anyhow!(
+                "strategy waiting state did not clear all targeted strategy orders"
+            ));
+        }
+    }
+
+    let missing_orders = strategy_orders_to_place(&working_snapshot);
+    if missing_orders.is_empty() {
+        aggregate.snapshot.execution.open_orders = working_snapshot.execution.open_orders.clone();
+        aggregate.snapshot.execution.recent_fills = working_snapshot.execution.recent_fills.clone();
+
+        if aggregate.snapshot == before {
+            return Ok(Vec::new());
+        }
+
+        return Ok(vec![aggregate.sequenced_event(EngineEvent::RuntimeSnapshot(
+            aggregate.snapshot.clone(),
+        ))]);
+    }
+
     let deadline = tokio::time::Instant::now() + STRATEGY_SYNC_TIMEOUT;
     let mut applied_any = false;
     for order in missing_orders {
@@ -941,7 +966,14 @@ fn strategy_orders_to_place(snapshot: &RuntimeSnapshot) -> Vec<SubmitOrderReques
     if snapshot.runtime.strategy_state != "running"
         || !has_valid_market_price(snapshot)
         || snapshot.risk.breaker_engaged
-        || snapshot.strategy.status == StrategyStatus::PendingRebuild
+        || matches!(
+            snapshot.strategy.status,
+            StrategyStatus::WaitingMarketPrice
+                | StrategyStatus::WaitingRangeEntry
+                | StrategyStatus::PendingRebuild
+        )
+        || (snapshot.strategy.status == StrategyStatus::Occupied
+            && snapshot.strategy.status_reason.is_some())
         || snapshot
             .execution
             .open_orders
@@ -983,9 +1015,47 @@ fn strategy_orders_to_place(snapshot: &RuntimeSnapshot) -> Vec<SubmitOrderReques
         .collect()
 }
 
+fn strategy_orders_to_cancel(snapshot: &RuntimeSnapshot) -> Option<CancelOrdersRequest> {
+    if snapshot.runtime.strategy_state != "running"
+        || snapshot.strategy.status != StrategyStatus::WaitingRangeEntry
+        || snapshot.runtime.position_qty.abs() > f64::EPSILON
+    {
+        return None;
+    }
+
+    let strategy_orders = snapshot
+        .execution
+        .open_orders
+        .iter()
+        .filter(|order| order.client_order_id.starts_with("grid_"))
+        .collect::<Vec<_>>();
+    if strategy_orders.is_empty() {
+        return None;
+    }
+
+    Some(CancelOrdersRequest {
+        command_id: None,
+        order_ids: strategy_orders
+            .iter()
+            .map(|order| order.order_id.clone())
+            .collect(),
+        client_order_ids: strategy_orders
+            .iter()
+            .map(|order| order.client_order_id.clone())
+            .collect(),
+    })
+}
+
 fn has_valid_market_price(snapshot: &RuntimeSnapshot) -> bool {
     snapshot.runtime.mark_price.abs() > f64::EPSILON
         || snapshot.runtime.last_price.abs() > f64::EPSILON
+}
+
+fn should_skip_paper_fill_simulation(snapshot: &RuntimeSnapshot) -> bool {
+    snapshot.runtime.strategy_state == "running"
+        && snapshot.runtime.position_qty.abs() <= f64::EPSILON
+        && strategy::reconcile(&snapshot.runtime, &snapshot.risk, &snapshot.strategy).status
+            == StrategyStatus::WaitingRangeEntry
 }
 
 fn should_sync_strategy_after_command(command: CommandType) -> bool {
@@ -1091,7 +1161,7 @@ impl RuntimeAggregate {
         self.snapshot.runtime.mark_price = round_price(self.snapshot.runtime.mark_price + 0.08);
         self.snapshot.connection.last_heartbeat_at = emitted_at.clone();
         self.snapshot.connection.stale_age_ms = 0;
-        if paper_mode {
+        if paper_mode && !should_skip_paper_fill_simulation(&self.snapshot) {
             let patch = simulate_paper_fills(
                 &self.snapshot,
                 PaperFillMarketUpdate {
@@ -1230,7 +1300,7 @@ impl RuntimeAggregate {
             changed = true;
         }
 
-        if paper_mode {
+        if paper_mode && !should_skip_paper_fill_simulation(&self.snapshot) {
             let patch = simulate_paper_fills(
                 &self.snapshot,
                 PaperFillMarketUpdate {

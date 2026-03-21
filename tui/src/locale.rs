@@ -1395,9 +1395,13 @@ impl SelectorCopy {
 
     pub fn strategy_status_label(self, status: StrategyStatus) -> &'static str {
         match (self.locale, status) {
+            (Locale::EnUs, StrategyStatus::WaitingMarketPrice) => "WAITING PRICE",
+            (Locale::EnUs, StrategyStatus::WaitingRangeEntry) => "WAITING RANGE",
             (Locale::EnUs, StrategyStatus::Active) => "ACTIVE",
             (Locale::EnUs, StrategyStatus::Occupied) => "OCCUPIED",
             (Locale::EnUs, StrategyStatus::PendingRebuild) => "PENDING REBUILD",
+            (Locale::ZhCn, StrategyStatus::WaitingMarketPrice) => "等待价格",
+            (Locale::ZhCn, StrategyStatus::WaitingRangeEntry) => "等待入区",
             (Locale::ZhCn, StrategyStatus::Active) => "激活",
             (Locale::ZhCn, StrategyStatus::Occupied) => "占用",
             (Locale::ZhCn, StrategyStatus::PendingRebuild) => "待重建",

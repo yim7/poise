@@ -1126,7 +1126,7 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
         Line::from(
             state
                 .strategy
-                .pending_rebuild_reason
+                .status_reason
                 .clone()
                 .unwrap_or_else(|| copy.grid().aligned_message().into()),
         ),

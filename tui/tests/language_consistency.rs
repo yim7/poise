@@ -205,7 +205,7 @@ fn runtime_copy_samples(locale: Locale) -> BTreeMap<&'static str, String> {
         (
             "selector.strategy_status",
             copy.selector()
-                .strategy_status_label(StrategyStatus::PendingRebuild)
+                .strategy_status_label(StrategyStatus::WaitingRangeEntry)
                 .to_string(),
         ),
         (
