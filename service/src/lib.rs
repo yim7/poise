@@ -1,5 +1,6 @@
 mod background;
 pub mod config;
+pub mod registry;
 mod risk;
 mod strategy;
 
@@ -14,3 +15,4 @@ pub mod storage;
 
 pub use application::Application;
 pub use control_plane::build_app;
+pub use registry::ApplicationRegistry;

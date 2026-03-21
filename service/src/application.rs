@@ -46,6 +46,37 @@ impl Application {
         Self::build_from_engine(spawn_engine())
     }
 
+    pub fn bootstrap_with_runtime(
+        runtime: PersistedRuntime,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        Self::bootstrap_with_runtime_and_storage(runtime, None, instance_id)
+    }
+
+    pub fn bootstrap_with_runtime_and_storage(
+        runtime: PersistedRuntime,
+        storage: Option<SqliteStorage>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        Self::build_from_engine_with_instance_id(
+            spawn_engine_with_runtime(runtime, storage),
+            instance_id.into(),
+        )
+    }
+
+    pub fn bootstrap_with_runtime_storage_and_binance(
+        runtime: PersistedRuntime,
+        storage: Option<SqliteStorage>,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        let application =
+            Self::bootstrap_with_runtime_and_storage(runtime, storage, instance_id.into());
+        application.start_binance_supervisor(config, transport);
+        application
+    }
+
     pub fn bootstrap_with_binance(
         config: BinanceConfig,
         transport: Arc<dyn BinanceTransport>,
@@ -65,9 +96,13 @@ impl Application {
     ) -> Self {
         let mut runtime = prepare_bootstrap_runtime(runtime, &config);
         runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
-        let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
-        application.start_binance_supervisor(config, transport);
-        application
+        Self::bootstrap_with_runtime_storage_and_binance(
+            runtime,
+            None,
+            config,
+            transport,
+            default_instance_id(),
+        )
     }
 
     pub fn bootstrap_with_sqlite(path: impl AsRef<Path>) -> Result<Self> {
@@ -80,10 +115,11 @@ impl Application {
                 runtime
             }
         };
-        Ok(Self::build_from_engine(spawn_engine_with_runtime(
+        Ok(Self::bootstrap_with_runtime_and_storage(
             runtime,
             Some(storage),
-        )))
+            default_instance_id(),
+        ))
     }
 
     pub fn bootstrap_with_sqlite_and_binance(
@@ -99,18 +135,35 @@ impl Application {
         let mut runtime = prepare_bootstrap_runtime(runtime, &config);
         runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
         storage.persist_runtime(&runtime)?;
-        let application =
-            Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
-        application.start_binance_supervisor(config, transport);
-        Ok(application)
+        Ok(Self::bootstrap_with_runtime_storage_and_binance(
+            runtime,
+            Some(storage),
+            config,
+            transport,
+            default_instance_id(),
+        ))
     }
 
     fn build_from_engine(
+        (engine, read_model, engine_events_rx): (
+            EngineHandle,
+            SharedReadModel,
+            tokio::sync::mpsc::Receiver<crate::kernel::SequencedEngineEvent>,
+        ),
+    ) -> Self {
+        Self::build_from_engine_with_instance_id(
+            (engine, read_model, engine_events_rx),
+            default_instance_id(),
+        )
+    }
+
+    fn build_from_engine_with_instance_id(
         (engine, read_model, mut engine_events_rx): (
             EngineHandle,
             SharedReadModel,
             tokio::sync::mpsc::Receiver<crate::kernel::SequencedEngineEvent>,
         ),
+        instance_id: String,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         let publish_tx = events_tx.clone();
@@ -128,7 +181,7 @@ impl Application {
             engine,
             read_model,
             events_tx,
-            instance_id: default_instance_id(),
+            instance_id,
         }
     }
 

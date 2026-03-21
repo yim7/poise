@@ -1,16 +1,16 @@
 use axum::{
     Json, Router,
     extract::{
-        Query, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Application,
     application::success,
     protocol::{
         AlertsFilters, AlertsQueryResult, CommandAccepted, CommandRequest, CommandType,
@@ -19,11 +19,15 @@ use crate::{
         OrdersQueryResult, PROTOCOL_VERSION, PriceUpdated, RuntimeQueryResult, RuntimeSnapshot,
         ServerEnvelope,
     },
+    registry::{ApplicationRegistry, InstancesDirectory},
+    Application,
 };
 
-pub fn build_app(application: Application) -> Router {
+pub fn build_app(registry: impl Into<ApplicationRegistry>) -> Router {
+    let registry = registry.into();
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/instances", get(instances))
         .route("/runtime/snapshot", get(runtime_snapshot))
         .route("/orders/open", get(open_orders))
         .route("/fills/recent", get(recent_fills))
@@ -48,7 +52,46 @@ pub fn build_app(application: Application) -> Router {
         )
         .route("/__test__/emit-price-tick", post(emit_price_tick))
         .route("/ws", get(ws_events))
-        .with_state(application)
+        .route(
+            "/instances/{symbol}/runtime/snapshot",
+            get(runtime_snapshot_for_instance),
+        )
+        .route("/instances/{symbol}/orders/open", get(open_orders_for_instance))
+        .route("/instances/{symbol}/fills/recent", get(recent_fills_for_instance))
+        .route("/instances/{symbol}/risk/events", get(risk_events_for_instance))
+        .route("/instances/{symbol}/system/events", get(system_events_for_instance))
+        .route("/instances/{symbol}/query/runtime", get(query_runtime_for_instance))
+        .route("/instances/{symbol}/query/orders", get(query_orders_for_instance))
+        .route("/instances/{symbol}/query/fills", get(query_fills_for_instance))
+        .route("/instances/{symbol}/query/alerts", get(query_alerts_for_instance))
+        .route(
+            "/instances/{symbol}/query/commands",
+            get(query_commands_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/control-plane/capabilities",
+            get(control_plane_capabilities_for_instance),
+        )
+        .route("/instances/{symbol}/commands/pause", post(pause_for_instance))
+        .route("/instances/{symbol}/commands/resume", post(resume_for_instance))
+        .route(
+            "/instances/{symbol}/commands/cancel-all",
+            post(cancel_all_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/commands/flatten-now",
+            post(flatten_now_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/commands/shutdown-after-flatten",
+            post(shutdown_after_flatten_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/__test__/emit-price-tick",
+            post(emit_price_tick_for_instance),
+        )
+        .route("/instances/{symbol}/ws", get(ws_events_for_instance))
+        .with_state(registry)
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +102,7 @@ struct HealthResponse<'a> {
 
 #[derive(Debug)]
 struct ApiError {
+    status: StatusCode,
     code: &'static str,
     message: String,
 }
@@ -66,7 +110,16 @@ struct ApiError {
 impl ApiError {
     fn unavailable(message: impl Into<String>) -> Self {
         Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             code: "service_unavailable",
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "instance_not_found",
             message: message.into(),
         }
     }
@@ -74,7 +127,6 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
         let body = Json(HttpErrorEnvelope {
             version: PROTOCOL_VERSION.into(),
             status: "error".into(),
@@ -84,7 +136,7 @@ impl IntoResponse for ApiError {
                 details: None,
             },
         });
-        (status, body).into_response()
+        (self.status, body).into_response()
     }
 }
 
@@ -95,34 +147,98 @@ async fn healthz() -> Json<HealthResponse<'static>> {
     })
 }
 
+async fn instances(
+    State(registry): State<ApplicationRegistry>,
+) -> Json<HttpSuccessEnvelope<InstancesDirectory>> {
+    Json(success(registry.directory()))
+}
+
+fn default_application(registry: &ApplicationRegistry) -> Application {
+    registry.default_application()
+}
+
+fn application_for_symbol(
+    registry: &ApplicationRegistry,
+    symbol: &str,
+) -> Result<Application, ApiError> {
+    registry
+        .application(symbol)
+        .ok_or_else(|| ApiError::not_found(format!("instance `{symbol}` was not found")))
+}
+
 async fn runtime_snapshot(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<RuntimeSnapshot>> {
-    Json(success(application.snapshot()))
+    Json(success(default_application(&registry).snapshot()))
+}
+
+async fn runtime_snapshot_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<RuntimeSnapshot>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.snapshot(),
+    )))
 }
 
 async fn open_orders(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<Vec<crate::protocol::OpenOrder>>> {
-    Json(success(application.open_orders()))
+    Json(success(default_application(&registry).open_orders()))
+}
+
+async fn open_orders_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<Vec<crate::protocol::OpenOrder>>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.open_orders(),
+    )))
 }
 
 async fn recent_fills(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<Vec<crate::protocol::RecentFill>>> {
-    Json(success(application.recent_fills()))
+    Json(success(default_application(&registry).recent_fills()))
+}
+
+async fn recent_fills_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<Vec<crate::protocol::RecentFill>>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.recent_fills(),
+    )))
 }
 
 async fn risk_events(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<Vec<crate::protocol::RiskEvent>>> {
-    Json(success(application.risk_events()))
+    Json(success(default_application(&registry).risk_events()))
+}
+
+async fn risk_events_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<Vec<crate::protocol::RiskEvent>>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.risk_events(),
+    )))
 }
 
 async fn system_events(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<Vec<crate::protocol::SystemEvent>>> {
-    Json(success(application.system_events()))
+    Json(success(default_application(&registry).system_events()))
+}
+
+async fn system_events_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<Vec<crate::protocol::SystemEvent>>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.system_events(),
+    )))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -163,17 +279,26 @@ struct CommandsQueryParams {
 }
 
 async fn query_runtime(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<RuntimeQueryResult>> {
-    Json(success(application.query_runtime()))
+    Json(success(default_application(&registry).query_runtime()))
+}
+
+async fn query_runtime_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<RuntimeQueryResult>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.query_runtime(),
+    )))
 }
 
 async fn query_orders(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Query(params): Query<OrdersQueryParams>,
 ) -> Json<HttpSuccessEnvelope<OrdersQueryResult>> {
     let (page, per_page) = normalize_pagination(params.page, params.per_page);
-    Json(success(application.query_orders(
+    Json(success(default_application(&registry).query_orders(
         page,
         per_page,
         OrdersFilters {
@@ -183,12 +308,28 @@ async fn query_orders(
     )))
 }
 
+async fn query_orders_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Query(params): Query<OrdersQueryParams>,
+) -> Result<Json<HttpSuccessEnvelope<OrdersQueryResult>>, ApiError> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Ok(Json(success(application_for_symbol(&registry, &symbol)?.query_orders(
+        page,
+        per_page,
+        OrdersFilters {
+            side: params.side,
+            status: params.status,
+        },
+    ))))
+}
+
 async fn query_fills(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Query(params): Query<FillsQueryParams>,
 ) -> Json<HttpSuccessEnvelope<FillsQueryResult>> {
     let (page, per_page) = normalize_pagination(params.page, params.per_page);
-    Json(success(application.query_fills(
+    Json(success(default_application(&registry).query_fills(
         page,
         per_page,
         FillsFilters {
@@ -199,12 +340,29 @@ async fn query_fills(
     )))
 }
 
+async fn query_fills_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Query(params): Query<FillsQueryParams>,
+) -> Result<Json<HttpSuccessEnvelope<FillsQueryResult>>, ApiError> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Ok(Json(success(application_for_symbol(&registry, &symbol)?.query_fills(
+        page,
+        per_page,
+        FillsFilters {
+            side: params.side,
+            order_id: params.order_id,
+            client_order_id: params.client_order_id,
+        },
+    ))))
+}
+
 async fn query_alerts(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Query(params): Query<AlertsQueryParams>,
 ) -> Json<HttpSuccessEnvelope<AlertsQueryResult>> {
     let (page, per_page) = normalize_pagination(params.page, params.per_page);
-    Json(success(application.query_alerts(
+    Json(success(default_application(&registry).query_alerts(
         page,
         per_page,
         AlertsFilters {
@@ -217,12 +375,33 @@ async fn query_alerts(
     )))
 }
 
+async fn query_alerts_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Query(params): Query<AlertsQueryParams>,
+) -> Result<Json<HttpSuccessEnvelope<AlertsQueryResult>>, ApiError> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.query_alerts(
+            page,
+            per_page,
+            AlertsFilters {
+                category: params.category,
+                severity: params.severity,
+                source: params.source,
+                acknowledged: params.acknowledged,
+            },
+            params.sort.as_deref().unwrap_or("created_at_desc"),
+        ),
+    )))
+}
+
 async fn query_commands(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Query(params): Query<CommandsQueryParams>,
 ) -> Json<HttpSuccessEnvelope<CommandsQueryResult>> {
     let (page, per_page) = normalize_pagination(params.page, params.per_page);
-    Json(success(application.query_commands(
+    Json(success(default_application(&registry).query_commands(
         page,
         per_page,
         CommandsFilters {
@@ -233,51 +412,150 @@ async fn query_commands(
     )))
 }
 
+async fn query_commands_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Query(params): Query<CommandsQueryParams>,
+) -> Result<Json<HttpSuccessEnvelope<CommandsQueryResult>>, ApiError> {
+    let (page, per_page) = normalize_pagination(params.page, params.per_page);
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.query_commands(
+            page,
+            per_page,
+            CommandsFilters {
+                command: params.command,
+                status: params.status,
+            },
+            params.sort.as_deref().unwrap_or("requested_at_desc"),
+        ),
+    )))
+}
+
 async fn control_plane_capabilities(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<ControlPlaneCapabilities>> {
-    Json(success(application.control_plane_capabilities()))
+    Json(success(default_application(&registry).control_plane_capabilities()))
+}
+
+async fn control_plane_capabilities_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<ControlPlaneCapabilities>>, ApiError> {
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.control_plane_capabilities(),
+    )))
 }
 
 async fn pause(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application, CommandType::Pause, request).await
+    issue_command(default_application(&registry), CommandType::Pause, request).await
+}
+
+async fn pause_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Json(request): Json<CommandRequest>,
+) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
+    issue_command(application_for_symbol(&registry, &symbol)?, CommandType::Pause, request).await
 }
 
 async fn resume(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application, CommandType::Resume, request).await
+    issue_command(default_application(&registry), CommandType::Resume, request).await
+}
+
+async fn resume_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Json(request): Json<CommandRequest>,
+) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
+    issue_command(application_for_symbol(&registry, &symbol)?, CommandType::Resume, request).await
 }
 
 async fn cancel_all(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application, CommandType::CancelAll, request).await
+    issue_command(default_application(&registry), CommandType::CancelAll, request).await
+}
+
+async fn cancel_all_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Json(request): Json<CommandRequest>,
+) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
+    issue_command(
+        application_for_symbol(&registry, &symbol)?,
+        CommandType::CancelAll,
+        request,
+    )
+    .await
 }
 
 async fn flatten_now(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application, CommandType::FlattenNow, request).await
+    issue_command(default_application(&registry), CommandType::FlattenNow, request).await
+}
+
+async fn flatten_now_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Json(request): Json<CommandRequest>,
+) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
+    issue_command(
+        application_for_symbol(&registry, &symbol)?,
+        CommandType::FlattenNow,
+        request,
+    )
+    .await
 }
 
 async fn shutdown_after_flatten(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application, CommandType::ShutdownAfterFlatten, request).await
+    issue_command(
+        default_application(&registry),
+        CommandType::ShutdownAfterFlatten,
+        request,
+    )
+    .await
+}
+
+async fn shutdown_after_flatten_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+    Json(request): Json<CommandRequest>,
+) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
+    issue_command(
+        application_for_symbol(&registry, &symbol)?,
+        CommandType::ShutdownAfterFlatten,
+        request,
+    )
+    .await
 }
 
 async fn emit_price_tick(
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> Result<Json<HttpSuccessEnvelope<PriceUpdated>>, ApiError> {
-    let tick = application
+    let tick = default_application(&registry)
+        .emit_price_tick()
+        .await
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    Ok(Json(success(tick)))
+}
+
+async fn emit_price_tick_for_instance(
+    Path(symbol): Path<String>,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<Json<HttpSuccessEnvelope<PriceUpdated>>, ApiError> {
+    let tick = application_for_symbol(&registry, &symbol)?
         .emit_price_tick()
         .await
         .map_err(|error| ApiError::unavailable(error.to_string()))?;
@@ -298,9 +576,18 @@ async fn issue_command(
 
 async fn ws_events(
     ws: WebSocketUpgrade,
-    State(application): State<Application>,
+    State(registry): State<ApplicationRegistry>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| websocket_session(socket, application))
+    ws.on_upgrade(move |socket| websocket_session(socket, default_application(&registry)))
+}
+
+async fn ws_events_for_instance(
+    Path(symbol): Path<String>,
+    ws: WebSocketUpgrade,
+    State(registry): State<ApplicationRegistry>,
+) -> Result<impl IntoResponse, ApiError> {
+    let application = application_for_symbol(&registry, &symbol)?;
+    Ok(ws.on_upgrade(move |socket| websocket_session(socket, application)))
 }
 
 async fn websocket_session(mut socket: WebSocket, application: Application) {
