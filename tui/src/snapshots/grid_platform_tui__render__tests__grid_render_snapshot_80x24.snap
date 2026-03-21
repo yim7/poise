@@ -1,18 +1,17 @@
 ---
 source: tui/src/render.rs
-assertion_line: 1725
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus 策 略 订 单                 
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Strategy Orders         
 ────────────────────────────────────────────────────────────────────────────────
  Dashboard   Grid   Market   Events   Help                                      
                                                                                 
                                                                                 
-┌ 策 略 订 单  ────────────────────────────────────────────────────────────────────┐
-│方 向    价 格        数 量      策 略 状 态    挂 单 状 态                                 │
-│BUY    2336.68    0.100    占 用        无 需 挂 单                                 │
-│BUY    2344.95    0.100    占 用        无 需 挂 单                                 │
-│BUY    2353.21    0.100    占 用        无 需 挂 单                                 │
+┌ Strategy Orders ─────────────────────────────────────────────────────────────┐
+│Side   Price      Qty      Strategy   Placement                               │
+│BUY    2336.68    0.100    Occupied   N/A                                     │
+│BUY    2344.95    0.100    Occupied   N/A                                     │
+│BUY    2353.21    0.100    Occupied   N/A                                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Grid Summary ────────────────────────────────────────────────────────────────┐
 │Status  OCCUPIED                                                              │
@@ -26,4 +25,4 @@ expression: snapshot
 │Breaker  OFF                                                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────
- Focus 策 略 订 单  | Tab panels | p/r run | c/f/s danger | Enter/Esc
+ Focus Strategy Orders | Tab panels | p/r run | c/f/s danger | Enter/Esc

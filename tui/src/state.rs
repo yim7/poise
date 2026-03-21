@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::locale::{self, Locale};
 use crate::protocol::{
     CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, OpenOrdersSource,
     PendingCommand, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
@@ -37,28 +38,29 @@ impl Page {
         }
     }
 
-    pub fn focus_label(self, focus_index: usize) -> &'static str {
-        const DASHBOARD: [&str; 6] = [
-            "Execution Focus",
-            "交易所挂单",
-            "Recent Fills",
-            "Risk + Alerts",
-            "Market + Health",
-            "Command Timeline",
-        ];
-        const GRID: [&str; 3] = ["策略订单", "Grid Summary", "Operator Notes"];
-        const MARKET: [&str; 3] = ["Tape", "Connectivity", "Runtime"];
-        const EVENTS: [&str; 4] = ["Fills", "Alerts", "Commands", "System"];
-        const HELP: [&str; 2] = ["快捷键", "术语说明"];
-
-        let labels = match self {
-            Self::Dashboard => &DASHBOARD[..],
-            Self::Grid => &GRID[..],
-            Self::Market => &MARKET[..],
-            Self::Events => &EVENTS[..],
-            Self::Help => &HELP[..],
-        };
-        labels[self.normalize_focus(focus_index)]
+    pub fn focus_label(self, locale: Locale, focus_index: usize) -> &'static str {
+        let copy = crate::locale::copy(locale);
+        match (self, self.normalize_focus(focus_index)) {
+            (Self::Dashboard, 0) => copy.dashboard().execution_focus_title(),
+            (Self::Dashboard, 1) => copy.dashboard().exchange_orders_title(),
+            (Self::Dashboard, 2) => copy.dashboard().recent_fills_title(),
+            (Self::Dashboard, 3) => copy.dashboard().risk_alerts_title(),
+            (Self::Dashboard, 4) => copy.dashboard().market_health_title(),
+            (Self::Dashboard, 5) => copy.dashboard().command_timeline_title(),
+            (Self::Grid, 0) => copy.grid().strategy_orders_title(),
+            (Self::Grid, 1) => copy.grid().grid_summary_title(),
+            (Self::Grid, 2) => copy.grid().operator_notes_title(),
+            (Self::Market, 0) => copy.market().tape_title(),
+            (Self::Market, 1) => copy.market().connectivity_title(),
+            (Self::Market, 2) => copy.market().runtime_title(),
+            (Self::Events, 0) => copy.events().fills_panel_title(),
+            (Self::Events, 1) => copy.events().alerts_panel_title(),
+            (Self::Events, 2) => copy.events().commands_panel_title(),
+            (Self::Events, 3) => copy.events().system_panel_title(),
+            (Self::Help, 0) => copy.help().shortcuts_title(),
+            (Self::Help, 1) => copy.help().glossary_title(),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -126,6 +128,7 @@ pub struct ConnectionViewState {
     pub http_available: bool,
     pub market_ws_connected: bool,
     pub user_stream_connected: Option<bool>,
+    pub latency_ms: Option<u32>,
     pub last_heartbeat_at: String,
     pub market_reconnect_backoff_ms: u64,
     pub stale_age_ms: u64,
@@ -214,6 +217,7 @@ pub struct RiskViewState {
 pub struct UiState {
     pub page: Page,
     pub focus_index: usize,
+    pub locale: Locale,
     pub modal: Option<Modal>,
     pub toast: Option<Toast>,
     pub should_quit: bool,
@@ -239,11 +243,16 @@ pub struct AppState {
 
 impl AppState {
     pub fn waiting_first_snapshot() -> Self {
+        Self::waiting_first_snapshot_with_locale(Locale::EnUs)
+    }
+
+    pub fn waiting_first_snapshot_with_locale(locale: Locale) -> Self {
         Self {
             connection: ConnectionViewState {
                 http_available: false,
                 market_ws_connected: false,
                 user_stream_connected: None,
+                latency_ms: None,
                 last_heartbeat_at: String::new(),
                 market_reconnect_backoff_ms: 0,
                 stale_age_ms: 0,
@@ -287,6 +296,7 @@ impl AppState {
             ui: UiState {
                 page: Page::Dashboard,
                 focus_index: 0,
+                locale,
                 modal: None,
                 toast: None,
                 should_quit: false,
@@ -302,67 +312,14 @@ impl AppState {
         }
     }
 
-    pub fn sample() -> Self {
-        let mut state = Self::from_snapshot(RuntimeSnapshot::sample());
-        state.connection.ws_connected = true;
-        state.risk.alerts.push_front(RiskEvent {
-            severity: RiskLevel::Watch,
-            code: "MARGIN_USAGE_WATCH".into(),
-            message: "Margin usage reached 39% of configured threshold.".into(),
-            created_at: "2025-01-01T00:00:00Z".into(),
-            acknowledged_at: None,
-        });
-        state.system_events.push_front(SystemEvent {
-            level: "info".into(),
-            source: "bootstrap".into(),
-            message: "Initial runtime snapshot loaded.".into(),
-            created_at: "2025-01-01T00:00:00Z".into(),
-        });
-        state.system_events.push_front(SystemEvent {
-            level: "info".into(),
-            source: "transport".into(),
-            message: "WebSocket connected and streaming.".into(),
-            created_at: "2025-01-01T00:00:02Z".into(),
-        });
-        state
-            .execution
-            .command_timeline
-            .push_front(CommandTimelineEntry {
-                command_id: "cmd_hist_0002".into(),
-                command: CommandType::FlattenNow,
-                stage: CommandTimelineStage::Failed,
-                summary: "Exchange rejected flatten request due to reduce-only mismatch.".into(),
-                requested_at: "2025-01-01T00:00:09Z".into(),
-                accepted_at: Some("2025-01-01T00:00:10Z".into()),
-                finished_at: Some("2025-01-01T00:00:13Z".into()),
-                links: CommandLinks::default(),
-                timeout_at_tick: None,
-            });
-        state
-            .execution
-            .command_timeline
-            .push_front(CommandTimelineEntry {
-                command_id: "cmd_hist_0001".into(),
-                command: CommandType::Pause,
-                stage: CommandTimelineStage::Ack,
-                summary: "Strategy acknowledged pause and stopped placing new orders.".into(),
-                requested_at: "2025-01-01T00:00:03Z".into(),
-                accepted_at: Some("2025-01-01T00:00:04Z".into()),
-                finished_at: Some("2025-01-01T00:00:05Z".into()),
-                links: CommandLinks::default(),
-                timeout_at_tick: None,
-            });
-        state.trim_command_timeline();
-        state
-    }
-
-    pub fn from_snapshot(snapshot: RuntimeSnapshot) -> Self {
-        let command_timeline = command_timeline_from_snapshot(&snapshot);
+    pub fn from_snapshot_with_locale(snapshot: RuntimeSnapshot, locale: Locale) -> Self {
+        let command_timeline = command_timeline_from_snapshot(&snapshot, locale);
         Self {
             connection: ConnectionViewState {
                 http_available: snapshot.connection.http_available,
                 market_ws_connected: snapshot.connection.ws_connected,
                 user_stream_connected: snapshot.connection.user_stream_connected,
+                latency_ms: None,
                 last_heartbeat_at: snapshot.connection.last_heartbeat_at,
                 market_reconnect_backoff_ms: snapshot.connection.reconnect_backoff_ms,
                 stale_age_ms: snapshot.connection.stale_age_ms,
@@ -406,6 +363,7 @@ impl AppState {
             ui: UiState {
                 page: Page::Dashboard,
                 focus_index: 0,
+                locale,
                 modal: None,
                 toast: None,
                 should_quit: false,
@@ -419,6 +377,67 @@ impl AppState {
             clock_ticks: 0,
             next_command_seq: 1,
         }
+    }
+
+    pub fn sample() -> Self {
+        let mut state = Self::from_snapshot(RuntimeSnapshot::sample());
+        state.connection.ws_connected = true;
+        state.risk.alerts.push_front(RiskEvent {
+            severity: RiskLevel::Watch,
+            code: "MARGIN_USAGE_WATCH".into(),
+            message: "Margin usage reached 39% of configured threshold.".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            acknowledged_at: None,
+        });
+        state.system_events.push_front(SystemEvent {
+            level: "info".into(),
+            source: "bootstrap".into(),
+            message: "Initial runtime snapshot loaded.".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+        });
+        state.system_events.push_front(SystemEvent {
+            level: "info".into(),
+            source: "transport".into(),
+            message: locale::copy(state.ui.locale)
+                .store()
+                .ws_connected_event()
+                .into(),
+            created_at: "2025-01-01T00:00:02Z".into(),
+        });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_hist_0002".into(),
+                command: CommandType::FlattenNow,
+                stage: CommandTimelineStage::Failed,
+                summary: "Exchange rejected flatten request due to reduce-only mismatch.".into(),
+                requested_at: "2025-01-01T00:00:09Z".into(),
+                accepted_at: Some("2025-01-01T00:00:10Z".into()),
+                finished_at: Some("2025-01-01T00:00:13Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_hist_0001".into(),
+                command: CommandType::Pause,
+                stage: CommandTimelineStage::Ack,
+                summary: "Strategy acknowledged pause and stopped placing new orders.".into(),
+                requested_at: "2025-01-01T00:00:03Z".into(),
+                accepted_at: Some("2025-01-01T00:00:04Z".into()),
+                finished_at: Some("2025-01-01T00:00:05Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state.trim_command_timeline();
+        state
+    }
+
+    pub fn from_snapshot(snapshot: RuntimeSnapshot) -> Self {
+        Self::from_snapshot_with_locale(snapshot, Locale::EnUs)
     }
 
     pub fn queue_command(&mut self, command: CommandType) -> String {
@@ -436,7 +455,10 @@ impl AppState {
                 command_id: command_id.clone(),
                 command,
                 stage: CommandTimelineStage::Pending,
-                summary: "Waiting for service acceptance.".into(),
+                summary: locale::copy(self.ui.locale)
+                    .store()
+                    .command_pending_summary()
+                    .into(),
                 requested_at: self.local_timestamp(),
                 accepted_at: None,
                 finished_at: None,
@@ -491,7 +513,7 @@ impl AppState {
         let clock_ticks = self.clock_ticks;
         let next_command_seq = self.next_command_seq;
 
-        *self = Self::from_snapshot(snapshot);
+        *self = Self::from_snapshot_with_locale(snapshot, ui.locale);
         self.connection.ws_connected = ws_connected;
         self.connection.reconnect_attempt = reconnect_attempt;
         self.connection.reconnect_backoff_ms = reconnect_backoff_ms;
@@ -506,7 +528,7 @@ impl AppState {
     }
 }
 
-fn command_timeline_from_pending(command: &PendingCommand) -> CommandTimelineEntry {
+fn command_timeline_from_pending(command: &PendingCommand, locale: Locale) -> CommandTimelineEntry {
     let stage = match command.status {
         CommandStatus::Pending => CommandTimelineStage::Pending,
         CommandStatus::Accepted => CommandTimelineStage::Accepted,
@@ -514,24 +536,17 @@ fn command_timeline_from_pending(command: &PendingCommand) -> CommandTimelineEnt
         CommandStatus::Failed => CommandTimelineStage::Failed,
         CommandStatus::TimedOut => CommandTimelineStage::TimedOut,
     };
+    let store_copy = locale::copy(locale).store();
     CommandTimelineEntry {
         command_id: command.command_id.clone(),
         command: command.command,
         stage,
         summary: match stage {
-            CommandTimelineStage::Pending => "Recovered pending command from snapshot.".into(),
-            CommandTimelineStage::Accepted => {
-                "Service accepted command before the client reconnected.".into()
-            }
-            CommandTimelineStage::Ack => {
-                "Command already acknowledged before the client reconnected.".into()
-            }
-            CommandTimelineStage::Failed => {
-                "Command already failed before the client reconnected.".into()
-            }
-            CommandTimelineStage::TimedOut => {
-                "Command timed out before the client reconnected.".into()
-            }
+            CommandTimelineStage::Pending => store_copy.recovered_pending_summary().into(),
+            CommandTimelineStage::Accepted => store_copy.recovered_accepted_summary().into(),
+            CommandTimelineStage::Ack => store_copy.recovered_ack_summary().into(),
+            CommandTimelineStage::Failed => store_copy.recovered_failed_summary().into(),
+            CommandTimelineStage::TimedOut => store_copy.recovered_timed_out_summary().into(),
         },
         requested_at: command.requested_at.clone(),
         accepted_at: (stage == CommandTimelineStage::Accepted)
@@ -539,6 +554,74 @@ fn command_timeline_from_pending(command: &PendingCommand) -> CommandTimelineEnt
         finished_at: stage.is_terminal().then(|| command.requested_at.clone()),
         links: CommandLinks::default(),
         timeout_at_tick: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::locale::Locale;
+
+    #[test]
+    fn from_snapshot_with_locale_uses_explicit_locale() {
+        let state = AppState::from_snapshot_with_locale(RuntimeSnapshot::sample(), Locale::ZhCn);
+
+        assert_eq!(state.ui.locale, Locale::ZhCn);
+    }
+
+    #[test]
+    fn sync_runtime_snapshot_preserves_existing_locale() {
+        let mut state = AppState::waiting_first_snapshot_with_locale(Locale::ZhCn);
+
+        state.sync_runtime_snapshot(RuntimeSnapshot::sample());
+
+        assert_eq!(state.ui.locale, Locale::ZhCn);
+    }
+
+    #[test]
+    fn queue_command_uses_current_locale_for_pending_summary() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+
+        state.queue_command(CommandType::Pause);
+
+        assert_eq!(
+            state
+                .execution
+                .command_timeline
+                .front()
+                .map(|entry| entry.summary.as_str()),
+            Some("等待服务端接受命令。")
+        );
+    }
+
+    #[test]
+    fn from_snapshot_with_locale_localizes_recovered_pending_command_summaries() {
+        let mut snapshot = RuntimeSnapshot::sample();
+        snapshot.execution.pending_commands = vec![
+            PendingCommand {
+                command_id: "cmd_pending".into(),
+                command: CommandType::Pause,
+                status: CommandStatus::Pending,
+                requested_at: "2025-01-01T00:00:01Z".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_accepted".into(),
+                command: CommandType::Resume,
+                status: CommandStatus::Accepted,
+                requested_at: "2025-01-01T00:00:02Z".into(),
+            },
+        ];
+
+        let state = AppState::from_snapshot_with_locale(snapshot, Locale::ZhCn);
+
+        assert!(state.execution.command_timeline.iter().any(|entry| {
+            entry.command_id == "cmd_pending" && entry.summary == "已从快照恢复待处理命令。"
+        }));
+        assert!(state.execution.command_timeline.iter().any(|entry| {
+            entry.command_id == "cmd_accepted"
+                && entry.summary == "客户端重连前服务端已接受该命令。"
+        }));
     }
 }
 
@@ -563,7 +646,10 @@ fn command_timeline_from_record(command: &CommandRecord) -> CommandTimelineEntry
     }
 }
 
-fn command_timeline_from_snapshot(snapshot: &RuntimeSnapshot) -> VecDeque<CommandTimelineEntry> {
+fn command_timeline_from_snapshot(
+    snapshot: &RuntimeSnapshot,
+    locale: Locale,
+) -> VecDeque<CommandTimelineEntry> {
     let mut timeline = snapshot
         .execution
         .recent_commands
@@ -571,7 +657,7 @@ fn command_timeline_from_snapshot(snapshot: &RuntimeSnapshot) -> VecDeque<Comman
         .map(command_timeline_from_record)
         .collect::<VecDeque<_>>();
     for pending in snapshot.execution.pending_commands.iter().rev() {
-        timeline.push_front(command_timeline_from_pending(pending));
+        timeline.push_front(command_timeline_from_pending(pending, locale));
     }
     timeline
 }

@@ -18,6 +18,7 @@ use crate::{
     effects::Effect,
     events::{AppEvent, EffectResultEvent, InputEvent, SystemEvent},
     input::map_key_event,
+    locale::Locale,
     render::draw,
     state::AppState,
     theme::Theme,
@@ -28,16 +29,78 @@ use crate::{
 pub struct AppConfig {
     pub base_url: String,
     pub ws_url: String,
+    pub ui_locale: Locale,
 }
 
 impl AppConfig {
     pub fn from_env() -> Self {
+        let ui_locale = env::var("GRID_PLATFORM_UI_LOCALE")
+            .ok()
+            .and_then(|value| Locale::from_env_value(&value))
+            .unwrap_or(Locale::EnUs);
+
         Self {
             base_url: env::var("GRID_PLATFORM_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8000".into()),
             ws_url: env::var("GRID_PLATFORM_WS_URL")
                 .unwrap_or_else(|_| "ws://127.0.0.1:8000/ws".into()),
+            ui_locale,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, sync::Mutex};
+
+    use super::AppConfig;
+    use crate::locale::Locale;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        original: Option<String>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // Restore the original process environment after each test.
+            unsafe {
+                match &self.original {
+                    Some(value) => env::set_var("GRID_PLATFORM_UI_LOCALE", value),
+                    None => env::remove_var("GRID_PLATFORM_UI_LOCALE"),
+                }
+            }
+        }
+    }
+
+    fn set_ui_locale_env(value: Option<&str>) -> EnvGuard {
+        let original = env::var("GRID_PLATFORM_UI_LOCALE").ok();
+
+        unsafe {
+            match value {
+                Some(value) => env::set_var("GRID_PLATFORM_UI_LOCALE", value),
+                None => env::remove_var("GRID_PLATFORM_UI_LOCALE"),
+            }
+        }
+
+        EnvGuard { original }
+    }
+
+    #[test]
+    fn defaults_ui_locale_to_english_when_env_is_absent() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env_guard = set_ui_locale_env(None);
+
+        assert_eq!(AppConfig::from_env().ui_locale, Locale::EnUs);
+    }
+
+    #[test]
+    fn parses_ui_locale_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env_guard = set_ui_locale_env(Some("zh-CN"));
+
+        assert_eq!(AppConfig::from_env().ui_locale, Locale::ZhCn);
     }
 }
 
@@ -63,7 +126,7 @@ async fn run_loop(
     config: AppConfig,
 ) -> Result<()> {
     let theme = Theme::default();
-    let mut state = AppState::waiting_first_snapshot();
+    let mut state = AppState::waiting_first_snapshot_with_locale(config.ui_locale);
     let (app_tx, mut app_rx) = mpsc::channel::<AppEvent>(512);
     let (effect_tx, effect_rx) = mpsc::channel::<Effect>(256);
     let transport = TransportClient::new(config.base_url, config.ws_url);

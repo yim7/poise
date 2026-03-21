@@ -1,6 +1,7 @@
 pub mod effects;
 pub mod events;
 pub mod input;
+pub mod locale;
 pub mod protocol;
 pub mod render;
 pub mod runtime;

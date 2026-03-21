@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::{
+    locale,
     protocol::OpenOrdersSource,
     selectors::{self, ConnectionHealthKind},
     state::{AppState, CommandTimelineStage, Modal, Page, SnapshotBootstrapState, ToastLevel},
@@ -36,7 +37,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
     draw_footer(frame, outer[3], state, theme, viewport);
 
     if let Some(modal) = &state.ui.modal {
-        draw_modal(frame, modal, theme);
+        draw_modal(frame, modal, state.ui.locale, theme);
     }
 }
 
@@ -78,29 +79,37 @@ fn draw_status(
     theme: &Theme,
     viewport: Viewport,
 ) {
-    let focus = state.ui.page.focus_label(state.ui.focus_index);
+    let copy = locale::copy(state.ui.locale);
+    let focus = state
+        .ui
+        .page
+        .focus_label(state.ui.locale, state.ui.focus_index);
     let mut spans = vec![Span::styled(" GRID PLATFORM ", theme.emphasis())];
 
     match &state.snapshot_state {
         SnapshotBootstrapState::WaitingFirstSnapshot => {
-            spans.push(badge_span("WAITING SNAPSHOT", theme, StatusTone::Warning));
-            if viewport.narrow() {
-                spans.push(Span::styled(" 等待首次快照 ", theme.muted()));
-            } else {
-                spans.push(Span::styled(
-                    " 等待 /runtime/snapshot 返回后再显示真实数据 ",
-                    theme.muted(),
-                ));
-            }
+            spans.push(badge_span(
+                copy.status().waiting_snapshot_badge(),
+                theme,
+                StatusTone::Warning,
+            ));
+            spans.push(Span::styled(
+                copy.status().waiting_snapshot_message(viewport.narrow()),
+                theme.muted(),
+            ));
         }
         SnapshotBootstrapState::SnapshotRetrying {
             last_error: _,
             retry_count,
             retry_in_ms,
         } => {
-            spans.push(badge_span("SNAPSHOT FAILED", theme, StatusTone::Danger));
+            spans.push(badge_span(
+                copy.status().snapshot_failed_badge(),
+                theme,
+                StatusTone::Danger,
+            ));
             spans.push(Span::styled(
-                format!(" retry {} in {}ms ", retry_count, retry_in_ms),
+                copy.status().retry_status(*retry_count, *retry_in_ms),
                 theme.danger(),
             ));
         }
@@ -120,12 +129,19 @@ fn draw_status(
                 status_tone_for_connection(health.kind),
             ));
             if viewport.narrow() {
-                spans.push(Span::styled(format!(" Focus {} ", focus), theme.info()));
+                spans.push(Span::styled(
+                    copy.status().focus_status(focus),
+                    theme.info(),
+                ));
             } else {
                 spans.push(Span::styled(format!(" {} ", health.detail), theme.muted()));
-                spans.push(Span::styled(format!(" Focus {} ", focus), theme.info()));
                 spans.push(Span::styled(
-                    format!(" Pending {} ", state.execution.pending_commands.len()),
+                    copy.status().focus_status(focus),
+                    theme.info(),
+                ));
+                spans.push(Span::styled(
+                    copy.status()
+                        .pending_status(state.execution.pending_commands.len()),
                     theme.warning(),
                 ));
             }
@@ -150,7 +166,8 @@ fn draw_status(
 }
 
 fn draw_tabs(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
-    let titles = ["Dashboard", "Grid", "Market", "Events", "Help"]
+    let titles = locale::copy(state.ui.locale)
+        .tabs()
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -215,6 +232,7 @@ fn draw_bootstrap_dashboard(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let split = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(if viewport.narrow() {
@@ -236,7 +254,7 @@ fn draw_bootstrap_dashboard(
         frame,
         left[0],
         theme,
-        "Execution Focus",
+        copy.dashboard().execution_focus_title(),
         panel_focused(state, 0),
         PanelTone::Neutral,
         state,
@@ -245,7 +263,7 @@ fn draw_bootstrap_dashboard(
         frame,
         left[1],
         theme,
-        "Open Orders",
+        copy.dashboard().open_orders_title(),
         panel_focused(state, 1),
         PanelTone::Neutral,
         state,
@@ -254,7 +272,7 @@ fn draw_bootstrap_dashboard(
         frame,
         left[2],
         theme,
-        "Recent Fills",
+        copy.dashboard().recent_fills_title(),
         panel_focused(state, 2),
         PanelTone::Success,
         state,
@@ -263,7 +281,7 @@ fn draw_bootstrap_dashboard(
         frame,
         right[0],
         theme,
-        "Risk + Alerts",
+        copy.dashboard().risk_alerts_title(),
         panel_focused(state, 3),
         PanelTone::Warning,
         state,
@@ -272,7 +290,7 @@ fn draw_bootstrap_dashboard(
         frame,
         right[1],
         theme,
-        "Market + Health",
+        copy.dashboard().market_health_title(),
         panel_focused(state, 4),
         PanelTone::Neutral,
         state,
@@ -281,7 +299,7 @@ fn draw_bootstrap_dashboard(
         frame,
         right[2],
         theme,
-        "Command Timeline",
+        copy.dashboard().command_timeline_title(),
         panel_focused(state, 5),
         PanelTone::Neutral,
         state,
@@ -295,6 +313,7 @@ fn draw_bootstrap_grid(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     if viewport.compact() {
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -308,7 +327,7 @@ fn draw_bootstrap_grid(
             frame,
             layout[0],
             theme,
-            "Active Grid Levels",
+            copy.grid().active_grid_levels_title(),
             panel_focused(state, 0),
             PanelTone::Neutral,
             state,
@@ -317,7 +336,7 @@ fn draw_bootstrap_grid(
             frame,
             layout[1],
             theme,
-            "Grid Summary",
+            copy.grid().grid_summary_title(),
             panel_focused(state, 1),
             PanelTone::Neutral,
             state,
@@ -326,7 +345,7 @@ fn draw_bootstrap_grid(
             frame,
             layout[2],
             theme,
-            "Operator Notes",
+            copy.grid().operator_notes_title(),
             panel_focused(state, 2),
             PanelTone::Neutral,
             state,
@@ -344,7 +363,7 @@ fn draw_bootstrap_grid(
             frame,
             layout[0],
             theme,
-            "Active Grid Levels",
+            copy.grid().active_grid_levels_title(),
             panel_focused(state, 0),
             PanelTone::Neutral,
             state,
@@ -353,7 +372,7 @@ fn draw_bootstrap_grid(
             frame,
             right[0],
             theme,
-            "Grid Summary",
+            copy.grid().grid_summary_title(),
             panel_focused(state, 1),
             PanelTone::Neutral,
             state,
@@ -362,7 +381,7 @@ fn draw_bootstrap_grid(
             frame,
             right[1],
             theme,
-            "Operator Notes",
+            copy.grid().operator_notes_title(),
             panel_focused(state, 2),
             PanelTone::Neutral,
             state,
@@ -377,6 +396,7 @@ fn draw_bootstrap_market(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let layout = if viewport.compact() {
         Layout::default()
             .direction(Direction::Vertical)
@@ -401,7 +421,7 @@ fn draw_bootstrap_market(
         frame,
         layout[0],
         theme,
-        "Tape",
+        copy.market().tape_title(),
         panel_focused(state, 0),
         PanelTone::Neutral,
         state,
@@ -410,7 +430,7 @@ fn draw_bootstrap_market(
         frame,
         layout[1],
         theme,
-        "Connectivity",
+        copy.market().connectivity_title(),
         panel_focused(state, 1),
         PanelTone::Neutral,
         state,
@@ -419,7 +439,7 @@ fn draw_bootstrap_market(
         frame,
         layout[2],
         theme,
-        "Runtime",
+        copy.market().runtime_title(),
         panel_focused(state, 2),
         PanelTone::Neutral,
         state,
@@ -433,6 +453,7 @@ fn draw_bootstrap_events(
     theme: &Theme,
     _viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -450,7 +471,7 @@ fn draw_bootstrap_events(
         frame,
         top[0],
         theme,
-        "Fills",
+        copy.events().fills_panel_title(),
         panel_focused(state, 0),
         PanelTone::Success,
         state,
@@ -459,7 +480,7 @@ fn draw_bootstrap_events(
         frame,
         top[1],
         theme,
-        "Alerts",
+        copy.events().alerts_panel_title(),
         panel_focused(state, 1),
         PanelTone::Warning,
         state,
@@ -468,7 +489,7 @@ fn draw_bootstrap_events(
         frame,
         bottom[0],
         theme,
-        "Commands",
+        copy.events().commands_panel_title(),
         panel_focused(state, 2),
         PanelTone::Neutral,
         state,
@@ -477,7 +498,7 @@ fn draw_bootstrap_events(
         frame,
         bottom[1],
         theme,
-        "System",
+        copy.events().system_panel_title(),
         panel_focused(state, 3),
         PanelTone::Neutral,
         state,
@@ -503,25 +524,30 @@ fn bootstrap_block(
 }
 
 fn bootstrap_lines(state: &AppState, theme: &Theme, title: &str) -> Vec<Line<'static>> {
+    let copy = locale::copy(state.ui.locale);
     match &state.snapshot_state {
         SnapshotBootstrapState::WaitingFirstSnapshot => vec![
-            Line::from(vec![Span::styled("首次快照未就绪", theme.warning())]),
-            Line::from("等待 /runtime/snapshot 返回后再显示真实数据。"),
-            Line::from("p/r/c/f/s 已禁用。"),
-            Line::from(format!("当前面板：{title}")),
+            Line::from(vec![Span::styled(
+                copy.bootstrap().pending_title(),
+                theme.warning(),
+            )]),
+            Line::from(copy.bootstrap().pending_detail()),
+            Line::from(copy.bootstrap().pending_actions_disabled()),
+            Line::from(copy.bootstrap().panel_line(title)),
         ],
         SnapshotBootstrapState::SnapshotRetrying {
             last_error,
             retry_count,
             retry_in_ms,
         } => vec![
-            Line::from(vec![Span::styled("首次快照获取失败", theme.danger())]),
-            Line::from(format!(
-                "第 {retry_count} 次重试，{retry_in_ms}ms 后再次获取。"
-            )),
-            Line::from(format!("错误：{last_error}")),
-            Line::from("p/r/c/f/s 已禁用，等待重试后再操作。"),
-            Line::from(format!("当前面板：{title}")),
+            Line::from(vec![Span::styled(
+                copy.bootstrap().failed_title(),
+                theme.danger(),
+            )]),
+            Line::from(copy.bootstrap().failed_retry(*retry_count, *retry_in_ms)),
+            Line::from(copy.bootstrap().error_line(last_error)),
+            Line::from(copy.bootstrap().failed_actions_disabled()),
+            Line::from(copy.bootstrap().panel_line(title)),
         ],
         SnapshotBootstrapState::Ready => Vec::new(),
     }
@@ -534,6 +560,9 @@ fn draw_dashboard(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
+    let dashboard_copy = copy.dashboard();
+    let common = copy.common();
     let split = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(if viewport.narrow() {
@@ -556,15 +585,15 @@ fn draw_dashboard(
     let exchange_orders = vm
         .exchange_orders
         .map(|count| count.to_string())
-        .unwrap_or_else(|| "N/A".into());
+        .unwrap_or_else(|| common.not_available().into());
     let summary_lines = if left[0].height <= 4 {
         vec![
             Line::from(vec![
-                Span::styled("Pos  ", theme.muted()),
+                Span::styled(dashboard_copy.pos_short_label(), theme.muted()),
                 Span::styled(vm.position_qty, theme.emphasis()),
                 Span::styled(" @ ", theme.muted()),
                 Span::styled(vm.position_avg_price, theme.panel()),
-                Span::styled("   U  ", theme.muted()),
+                Span::styled(dashboard_copy.unrealized_short_label(), theme.muted()),
                 Span::styled(
                     vm.unrealized_pnl.clone(),
                     if state.runtime.unrealized_pnl >= 0.0 {
@@ -573,7 +602,7 @@ fn draw_dashboard(
                         theme.danger()
                     },
                 ),
-                Span::styled("   R  ", theme.muted()),
+                Span::styled(dashboard_copy.realized_short_label(), theme.muted()),
                 Span::styled(
                     vm.realized_pnl.clone(),
                     if state.runtime.realized_pnl >= 0.0 {
@@ -584,7 +613,7 @@ fn draw_dashboard(
                 ),
             ]),
             Line::from(vec![
-                Span::styled("交易所  ", theme.muted()),
+                Span::styled(dashboard_copy.exchange_label(), theme.muted()),
                 Span::styled(
                     exchange_orders,
                     if vm.exchange_orders.is_some() {
@@ -593,9 +622,9 @@ fn draw_dashboard(
                         theme.warning()
                     },
                 ),
-                Span::styled("   Pending  ", theme.muted()),
+                Span::styled(dashboard_copy.pending_label(), theme.muted()),
                 Span::styled(vm.pending_commands.to_string(), theme.warning()),
-                Span::styled("   Health  ", theme.muted()),
+                Span::styled(dashboard_copy.health_label(), theme.muted()),
                 Span::styled(
                     health.label,
                     theme.status(status_tone_for_connection(health.kind)),
@@ -605,13 +634,13 @@ fn draw_dashboard(
     } else {
         vec![
             Line::from(vec![
-                Span::styled("Position  ", theme.muted()),
+                Span::styled(dashboard_copy.position_label(), theme.muted()),
                 Span::styled(vm.position_qty, theme.emphasis()),
                 Span::styled(" @ ", theme.muted()),
                 Span::styled(vm.position_avg_price, theme.panel()),
             ]),
             Line::from(vec![
-                Span::styled("U-PnL  ", theme.muted()),
+                Span::styled(dashboard_copy.unrealized_label(), theme.muted()),
                 Span::styled(
                     vm.unrealized_pnl.clone(),
                     if state.runtime.unrealized_pnl >= 0.0 {
@@ -620,7 +649,7 @@ fn draw_dashboard(
                         theme.danger()
                     },
                 ),
-                Span::styled("   R-PnL  ", theme.muted()),
+                Span::styled(dashboard_copy.realized_label(), theme.muted()),
                 Span::styled(
                     vm.realized_pnl.clone(),
                     if state.runtime.realized_pnl >= 0.0 {
@@ -631,7 +660,7 @@ fn draw_dashboard(
                 ),
             ]),
             Line::from(vec![
-                Span::styled("交易所  ", theme.muted()),
+                Span::styled(dashboard_copy.exchange_label(), theme.muted()),
                 Span::styled(
                     exchange_orders,
                     if vm.exchange_orders.is_some() {
@@ -640,9 +669,9 @@ fn draw_dashboard(
                         theme.warning()
                     },
                 ),
-                Span::styled("   Pending  ", theme.muted()),
+                Span::styled(dashboard_copy.pending_label(), theme.muted()),
                 Span::styled(vm.pending_commands.to_string(), theme.warning()),
-                Span::styled("   Health  ", theme.muted()),
+                Span::styled(dashboard_copy.health_label(), theme.muted()),
                 Span::styled(
                     health.label,
                     theme.status(status_tone_for_connection(health.kind)),
@@ -653,7 +682,7 @@ fn draw_dashboard(
     let summary = Paragraph::new(summary_lines)
         .block(panel_block(
             theme,
-            "Execution Focus",
+            dashboard_copy.execution_focus_title(),
             panel_focused(state, 0),
             PanelTone::Neutral,
         ))
@@ -685,11 +714,19 @@ fn draw_dashboard(
                         Constraint::Min(7),
                     ],
                 )
-                .header(Row::new(vec!["方向", "价格", "数量", "状态"]).style(theme.emphasis()))
+                .header(
+                    Row::new(vec![
+                        dashboard_copy.side_header(),
+                        dashboard_copy.price_header(),
+                        dashboard_copy.qty_header(),
+                        dashboard_copy.status_header(),
+                    ])
+                    .style(theme.emphasis()),
+                )
                 .column_spacing(1)
                 .block(panel_block(
                     theme,
-                    "交易所挂单",
+                    dashboard_copy.exchange_orders_title(),
                     panel_focused(state, 1),
                     PanelTone::Neutral,
                 )),
@@ -701,7 +738,7 @@ fn draw_dashboard(
                 Paragraph::new(exchange_orders_unavailable_lines(state, theme))
                     .block(panel_block(
                         theme,
-                        "交易所挂单",
+                        dashboard_copy.exchange_orders_title(),
                         panel_focused(state, 1),
                         PanelTone::Warning,
                     ))
@@ -719,7 +756,7 @@ fn draw_dashboard(
                     Span::styled(format!("{} ", fill.side), theme.emphasis()),
                     Span::styled(fill.price_qty, theme.panel()),
                     Span::styled(
-                        format!("  pnl {}", fill.pnl),
+                        dashboard_copy.pnl_label(&fill.pnl),
                         if fill.realized_pnl >= 0.0 {
                             theme.success()
                         } else {
@@ -729,7 +766,7 @@ fn draw_dashboard(
                 ])];
                 if let Some(command_ref) = fill.command_ref {
                     lines.push(Line::from(Span::styled(
-                        format!("cmd {command_ref}"),
+                        dashboard_copy.command_ref_label(&command_ref),
                         theme.muted(),
                     )));
                 }
@@ -737,12 +774,12 @@ fn draw_dashboard(
             })
             .collect(),
         theme,
-        "No fills yet",
+        dashboard_copy.no_fills(),
     );
     frame.render_widget(
         List::new(fill_items).block(panel_block(
             theme,
-            "Recent Fills",
+            dashboard_copy.recent_fills_title(),
             panel_focused(state, 2),
             PanelTone::Success,
         )),
@@ -752,17 +789,17 @@ fn draw_dashboard(
     let top_alert = state.risk.alerts.front();
     let risk = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Level  ", theme.muted()),
+            Span::styled(dashboard_copy.level_label(), theme.muted()),
             Span::styled(
-                format!("{:?}", state.risk.risk_level),
+                dashboard_copy.risk_level_label(state.risk.risk_level),
                 risk_style(theme, state),
             ),
-            Span::styled("   Breaker  ", theme.muted()),
+            Span::styled(dashboard_copy.breaker_label(), theme.muted()),
             Span::styled(
                 if state.risk.breaker_engaged {
-                    "ON"
+                    common.on()
                 } else {
-                    "OFF"
+                    common.off()
                 },
                 if state.risk.breaker_engaged {
                     theme.danger()
@@ -772,7 +809,7 @@ fn draw_dashboard(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Notional  ", theme.muted()),
+            Span::styled(dashboard_copy.notional_label(), theme.muted()),
             Span::styled(
                 format!(
                     "{:.0}/{:.0}",
@@ -780,15 +817,15 @@ fn draw_dashboard(
                 ),
                 theme.panel().add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   Stop  ", theme.muted()),
+            Span::styled(dashboard_copy.stop_label(), theme.muted()),
             Span::styled(format!("{:.1}%", state.risk.stop_loss_pct), theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Alert  ", theme.muted()),
+            Span::styled(dashboard_copy.alert_label(), theme.muted()),
             Span::styled(
                 top_alert
                     .map(|alert| alert.code.clone())
-                    .unwrap_or_else(|| "None".into()),
+                    .unwrap_or_else(|| common.none_value().into()),
                 if top_alert.is_some() {
                     theme.warning()
                 } else {
@@ -799,12 +836,12 @@ fn draw_dashboard(
         Line::from(
             top_alert
                 .map(|alert| alert.message.clone())
-                .unwrap_or_else(|| "No active alerts.".into()),
+                .unwrap_or_else(|| dashboard_copy.no_active_alerts().into()),
         ),
     ])
     .block(panel_block(
         theme,
-        "Risk + Alerts",
+        dashboard_copy.risk_alerts_title(),
         panel_focused(state, 3),
         risk_panel_tone(state),
     ))
@@ -815,18 +852,18 @@ fn draw_dashboard(
     let market_lines = if right[1].height <= 4 {
         vec![
             Line::from(vec![
-                Span::styled("Last  ", theme.muted()),
+                Span::styled(dashboard_copy.last_label(), theme.muted()),
                 Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
-                Span::styled("   Mark  ", theme.muted()),
+                Span::styled(dashboard_copy.mark_label(), theme.muted()),
                 Span::styled(format!("{:.2}", state.runtime.mark_price), theme.panel()),
             ]),
             Line::from(vec![
-                Span::styled("Svc WS  ", theme.muted()),
+                Span::styled(dashboard_copy.service_ws_short_label(), theme.muted()),
                 Span::styled(
                     if state.connection.ws_connected {
-                        "UP"
+                        common.up()
                     } else {
-                        "DOWN"
+                        common.down()
                     },
                     if state.connection.ws_connected {
                         theme.success()
@@ -834,12 +871,12 @@ fn draw_dashboard(
                         theme.danger()
                     },
                 ),
-                Span::styled("   Mkt WS  ", theme.muted()),
+                Span::styled(dashboard_copy.market_ws_short_label(), theme.muted()),
                 Span::styled(
                     if state.connection.market_ws_connected {
-                        "UP"
+                        common.up()
                     } else {
-                        "DOWN"
+                        common.down()
                     },
                     if state.connection.market_ws_connected {
                         theme.success()
@@ -854,18 +891,18 @@ fn draw_dashboard(
     } else {
         vec![
             Line::from(vec![
-                Span::styled("Last  ", theme.muted()),
+                Span::styled(dashboard_copy.last_label(), theme.muted()),
                 Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
-                Span::styled("   Mark  ", theme.muted()),
+                Span::styled(dashboard_copy.mark_label(), theme.muted()),
                 Span::styled(format!("{:.2}", state.runtime.mark_price), theme.panel()),
             ]),
             Line::from(vec![
-                Span::styled("Service WS  ", theme.muted()),
+                Span::styled(dashboard_copy.service_ws_label(), theme.muted()),
                 Span::styled(
                     if state.connection.ws_connected {
-                        "UP"
+                        common.up()
                     } else {
-                        "DOWN"
+                        common.down()
                     },
                     if state.connection.ws_connected {
                         theme.success()
@@ -873,12 +910,12 @@ fn draw_dashboard(
                         theme.danger()
                     },
                 ),
-                Span::styled("   Market WS  ", theme.muted()),
+                Span::styled(dashboard_copy.market_ws_label(), theme.muted()),
                 Span::styled(
                     if state.connection.market_ws_connected {
-                        "UP"
+                        common.up()
                     } else {
-                        "DOWN"
+                        common.down()
                     },
                     if state.connection.market_ws_connected {
                         theme.success()
@@ -888,7 +925,7 @@ fn draw_dashboard(
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Health  ", theme.muted()),
+                Span::styled(dashboard_copy.health_line_label(), theme.muted()),
                 Span::styled(
                     health.label,
                     theme.status(status_tone_for_connection(health.kind)),
@@ -901,7 +938,7 @@ fn draw_dashboard(
     let market = Paragraph::new(market_lines)
         .block(panel_block(
             theme,
-            "Market + Health",
+            dashboard_copy.market_health_title(),
             panel_focused(state, 4),
             panel_tone_for_connection(health.kind),
         ))
@@ -912,7 +949,7 @@ fn draw_dashboard(
     frame.render_widget(
         List::new(command_items).block(panel_block(
             theme,
-            "Command Timeline",
+            dashboard_copy.command_timeline_title(),
             panel_focused(state, 5),
             command_panel_tone(state),
         )),
@@ -958,6 +995,7 @@ fn draw_grid(
 }
 
 fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let copy = locale::copy(state.ui.locale);
     let order_rows = selectors::strategy_orders(state)
         .into_iter()
         .take(table_capacity(area))
@@ -966,8 +1004,8 @@ fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, the
                 Cell::from(order.side),
                 Cell::from(order.price),
                 Cell::from(order.qty),
-                Cell::from(strategy_state_label(&order.strategy_state)),
-                Cell::from(placement_state_label(order.placement_state)),
+                Cell::from(strategy_state_label(state, &order.strategy_state)),
+                Cell::from(placement_state_label(state, order.placement_state)),
             ])
         });
     frame.render_widget(
@@ -982,12 +1020,19 @@ fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, the
             ],
         )
         .header(
-            Row::new(vec!["方向", "价格", "数量", "策略状态", "挂单状态"]).style(theme.emphasis()),
+            Row::new(vec![
+                copy.dashboard().side_header(),
+                copy.dashboard().price_header(),
+                copy.dashboard().qty_header(),
+                copy.grid().strategy_header(),
+                copy.grid().placement_header(),
+            ])
+            .style(theme.emphasis()),
         )
         .column_spacing(1)
         .block(panel_block(
             theme,
-            "策略订单",
+            copy.grid().strategy_orders_title(),
             panel_focused(state, 0),
             PanelTone::Neutral,
         )),
@@ -1002,39 +1047,40 @@ fn draw_grid_summary(
     theme: &Theme,
     vm: &selectors::GridViewModel,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let summary = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Status  ", theme.muted()),
+            Span::styled(copy.grid().status_label(), theme.muted()),
             Span::styled(vm.status.clone(), theme.emphasis()),
         ]),
         Line::from(vec![
-            Span::styled("Lower  ", theme.muted()),
+            Span::styled(copy.grid().lower_label(), theme.muted()),
             Span::styled(vm.lower.clone(), theme.panel()),
-            Span::styled("   Upper  ", theme.muted()),
+            Span::styled(copy.grid().upper_label(), theme.muted()),
             Span::styled(vm.upper.clone(), theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Center  ", theme.muted()),
+            Span::styled(copy.grid().center_label(), theme.muted()),
             Span::styled(vm.center.clone(), theme.emphasis()),
-            Span::styled("   Span  ", theme.muted()),
+            Span::styled(copy.grid().span_label(), theme.muted()),
             Span::styled(vm.span_pct.clone(), theme.warning()),
         ]),
         Line::from(vec![
-            Span::styled("Active  ", theme.muted()),
+            Span::styled(copy.grid().active_label(), theme.muted()),
             Span::styled(vm.active_levels.to_string(), theme.panel()),
-            Span::styled("   Occupied  ", theme.muted()),
+            Span::styled(copy.grid().occupied_label(), theme.muted()),
             Span::styled(vm.occupied_levels.to_string(), theme.warning()),
-            Span::styled("   Pending  ", theme.muted()),
+            Span::styled(copy.grid().pending_label(), theme.muted()),
             Span::styled(vm.pending_levels.to_string(), theme.warning()),
         ]),
         Line::from(vec![
-            Span::styled("   Bias  ", theme.muted()),
+            Span::styled(copy.grid().bias_label(), theme.muted()),
             Span::styled(vm.inventory_bias.clone(), theme.warning()),
         ]),
     ])
     .block(panel_block(
         theme,
-        "Grid Summary",
+        copy.grid().grid_summary_title(),
         panel_focused(state, 1),
         PanelTone::Neutral,
     ))
@@ -1043,30 +1089,32 @@ fn draw_grid_summary(
 }
 
 fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let copy = locale::copy(state.ui.locale);
+    let common = copy.common();
     let health = selectors::connection_health(state);
     let notes = vec![
         Line::from(vec![
-            Span::styled("Current Price  ", theme.muted()),
+            Span::styled(copy.grid().current_price_label(), theme.muted()),
             Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
         ]),
         Line::from(vec![
-            Span::styled("Session  ", theme.muted()),
+            Span::styled(copy.grid().session_label(), theme.muted()),
             Span::styled(state.runtime.session_state.clone(), theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Health  ", theme.muted()),
+            Span::styled(copy.grid().health_label(), theme.muted()),
             Span::styled(
                 health.label,
                 theme.status(status_tone_for_connection(health.kind)),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Breaker  ", theme.muted()),
+            Span::styled(copy.grid().breaker_label(), theme.muted()),
             Span::styled(
                 if state.risk.breaker_engaged {
-                    "ON"
+                    common.on()
                 } else {
-                    "OFF"
+                    common.off()
                 },
                 if state.risk.breaker_engaged {
                     theme.danger()
@@ -1080,16 +1128,14 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
                 .strategy
                 .pending_rebuild_reason
                 .clone()
-                .unwrap_or_else(|| {
-                    "Grid levels are aligned with the current strategy state.".into()
-                }),
+                .unwrap_or_else(|| copy.grid().aligned_message().into()),
         ),
     ];
     frame.render_widget(
         Paragraph::new(notes)
             .block(panel_block(
                 theme,
-                "Operator Notes",
+                copy.grid().operator_notes_title(),
                 panel_focused(state, 2),
                 panel_tone_for_connection(health.kind),
             ))
@@ -1105,6 +1151,7 @@ fn draw_market(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let vm = selectors::market(state);
     let health = selectors::connection_health(state);
     let layout = if viewport.compact() {
@@ -1129,15 +1176,15 @@ fn draw_market(
 
     let price = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Last  ", theme.muted()),
+            Span::styled(copy.market().last_label(), theme.muted()),
             Span::styled(vm.last_price, theme.emphasis()),
         ]),
         Line::from(vec![
-            Span::styled("Mark  ", theme.muted()),
+            Span::styled(copy.market().mark_label(), theme.muted()),
             Span::styled(vm.mark_price, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Basis  ", theme.muted()),
+            Span::styled(copy.market().basis_label(), theme.muted()),
             Span::styled(
                 vm.basis,
                 if state.runtime.mark_price >= state.runtime.last_price {
@@ -1150,7 +1197,7 @@ fn draw_market(
     ])
     .block(panel_block(
         theme,
-        "Tape",
+        copy.market().tape_title(),
         panel_focused(state, 0),
         PanelTone::Neutral,
     ));
@@ -1158,29 +1205,29 @@ fn draw_market(
 
     let connectivity = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Service WS  ", theme.muted()),
+            Span::styled(copy.market().service_ws_label(), theme.muted()),
             Span::styled(vm.service_ws_status, theme.panel()),
-            Span::styled("   HTTP  ", theme.muted()),
+            Span::styled(copy.market().http_label(), theme.muted()),
             Span::styled(vm.http_status, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Market WS  ", theme.muted()),
+            Span::styled(copy.market().market_ws_label(), theme.muted()),
             Span::styled(vm.market_ws_status, theme.panel()),
-            Span::styled("   User WS  ", theme.muted()),
+            Span::styled(copy.market().user_ws_label(), theme.muted()),
             Span::styled(vm.user_stream_status, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Stale  ", theme.muted()),
+            Span::styled(copy.market().stale_label(), theme.muted()),
             Span::styled(vm.stale_age, theme.warning()),
-            Span::styled("   Retry  ", theme.muted()),
+            Span::styled(copy.market().retry_label(), theme.muted()),
             Span::styled(vm.reconnect_attempt, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Market Backoff  ", theme.muted()),
+            Span::styled(copy.market().market_backoff_label(), theme.muted()),
             Span::styled(vm.market_backoff, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Mode  ", theme.muted()),
+            Span::styled(copy.market().mode_label(), theme.muted()),
             Span::styled(
                 health.label,
                 theme.status(status_tone_for_connection(health.kind)),
@@ -1190,7 +1237,7 @@ fn draw_market(
     ])
     .block(panel_block(
         theme,
-        "Connectivity",
+        copy.market().connectivity_title(),
         panel_focused(state, 1),
         panel_tone_for_connection(health.kind),
     ))
@@ -1199,21 +1246,21 @@ fn draw_market(
 
     let runtime = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Session  ", theme.muted()),
+            Span::styled(copy.market().session_label(), theme.muted()),
             Span::styled(vm.session_state, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Heartbeat  ", theme.muted()),
+            Span::styled(copy.market().heartbeat_label(), theme.muted()),
             Span::styled(vm.heartbeat, theme.panel()),
         ]),
         Line::from(vec![
-            Span::styled("Strategy  ", theme.muted()),
+            Span::styled(copy.market().strategy_label(), theme.muted()),
             Span::styled(state.runtime.strategy_state.clone(), theme.warning()),
         ]),
     ])
     .block(panel_block(
         theme,
-        "Runtime",
+        copy.market().runtime_title(),
         panel_focused(state, 2),
         PanelTone::Neutral,
     ))
@@ -1228,6 +1275,7 @@ fn draw_events(
     theme: &Theme,
     _viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let vm = selectors::events(state);
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -1252,7 +1300,7 @@ fn draw_events(
                 ])];
                 if let Some(command_ref) = fill.command_ref {
                     lines.push(Line::from(Span::styled(
-                        format!("cmd {command_ref}"),
+                        copy.events().command_ref_label(&command_ref),
                         theme.muted(),
                     )));
                 }
@@ -1260,12 +1308,12 @@ fn draw_events(
             })
             .collect(),
         theme,
-        "No fills",
+        copy.events().no_fills(),
     );
     frame.render_widget(
         List::new(fills).block(panel_block(
             theme,
-            &format!("Fills ({})", vm.fills_count),
+            &copy.events().fills_title(vm.fills_count),
             panel_focused(state, 0),
             PanelTone::Success,
         )),
@@ -1285,19 +1333,19 @@ fn draw_events(
                         Span::styled(alert.message.clone(), theme.panel()),
                     ]),
                     Line::from(Span::styled(
-                        selectors::risk_action_hint(&alert.code),
+                        selectors::risk_action_hint(state.ui.locale, &alert.code),
                         theme.muted(),
                     )),
                 ]
             })
             .collect(),
         theme,
-        "No alerts",
+        copy.events().no_alerts(),
     );
     frame.render_widget(
         List::new(alerts).block(panel_block(
             theme,
-            &format!("Alerts ({})", vm.alerts_count),
+            &copy.events().alerts_title(vm.alerts_count),
             panel_focused(state, 1),
             risk_panel_tone(state),
         )),
@@ -1308,7 +1356,7 @@ fn draw_events(
     frame.render_widget(
         List::new(commands).block(panel_block(
             theme,
-            &format!("Commands ({})", vm.timeline_count),
+            &copy.events().commands_title(vm.timeline_count),
             panel_focused(state, 2),
             command_panel_tone(state),
         )),
@@ -1328,15 +1376,14 @@ fn draw_events(
             })
             .collect(),
         theme,
-        "No system events",
+        copy.events().no_system_events(),
     );
     frame.render_widget(
         List::new(system).block(panel_block(
             theme,
-            &format!(
-                "System ({}) · pending {}",
-                vm.system_count, vm.pending_commands
-            ),
+            &copy
+                .events()
+                .system_title(vm.system_count, vm.pending_commands),
             panel_focused(state, 3),
             PanelTone::Neutral,
         )),
@@ -1351,6 +1398,7 @@ fn draw_help(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let layout = if viewport.compact() {
         Layout::default()
             .direction(Direction::Vertical)
@@ -1365,17 +1413,16 @@ fn draw_help(
     let health = selectors::connection_health(state);
 
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from("1 Dashboard   2 Grid   3 Market   4 Events   ? Help"),
-            Line::from("Tab / Shift-Tab 在当前页面切换焦点面板。"),
-            Line::from("p 暂停   r 恢复"),
-            Line::from("c 撤全部   f 立即平仓   s 平仓后停机"),
-            Line::from("Enter 确认危险操作，Esc 或 n 取消。"),
-            Line::from("q / Ctrl-C 只退出客户端，不会停止 service。"),
-        ])
+        Paragraph::new(
+            copy.help()
+                .shortcuts_lines()
+                .into_iter()
+                .map(Line::from)
+                .collect::<Vec<_>>(),
+        )
         .block(panel_block(
             theme,
-            "快捷键",
+            copy.help().shortcuts_title(),
             panel_focused(state, 0),
             PanelTone::Neutral,
         ))
@@ -1386,27 +1433,30 @@ fn draw_help(
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("当前焦点  ", theme.muted()),
+                Span::styled(copy.help().focus_label(), theme.muted()),
                 Span::styled(
-                    state.ui.page.focus_label(state.ui.focus_index),
+                    state
+                        .ui
+                        .page
+                        .focus_label(state.ui.locale, state.ui.focus_index),
                     theme.emphasis(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("连接健康  ", theme.muted()),
+                Span::styled(copy.help().health_label(), theme.muted()),
                 Span::styled(
                     health.label,
                     theme.status(status_tone_for_connection(health.kind)),
                 ),
             ]),
-            Line::from("策略订单：看的是策略目标。"),
-            Line::from("交易所挂单：只在真实挂单可用时展示。"),
-            Line::from("首页若显示不可用说明，"),
-            Line::from("表示当前模式无法证明策略单已真实挂出。"),
+            Line::from(copy.help().glossary_lines()[0]),
+            Line::from(copy.help().glossary_lines()[1]),
+            Line::from(copy.help().glossary_lines()[2]),
+            Line::from(copy.help().glossary_lines()[3]),
         ])
         .block(panel_block(
             theme,
-            "术语说明",
+            copy.help().glossary_title(),
             panel_focused(state, 1),
             panel_tone_for_connection(health.kind),
         ))
@@ -1422,6 +1472,7 @@ fn draw_footer(
     theme: &Theme,
     viewport: Viewport,
 ) {
+    let copy = locale::copy(state.ui.locale);
     let toast_line = if let Some(toast) = &state.ui.toast {
         let style = match toast.level {
             ToastLevel::Info => theme.info(),
@@ -1431,53 +1482,38 @@ fn draw_footer(
         Line::from(vec![Span::styled(format!(" {} ", toast.message), style)])
     } else if !state.is_snapshot_ready() {
         match &state.snapshot_state {
-            SnapshotBootstrapState::WaitingFirstSnapshot => {
-                if viewport.narrow() {
-                    Line::from(vec![Span::styled(
-                        " 首次快照未就绪 | p/r/c/f/s 已禁用 | 1-4 页面 ? help ",
-                        theme.muted(),
-                    )])
-                } else {
-                    Line::from(vec![Span::styled(
-                        " 首次快照未就绪 | p/r/c/f/s 已禁用 | 1-4 页面 ? help | Tab/Shift-Tab 面板 ",
-                        theme.muted(),
-                    )])
-                }
-            }
+            SnapshotBootstrapState::WaitingFirstSnapshot => Line::from(vec![Span::styled(
+                copy.footer().snapshot_pending(viewport.narrow()),
+                theme.muted(),
+            )]),
             SnapshotBootstrapState::SnapshotRetrying { retry_in_ms, .. } => {
-                if viewport.narrow() {
-                    Line::from(vec![Span::styled(
-                        format!(
-                            " 首次快照失败，{}ms 后重试 | p/r/c/f/s 已禁用 ",
-                            retry_in_ms
-                        ),
-                        theme.muted(),
-                    )])
-                } else {
-                    Line::from(vec![Span::styled(
-                        format!(
-                            " 首次快照失败，{}ms 后重试 | p/r/c/f/s 已禁用 | 1-4 页面 ? help | Tab/Shift-Tab 面板 ",
-                            retry_in_ms
-                        ),
-                        theme.muted(),
-                    )])
-                }
+                Line::from(vec![Span::styled(
+                    copy.footer()
+                        .snapshot_failed(viewport.narrow(), *retry_in_ms),
+                    theme.muted(),
+                )])
             }
             SnapshotBootstrapState::Ready => unreachable!(),
         }
     } else if viewport.narrow() {
         Line::from(vec![Span::styled(
-            format!(
-                " Focus {} | Tab panels | p/r run | c/f/s danger | Enter/Esc ",
-                state.ui.page.focus_label(state.ui.focus_index)
+            copy.footer().ready(
+                true,
+                state
+                    .ui
+                    .page
+                    .focus_label(state.ui.locale, state.ui.focus_index),
             ),
             theme.muted(),
         )])
     } else {
         Line::from(vec![Span::styled(
-            format!(
-                " Focus {} | 1-4 pages ? help | Tab/Shift-Tab panels | p/r runtime | c/f/s danger ops | Enter/Esc modal ",
-                state.ui.page.focus_label(state.ui.focus_index)
+            copy.footer().ready(
+                false,
+                state
+                    .ui
+                    .page
+                    .focus_label(state.ui.locale, state.ui.focus_index),
             ),
             theme.muted(),
         )])
@@ -1492,14 +1528,19 @@ fn draw_footer(
     );
 }
 
-fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, theme: &Theme) {
+fn draw_modal(
+    frame: &mut Frame<'_>,
+    modal: &Modal,
+    app_locale: crate::locale::Locale,
+    theme: &Theme,
+) {
     let area = centered_rect(
         frame.area().width.saturating_sub(8).clamp(48, 76),
         if frame.area().height < 20 { 9 } else { 10 },
         frame.area(),
     );
     frame.render_widget(Clear, area);
-    let (title, lines) = danger_copy(modal);
+    let (title, lines) = danger_copy(app_locale, modal);
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
@@ -1509,36 +1550,14 @@ fn draw_modal(frame: &mut Frame<'_>, modal: &Modal, theme: &Theme) {
     );
 }
 
-fn danger_copy(modal: &Modal) -> (&'static str, Vec<Line<'static>>) {
+fn danger_copy(
+    app_locale: crate::locale::Locale,
+    modal: &Modal,
+) -> (&'static str, Vec<Line<'static>>) {
+    let copy = locale::copy(app_locale);
     match modal {
         Modal::Confirm(command) => {
-            let (title, body, detail) = match command {
-                crate::protocol::CommandType::CancelAll => (
-                    "Confirm Cancel All",
-                    "All resting grid orders will be cancelled immediately.",
-                    "Open position remains live; verify inventory before sending more orders.",
-                ),
-                crate::protocol::CommandType::FlattenNow => (
-                    "Confirm Flatten Now",
-                    "The client will request an immediate flatten of current inventory.",
-                    "This can cross the spread, realize slippage, and may fail if connectivity is degraded.",
-                ),
-                crate::protocol::CommandType::ShutdownAfterFlatten => (
-                    "Confirm Shutdown After Flatten",
-                    "The strategy will flatten first and then stay paused for operator review.",
-                    "Use this when you want a controlled stop, not a quick resume cycle.",
-                ),
-                crate::protocol::CommandType::Pause => (
-                    "Confirm Pause",
-                    "The strategy will stop placing new orders after the service acknowledges it.",
-                    "Existing orders may remain on the book until a later cancel request.",
-                ),
-                crate::protocol::CommandType::Resume => (
-                    "Confirm Resume",
-                    "The strategy will resume normal order management after acknowledgement.",
-                    "Confirm market health first if the client is showing stale or reconnecting status.",
-                ),
-            };
+            let (title, body, detail) = copy.modal().confirm(*command);
             (
                 title,
                 vec![
@@ -1547,7 +1566,7 @@ fn danger_copy(modal: &Modal) -> (&'static str, Vec<Line<'static>>) {
                         detail,
                         Style::default().add_modifier(Modifier::BOLD),
                     )),
-                    Line::from("Press Enter to confirm, or Esc / n to cancel."),
+                    Line::from(copy.modal().confirm_hint()),
                 ],
             )
         }
@@ -1570,47 +1589,35 @@ fn badge_span(label: &str, theme: &Theme, tone: StatusTone) -> Span<'static> {
 }
 
 fn exchange_orders_unavailable_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+    let copy = locale::copy(state.ui.locale);
     if state.execution.exchange_open_orders_source == OpenOrdersSource::ExchangeLive {
         Vec::new()
     } else if state.execution.open_orders_source == OpenOrdersSource::StrategyMirror {
+        let lines = copy.common().exchange_orders_mirror_lines();
         vec![
-            Line::from(Span::styled(
-                "当前模式只提供策略挂单镜像。",
-                theme.warning(),
-            )),
-            Line::from("尚未接入真实交易所挂单查询。"),
-            Line::from(Span::styled("请到 Grid 页查看策略订单。", theme.muted())),
+            Line::from(Span::styled(lines[0], theme.warning())),
+            Line::from(lines[1]),
+            Line::from(Span::styled(lines[2], theme.muted())),
         ]
     } else {
+        let lines = copy.common().exchange_orders_unavailable_lines();
         vec![
-            Line::from(Span::styled(
-                "当前模式未提供交易所挂单数据。",
-                theme.warning(),
-            )),
-            Line::from(Span::styled(
-                "请先确认运行模式与执行适配器。",
-                theme.muted(),
-            )),
+            Line::from(Span::styled(lines[0], theme.warning())),
+            Line::from(Span::styled(lines[1], theme.muted())),
         ]
     }
 }
 
-fn strategy_state_label(state: &str) -> String {
-    match state {
-        "ACTIVE" => "生效".into(),
-        "OCCUPIED" => "占用".into(),
-        "PENDING REBUILD" => "待重建".into(),
-        other => other.into(),
-    }
+fn strategy_state_label(app_state: &AppState, state: &str) -> String {
+    locale::copy(app_state.ui.locale)
+        .common()
+        .strategy_state_label(state)
 }
 
-fn placement_state_label(state: selectors::PlacementState) -> &'static str {
-    match state {
-        selectors::PlacementState::Live => "已挂出",
-        selectors::PlacementState::NotPlaced => "未挂出",
-        selectors::PlacementState::NotExpected => "无需挂单",
-        selectors::PlacementState::Unknown => "未知",
-    }
+fn placement_state_label(app_state: &AppState, state: selectors::PlacementState) -> &'static str {
+    locale::copy(app_state.ui.locale)
+        .common()
+        .placement_state_label(state)
 }
 
 fn list_from_lines(
@@ -1629,6 +1636,7 @@ fn list_from_lines(
 }
 
 fn command_timeline_items(state: &AppState, theme: &Theme, area: Rect) -> Vec<ListItem<'static>> {
+    let copy = locale::copy(state.ui.locale);
     let compact = area.height < 6;
     let limit = if compact {
         list_capacity(area)
@@ -1638,7 +1646,7 @@ fn command_timeline_items(state: &AppState, theme: &Theme, area: Rect) -> Vec<Li
     let items = selectors::command_timeline(state, limit);
     if items.is_empty() {
         return vec![ListItem::new(Line::from(vec![Span::styled(
-            "No recent commands",
+            copy.common().no_recent_commands().to_string(),
             theme.muted(),
         )]))];
     }
@@ -1795,6 +1803,7 @@ mod tests {
     use super::*;
     use crate::{
         events::{AppEvent, EffectResultEvent},
+        locale::Locale,
         protocol::{
             CommandLinks, CommandStatus, CommandType, PendingCommand, RiskEvent, RiskLevel,
         },
@@ -1837,6 +1846,30 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_render_snapshot_zh_cn_100x16() {
+        assert_page_snapshot_with_locale(
+            Locale::ZhCn,
+            Page::Dashboard,
+            100,
+            16,
+            "dashboard_render_snapshot_zh_cn_100x16",
+            |_| {},
+        );
+    }
+
+    #[test]
+    fn dashboard_render_snapshot_zh_cn_80x24() {
+        assert_page_snapshot_with_locale(
+            Locale::ZhCn,
+            Page::Dashboard,
+            80,
+            24,
+            "dashboard_render_snapshot_zh_cn_80x24",
+            |_| {},
+        );
+    }
+
+    #[test]
     fn grid_render_snapshot_120x18() {
         assert_page_snapshot(Page::Grid, 120, 18, "grid_render_snapshot_120x18", |_| {});
     }
@@ -1849,6 +1882,30 @@ mod tests {
     #[test]
     fn grid_render_snapshot_80x24() {
         assert_page_snapshot(Page::Grid, 80, 24, "grid_render_snapshot_80x24", |_| {});
+    }
+
+    #[test]
+    fn grid_render_snapshot_zh_cn_100x16() {
+        assert_page_snapshot_with_locale(
+            Locale::ZhCn,
+            Page::Grid,
+            100,
+            16,
+            "grid_render_snapshot_zh_cn_100x16",
+            |_| {},
+        );
+    }
+
+    #[test]
+    fn grid_render_snapshot_zh_cn_80x24() {
+        assert_page_snapshot_with_locale(
+            Locale::ZhCn,
+            Page::Grid,
+            80,
+            24,
+            "grid_render_snapshot_zh_cn_80x24",
+            |_| {},
+        );
     }
 
     #[test]
@@ -1925,6 +1982,20 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_render_snapshot_waiting_first_snapshot_zh_cn_100x16() {
+        assert_page_snapshot_after_mutate_with_locale(
+            Locale::ZhCn,
+            Page::Dashboard,
+            100,
+            16,
+            "dashboard_render_snapshot_waiting_first_snapshot_zh_cn_100x16",
+            |state| {
+                *state = AppState::waiting_first_snapshot_with_locale(Locale::ZhCn);
+            },
+        );
+    }
+
+    #[test]
     fn help_render_snapshot_waiting_first_snapshot_100x16() {
         assert_page_snapshot(
             Page::Help,
@@ -1939,6 +2010,20 @@ mod tests {
     }
 
     #[test]
+    fn help_render_snapshot_waiting_first_snapshot_zh_cn_100x16() {
+        assert_page_snapshot(
+            Page::Help,
+            100,
+            16,
+            "help_render_snapshot_waiting_first_snapshot_zh_cn_100x16",
+            |state| {
+                *state = AppState::waiting_first_snapshot_with_locale(Locale::ZhCn);
+                state.ui.page = Page::Help;
+            },
+        );
+    }
+
+    #[test]
     fn market_render_snapshot_snapshot_retrying_100x16() {
         assert_page_snapshot_after_mutate(
             Page::Market,
@@ -1947,6 +2032,27 @@ mod tests {
             "market_render_snapshot_snapshot_retrying_100x16",
             |state| {
                 *state = AppState::waiting_first_snapshot();
+                reduce(
+                    state,
+                    AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
+                        "upstream timeout".into(),
+                    )),
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn market_render_snapshot_snapshot_retrying_zh_cn_100x16() {
+        assert_page_snapshot_after_mutate_with_locale(
+            Locale::ZhCn,
+            Page::Market,
+            100,
+            16,
+            "market_render_snapshot_snapshot_retrying_zh_cn_100x16",
+            |state| {
+                *state = AppState::waiting_first_snapshot_with_locale(Locale::ZhCn);
+                state.ui.page = Page::Market;
                 reduce(
                     state,
                     AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
@@ -2141,9 +2247,33 @@ mod tests {
             state.execution.open_orders_source = crate::protocol::OpenOrdersSource::StrategyMirror;
         });
 
-        assert!(rendered.contains("交易所挂单"));
-        assert!(rendered.contains("当前模式只提供策略挂单镜像"));
+        assert!(rendered.contains("ExchangeOrders"));
+        assert!(rendered.contains("Currentmodeexposesstrategy-ordermirrorsonly."));
         assert!(rendered.contains("N/A"));
+    }
+
+    #[test]
+    fn dashboard_uses_english_copy_by_default() {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |_| {});
+
+        assert!(rendered.contains("ExchangeOrders"));
+    }
+
+    #[test]
+    fn dashboard_can_render_chinese_copy() {
+        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+            state.ui.locale = crate::locale::Locale::ZhCn;
+            state.risk.risk_level = crate::protocol::RiskLevel::Watch;
+        });
+        let normalized = rendered
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+
+        assert!(normalized.contains("交易所挂单"));
+        assert!(normalized.contains("风险与告警"));
+        assert!(normalized.contains("观察"));
+        assert!(!normalized.contains("Watch"));
     }
 
     #[test]
@@ -2152,9 +2282,9 @@ mod tests {
             state.execution.open_orders_source = crate::protocol::OpenOrdersSource::ExchangeLive;
         });
 
-        assert!(rendered.contains("策略订单"));
-        assert!(rendered.contains("策略状态"));
-        assert!(rendered.contains("挂单状态"));
+        assert!(rendered.contains("StrategyOrders"));
+        assert!(rendered.contains("Strategy"));
+        assert!(rendered.contains("Placement"));
     }
 
     #[test]
@@ -2177,16 +2307,16 @@ mod tests {
         });
 
         assert!(rendered.contains("4510.25"));
-        assert!(!rendered.contains("当前模式只提供策略挂单镜像"));
+        assert!(!rendered.contains("Currentmodeexposesstrategy-ordermirrorsonly."));
     }
 
     #[test]
     fn help_page_explains_strategy_and_exchange_orders() {
         let rendered = normalized_page_string(Page::Help, 100, 16, |_| {});
 
-        assert!(rendered.contains("策略订单"));
-        assert!(rendered.contains("交易所挂单"));
-        assert!(rendered.contains("无法证明策略单已真实挂出"));
+        assert!(rendered.contains("StrategyOrders"));
+        assert!(rendered.contains("ExchangeOrders"));
+        assert!(rendered.contains("theclientcannotprovethestrategyorders"));
     }
 
     #[test]
@@ -2204,6 +2334,20 @@ mod tests {
         assert_snapshot!(name, snapshot);
     }
 
+    fn assert_page_snapshot_with_locale<F>(
+        locale: Locale,
+        page: Page,
+        width: u16,
+        height: u16,
+        name: &str,
+        mutate: F,
+    ) where
+        F: FnOnce(&mut AppState),
+    {
+        let snapshot = render_page_to_string_with_locale(locale, page, width, height, mutate);
+        assert_snapshot!(name, snapshot);
+    }
+
     fn assert_page_snapshot_after_mutate<F>(
         page: Page,
         width: u16,
@@ -2217,6 +2361,21 @@ mod tests {
         assert_snapshot!(name, snapshot);
     }
 
+    fn assert_page_snapshot_after_mutate_with_locale<F>(
+        locale: Locale,
+        page: Page,
+        width: u16,
+        height: u16,
+        name: &str,
+        mutate: F,
+    ) where
+        F: FnOnce(&mut AppState),
+    {
+        let snapshot =
+            render_page_to_string_after_mutate_with_locale(locale, page, width, height, mutate);
+        assert_snapshot!(name, snapshot);
+    }
+
     fn render_page_to_string<F>(page: Page, width: u16, height: u16, mutate: F) -> String
     where
         F: FnOnce(&mut AppState),
@@ -2225,6 +2384,29 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::sample();
         state.ui.page = page;
+        state.ui.width = width;
+        state.ui.height = height;
+        mutate(&mut state);
+        let theme = Theme::default();
+        terminal.draw(|frame| draw(frame, &state, &theme)).unwrap();
+        buffer_to_string(terminal.backend().buffer(), width, height)
+    }
+
+    fn render_page_to_string_with_locale<F>(
+        locale: Locale,
+        page: Page,
+        width: u16,
+        height: u16,
+        mutate: F,
+    ) -> String
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::sample();
+        state.ui.page = page;
+        state.ui.locale = locale;
         state.ui.width = width;
         state.ui.height = height;
         mutate(&mut state);
@@ -2245,6 +2427,29 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::sample();
+        state.ui.width = width;
+        state.ui.height = height;
+        mutate(&mut state);
+        state.ui.page = page;
+        let theme = Theme::default();
+        terminal.draw(|frame| draw(frame, &state, &theme)).unwrap();
+        buffer_to_string(terminal.backend().buffer(), width, height)
+    }
+
+    fn render_page_to_string_after_mutate_with_locale<F>(
+        locale: Locale,
+        page: Page,
+        width: u16,
+        height: u16,
+        mutate: F,
+    ) -> String
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::sample();
+        state.ui.locale = locale;
         state.ui.width = width;
         state.ui.height = height;
         mutate(&mut state);

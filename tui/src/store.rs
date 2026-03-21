@@ -4,6 +4,7 @@ use crate::effects::Effect;
 use crate::events::{
     AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent, SystemEvent,
 };
+use crate::locale;
 use crate::protocol::{CommandAck, CommandStatus, CommandType, ServerEvent};
 use crate::state::{
     AppState, COMMAND_TIMEOUT_TICKS, CommandTimelineEntry, CommandTimelineStage, DirtyFlags, Modal,
@@ -112,6 +113,17 @@ fn handle_input_event(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
             KeyAction::ShutdownAfterFlatten => {
                 open_confirm(state, CommandType::ShutdownAfterFlatten)
             }
+            KeyAction::ToggleLocale => {
+                state.ui.locale = state.ui.locale.toggle();
+                state.mark_dirty(
+                    DirtyFlags {
+                        ui: true,
+                        ..DirtyFlags::default()
+                    },
+                    true,
+                );
+                Vec::new()
+            }
             KeyAction::Confirm => handle_local_ui_event(state, LocalUiEvent::ConfirmModal),
             KeyAction::Cancel => handle_local_ui_event(state, LocalUiEvent::CancelModal),
             KeyAction::Quit => {
@@ -169,9 +181,10 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
         }
         EffectResultEvent::SnapshotFailed(error) => match &state.snapshot_state {
             SnapshotBootstrapState::Ready => {
+                let toast_copy = locale::copy(state.ui.locale).toast();
                 state.ui.toast = Some(Toast {
                     level: ToastLevel::Danger,
-                    message: format!("snapshot failed: {error}"),
+                    message: toast_copy.snapshot_failed(&error),
                     ttl_ticks: 24,
                 });
                 state.mark_dirty(
@@ -227,9 +240,10 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             Vec::new()
         }
         EffectResultEvent::RiskEventsFailed(error) => {
+            let toast_copy = locale::copy(state.ui.locale).toast();
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Warning,
-                message: format!("risk events failed: {error}"),
+                message: toast_copy.risk_events_failed(&error),
                 ttl_ticks: 24,
             });
             state.mark_dirty(
@@ -247,16 +261,17 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             state.connection.reconnect_attempt = 0;
             state.connection.reconnect_backoff_ms = 0;
             let timestamp = state.local_timestamp();
+            let copy = locale::copy(state.ui.locale);
             push_system_event(
                 state,
                 "info",
                 "transport",
-                "WebSocket connected and streaming.",
+                copy.store().ws_connected_event(),
                 timestamp,
             );
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Info,
-                message: "ws connected".into(),
+                message: copy.toast().ws_connected().into(),
                 ttl_ticks: 16,
             });
             state.mark_dirty(
@@ -281,16 +296,17 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
                 .min(8);
             state.connection.reconnect_backoff_ms = 1_000u64.saturating_mul(backoff_multiplier);
             let timestamp = state.local_timestamp();
+            let copy = locale::copy(state.ui.locale);
             push_system_event(
                 state,
                 "warn",
                 "transport",
-                &format!("WebSocket disconnected: {reason}"),
+                &copy.store().ws_disconnected_event(&reason),
                 timestamp,
             );
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Warning,
-                message: format!("ws disconnected: {reason}"),
+                message: copy.toast().ws_disconnected(&reason),
                 ttl_ticks: 24,
             });
             state.mark_dirty(DirtyFlags::all(), true);
@@ -312,7 +328,10 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
                 &accepted.command_id,
                 accepted.command,
                 CommandTimelineStage::Accepted,
-                "Service accepted command; waiting for final acknowledgement.".into(),
+                locale::copy(state.ui.locale)
+                    .store()
+                    .command_accepted_summary()
+                    .into(),
                 accepted.accepted_at,
                 None,
             );
@@ -351,13 +370,17 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
                 &command_id,
                 command,
                 CommandTimelineStage::Failed,
-                format!("Command request failed before ack: {error}"),
+                locale::copy(state.ui.locale)
+                    .store()
+                    .command_failed_summary(&error),
                 timestamp,
                 None,
             );
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Danger,
-                message: format!("command failed: {error}"),
+                message: locale::copy(state.ui.locale)
+                    .store()
+                    .command_failed_toast(&error),
                 ttl_ticks: 24,
             });
             state.mark_dirty(DirtyFlags::all(), true);
@@ -390,10 +413,11 @@ fn merge_risk_alerts(
 }
 
 fn bootstrap_blocked_message(state: &AppState) -> Option<&'static str> {
+    let toast_copy = locale::copy(state.ui.locale).toast();
     match state.snapshot_state {
-        SnapshotBootstrapState::WaitingFirstSnapshot => Some("首次快照未就绪，操作已禁用"),
+        SnapshotBootstrapState::WaitingFirstSnapshot => Some(toast_copy.snapshot_pending_blocked()),
         SnapshotBootstrapState::SnapshotRetrying { .. } => {
-            Some("首次快照获取失败，等待重试后再操作")
+            Some(toast_copy.snapshot_retrying_blocked())
         }
         SnapshotBootstrapState::Ready => None,
     }
@@ -700,7 +724,10 @@ fn expire_stalled_commands(state: &mut AppState) -> bool {
             &command_id,
             command,
             CommandTimelineStage::TimedOut,
-            "No final acknowledgement arrived within the timeout window.".into(),
+            locale::copy(state.ui.locale)
+                .store()
+                .command_timed_out_summary()
+                .into(),
             timestamp.clone(),
             None,
         );
@@ -708,7 +735,10 @@ fn expire_stalled_commands(state: &mut AppState) -> bool {
 
     state.ui.toast = Some(Toast {
         level: ToastLevel::Warning,
-        message: "one or more commands timed out".into(),
+        message: locale::copy(state.ui.locale)
+            .store()
+            .command_timed_out_toast()
+            .into(),
         ttl_ticks: 20,
     });
     true
@@ -746,6 +776,7 @@ fn command_status_level(status: CommandStatus) -> &'static str {
 mod tests {
     use super::*;
     use crate::events::{AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent};
+    use crate::locale::Locale;
     use crate::protocol::{CommandAccepted, CommandRecord, RuntimeSnapshot};
     use crate::state::SnapshotBootstrapState;
 
@@ -825,7 +856,7 @@ mod tests {
             assert!(effects.is_empty());
             assert_eq!(
                 state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
-                Some("首次快照未就绪，操作已禁用")
+                Some("Initial snapshot pending. Runtime actions are disabled.")
             );
             state.ui.toast = None;
         }
@@ -850,7 +881,55 @@ mod tests {
             assert!(effects.is_empty());
             assert_eq!(
                 state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
-                Some("首次快照获取失败，等待重试后再操作")
+                Some("Initial snapshot failed. Wait for retry before sending runtime actions.")
+            );
+            state.ui.toast = None;
+        }
+    }
+
+    #[test]
+    fn waiting_snapshot_blocks_runtime_shortcuts_and_toasts_in_chinese() {
+        let mut state = AppState::waiting_first_snapshot();
+        state.ui.locale = Locale::ZhCn;
+
+        for action in [
+            KeyAction::Pause,
+            KeyAction::Resume,
+            KeyAction::CancelAll,
+            KeyAction::FlattenNow,
+            KeyAction::ShutdownAfterFlatten,
+        ] {
+            let effects = reduce(&mut state, AppEvent::Input(InputEvent::Key(action)));
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+                Some("首个快照未就绪，运行时操作已禁用。")
+            );
+            state.ui.toast = None;
+        }
+    }
+
+    #[test]
+    fn retrying_snapshot_blocks_runtime_shortcuts_and_toasts_in_chinese() {
+        let mut state = AppState::waiting_first_snapshot();
+        state.ui.locale = Locale::ZhCn;
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+        );
+
+        for action in [
+            KeyAction::Pause,
+            KeyAction::Resume,
+            KeyAction::CancelAll,
+            KeyAction::FlattenNow,
+            KeyAction::ShutdownAfterFlatten,
+        ] {
+            let effects = reduce(&mut state, AppEvent::Input(InputEvent::Key(action)));
+            assert!(effects.is_empty());
+            assert_eq!(
+                state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+                Some("首个快照获取失败，请等待重试后再发送运行时操作。")
             );
             state.ui.toast = None;
         }
@@ -886,6 +965,142 @@ mod tests {
             Some(Effect::ReconnectWs { attempt: 1 })
         ));
         assert!(!state.connection.ws_connected);
+    }
+
+    #[test]
+    fn snapshot_failure_and_transport_toasts_follow_current_locale() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+        );
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("快照获取失败：boom")
+        );
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::WsConnected),
+        );
+        assert_eq!(
+            state
+                .system_events
+                .front()
+                .map(|event| event.message.as_str()),
+            Some("WebSocket 已连接，开始流式传输。")
+        );
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("WebSocket 已连接")
+        );
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::WsDisconnected("boom".into())),
+        );
+        assert_eq!(
+            state
+                .system_events
+                .front()
+                .map(|event| event.message.as_str()),
+            Some("WebSocket 已断开：boom")
+        );
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("WebSocket 已断开：boom")
+        );
+    }
+
+    #[test]
+    fn command_failures_and_timeouts_follow_current_locale() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::CommandFailed {
+                command_id: "cmd_fail_zh".into(),
+                error: "boom".into(),
+            }),
+        );
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("命令失败：boom")
+        );
+        assert!(state.execution.command_timeline.iter().any(|entry| {
+            entry.command_id == "cmd_fail_zh" && entry.summary == "命令在收到服务端确认前失败：boom"
+        }));
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(KeyAction::Pause)),
+        );
+        let command_id = match effects.first().expect("send command") {
+            Effect::SendCommand { command_id, .. } => command_id.clone(),
+            other => panic!("unexpected effect: {other:?}"),
+        };
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::CommandAccepted(CommandAccepted {
+                version: "v1alpha1".into(),
+                command_id: command_id.clone(),
+                command: CommandType::Pause,
+                status: CommandStatus::Accepted,
+                accepted_at: "2025-01-01T00:00:01Z".into(),
+            })),
+        );
+        for _ in 0..COMMAND_TIMEOUT_TICKS {
+            reduce(&mut state, AppEvent::System(SystemEvent::HealthTick));
+        }
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("一条或多条命令已超时")
+        );
+        assert!(state.execution.command_timeline.iter().any(|entry| {
+            entry.command_id == command_id && entry.summary == "在超时窗口内没有收到最终确认。"
+        }));
+    }
+
+    #[test]
+    fn toggle_locale_updates_ui_state_without_changing_page() {
+        let mut state = AppState::sample();
+        state.ui.page = Page::Grid;
+        state.ui.focus_index = 2;
+        state.ui.modal = Some(Modal::Confirm(CommandType::Pause));
+        let pending_command_id = state.queue_command(CommandType::Resume);
+        state.dirty.clear();
+        state.immediate_render = false;
+
+        let page_before = state.ui.page;
+        let focus_before = state.ui.focus_index;
+        let modal_before = state.ui.modal.clone();
+        let pending_before = state.execution.pending_commands.clone();
+        let timeline_before = state.execution.command_timeline.clone();
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(KeyAction::ToggleLocale)),
+        );
+
+        assert!(effects.is_empty());
+        assert_eq!(state.ui.page, page_before);
+        assert_eq!(state.ui.focus_index, focus_before);
+        assert_eq!(state.ui.modal, modal_before);
+        assert_eq!(state.ui.locale, Locale::ZhCn);
+        assert_eq!(state.execution.pending_commands, pending_before);
+        assert_eq!(state.execution.command_timeline, timeline_before);
+        assert!(state.dirty.ui);
+        assert!(state.take_immediate_render());
+        assert!(
+            state
+                .execution
+                .pending_commands
+                .iter()
+                .any(|command| command.command_id == pending_command_id)
+        );
     }
 
     #[test]

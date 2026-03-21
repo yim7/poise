@@ -10,13 +10,13 @@ expression: snapshot
 ┌ Execution Focus ──────────────────────────┐┌ Risk + Alerts ──────────────────┐
 │Position  0.250 @ 2354.20                  ││Level  Watch   Breaker  OFF      │
 │U-PnL  1.84   R-PnL  14.52                 ││Notional  590/1500   Stop  4.0%  │
-│交 易 所   N/A   Pending  0   Health  HEALTHY ││Alert  MARGIN_USAGE_WATCH        │
+│Exchange  N/A   Pending  0   Health        ││Alert  MARGIN_USAGE_WATCH        │
 └───────────────────────────────────────────┘└─────────────────────────────────┘
-┌ 交 易 所 挂 单  ───────────────────────────────┐┌ Market + Health ────────────────┐
-│当 前 模 式 只 提 供 策 略 挂 单 镜 像 。                ││Last  2361.48   Mark  2361.55    │
-│尚 未 接 入 真 实 交 易 所 挂 单 查 询 。                ││Service WS  UP   Market WS  UP   │
-│请 到  Grid 页 查 看 策 略 订 单 。                  ││Health  HEALTHY   stale 0ms      │
-│                                           │└─────────────────────────────────┘
+┌ Exchange Orders ──────────────────────────┐┌ Market + Health ────────────────┐
+│Current mode exposes strategy-order mirrors││Last  2361.48   Mark  2361.55    │
+│only.                                      ││Service WS  UP   Market WS  UP   │
+│Live exchange-order queries are not        ││Health  HEALTHY   stale 0ms      │
+│enabled.                                   │└─────────────────────────────────┘
 └───────────────────────────────────────────┘┌ Command Timeline ───────────────┐
 ┌ Recent Fills ─────────────────────────────┐│ ACK  PAUSE cmd_hist_0001        │
 │BUY 2349.10 x 0.050  pnl +2.51             ││Strategy acknowledged pause and s│

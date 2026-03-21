@@ -7,11 +7,11 @@ expression: snapshot
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
 │Pos  0.250 @ 2354.20   U  1.84   R  14.52             ││Level  Watch   Breaker  OFF               │
-│交 易 所   N/A   Pending  0   Health  HEALTHY            ││Notional  590/1500   Stop  4.0%           │
+│Exchange  N/A   Pending  0   Health  HEALTHY          ││Notional  590/1500   Stop  4.0%           │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
-┌ 交 易 所 挂 单  ──────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
-│当 前 模 式 只 提 供 策 略 挂 单 镜 像 。                           ││Last  2361.48   Mark  2361.55             │
-│尚 未 接 入 真 实 交 易 所 挂 单 查 询 。                           ││Svc WS  UP   Mkt WS  UP   stale 0ms       │
+┌ Exchange Orders ─────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
+│Current mode exposes strategy-order mirrors only.     ││Last  2361.48   Mark  2361.55             │
+│Live exchange-order queries are not enabled.          ││Svc WS  UP   Mkt WS  UP   stale 0ms       │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
 │BUY 2349.10 x 0.050  pnl +2.51                        ││ ACK  PAUSE                               │

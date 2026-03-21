@@ -30,6 +30,7 @@ pub enum KeyAction {
     CancelAll,
     FlattenNow,
     ShutdownAfterFlatten,
+    ToggleLocale,
     Confirm,
     Cancel,
     Quit,

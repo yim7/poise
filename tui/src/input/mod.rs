@@ -28,6 +28,7 @@ pub fn map_key_event(event: KeyEvent) -> Option<KeyAction> {
         KeyCode::Char('c') => Some(KeyAction::CancelAll),
         KeyCode::Char('f') => Some(KeyAction::FlattenNow),
         KeyCode::Char('s') => Some(KeyAction::ShutdownAfterFlatten),
+        KeyCode::Char('l') => Some(KeyAction::ToggleLocale),
         KeyCode::Enter => Some(KeyAction::Confirm),
         KeyCode::Esc | KeyCode::Char('n') => Some(KeyAction::Cancel),
         KeyCode::Char('q') => Some(KeyAction::Quit),
@@ -68,5 +69,12 @@ mod tests {
         let action = map_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
 
         assert_eq!(action, Some(KeyAction::ToggleHelp));
+    }
+
+    #[test]
+    fn plain_l_toggles_locale() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+        assert_eq!(action, Some(KeyAction::ToggleLocale));
     }
 }

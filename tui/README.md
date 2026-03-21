@@ -20,6 +20,19 @@
 cargo run -p grid-platform-tui
 ```
 
+也可以通过环境变量指定启动语言：
+
+```bash
+GRID_PLATFORM_UI_LOCALE=zh-CN cargo run -p grid-platform-tui
+```
+
+可选值：
+
+- `en-US`
+- `zh-CN`
+
+运行中可按 `l` 在中英文界面之间切换。
+
 ## 测试
 
 ```bash

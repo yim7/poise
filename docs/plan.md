@@ -17,9 +17,9 @@
 
 当前最重要的判断是：
 
-- 近期主线是把 `service` 做成真正的内核
+- 近期主线已经切换为 `K8`：TUI 中英文切换
 - 开发顺序按测试优先推进
-- `tui` 当前主要职责是验证协议、恢复和用户链路，不是继续扩展页面功能
+- `K8` 不是继续扩展新的交易页面，而是为现有 `tui` 页面补本地化基础设施
 
 ## 2. 测试优先执行原则
 
@@ -192,8 +192,54 @@
 - 已补控制面验收测试，覆盖查询模型、排序规则与能力接口
 - K7 验收条件已满足
 
-## 7. 当前并行方式
+## 7. 里程碑 K8：TUI 中英文切换
 
-当前没有正在执行的并行主线，等待下一里程碑确认。
+### 目标
 
-当前不建议直接扩展新的交易功能，下一阶段应先明确 K8 目标，再决定是继续控制面扩展还是回到交易能力建设。
+在不改服务端接口文本的前提下，让 `tui` 的本地界面文案支持 `zh-CN / en-US` 双语切换，并保持英文默认行为不回退。
+
+### 先补的测试
+
+1. 为 `Locale` 解析、默认值与切换动作补单元测试。
+2. 为 `l` 快捷键映射与切换后的状态流转补测试。
+3. 将现有语言一致性测试改为“翻译完整性 + 本地文案边界”测试。
+4. 为 `Dashboard / Grid / Help / waiting / retrying` 补中文快照。
+5. 为切换后命令链路与重连链路稳定性补最小回归测试。
+
+### 实施任务
+
+1. 新增统一 `locale` 模块，收敛页签、面板、表头、帮助页、toast、footer 与本地状态标签文案。
+2. 为 `AppConfig`、`UiState`、输入动作与归约逻辑补 locale 支持，并通过 `GRID_PLATFORM_UI_LOCALE` 指定启动语言。
+3. 支持运行时按 `l` 在 `zh-CN / en-US` 间切换，并立即重绘页面。
+4. 改造 `render / store / selectors / state`，让本地文案统一从 locale 层取值。
+5. 保持服务端返回文本原样显示，不在客户端本地改写。
+6. 为窄屏和 bootstrap 场景补中文短文案与快照保护。
+
+### K8 验收标准
+
+- 默认语言继续为英文
+- `GRID_PLATFORM_UI_LOCALE` 可指定启动语言
+- 运行时按 `l` 可在中英文之间切换
+- 切换后不影响当前页面、焦点、modal、命令链路与重连链路
+- 服务端返回文本继续原样显示
+- 中文关键页面窄屏布局稳定
+- K8 对应测试矩阵全部通过
+
+### 当前状态
+
+- 已完成 [`superpowers/specs/2026-03-22-tui-locale-switch-design.md`](superpowers/specs/2026-03-22-tui-locale-switch-design.md) 设计
+- 已明确只本地化 `tui` 本地文案，不改服务端接口文本
+- 已完成 `locale` 模块、`GRID_PLATFORM_UI_LOCALE` 启动配置、`UiState.locale` 与 `l` 热切换
+- 已完成 `render / store / selectors / state` 接线，运行时本地文案统一走 locale 层
+- 已补中文快照与 `ToggleLocale` 后 pause/ack 最小 E2E 回归
+- `cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test` 已通过
+- K8 验收条件已满足
+
+## 8. 当前并行方式
+
+当前主线已经明确为 `K8`，执行顺序建议保持单主线串行推进：
+
+1. 先补 locale 与切换相关测试。
+2. 再接入配置、状态、输入与归约。
+3. 然后改造 render / selectors / store 本地文案。
+4. 最后补中文快照、回归测试与文档同步。

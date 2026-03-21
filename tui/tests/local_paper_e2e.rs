@@ -12,6 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use grid_platform_tui::{
     effects::Effect,
     events::{AppEvent, EffectResultEvent, InputEvent, KeyAction},
+    locale::Locale,
     protocol::{CommandRequest, CommandType},
     render::draw,
     state::{AppState, CommandTimelineStage, Page, SnapshotBootstrapState},
@@ -375,7 +376,7 @@ async fn local_paper_first_snapshot_bootstrap_enables_runtime_ops_only_after_rea
             .toast
             .as_ref()
             .map(|toast| toast.message.as_str()),
-        Some("首次快照未就绪，操作已禁用")
+        Some("Initial snapshot pending. Runtime actions are disabled.")
     );
     assert!(matches!(
         app.state.snapshot_state,
@@ -433,6 +434,36 @@ async fn local_paper_first_snapshot_success_shows_real_empty_state() -> Result<(
     assert!(rendered.contains("No recent commands"));
     assert!(rendered.contains("No system events"));
     assert!(!rendered.contains("WAITING SNAPSHOT"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_toggle_locale_while_running_keeps_pause_ack_flow_working() -> Result<()> {
+    let service = ServiceProcess::start().await?;
+    let mut app = AppHarness::connect(service.base_url.clone(), service.ws_url.clone()).await?;
+
+    assert_eq!(app.state.ui.locale, Locale::EnUs);
+
+    app.submit_key(KeyAction::ToggleLocale).await?;
+    assert_eq!(app.state.ui.locale, Locale::ZhCn);
+
+    app.submit_key(KeyAction::Pause).await?;
+    app.drive_until(
+        |state| {
+            state.runtime.strategy_state == "paused"
+                && state
+                    .execution
+                    .last_command_ack
+                    .as_ref()
+                    .is_some_and(|ack| ack.command == CommandType::Pause)
+                && state.execution.command_timeline.iter().any(|entry| {
+                    entry.command == CommandType::Pause && entry.stage == CommandTimelineStage::Ack
+                })
+        },
+        Duration::from_secs(3),
+    )
+    .await?;
 
     Ok(())
 }

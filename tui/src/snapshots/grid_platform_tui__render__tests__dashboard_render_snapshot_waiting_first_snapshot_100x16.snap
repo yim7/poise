@@ -1,21 +1,20 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2030
 expression: snapshot
 ---
- GRID PLATFORM  WAITING SNAPSHOT  等 待 首 次 快 照                                                       
+ GRID PLATFORM  WAITING SNAPSHOT  Waiting for first snapshot                                        
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
-│首 次 快 照 未 就 绪                                         ││首 次 快 照 未 就 绪                             │
-│等 待  /runtime/snapshot 返 回 后 再 显 示 真 实 数 据 。          ││等 待  /runtime/snapshot                    │
+│Initial snapshot pending                              ││Initial snapshot pending                  │
+│Waiting for /runtime/snapshot before showing live     ││Waiting for /runtime/snapshot before      │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
-│首 次 快 照 未 就 绪                                         ││首 次 快 照 未 就 绪                             │
-│等 待  /runtime/snapshot 返 回 后 再 显 示 真 实 数 据 。          ││等 待  /runtime/snapshot                    │
+│Initial snapshot pending                              ││Initial snapshot pending                  │
+│Waiting for /runtime/snapshot before showing live     ││Waiting for /runtime/snapshot before      │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
-│首 次 快 照 未 就 绪                                         ││首 次 快 照 未 就 绪                             │
+│Initial snapshot pending                              ││Initial snapshot pending                  │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- 首 次 快 照 未 就 绪  | p/r/c/f/s 已 禁 用  | 1-4 页 面  ? help
+ Snapshot pending | p/r/c/f/s disabled | 1-4 pages ? help

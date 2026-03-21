@@ -1,21 +1,21 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2207
+assertion_line: 2210
 expression: snapshot
 ---
- GRID PLATFORM  WAITING SNAPSHOT  等 待 首 次 快 照                                                       
+ GRID PLATFORM  WAITING SNAPSHOT  Waiting for first snapshot                                        
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
-┌ 快 捷 键  ─────────────────────────────────────────────┐┌ 术 语 说 明  ─────────────────────────────────┐
-│1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││当 前 焦 点   快 捷 键                            │
-│Tab / Shift-Tab 在 当 前 页 面 切 换 焦 点 面 板 。              ││连 接 健 康   SERVICE RECONNECTING             │
-│p 暂 停    r 恢 复                                       ││策 略 订 单 ： 看 的 是 策 略 目 标 。                  │
-│c 撤 全 部    f 立 即 平 仓    s 平 仓 后 停 机                  ││交 易 所 挂 单 ： 只 在 真 实 挂 单 可 用 时 展 示 。        │
-│Enter 确 认 危 险 操 作 ， Esc 或  n 取 消 。                   ││首 页 若 显 示 不 可 用 说 明 ，                      │
-│q / Ctrl-C 只 退 出 客 户 端 ， 不 会 停 止  service。           ││表 示 当 前 模 式 无 法 证 明 策 略 单 已 真 实 挂 出 。      │
-│                                                     ││                                           │
-│                                                     ││                                           │
-│                                                     ││                                           │
+┌ Shortcuts ──────────────────────────────────────────┐┌ Glossary ─────────────────────────────────┐
+│1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││Focus  Shortcuts                           │
+│Tab / Shift-Tab moves focus between panels on the    ││Health  SERVICE RECONNECTING               │
+│current page.                                        ││Strategy Orders: target orders produced by │
+│p Pause   r Resume   l Toggle language               ││the strategy.                              │
+│c Cancel all   f Flatten now   s Shutdown after      ││Exchange Orders: shown only when live      │
+│flatten                                              ││exchange data is available.                │
+│Enter confirms danger actions; Esc or n cancels.     ││If the dashboard shows an unavailable      │
+│q / Ctrl-C exits the client only; the service keeps  ││notice,                                    │
+│running.                                             ││the client cannot prove the strategy orders│
 └─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- 首 次 快 照 未 就 绪  | p/r/c/f/s 已 禁 用  | 1-4 页 面  ? help
+ Snapshot pending | p/r/c/f/s disabled | 1-4 pages ? help

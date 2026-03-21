@@ -1,21 +1,20 @@
 ---
 source: tui/src/render.rs
-assertion_line: 1725
 expression: snapshot
 ---
- GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus 策 略 订 单                                     
+ GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Strategy Orders                             
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
-┌ 策 略 订 单  ────────────────────────────────────────────────────┐┌ Grid Summary ────────────────────┐
-│方 向    价 格        数 量      策 略 状 态    挂 单 状 态                 ││Status  OCCUPIED                  │
-│BUY    2336.68    0.100    占 用        无 需 挂 单                 ││Lower  2336.76   Upper  2386.20   │
-│BUY    2344.95    0.100    占 用        无 需 挂 单                 ││Center  2361.48   Span  2.09%     │
-│BUY    2353.21    0.100    占 用        无 需 挂 单                 ││Active  3   Occupied  3   Pending │
-│SELL   2369.75    0.100    生 效        未 知                     │└──────────────────────────────────┘
-│SELL   2378.01    0.100    生 效        未 知                     │┌ Operator Notes ──────────────────┐
-│SELL   2386.28    0.100    生 效        未 知                     ││Current Price  2361.48            │
+┌ Strategy Orders ─────────────────────────────────────────────┐┌ Grid Summary ────────────────────┐
+│Side   Price      Qty      Strategy   Placement               ││Status  OCCUPIED                  │
+│BUY    2336.68    0.100    Occupied   N/A                     ││Lower  2336.76   Upper  2386.20   │
+│BUY    2344.95    0.100    Occupied   N/A                     ││Center  2361.48   Span  2.09%     │
+│BUY    2353.21    0.100    Occupied   N/A                     ││Active  3   Occupied  3   Pending │
+│SELL   2369.75    0.100    Active     Unknown                 │└──────────────────────────────────┘
+│SELL   2378.01    0.100    Active     Unknown                 │┌ Operator Notes ──────────────────┐
+│SELL   2386.28    0.100    Active     Unknown                 ││Current Price  2361.48            │
 │                                                              ││Session  regular                  │
 │                                                              ││Health  HEALTHY                   │
 └──────────────────────────────────────────────────────────────┘└──────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- Focus 策 略 订 单  | Tab panels | p/r run | c/f/s danger | Enter/Esc
+ Focus Strategy Orders | Tab panels | p/r run | c/f/s danger | Enter/Esc

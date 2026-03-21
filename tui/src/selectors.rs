@@ -1,7 +1,7 @@
 use crate::{
+    locale::{self, Locale},
     protocol::{
         CommandType, GridLevel, GridLevelState, GridSide, OpenOrder, OpenOrdersSource, RecentFill,
-        StrategyStatus,
     },
     state::{AppState, CommandTimelineEntry, CommandTimelineStage},
 };
@@ -23,6 +23,7 @@ pub struct DashboardViewModel {
 }
 
 pub fn dashboard(state: &AppState) -> DashboardViewModel {
+    let copy = locale::copy(state.ui.locale);
     let health = connection_health(state);
     DashboardViewModel {
         symbol: state.runtime.symbol.clone(),
@@ -38,37 +39,38 @@ pub fn dashboard(state: &AppState) -> DashboardViewModel {
         pending_commands: state.execution.pending_commands.len(),
         fills: state.execution.recent_fills.len(),
         risk_summary: format!(
-            "{:?} {:.0}/{:.0}",
-            state.risk.risk_level, state.risk.current_notional, state.risk.max_notional
+            "{} {:.0}/{:.0}",
+            copy.dashboard().risk_level_label(state.risk.risk_level),
+            state.risk.current_notional,
+            state.risk.max_notional
         ),
         ws_summary: format!("{} · {}", health.label, health.detail),
     }
 }
 
 pub fn dashboard_health_detail(state: &AppState) -> String {
+    let selector_copy = locale::copy(state.ui.locale).selector();
     let health = connection_health(state);
     let stale_age_ms = state.connection.stale_age_ms;
 
     match health.kind {
-        ConnectionHealthKind::Healthy => format!("stale {stale_age_ms}ms"),
+        ConnectionHealthKind::Healthy => selector_copy.healthy_detail(stale_age_ms),
         ConnectionHealthKind::Reconnecting => {
             if !state.connection.ws_connected {
-                format!("svc retry {}ms", state.connection.reconnect_backoff_ms)
+                selector_copy.dashboard_service_retry_detail(state.connection.reconnect_backoff_ms)
             } else {
-                format!(
-                    "mkt retry {}ms",
-                    state.connection.market_reconnect_backoff_ms
-                )
+                selector_copy
+                    .dashboard_market_retry_detail(state.connection.market_reconnect_backoff_ms)
             }
         }
-        ConnectionHealthKind::Stale => format!("stale {stale_age_ms}ms"),
+        ConnectionHealthKind::Stale => selector_copy.healthy_detail(stale_age_ms),
         ConnectionHealthKind::Degraded => {
             if !state.connection.http_available {
-                "http down".into()
+                selector_copy.dashboard_http_down().into()
             } else if state.connection.user_stream_connected == Some(false) {
-                "user down".into()
+                selector_copy.dashboard_user_down().into()
             } else {
-                format!("stale {stale_age_ms}ms")
+                selector_copy.healthy_detail(stale_age_ms)
             }
         }
     }
@@ -94,8 +96,13 @@ pub fn open_order_items(state: &AppState, limit: usize) -> Vec<OpenOrderItemView
             price: format!("{:.2}", order.price),
             qty: format!("{:.3}", order.qty),
             status: order.status.clone(),
-            command_ref: linked_command_for_order(state, order)
-                .map(|entry| format!("{} {}", command_label(entry.command), entry.command_id)),
+            command_ref: linked_command_for_order(state, order).map(|entry| {
+                format!(
+                    "{} {}",
+                    command_label(state.ui.locale, entry.command),
+                    entry.command_id
+                )
+            }),
         })
         .collect()
 }
@@ -145,7 +152,7 @@ pub fn strategy_orders(state: &AppState) -> Vec<StrategyOrderItemViewModel> {
             },
             price: format!("{:.2}", level.price),
             qty: format!("{:.3}", level.quantity),
-            strategy_state: grid_level_state_label(level.state).into(),
+            strategy_state: grid_level_state_label(state.ui.locale, level.state).into(),
             placement_state: placement_state_for_level(state, level),
         })
         .collect()
@@ -171,8 +178,13 @@ pub fn recent_fill_items(state: &AppState, limit: usize) -> Vec<RecentFillItemVi
             price_qty: format!("{:.2} x {:.3}", fill.price, fill.qty),
             pnl: format!("{:+.2}", fill.realized_pnl),
             realized_pnl: fill.realized_pnl,
-            command_ref: linked_command_for_fill(state, fill)
-                .map(|entry| format!("{} {}", command_label(entry.command), entry.command_id)),
+            command_ref: linked_command_for_fill(state, fill).map(|entry| {
+                format!(
+                    "{} {}",
+                    command_label(state.ui.locale, entry.command),
+                    entry.command_id
+                )
+            }),
         })
         .collect()
 }
@@ -202,6 +214,7 @@ pub struct GridViewModel {
 }
 
 pub fn grid(state: &AppState) -> GridViewModel {
+    let selector_copy = locale::copy(state.ui.locale).selector();
     let center = state.strategy.center_price;
     let span_pct = if center.abs() > f64::EPSILON {
         ((state.strategy.upper_bound - state.strategy.lower_bound) / center) * 100.0
@@ -216,7 +229,9 @@ pub fn grid(state: &AppState) -> GridViewModel {
     });
 
     GridViewModel {
-        status: strategy_status_label(state.strategy.status).into(),
+        status: selector_copy
+            .strategy_status_label(state.strategy.status)
+            .into(),
         lower: format!("{:.2}", state.strategy.lower_bound),
         upper: format!("{:.2}", state.strategy.upper_bound),
         center: format!("{center:.2}"),
@@ -234,21 +249,21 @@ pub fn grid(state: &AppState) -> GridViewModel {
             .filter(|level| level.state == GridLevelState::PendingRebuild)
             .count(),
         inventory_bias: if state.runtime.position_qty > 0.0 {
-            "long inventory".into()
+            selector_copy.long_inventory().into()
         } else if state.runtime.position_qty < 0.0 {
-            "short inventory".into()
+            selector_copy.short_inventory().into()
         } else {
-            "flat inventory".into()
+            selector_copy.flat_inventory().into()
         },
         pending_rebuild_reason: state.strategy.pending_rebuild_reason.clone(),
         levels: levels
             .iter()
-            .map(|level| grid_level(level, state.runtime.last_price))
+            .map(|level| grid_level(state.ui.locale, level, state.runtime.last_price))
             .collect(),
     }
 }
 
-fn grid_level(level: &GridLevel, last_price: f64) -> GridLevelViewModel {
+fn grid_level(locale: Locale, level: &GridLevel, last_price: f64) -> GridLevelViewModel {
     let distance_bps = if last_price.abs() > f64::EPSILON {
         ((level.price - last_price) / last_price) * 10_000.0
     } else {
@@ -262,7 +277,7 @@ fn grid_level(level: &GridLevel, last_price: f64) -> GridLevelViewModel {
         price: format!("{:.2}", level.price),
         qty: format!("{:.3}", level.quantity),
         distance_bps: format!("{distance_bps:+.1}"),
-        status: grid_level_state_label(level.state).into(),
+        status: grid_level_state_label(locale, level.state).into(),
     }
 }
 
@@ -314,6 +329,7 @@ pub struct MarketViewModel {
 }
 
 pub fn market(state: &AppState) -> MarketViewModel {
+    let selector_copy = locale::copy(state.ui.locale).selector();
     MarketViewModel {
         last_price: format!("{:.2}", state.runtime.last_price),
         mark_price: format!("{:.2}", state.runtime.mark_price),
@@ -322,30 +338,19 @@ pub fn market(state: &AppState) -> MarketViewModel {
             state.runtime.mark_price - state.runtime.last_price
         ),
         session_state: state.runtime.session_state.clone(),
-        http_status: if state.connection.http_available {
-            "UP"
-        } else {
-            "DOWN"
-        }
-        .into(),
-        market_ws_status: if state.connection.market_ws_connected {
-            "UP"
-        } else {
-            "DOWN"
-        }
-        .into(),
+        http_status: selector_copy
+            .market_status(state.connection.http_available)
+            .into(),
+        market_ws_status: selector_copy
+            .market_status(state.connection.market_ws_connected)
+            .into(),
         user_stream_status: match state.connection.user_stream_connected {
-            Some(true) => "UP",
-            Some(false) => "DOWN",
-            None => "N/A",
+            status => selector_copy.optional_market_status(status),
         }
         .into(),
-        service_ws_status: if state.connection.ws_connected {
-            "UP"
-        } else {
-            "DOWN"
-        }
-        .into(),
+        service_ws_status: selector_copy
+            .market_status(state.connection.ws_connected)
+            .into(),
         stale_age: format!("{}ms", state.connection.stale_age_ms),
         reconnect_attempt: state.connection.reconnect_attempt.to_string(),
         market_backoff: format!("{}ms", state.connection.market_reconnect_backoff_ms),
@@ -389,41 +394,36 @@ pub struct ConnectionHealthViewModel {
 }
 
 pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
+    let selector_copy = locale::copy(state.ui.locale).selector();
     let stale_age_ms = state.connection.stale_age_ms;
 
     if !state.connection.ws_connected {
         return ConnectionHealthViewModel {
-            label: "SERVICE RECONNECTING",
-            detail: format!(
-                "service ws retry {} in {}ms",
+            label: selector_copy.service_reconnecting_label(),
+            detail: selector_copy.service_reconnecting_detail(
                 state.connection.reconnect_attempt.max(1),
-                state.connection.reconnect_backoff_ms
+                state.connection.reconnect_backoff_ms,
             ),
-            hint: "Service control-plane WebSocket is down. Wait for the client stream to recover."
-                .into(),
+            hint: selector_copy.service_reconnecting_hint().into(),
             kind: ConnectionHealthKind::Reconnecting,
         };
     }
 
     if !state.connection.market_ws_connected {
         return ConnectionHealthViewModel {
-            label: "MARKET RECONNECTING",
-            detail: format!(
-                "binance ws retry in {}ms",
-                state.connection.market_reconnect_backoff_ms
-            ),
-            hint: "Service is online, but Binance market stream is reconnecting. Treat market data as stale."
-                .into(),
+            label: selector_copy.market_reconnecting_label(),
+            detail: selector_copy
+                .market_reconnecting_detail(state.connection.market_reconnect_backoff_ms),
+            hint: selector_copy.market_reconnecting_hint().into(),
             kind: ConnectionHealthKind::Reconnecting,
         };
     }
 
     if stale_age_ms >= 8_000 {
         return ConnectionHealthViewModel {
-            label: "STALE",
-            detail: format!("feed lag {}ms", stale_age_ms),
-            hint: "Heartbeat is alive but market data is not advancing. Recheck before trading."
-                .into(),
+            label: selector_copy.stale_label(),
+            detail: selector_copy.stale_detail(stale_age_ms),
+            hint: selector_copy.stale_hint().into(),
             kind: ConnectionHealthKind::Stale,
         };
     }
@@ -433,22 +433,21 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
         || state.connection.user_stream_connected == Some(false)
     {
         return ConnectionHealthViewModel {
-            label: "DEGRADED",
-            detail: format!(
-                "http {} / stale {}ms / user {}",
-                status_word(state.connection.http_available),
+            label: selector_copy.degraded_label(),
+            detail: selector_copy.degraded_detail(
+                state.connection.http_available,
                 stale_age_ms,
-                optional_status_word(state.connection.user_stream_connected)
+                state.connection.user_stream_connected,
             ),
-            hint: "Connection is usable but lagging. Avoid risky commands until it settles.".into(),
+            hint: selector_copy.degraded_hint().into(),
             kind: ConnectionHealthKind::Degraded,
         };
     }
 
     ConnectionHealthViewModel {
-        label: "HEALTHY",
-        detail: format!("stale {}ms", stale_age_ms),
-        hint: "Service and Binance streams are both healthy.".into(),
+        label: selector_copy.healthy_label(),
+        detail: selector_copy.healthy_detail(stale_age_ms),
+        hint: selector_copy.healthy_hint().into(),
         kind: ConnectionHealthKind::Healthy,
     }
 }
@@ -464,46 +463,29 @@ pub struct CommandTimelineItemViewModel {
 }
 
 pub fn command_timeline(state: &AppState, limit: usize) -> Vec<CommandTimelineItemViewModel> {
+    let selector_copy = locale::copy(state.ui.locale).selector();
     state
         .execution
         .command_timeline
         .iter()
         .take(limit)
-        .map(|entry| {
-            let timing = match (&entry.accepted_at, &entry.finished_at) {
-                (Some(accepted_at), Some(finished_at)) => format!(
-                    "req {} -> acc {} -> end {}",
-                    entry.requested_at, accepted_at, finished_at
-                ),
-                (Some(accepted_at), None) => {
-                    format!("req {} -> acc {}", entry.requested_at, accepted_at)
-                }
-                (None, Some(finished_at)) => {
-                    format!("req {} -> end {}", entry.requested_at, finished_at)
-                }
-                (None, None) => format!("req {}", entry.requested_at),
-            };
-
-            CommandTimelineItemViewModel {
-                command_id: entry.command_id.clone(),
-                command_label: command_label(entry.command),
-                stage_label: entry.stage.label(),
-                stage: entry.stage,
-                summary: entry.summary.clone(),
-                timing,
-            }
+        .map(|entry| CommandTimelineItemViewModel {
+            command_id: entry.command_id.clone(),
+            command_label: selector_copy.command_label(entry.command),
+            stage_label: selector_copy.stage_label(entry.stage),
+            stage: entry.stage,
+            summary: entry.summary.clone(),
+            timing: selector_copy.command_timing(
+                &entry.requested_at,
+                entry.accepted_at.as_deref(),
+                entry.finished_at.as_deref(),
+            ),
         })
         .collect()
 }
 
-pub fn command_label(command: CommandType) -> &'static str {
-    match command {
-        CommandType::Pause => "PAUSE",
-        CommandType::Resume => "RESUME",
-        CommandType::CancelAll => "CANCEL ALL",
-        CommandType::FlattenNow => "FLATTEN NOW",
-        CommandType::ShutdownAfterFlatten => "SHUTDOWN",
-    }
+pub fn command_label(locale: Locale, command: CommandType) -> &'static str {
+    locale::copy(locale).selector().command_label(command)
 }
 
 fn linked_command_for_order<'a>(
@@ -540,42 +522,14 @@ fn linked_command_for_fill<'a>(
     })
 }
 
-fn status_word(is_up: bool) -> &'static str {
-    if is_up { "up" } else { "down" }
+pub fn risk_action_hint(locale: Locale, code: &str) -> &'static str {
+    locale::copy(locale).selector().risk_action_hint(code)
 }
 
-fn optional_status_word(is_up: Option<bool>) -> &'static str {
-    match is_up {
-        Some(true) => "up",
-        Some(false) => "down",
-        None => "n/a",
-    }
-}
-
-pub fn risk_action_hint(code: &str) -> &'static str {
-    match code {
-        "MAX_POSITION_EXCEEDED" => "Reduce exposure before placing new grid orders.",
-        "STOP_LOSS_TRIGGERED" => "Reduce exposure before resuming the grid.",
-        "DAILY_LOSS_LIMIT_BREACHED" => "Pause new orders and review daily loss limits.",
-        "BREAKER_RELEASED" => "Breaker released. Verify conditions before resuming.",
-        _ => "Review the risk configuration before resuming.",
-    }
-}
-
-fn strategy_status_label(status: StrategyStatus) -> &'static str {
-    match status {
-        StrategyStatus::Active => "ACTIVE",
-        StrategyStatus::Occupied => "OCCUPIED",
-        StrategyStatus::PendingRebuild => "PENDING REBUILD",
-    }
-}
-
-fn grid_level_state_label(state: GridLevelState) -> &'static str {
-    match state {
-        GridLevelState::Active => "ACTIVE",
-        GridLevelState::Occupied => "OCCUPIED",
-        GridLevelState::PendingRebuild => "PENDING REBUILD",
-    }
+fn grid_level_state_label(locale: Locale, state: GridLevelState) -> &'static str {
+    locale::copy(locale)
+        .selector()
+        .grid_level_state_label(state)
 }
 
 #[cfg(test)]
@@ -688,6 +642,66 @@ mod tests {
     }
 
     #[test]
+    fn open_order_and_fill_items_localize_linked_command_refs() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+        state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
+        state.execution.exchange_open_orders = vec![OpenOrder {
+            order_id: "ord_1001".into(),
+            client_order_id: "grid_buy_01".into(),
+            side: "buy".into(),
+            price: 2332.80,
+            qty: 0.100,
+            filled_qty: 0.0,
+            status: "NEW".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }];
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_cancel_01".into(),
+                command: CommandType::CancelAll,
+                stage: CommandTimelineStage::Ack,
+                summary: "All open orders cancelled.".into(),
+                requested_at: "2025-01-01T00:00:03Z".into(),
+                accepted_at: Some("2025-01-01T00:00:04Z".into()),
+                finished_at: Some("2025-01-01T00:00:05Z".into()),
+                links: CommandLinks {
+                    client_order_ids: vec!["grid_buy_01".into()],
+                    order_ids: vec!["ord_1001".into()],
+                    trade_ids: vec!["fill_9001".into()],
+                },
+                timeout_at_tick: None,
+            });
+        state.execution.recent_fills = vec![RecentFill {
+            trade_id: "fill_9001".into(),
+            order_id: "ord_1001".into(),
+            client_order_id: Some("grid_buy_01".into()),
+            side: "sell".into(),
+            price: 2335.10,
+            qty: 0.100,
+            fee: 0.05,
+            realized_pnl: 1.23,
+            event_time: "2025-01-01T00:00:05Z".into(),
+        }]
+        .into();
+
+        let order_items = open_order_items(&state, 4);
+        let fill_items = recent_fill_items(&state, 4);
+
+        assert_eq!(
+            order_items[0].command_ref.as_deref(),
+            Some("取消全部 cmd_cancel_01")
+        );
+        assert_eq!(
+            fill_items[0].command_ref.as_deref(),
+            Some("取消全部 cmd_cancel_01")
+        );
+    }
+
+    #[test]
     fn grid_selector_prefers_strategy_levels_over_execution_orders() {
         let mut state = AppState::sample();
         state.execution.open_orders.clear();
@@ -698,6 +712,21 @@ mod tests {
         assert_eq!(vm.active_levels, 3);
         assert_eq!(vm.levels.len(), 6);
         assert_eq!(vm.levels[0].status, "OCCUPIED");
+    }
+
+    #[test]
+    fn grid_selector_localizes_status_and_inventory_in_chinese() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+        state.strategy.status = crate::protocol::StrategyStatus::Active;
+        state.runtime.position_qty = 0.250;
+
+        let vm = grid(&state);
+
+        assert_eq!(vm.status, "激活");
+        assert_eq!(vm.inventory_bias, "多头库存");
+        assert!(vm.levels.iter().any(|level| level.status == "占用"));
+        assert!(vm.levels.iter().any(|level| level.status == "激活"));
     }
 
     #[test]
@@ -747,6 +776,18 @@ mod tests {
         let vm = dashboard(&state);
 
         assert_eq!(vm.exchange_orders, Some(1));
+    }
+
+    #[test]
+    fn risk_action_hint_changes_with_locale() {
+        assert_eq!(
+            risk_action_hint(Locale::EnUs, "STOP_LOSS_TRIGGERED"),
+            "Reduce exposure before resuming the grid."
+        );
+        assert_eq!(
+            risk_action_hint(Locale::ZhCn, "STOP_LOSS_TRIGGERED"),
+            "恢复网格前先降低风险敞口。"
+        );
     }
 
     fn strategy_order_fixture(source: OpenOrdersSource) -> AppState {

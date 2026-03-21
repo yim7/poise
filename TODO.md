@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 当前主线：待确认下一里程碑
+- 当前主线：`K8` TUI 中英文切换
 - 并行预研：无
-- 最近完成：`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新；补齐 `/query/alerts` `acknowledged` 过滤回归测试，并补上 `strategy / risk` 直接单元测试；服务端与 TUI 协议、状态和界面已彻底移除 `latency_ms` 字段
-- 最近验证：`2026-03-21` 对照 [`docs/roadmap.md`](docs/roadmap.md) 与 [`docs/plan.md`](docs/plan.md) 复核 `K4` 到 `K7`，`cargo fmt --check`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test control_plane web_query_alerts_acknowledged_false` 与 `cargo test` 已通过；执行闭环、网格策略与风控、replay / paper / fake transport 验证链路、Web 查询模型与能力接口均已复核，未发现新的阻断项；testnet 最小闭环仍维持手工冒烟验证结论。`2026-03-22` 新增 `cargo test -p grid-platform-service --lib`、`INSTA_UPDATE=always cargo test -p grid-platform-tui --lib` 与 `cargo test -p grid-platform-tui`，均已通过，并覆盖 `latency_ms` 字段移除后的协议、快照与 local paper e2e 验证
+- 最近完成：`K8` TUI 中英文切换已实现并验收通过，包含 `locale` 模块、`GRID_PLATFORM_UI_LOCALE` 启动语言、`l` 热切换、`render / store / selectors / state` 本地化接线、中文快照和 `ToggleLocale` 后 pause/ack 最小 E2E 回归；`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新；补齐 `/query/alerts` `acknowledged` 过滤回归测试，并补上 `strategy / risk` 直接单元测试；TUI 连接健康判定已移除 Binance 元数据 REST `latency_ms` 的降级条件，延迟数值仅保留展示；服务端与 TUI 协议、状态和界面已彻底移除 `latency_ms` 字段
+- 最近验证：`2026-03-21` 对照 [`docs/roadmap.md`](docs/roadmap.md) 与 [`docs/plan.md`](docs/plan.md) 复核 `K4` 到 `K7`，`cargo fmt --check`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test control_plane web_query_alerts_acknowledged_false`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui` 与 `cargo test` 已通过；执行闭环、网格策略与风控、replay / paper / fake transport 验证链路、Web 查询模型与能力接口均已复核，未发现新的阻断项；testnet 最小闭环仍维持手工冒烟验证结论。`2026-03-22` 新增 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli`、`cargo test -p grid-platform-tui --lib`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`，均已通过，并覆盖 TUI 中英文切换、中文快照、运行时热切换链路和全工作区回归
 
 ## 首次快照空态验收
 
@@ -188,9 +188,42 @@
 - [x] 更新 `docs/plan.md` 与本文件状态
 - 验收结论：K7 已验收通过
 
+## K8 TUI 中英文切换
+
+### K8.1 测试先补齐
+
+- [x] 为 `Locale` 解析、默认值与切换动作补单元测试
+- [x] 为 `l` 快捷键映射与切换后的状态流转补测试
+- [x] 将现有语言一致性测试改为“翻译完整性 + 本地文案边界”测试
+- [x] 为 `Dashboard / Grid / Help / waiting / retrying` 补中文快照
+- [x] 为切换后命令链路与重连链路稳定性补最小回归测试
+
+### K8.2 本地化基础设施
+
+- [x] 新建 `tui/src/locale.rs`，统一管理 `zh-CN / en-US` 本地文案
+- [x] 为 `AppConfig` 增加 `GRID_PLATFORM_UI_LOCALE` 启动配置
+- [x] 为 `UiState` 增加当前 locale 状态
+- [x] 新增 `ToggleLocale` 输入动作与 `l` 快捷键
+
+### K8.3 界面接线
+
+- [x] 改造 `render.rs`，让页签、面板标题、表头、帮助页、footer 与 modal 统一走 locale
+- [x] 改造 `store.rs`，让本地 toast 与 bootstrap 阻断提示统一走 locale
+- [x] 改造 `selectors.rs`，让本地生成的风险提示和状态标签统一走 locale
+- [x] 保持服务端返回文本原样显示，不在客户端本地重写
+- [x] 为中文窄屏场景补短文案，避免布局错位
+
+### K8.4 收尾与验收
+
+- [x] 跑通 `cargo test -p grid-platform-tui`
+- [x] 跑通 `cargo test`
+- [x] 复核 K8 验收标准
+- [x] 更新 `docs/plan.md` 与本文件状态
+- [x] 验收结论：K8 已验收通过
+
 ## 当前并行方式
 
-- 无，等待下一里程碑确认
+- 无，当前按 `K8` 单主线串行推进
 
 ## 完成后必做
 
