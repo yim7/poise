@@ -29,7 +29,9 @@ const ENGINE_EVENT_BUFFER: usize = 256;
 const EXECUTION_TIMEOUT: Duration = Duration::from_millis(250);
 const EXECUTION_MAX_ATTEMPTS: usize = 3;
 const EXECUTION_RETRY_DELAY: Duration = Duration::from_millis(20);
-const STRATEGY_SYNC_TIMEOUT: Duration = Duration::from_millis(250);
+const STRATEGY_SYNC_BASE_TIMEOUT: Duration = Duration::from_millis(250);
+const STRATEGY_SYNC_TIMEOUT_PER_ORDER_MS: u64 = 250;
+const STRATEGY_SYNC_MAX_TIMEOUT: Duration = Duration::from_secs(15);
 const STRATEGY_SYNC_FAILURE_THRESHOLD: usize = 3;
 
 pub type SharedReadModel = Arc<RwLock<ReadModel>>;
@@ -912,7 +914,7 @@ async fn maybe_sync_strategy_orders(
         )]);
     }
 
-    let deadline = tokio::time::Instant::now() + STRATEGY_SYNC_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + strategy_sync_timeout(missing_orders.len());
     let mut applied_any = false;
     for order in missing_orders {
         let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
@@ -990,6 +992,12 @@ where
         }
     }
     Err(last_error.expect("retry loop should capture at least one error"))
+}
+
+fn strategy_sync_timeout(order_count: usize) -> Duration {
+    let per_order_budget = STRATEGY_SYNC_TIMEOUT_PER_ORDER_MS.saturating_mul(order_count as u64);
+    (STRATEGY_SYNC_BASE_TIMEOUT + Duration::from_millis(per_order_budget))
+        .min(STRATEGY_SYNC_MAX_TIMEOUT)
 }
 
 async fn strategy_sync_call<T, Fut>(timeout_after: Duration, future: Fut) -> Result<T>

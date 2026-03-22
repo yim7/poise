@@ -1792,7 +1792,7 @@ async fn timed_out_command_records_reason_without_side_effects() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn strategy_sync_uses_total_time_budget_and_keeps_successful_placements() -> Result<()> {
+async fn strategy_sync_waits_long_enough_to_finish_slow_batch_placements() -> Result<()> {
     let mut runtime = PersistedRuntime::in_memory_bootstrap();
     runtime.snapshot = RuntimeSnapshot::sample();
     runtime.snapshot.runtime.position_qty = 0.0;
@@ -1813,13 +1813,17 @@ async fn strategy_sync_uses_total_time_budget_and_keeps_successful_placements() 
 
     assert_eq!(tick.last_price, initial_price + 0.11);
     assert!(
-        elapsed < Duration::from_millis(350),
-        "strategy sync exceeded total time budget: {elapsed:?}"
+        elapsed >= Duration::from_millis(380),
+        "strategy sync did not wait for slow batch placements: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "strategy sync took unexpectedly long to finish batch placements: {elapsed:?}"
     );
 
     let snapshot = read_model.read().expect("read model").snapshot();
-    assert_eq!(snapshot.execution.open_orders.len(), 1);
-    assert_eq!(adapter.submit_calls(), 2);
+    assert_eq!(snapshot.execution.open_orders.len(), 3);
+    assert_eq!(adapter.submit_calls(), 3);
 
     Ok(())
 }
