@@ -1,6 +1,6 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2334
+assertion_line: 2497
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Strategy Orders         
@@ -9,10 +9,10 @@ expression: snapshot
                                                                                 
                                                                                 
 ┌ Strategy Orders ─────────────────────────────────────────────────────────────┐
-│Side   Price      Qty      Strategy   Placement                               │
-│BUY    2336.68    0.100    Occupied   N/A                                     │
-│BUY    2344.95    0.100    Occupied   N/A                                     │
-│BUY    2353.21    0.100    Occupied   N/A                                     │
+│Side   Price      Qty      Status                                             │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Grid Summary ────────────────────────────────────────────────────────────────┐
 │Status  OCCUPIED                                                              │

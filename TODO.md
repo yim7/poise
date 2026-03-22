@@ -8,7 +8,7 @@
 - 当前主线：`K10` 单实例 `7x24` 值守硬化
 - 并行线程：多实例固定区间网格已实现并并入主线，后续只维护实例边界与运行安全配套
 - 最近完成：`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
-- 最近验证：`2026-03-23` 已通过 `cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow immediate_live_fill_updates_runtime_before_next_strategy_sync -- --nocapture`、`cargo test -p grid-platform-service --test binance_integration -- --nocapture` 与 `cargo build -p grid-platform-service`
+- 最近验证：`2026-03-23` 已通过 `cargo test -p grid-platform-tui -- --nocapture`、`cargo test -p grid-platform-service --test binance_integration -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow immediate_live_fill_updates_runtime_before_next_strategy_sync -- --nocapture` 与 `cargo build -p grid-platform-service`
 
 ## K9 主网运行安全底座
 
@@ -65,6 +65,7 @@
 
 ## K11 单实例实盘策略收敛
 
+- [x] 让 Grid 页策略订单只显示当前真实挂单，库存占用改由仓位和摘要表达
 - [ ] 为当前网格策略增加参数护栏与危险参数拦截
 - [ ] 收敛更贴近实盘长期运行的风险规则和风险动作语义
 - [ ] 让策略状态与最近关键变化进入查询模型、事件流和界面展示

@@ -1004,8 +1004,7 @@ fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, the
                 Cell::from(order.side),
                 Cell::from(order.price),
                 Cell::from(order.qty),
-                Cell::from(strategy_state_label(state, &order.strategy_state)),
-                Cell::from(placement_state_label(state, order.placement_state)),
+                Cell::from(order.status),
             ])
         });
     frame.render_widget(
@@ -1015,7 +1014,6 @@ fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, the
                 Constraint::Length(6),
                 Constraint::Length(10),
                 Constraint::Length(8),
-                Constraint::Length(10),
                 Constraint::Min(10),
             ],
         )
@@ -1024,8 +1022,7 @@ fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, the
                 copy.dashboard().side_header(),
                 copy.dashboard().price_header(),
                 copy.dashboard().qty_header(),
-                copy.grid().strategy_header(),
-                copy.grid().placement_header(),
+                copy.dashboard().status_header(),
             ])
             .style(theme.emphasis()),
         )
@@ -1703,18 +1700,6 @@ fn exchange_orders_unavailable_lines(state: &AppState, theme: &Theme) -> Vec<Lin
             Line::from(Span::styled(lines[1], theme.muted())),
         ]
     }
-}
-
-fn strategy_state_label(app_state: &AppState, state: &str) -> String {
-    locale::copy(app_state.ui.locale)
-        .common()
-        .strategy_state_label(state)
-}
-
-fn placement_state_label(app_state: &AppState, state: selectors::PlacementState) -> &'static str {
-    locale::copy(app_state.ui.locale)
-        .common()
-        .placement_state_label(state)
 }
 
 fn list_from_lines(
@@ -2455,14 +2440,42 @@ mod tests {
     }
 
     #[test]
-    fn grid_page_shows_strategy_orders_columns() {
+    fn grid_page_shows_only_live_strategy_orders() {
         let rendered = normalized_page_string(Page::Grid, 100, 16, |state| {
-            state.execution.open_orders_source = crate::protocol::OpenOrdersSource::ExchangeLive;
+            state.execution.open_orders_source = crate::protocol::OpenOrdersSource::StrategyMirror;
+            state.execution.exchange_open_orders_source =
+                crate::protocol::OpenOrdersSource::ExchangeLive;
+            state.execution.exchange_open_orders = vec![
+                crate::protocol::OpenOrder {
+                    order_id: "real_ord_01".into(),
+                    client_order_id: "grid_sell_live_01".into(),
+                    side: "sell".into(),
+                    price: 42424.25,
+                    qty: 0.2,
+                    filled_qty: 0.0,
+                    status: "NEW".into(),
+                    created_at: "2025-01-01T00:00:00Z".into(),
+                    updated_at: "2025-01-01T00:00:00Z".into(),
+                },
+                crate::protocol::OpenOrder {
+                    order_id: "manual_ord_01".into(),
+                    client_order_id: "manual_sell_01".into(),
+                    side: "sell".into(),
+                    price: 99999.99,
+                    qty: 0.5,
+                    filled_qty: 0.0,
+                    status: "NEW".into(),
+                    created_at: "2025-01-01T00:00:00Z".into(),
+                    updated_at: "2025-01-01T00:00:00Z".into(),
+                },
+            ];
         });
 
         assert!(rendered.contains("StrategyOrders"));
-        assert!(rendered.contains("Strategy"));
-        assert!(rendered.contains("Placement"));
+        assert!(rendered.contains("Status"));
+        assert!(!rendered.contains("Placement"));
+        assert!(rendered.contains("42424.25"));
+        assert!(!rendered.contains("99999.99"));
     }
 
     #[test]
@@ -2494,7 +2507,7 @@ mod tests {
 
         assert!(rendered.contains("StrategyOrders"));
         assert!(rendered.contains("ExchangeOrders"));
-        assert!(rendered.contains("theclientcannotprovethestrategyorders"));
+        assert!(rendered.contains("currentopenorders"));
     }
 
     #[test]

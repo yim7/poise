@@ -154,53 +154,33 @@ pub fn open_order_items(state: &AppState, limit: usize) -> Vec<OpenOrderItemView
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementState {
-    Live,
-    NotPlaced,
-    NotExpected,
-    Unknown,
-}
-
-impl PlacementState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Live => "live",
-            Self::NotPlaced => "not_placed",
-            Self::NotExpected => "not_expected",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyOrderItemViewModel {
     pub side: String,
     pub price: String,
     pub qty: String,
-    pub strategy_state: String,
-    pub placement_state: PlacementState,
+    pub status: String,
 }
 
 pub fn strategy_orders(state: &AppState) -> Vec<StrategyOrderItemViewModel> {
-    let mut levels = state.strategy.levels.clone();
-    levels.sort_by(|a, b| {
+    let mut orders = strategy_order_source(state)
+        .iter()
+        .filter(|order| is_strategy_managed_order(state, order))
+        .cloned()
+        .collect::<Vec<_>>();
+    orders.sort_by(|a, b| {
         a.price
             .partial_cmp(&b.price)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    levels
+    orders
         .iter()
-        .map(|level| StrategyOrderItemViewModel {
-            side: match level.side {
-                GridSide::Buy => "BUY".into(),
-                GridSide::Sell => "SELL".into(),
-            },
-            price: format!("{:.2}", level.price),
-            qty: format!("{:.3}", level.quantity),
-            strategy_state: grid_level_state_label(state.ui.locale, level.state).into(),
-            placement_state: placement_state_for_level(state, level),
+        .map(|order| StrategyOrderItemViewModel {
+            side: order.side.to_uppercase(),
+            price: format!("{:.2}", order.price),
+            qty: format!("{:.3}", order.qty),
+            status: order.status.clone(),
         })
         .collect()
 }
@@ -328,26 +308,20 @@ fn grid_level(locale: Locale, level: &GridLevel, last_price: f64) -> GridLevelVi
     }
 }
 
-fn placement_state_for_level(state: &AppState, level: &GridLevel) -> PlacementState {
-    match level.state {
-        GridLevelState::Occupied | GridLevelState::PendingRebuild => PlacementState::NotExpected,
-        GridLevelState::Active => match state.execution.exchange_open_orders_source {
-            OpenOrdersSource::ExchangeLive => {
-                if has_matching_open_order(state, level) {
-                    PlacementState::Live
-                } else {
-                    PlacementState::NotPlaced
-                }
-            }
-            OpenOrdersSource::StrategyMirror | OpenOrdersSource::Unavailable => {
-                PlacementState::Unknown
-            }
-        },
+fn strategy_order_source(state: &AppState) -> &[OpenOrder] {
+    if state.execution.exchange_open_orders_source == OpenOrdersSource::ExchangeLive {
+        &state.execution.exchange_open_orders
+    } else {
+        &[]
     }
 }
 
-fn has_matching_open_order(state: &AppState, level: &GridLevel) -> bool {
-    state.execution.exchange_open_orders.iter().any(|order| {
+fn is_strategy_managed_order(state: &AppState, order: &OpenOrder) -> bool {
+    if order.client_order_id.starts_with("grid_") {
+        return true;
+    }
+
+    state.strategy.levels.iter().any(|level| {
         level
             .client_order_id
             .as_ref()
@@ -830,22 +804,26 @@ mod tests {
     }
 
     #[test]
-    fn placement_state_rules_cover_live_not_placed_not_expected_and_unknown() {
+    fn strategy_orders_only_show_current_real_strategy_orders() {
         let mut live_state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
         live_state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
         live_state.execution.exchange_open_orders = live_state.execution.open_orders.clone();
         let vm = strategy_orders(&live_state);
-        assert_eq!(vm[0].placement_state, PlacementState::NotExpected);
-        assert_eq!(vm[1].placement_state, PlacementState::Live);
-        assert_eq!(vm[2].placement_state, PlacementState::NotPlaced);
+        assert_eq!(vm.len(), 1);
+        assert_eq!(vm[0].side, "SELL");
+        assert_eq!(vm[0].price, "100.00");
+        assert_eq!(vm[0].qty, "0.100");
+        assert_eq!(vm[0].status, "NEW");
 
-        live_state.strategy.levels[1].state = GridLevelState::Occupied;
+        live_state.execution.exchange_open_orders.clear();
         let vm = strategy_orders(&live_state);
-        assert_eq!(vm[1].placement_state, PlacementState::NotExpected);
+        assert!(vm.is_empty());
 
-        let mirror_state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
+        let mut mirror_state = strategy_order_fixture(OpenOrdersSource::StrategyMirror);
+        mirror_state.execution.exchange_open_orders_source = OpenOrdersSource::StrategyMirror;
+        mirror_state.execution.exchange_open_orders = mirror_state.execution.open_orders.clone();
         let vm = strategy_orders(&mirror_state);
-        assert_eq!(vm[1].placement_state, PlacementState::Unknown);
+        assert!(vm.is_empty());
     }
 
     #[test]
@@ -933,6 +911,20 @@ mod tests {
             created_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
         }];
+        state
+            .execution
+            .open_orders
+            .push(crate::protocol::OpenOrder {
+                order_id: "manual_ord_01".into(),
+                client_order_id: "manual_sell_01".into(),
+                side: "sell".into(),
+                price: 105.0,
+                qty: 0.100,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            });
         state
     }
 }

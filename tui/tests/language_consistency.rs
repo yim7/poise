@@ -3,7 +3,6 @@ use std::{collections::BTreeMap, fs, path::Path};
 use grid_platform_tui::{
     locale::{self, Locale},
     protocol::{CommandType, GridLevelState, StrategyStatus},
-    selectors::PlacementState,
     state::CommandTimelineStage,
 };
 
@@ -174,10 +173,8 @@ fn runtime_copy_samples(locale: Locale) -> BTreeMap<&'static str, String> {
             copy.common().strategy_state_label("ACTIVE"),
         ),
         (
-            "common.placement_state",
-            copy.common()
-                .placement_state_label(PlacementState::Live)
-                .to_string(),
+            "dashboard.status_header",
+            copy.dashboard().status_header().to_string(),
         ),
         (
             "selector.risk_action_hint",

@@ -1,6 +1,5 @@
 use crate::{
     protocol::{CommandType, GridLevelState, RiskLevel, StrategyStatus},
-    selectors,
     state::CommandTimelineStage,
 };
 
@@ -992,16 +991,16 @@ impl HelpCopy {
     pub fn glossary_lines(self) -> [&'static str; 4] {
         match self.locale {
             Locale::EnUs => [
-                "Strategy Orders: target orders produced by the strategy.",
+                "Strategy Orders: current open orders managed by the strategy.",
                 "Exchange Orders: shown only when live exchange data is available.",
-                "If the dashboard shows an unavailable notice,",
-                "the client cannot prove the strategy orders are live on the exchange.",
+                "Filled levels move to fills and position instead of staying here.",
+                "If exchange data is unavailable, this table stays empty.",
             ],
             Locale::ZhCn => [
-                "策略订单：由策略生成的目标订单。",
+                "策略订单：当前仍然挂着的真实策略单。",
                 "交易所挂单：仅在存在实时交易所数据时显示。",
-                "如果概览页显示不可用提示，",
-                "说明客户端无法证明策略订单已经真实存在于交易所。",
+                "已经成交的档位会进入成交和仓位，不再留在这里。",
+                "如果交易所数据不可用，这张表保持为空。",
             ],
         }
     }
@@ -1695,19 +1694,6 @@ impl CommonCopy {
             (Locale::ZhCn, "OCCUPIED") => "占用".into(),
             (Locale::ZhCn, "PENDING REBUILD") => "重建".into(),
             (_, other) => other.into(),
-        }
-    }
-
-    pub fn placement_state_label(self, state: selectors::PlacementState) -> &'static str {
-        match (self.locale, state) {
-            (Locale::EnUs, selectors::PlacementState::Live) => "Live",
-            (Locale::EnUs, selectors::PlacementState::NotPlaced) => "Missing",
-            (Locale::EnUs, selectors::PlacementState::NotExpected) => "N/A",
-            (Locale::EnUs, selectors::PlacementState::Unknown) => "Unknown",
-            (Locale::ZhCn, selectors::PlacementState::Live) => "在线",
-            (Locale::ZhCn, selectors::PlacementState::NotPlaced) => "缺失",
-            (Locale::ZhCn, selectors::PlacementState::NotExpected) => "N/A",
-            (Locale::ZhCn, selectors::PlacementState::Unknown) => "未知",
         }
     }
 
