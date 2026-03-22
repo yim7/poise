@@ -32,6 +32,8 @@ cargo run -p grid-platform-service
 - `GRID_PLATFORM_BINANCE_API_KEY=...`
 - `GRID_PLATFORM_BINANCE_API_SECRET=...`
 
+这些环境变量既可以直接 `export`，也可以写到当前工作目录或其父目录中的 `.env`。`service` 启动时会自动尝试加载 `.env`，同名进程环境变量优先。
+
 mainnet 额外约束：
 
 - 必须显式设置 `GRID_PLATFORM_ALLOW_MAINNET=1`

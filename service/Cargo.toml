@@ -9,6 +9,7 @@ async-trait = "0.1.89"
 axum = { version = "0.8.1", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4.40", default-features = false, features = ["clock"] }
 clap = { version = "4.5", features = ["derive"] }
+dotenvy = "0.15.7"
 futures-util.workspace = true
 hmac = "0.12.1"
 hex = "0.4.3"

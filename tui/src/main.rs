@@ -1,8 +1,9 @@
 use anyhow::Result;
-use grid_platform_tui::runtime::{AppConfig, run_app};
+use grid_platform_tui::runtime::{AppConfig, load_dotenv_if_present, run_app};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    load_dotenv_if_present().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     color_eyre::install().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     tracing_subscriber::fmt()
         .with_env_filter(

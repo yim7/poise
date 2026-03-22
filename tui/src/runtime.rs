@@ -33,6 +33,14 @@ pub struct AppConfig {
     pub ui_locale: Locale,
 }
 
+pub fn load_dotenv_if_present() -> Result<()> {
+    match dotenvy::dotenv() {
+        Ok(_) => Ok(()),
+        Err(error) if error.not_found() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl AppConfig {
     pub fn from_env() -> Self {
         let ui_locale = env::var("GRID_PLATFORM_UI_LOCALE")
@@ -52,14 +60,18 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, sync::Mutex};
+    use std::{env, fs, path::Path, sync::Mutex};
 
-    use super::{AppConfig, current_instance_matches};
+    use anyhow::Result;
+    use tempfile::TempDir;
+
+    use super::{AppConfig, current_instance_matches, load_dotenv_if_present};
     use crate::locale::Locale;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
+        key: &'static str,
         original: Option<String>,
     }
 
@@ -68,24 +80,49 @@ mod tests {
             // Restore the original process environment after each test.
             unsafe {
                 match &self.original {
-                    Some(value) => env::set_var("GRID_PLATFORM_UI_LOCALE", value),
-                    None => env::remove_var("GRID_PLATFORM_UI_LOCALE"),
+                    Some(value) => env::set_var(self.key, value),
+                    None => env::remove_var(self.key),
                 }
             }
         }
     }
 
-    fn set_ui_locale_env(value: Option<&str>) -> EnvGuard {
-        let original = env::var("GRID_PLATFORM_UI_LOCALE").ok();
+    struct CurrentDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.original).expect("restore current dir");
+        }
+    }
+
+    fn set_env(key: &'static str, value: Option<&str>) -> EnvGuard {
+        let original = env::var(key).ok();
 
         unsafe {
             match value {
-                Some(value) => env::set_var("GRID_PLATFORM_UI_LOCALE", value),
-                None => env::remove_var("GRID_PLATFORM_UI_LOCALE"),
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
             }
         }
 
-        EnvGuard { original }
+        EnvGuard { key, original }
+    }
+
+    fn set_ui_locale_env(value: Option<&str>) -> EnvGuard {
+        set_env("GRID_PLATFORM_UI_LOCALE", value)
+    }
+
+    fn with_temp_cwd(dir: &Path) -> CurrentDirGuard {
+        let original = env::current_dir().expect("current dir");
+        env::set_current_dir(dir).expect("set current dir");
+        CurrentDirGuard { original }
+    }
+
+    fn write_dotenv(dir: &Path, content: &str) -> Result<()> {
+        fs::write(dir.join(".env"), content.trim_start())?;
+        Ok(())
     }
 
     #[test]
@@ -102,6 +139,60 @@ mod tests {
         let _env_guard = set_ui_locale_env(Some("zh-CN"));
 
         assert_eq!(AppConfig::from_env().ui_locale, Locale::ZhCn);
+    }
+
+    #[test]
+    fn dotenv_file_is_loaded_before_app_config_reads_env() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let _cwd_guard = with_temp_cwd(temp.path());
+        let _base_url_guard = set_env("GRID_PLATFORM_BASE_URL", None);
+        let _ws_url_guard = set_env("GRID_PLATFORM_WS_URL", None);
+        let _locale_guard = set_env("GRID_PLATFORM_UI_LOCALE", None);
+
+        write_dotenv(
+            temp.path(),
+            r#"
+GRID_PLATFORM_BASE_URL=http://127.0.0.1:9001
+GRID_PLATFORM_WS_URL=ws://127.0.0.1:9001/ws
+GRID_PLATFORM_UI_LOCALE=zh-CN
+"#,
+        )?;
+
+        load_dotenv_if_present()?;
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.base_url, "http://127.0.0.1:9001");
+        assert_eq!(config.ws_url, "ws://127.0.0.1:9001/ws");
+        assert_eq!(config.ui_locale, Locale::ZhCn);
+        Ok(())
+    }
+
+    #[test]
+    fn process_env_overrides_dotenv_values_for_app_config() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let _cwd_guard = with_temp_cwd(temp.path());
+        let _base_url_guard = set_env("GRID_PLATFORM_BASE_URL", Some("http://127.0.0.1:9002"));
+        let _ws_url_guard = set_env("GRID_PLATFORM_WS_URL", Some("ws://127.0.0.1:9002/ws"));
+        let _locale_guard = set_env("GRID_PLATFORM_UI_LOCALE", Some("en-US"));
+
+        write_dotenv(
+            temp.path(),
+            r#"
+GRID_PLATFORM_BASE_URL=http://127.0.0.1:9001
+GRID_PLATFORM_WS_URL=ws://127.0.0.1:9001/ws
+GRID_PLATFORM_UI_LOCALE=zh-CN
+"#,
+        )?;
+
+        load_dotenv_if_present()?;
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.base_url, "http://127.0.0.1:9002");
+        assert_eq!(config.ws_url, "ws://127.0.0.1:9002/ws");
+        assert_eq!(config.ui_locale, Locale::EnUs);
+        Ok(())
     }
 
     #[test]
