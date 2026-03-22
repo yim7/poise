@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use clap::Parser;
+use dotenvy::dotenv;
 use grid_platform_service::{
     Application, ApplicationRegistry, build_app,
     config::{InstanceConfig, ServiceConfig, default_sqlite_path},
@@ -28,6 +29,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    load_dotenv_if_present().with_context(|| "failed to load .env")?;
+
     let cli = Cli::parse();
 
     let startup = startup::StartupConfig::from_env()?;
@@ -100,6 +103,14 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, router)
         .await
         .context("service stopped unexpectedly")
+}
+
+fn load_dotenv_if_present() -> anyhow::Result<()> {
+    match dotenv() {
+        Ok(_) => Ok(()),
+        Err(error) if error.not_found() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn binance_config_from_env() -> anyhow::Result<Option<BinanceConfig>> {

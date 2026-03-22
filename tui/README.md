@@ -26,6 +26,8 @@ cargo run -p grid-platform-tui
 GRID_PLATFORM_UI_LOCALE=zh-CN cargo run -p grid-platform-tui
 ```
 
+这些变量也可以写到当前工作目录或其父目录中的 `.env`。`tui` 启动时会自动尝试加载 `.env`，同名进程环境变量优先。
+
 可选值：
 
 - `en-US`
