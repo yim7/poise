@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use grid_platform_service::{
     Application,
     integrations::binance::{
-        BinanceTransport, ExchangeSymbol, MarketStreamEvent, PositionSnapshot,
+        BinanceTransport, ExchangeSymbol, MarketStreamEvent, PositionMode, PositionSnapshot,
         PositionSnapshotState, TradingSchedule, UserStreamEvent,
     },
     protocol::{OpenOrder, OpenOrdersSource},
@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 struct FakeBinanceTransport {
     exchange_info: ExchangeSymbol,
     trading_schedule: TradingSchedule,
+    position_mode: PositionMode,
     position: PositionSnapshotState,
     open_orders: Option<Vec<OpenOrder>>,
 }
@@ -33,11 +34,13 @@ impl FakeBinanceTransport {
                 symbol: "XAUUSDT".into(),
                 status: "TRADING".into(),
                 underlying_type: "COMMODITY".into(),
+                order_rules: None,
             },
             trading_schedule: TradingSchedule {
                 update_time_ms: 0,
                 market_schedules: std::collections::HashMap::new(),
             },
+            position_mode: PositionMode::OneWay,
             position: PositionSnapshotState::Flat,
             open_orders: Some(Vec::new()),
         }
@@ -58,6 +61,7 @@ impl FakeBinanceTransport {
         self.open_orders = None;
         self
     }
+
 }
 
 #[async_trait]
@@ -71,6 +75,10 @@ impl BinanceTransport for FakeBinanceTransport {
 
     async fn fetch_trading_schedule(&self) -> Result<TradingSchedule> {
         Ok(self.trading_schedule.clone())
+    }
+
+    async fn fetch_position_mode(&self) -> Result<PositionMode> {
+        Ok(self.position_mode)
     }
 
     async fn fetch_position_snapshot(&self, _symbol: &str) -> Result<PositionSnapshotState> {
@@ -130,6 +138,7 @@ async fn startup_preflight_collects_exchange_position_and_open_orders() -> Resul
 fn startup_reconcile_pauses_when_exchange_position_exists_but_persisted_runtime_is_flat() {
     let persisted = PersistedRuntime::sqlite_bootstrap();
     let exchange = StartupExchangeState {
+        position_mode: PositionMode::OneWay,
         position: PositionSnapshotState::Position(PositionSnapshot {
             symbol: "XAUUSDT".into(),
             qty: 1.0,
@@ -138,6 +147,7 @@ fn startup_reconcile_pauses_when_exchange_position_exists_but_persisted_runtime_
             realized_pnl: 0.0,
         }),
         open_orders: Some(vec![]),
+        order_rules: None,
     };
 
     let decision =
@@ -157,8 +167,10 @@ fn startup_reconcile_pauses_when_persisted_runtime_has_position_but_exchange_is_
     persisted.snapshot.runtime.position_avg_price = 2360.0;
 
     let exchange = StartupExchangeState {
+        position_mode: PositionMode::OneWay,
         position: PositionSnapshotState::Flat,
         open_orders: Some(vec![]),
+        order_rules: None,
     };
 
     let decision =
@@ -178,8 +190,10 @@ fn startup_reconcile_pauses_when_exchange_open_orders_differ_from_persisted_stat
     persisted.snapshot.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
 
     let exchange = StartupExchangeState {
+        position_mode: PositionMode::OneWay,
         position: PositionSnapshotState::Flat,
         open_orders: Some(vec![sample_open_order("grid_buy_02")]),
+        order_rules: None,
     };
 
     let decision =
@@ -189,6 +203,26 @@ fn startup_reconcile_pauses_when_exchange_open_orders_differ_from_persisted_stat
         decision,
         StartupDecision::Pause { code, .. }
             if code == "STARTUP_RECONCILE_OPEN_ORDERS_MISMATCH"
+    ));
+}
+
+#[test]
+fn startup_reconcile_pauses_when_binance_account_uses_hedge_mode() {
+    let persisted = PersistedRuntime::sqlite_bootstrap();
+    let exchange = StartupExchangeState {
+        position_mode: PositionMode::Hedge,
+        position: PositionSnapshotState::Flat,
+        open_orders: Some(vec![]),
+        order_rules: None,
+    };
+
+    let decision =
+        reconcile_startup(RuntimeMode::Testnet, &persisted, &exchange).expect("decision");
+
+    assert!(matches!(
+        decision,
+        StartupDecision::Pause { code, .. }
+            if code == "STARTUP_BINANCE_HEDGE_MODE_UNSUPPORTED"
     ));
 }
 
@@ -210,8 +244,10 @@ fn startup_apply_clears_stale_strategy_mirror_when_exchange_has_no_live_orders()
 
     let applied = StartupReport {
         exchange: StartupExchangeState {
+            position_mode: PositionMode::OneWay,
             position: PositionSnapshotState::Flat,
             open_orders: Some(vec![]),
+            order_rules: None,
         },
         decision: StartupDecision::Continue,
     }

@@ -184,6 +184,7 @@ mod tests {
             upper_price: 110.0,
             grid_levels: 6,
             max_position_notional: 3000.0,
+            exchange_rules: None,
         }
     }
 

@@ -288,6 +288,7 @@ fn seed_runtime(symbol: &str) -> PersistedRuntime {
         upper_price: 110.0,
         grid_levels: 6,
         max_position_notional: 3000.0,
+        exchange_rules: None,
     };
     runtime.snapshot.execution.open_orders.clear();
     runtime.snapshot.execution.recent_fills.clear();

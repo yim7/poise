@@ -254,6 +254,7 @@ async fn runtime_snapshot_payload_normalizes_open_orders_source_for_binance_boot
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,

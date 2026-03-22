@@ -225,6 +225,7 @@ fn apply_instance_config(
         upper_price: instance.range.upper_price,
         grid_levels: instance.range.grid_levels,
         max_position_notional: instance.range.max_position_notional,
+        exchange_rules: None,
     };
     runtime
 }

@@ -86,6 +86,19 @@ pub struct GridConfig {
     pub upper_price: f64,
     pub grid_levels: u32,
     pub max_position_notional: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange_rules: Option<ExchangeOrderRules>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExchangeOrderRules {
+    pub price_tick: f64,
+    pub price_precision: u32,
+    pub min_price: f64,
+    pub quantity_step: f64,
+    pub quantity_precision: u32,
+    pub min_qty: f64,
+    pub min_notional: f64,
 }
 
 impl Default for GridConfig {
@@ -95,6 +108,7 @@ impl Default for GridConfig {
             upper_price: 110.0,
             grid_levels: 6,
             max_position_notional: 3000.0,
+            exchange_rules: None,
         }
     }
 }
@@ -117,8 +131,56 @@ impl GridConfig {
         if self.grid_levels <= 1 {
             return 0.0;
         }
-        self.max_position_qty() / (self.grid_levels - 1) as f64
+        let base_qty = self.max_position_qty() / (self.grid_levels - 1) as f64;
+        self.exchange_rules
+            .as_ref()
+            .map(|rules| rules.normalize_quantity(base_qty, self.lower_price))
+            .unwrap_or(base_qty)
     }
+
+    pub fn normalize_price(&self, price: f64) -> f64 {
+        self.exchange_rules
+            .as_ref()
+            .map(|rules| rules.normalize_price(price))
+            .unwrap_or(price)
+    }
+}
+
+impl ExchangeOrderRules {
+    pub fn normalize_price(&self, price: f64) -> f64 {
+        let clamped = if self.min_price > f64::EPSILON {
+            price.max(self.min_price)
+        } else {
+            price
+        };
+        let aligned = if self.price_tick > f64::EPSILON {
+            (clamped / self.price_tick).round() * self.price_tick
+        } else {
+            clamped
+        };
+        round_to_precision(aligned, self.price_precision)
+    }
+
+    pub fn normalize_quantity(&self, quantity: f64, price_reference: f64) -> f64 {
+        let min_notional_qty = if self.min_notional > f64::EPSILON && price_reference > f64::EPSILON
+        {
+            self.min_notional / price_reference
+        } else {
+            0.0
+        };
+        let minimum = quantity.max(self.min_qty).max(min_notional_qty);
+        let aligned = if self.quantity_step > f64::EPSILON {
+            (minimum / self.quantity_step).ceil() * self.quantity_step
+        } else {
+            minimum
+        };
+        round_to_precision(aligned, self.quantity_precision)
+    }
+}
+
+fn round_to_precision(value: f64, precision: u32) -> f64 {
+    let scale = 10f64.powi(precision as i32);
+    (value * scale).round() / scale
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +249,7 @@ struct GridConfigWire {
     upper_price: Option<f64>,
     grid_levels: Option<u32>,
     max_position_notional: Option<f64>,
+    exchange_rules: Option<ExchangeOrderRules>,
     #[serde(rename = "spacing_bps")]
     _spacing_bps: Option<f64>,
     levels_per_side: Option<u32>,
@@ -248,6 +311,7 @@ impl GridConfigWire {
             upper_price,
             grid_levels,
             max_position_notional,
+            exchange_rules: self.exchange_rules,
         };
 
         if candidate.lower_price.is_finite()
@@ -795,6 +859,7 @@ fn sample_strategy() -> StrategyState {
             upper_price: 2386.28,
             grid_levels: 7,
             max_position_notional: 1416.89,
+            exchange_rules: None,
         },
         status: StrategyStatus::Occupied,
         center_price: 2361.48,

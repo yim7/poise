@@ -4,8 +4,13 @@ use anyhow::{Result, bail};
 use chrono::{SecondsFormat, Utc};
 
 use crate::{
-    integrations::binance::{BinanceTransport, PositionSnapshot, PositionSnapshotState},
-    protocol::{DEFAULT_INSTANCE_ID, OpenOrder, OpenOrdersSource, RuntimeState, SystemEvent},
+    integrations::binance::{
+        BinanceTransport, PositionMode, PositionSnapshot, PositionSnapshotState,
+    },
+    protocol::{
+        DEFAULT_INSTANCE_ID, ExchangeOrderRules, OpenOrder, OpenOrdersSource, RuntimeState,
+        SystemEvent,
+    },
     storage::PersistedRuntime,
 };
 
@@ -56,6 +61,8 @@ pub struct StartupConfig {
 pub struct StartupExchangeState {
     pub position: PositionSnapshotState,
     pub open_orders: Option<Vec<OpenOrder>>,
+    pub order_rules: Option<ExchangeOrderRules>,
+    pub position_mode: PositionMode,
 }
 
 impl StartupExchangeState {
@@ -171,6 +178,8 @@ impl StartupReport {
             }
         }
 
+        runtime.snapshot.strategy.config.exchange_rules = self.exchange.order_rules.clone();
+
         match &self.decision {
             StartupDecision::Continue => {}
             StartupDecision::Pause { code, message } => {
@@ -209,9 +218,12 @@ pub async fn collect_startup_exchange_state(
     symbol: &str,
     transport: Arc<dyn BinanceTransport>,
 ) -> Result<StartupExchangeState> {
+    let exchange_info = transport.fetch_exchange_info(symbol).await?;
     Ok(StartupExchangeState {
+        position_mode: transport.fetch_position_mode().await?,
         position: transport.fetch_position_snapshot(symbol).await?,
         open_orders: transport.fetch_open_orders(symbol).await?,
+        order_rules: exchange_info.order_rules,
     })
 }
 
@@ -226,6 +238,13 @@ pub fn reconcile_startup(
         return Ok(StartupDecision::Refuse {
             code: "STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE",
             message: "mainnet startup requires signed position and open-order snapshots".into(),
+        });
+    }
+
+    if exchange.position_mode == PositionMode::Hedge {
+        return Ok(StartupDecision::Pause {
+            code: "STARTUP_BINANCE_HEDGE_MODE_UNSUPPORTED",
+            message: "binance hedge mode is enabled; switch account to one-way mode".into(),
         });
     }
 

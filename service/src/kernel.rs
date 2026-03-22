@@ -17,9 +17,9 @@ use crate::execution::{
 };
 use crate::protocol::{
     CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
-    CommandType, ConnectionState, GridLevelState, GridSide, OpenOrder, OpenOrdersSource,
-    PROTOCOL_VERSION, PendingCommand, PriceUpdated, RecentFill, RiskEvent, RuntimeSnapshot,
-    StrategyStatus, SystemEvent,
+    CommandType, ConnectionState, ExchangeOrderRules, GridLevelState, GridSide, OpenOrder,
+    OpenOrdersSource, PROTOCOL_VERSION, PendingCommand, PriceUpdated, RecentFill, RiskEvent,
+    RuntimeSnapshot, StrategyStatus, SystemEvent,
 };
 use crate::storage::{PersistedRuntime, SqliteStorage};
 use crate::{risk, strategy};
@@ -131,6 +131,7 @@ pub struct RuntimePatch {
     pub symbol: Option<String>,
     pub env: Option<String>,
     pub session_state: Option<String>,
+    pub exchange_rules: Option<Option<ExchangeOrderRules>>,
     pub position_qty: Option<f64>,
     pub position_avg_price: Option<f64>,
     pub unrealized_pnl: Option<f64>,
@@ -1282,6 +1283,12 @@ impl RuntimeAggregate {
             && self.snapshot.runtime.session_state != session_state
         {
             self.snapshot.runtime.session_state = session_state;
+            changed = true;
+        }
+        if let Some(exchange_rules) = patch.exchange_rules
+            && self.snapshot.strategy.config.exchange_rules != exchange_rules
+        {
+            self.snapshot.strategy.config.exchange_rules = exchange_rules;
             changed = true;
         }
         if let Some(position_qty) = patch.position_qty

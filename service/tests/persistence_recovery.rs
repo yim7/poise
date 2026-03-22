@@ -386,6 +386,7 @@ async fn sqlite_binance_bootstrap_normalizes_open_orders_source_on_recovery() ->
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,

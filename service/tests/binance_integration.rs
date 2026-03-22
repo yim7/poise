@@ -19,8 +19,8 @@ use grid_platform_service::{
         TradingSchedule, TradingSession, UserStreamEvent, UserStreamOrderUpdate,
     },
     protocol::{
-        CommandRequest, CommandStatus, CommandType, GridConfig, OpenOrder, OpenOrdersSource,
-        RecentFill, RuntimeSnapshot, SystemEvent,
+        CommandRequest, CommandStatus, CommandType, ExchangeOrderRules, GridConfig, OpenOrder,
+        OpenOrdersSource, RecentFill, RuntimeSnapshot, SystemEvent,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
@@ -40,6 +40,7 @@ struct FakeBinanceTransport {
     user_connects: Arc<AtomicUsize>,
     keepalive_calls: Arc<AtomicUsize>,
     submit_calls: Arc<AtomicUsize>,
+    submit_requests: Arc<Mutex<Vec<SubmitOrderRequest>>>,
     cancel_calls: Arc<AtomicUsize>,
     cancel_result: Arc<Mutex<Option<Vec<OpenOrder>>>>,
     execution_enabled: bool,
@@ -58,6 +59,7 @@ impl FakeBinanceTransport {
             user_connects: Arc::new(AtomicUsize::new(0)),
             keepalive_calls: Arc::new(AtomicUsize::new(0)),
             submit_calls: Arc::new(AtomicUsize::new(0)),
+            submit_requests: Arc::new(Mutex::new(Vec::new())),
             cancel_calls: Arc::new(AtomicUsize::new(0)),
             cancel_result: Arc::new(Mutex::new(None)),
             execution_enabled: false,
@@ -99,6 +101,10 @@ impl FakeBinanceTransport {
 
     fn submit_calls(&self) -> usize {
         self.submit_calls.load(Ordering::SeqCst)
+    }
+
+    async fn submit_requests(&self) -> Vec<SubmitOrderRequest> {
+        self.submit_requests.lock().await.clone()
     }
 
     fn cancel_calls(&self) -> usize {
@@ -170,6 +176,7 @@ impl BinanceTransport for FakeBinanceTransport {
         _snapshot: &RuntimeSnapshot,
     ) -> Result<SubmitOrderResult> {
         self.submit_calls.fetch_add(1, Ordering::SeqCst);
+        self.submit_requests.lock().await.push(request.clone());
         if request.reduce_only {
             return Ok(SubmitOrderResult {
                 open_order: None,
@@ -236,6 +243,7 @@ async fn fake_binance_market_sync_updates_session_prices_stale_and_reconnects() 
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -367,6 +375,7 @@ async fn binance_bootstrap_without_sqlite_clears_sample_runtime_before_backgroun
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms_or_zero(),
@@ -416,6 +425,7 @@ async fn sqlite_binance_sync_persists_latest_runtime_for_recovery() -> Result<()
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -540,6 +550,7 @@ async fn sqlite_binance_bootstrap_seeds_runtime_config_before_background_sync() 
             symbol: "BTCUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "CRYPTO".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms_or_zero(),
@@ -578,6 +589,7 @@ async fn sqlite_binance_stream_sync_retries_after_temporary_persist_failure() ->
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -687,6 +699,7 @@ async fn fake_binance_user_stream_updates_position_snapshot() -> Result<()> {
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -766,6 +779,7 @@ async fn fake_binance_bootstrap_and_user_stream_sync_real_exchange_open_orders()
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -856,6 +870,7 @@ async fn binance_mode_routes_strategy_placements_through_transport_execution() -
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -915,6 +930,7 @@ async fn binance_mode_routes_strategy_cancels_through_transport_without_absorbin
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -1024,6 +1040,7 @@ async fn startup_clears_stale_strategy_mirror_so_resume_can_replace_real_binance
         upper_price: 110.0,
         grid_levels: 6,
         max_position_notional: 3000.0,
+        exchange_rules: None,
     };
     persisted.snapshot.execution.open_orders = vec![
         stale_strategy_order("buy", 1, 90.0),
@@ -1042,6 +1059,7 @@ async fn startup_clears_stale_strategy_mirror_so_resume_can_replace_real_binance
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -1101,6 +1119,102 @@ async fn startup_clears_stale_strategy_mirror_so_resume_can_replace_real_binance
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binance_resume_aligns_strategy_orders_to_exchange_filters() -> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "BTCUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "CRYPTO".into(),
+            order_rules: Some(btc_testnet_order_rules()),
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::new(),
+        },
+    )
+    .with_execution_enabled();
+    let (market_tx, market_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot.runtime.symbol = "BTCUSDT".into();
+    runtime.snapshot.runtime.env = "testnet".into();
+    runtime.snapshot.runtime.strategy_state = "paused".into();
+    runtime.snapshot.strategy.config = GridConfig {
+        lower_price: 65000.0,
+        upper_price: 72000.0,
+        grid_levels: 50,
+        max_position_notional: 5000.0,
+        exchange_rules: None,
+    };
+    let mut config = BinanceConfig::testnet("BTCUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_runtime_and_binance(
+        runtime,
+        config,
+        Arc::new(transport.clone()),
+    );
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.http_available
+            && snapshot.connection.ws_connected
+            && snapshot.runtime.session_state == "continuous"
+    })
+    .await
+    .context("binance runtime did not finish metadata bootstrap before resume")?;
+
+    market_tx
+        .send(MarketStreamEvent {
+            event_time_ms: now_ms + 1_000,
+            last_price: Some(68594.3),
+            mark_price: Some(68637.9),
+        })
+        .await
+        .context("failed to send market event for BTC strategy placement")?;
+
+    wait_until(Duration::from_secs(2), || {
+        app.snapshot().runtime.mark_price > 0.0
+    })
+    .await
+    .context("market price did not reach runtime before resume")?;
+
+    let accepted = app
+        .submit_command(
+            CommandType::Resume,
+            CommandRequest {
+                command_id: "cmd_resume_btc_exchange_filters".into(),
+            },
+        )
+        .await?;
+    assert_eq!(accepted.status, CommandStatus::Accepted);
+
+    wait_until(Duration::from_secs(2), || transport.submit_calls() == 50)
+        .await
+        .context("resume did not submit expected BTC strategy orders")?;
+
+    let submit_requests = transport.submit_requests().await;
+    assert_eq!(submit_requests.len(), 50);
+    assert!(submit_requests.iter().all(|request| request.qty == 0.002));
+    assert_eq!(
+        submit_requests
+            .iter()
+            .find(|request| request.client_order_id == "grid_buy_02")
+            .map(|request| request.price),
+        Some(65142.9)
+    );
+
+    Ok(())
+}
+
 async fn wait_until<F>(within: Duration, predicate: F) -> Result<()>
 where
     F: Fn() -> bool,
@@ -1114,6 +1228,18 @@ where
             return Err(anyhow!("timed out waiting for expected condition"));
         }
         sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn btc_testnet_order_rules() -> ExchangeOrderRules {
+    ExchangeOrderRules {
+        price_tick: 0.1,
+        price_precision: 2,
+        min_price: 261.1,
+        quantity_step: 0.001,
+        quantity_precision: 3,
+        min_qty: 0.001,
+        min_notional: 100.0,
     }
 }
 

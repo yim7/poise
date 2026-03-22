@@ -31,8 +31,8 @@ pub fn reconcile(
     } else {
         GridConfig::default()
     };
-    let lower_bound = round_price(config.lower_price);
-    let upper_bound = round_price(config.upper_price);
+    let lower_bound = round_price(config.normalize_price(config.lower_price));
+    let upper_bound = round_price(config.normalize_price(config.upper_price));
     let center_price = round_price(config.midpoint_price());
     let occupied_count = occupied_levels(runtime.position_qty, config.quantity_per_level());
 
@@ -123,7 +123,7 @@ fn build_levels(market_price: f64, config: &GridConfig) -> Vec<GridLevel> {
 
     let mut levels = Vec::with_capacity(config.grid_levels as usize);
     for index in 0..config.grid_levels {
-        let price = round_price(config.lower_price + step * index as f64);
+        let price = round_price(config.normalize_price(config.lower_price + step * index as f64));
         let side = if price < market_price - EPSILON {
             Some(GridSide::Buy)
         } else if price > market_price + EPSILON {
@@ -341,6 +341,7 @@ mod tests {
             upper_price: 110.0,
             grid_levels: 6,
             max_position_notional: 3000.0,
+            exchange_rules: None,
         }
     }
 }

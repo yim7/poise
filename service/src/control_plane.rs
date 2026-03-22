@@ -603,7 +603,7 @@ async fn emit_price_tick(
     let tick = default_application(&registry)
         .emit_price_tick()
         .await
-        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+        .map_err(|error| ApiError::unavailable(format!("{error:#}")))?;
     Ok(Json(success(tick)))
 }
 
@@ -614,7 +614,7 @@ async fn emit_price_tick_for_instance(
     let tick = application_for_symbol(&registry, &symbol)?
         .emit_price_tick()
         .await
-        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+        .map_err(|error| ApiError::unavailable(format!("{error:#}")))?;
     Ok(Json(success(tick)))
 }
 
@@ -626,7 +626,7 @@ async fn issue_command(
     let accepted = application
         .submit_command(command, request)
         .await
-        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+        .map_err(|error| ApiError::unavailable(format!("{error:#}")))?;
     Ok(Json(success(accepted)))
 }
 

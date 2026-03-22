@@ -23,7 +23,10 @@ use crate::{
         SubmitOrderResult,
     },
     kernel::{EngineHandle, RuntimePatch},
-    protocol::{ConnectionState, OpenOrder, OpenOrdersSource, RecentFill, RuntimeSnapshot},
+    protocol::{
+        ConnectionState, ExchangeOrderRules, OpenOrder, OpenOrdersSource, RecentFill,
+        RuntimeSnapshot,
+    },
     storage::PersistedRuntime,
 };
 
@@ -133,6 +136,7 @@ pub struct ExchangeSymbol {
     pub symbol: String,
     pub status: String,
     pub underlying_type: String,
+    pub order_rules: Option<ExchangeOrderRules>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,6 +175,13 @@ pub struct PositionSnapshot {
     pub realized_pnl: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionMode {
+    Unavailable,
+    OneWay,
+    Hedge,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PositionSnapshotState {
     Unavailable,
@@ -204,6 +215,9 @@ pub trait BinanceTransport: Send + Sync + 'static {
     async fn fetch_trading_schedule(&self) -> Result<TradingSchedule>;
     fn supports_execution(&self) -> bool {
         false
+    }
+    async fn fetch_position_mode(&self) -> Result<PositionMode> {
+        Ok(PositionMode::Unavailable)
     }
     async fn fetch_position_snapshot(&self, _symbol: &str) -> Result<PositionSnapshotState> {
         Ok(PositionSnapshotState::Unavailable)
@@ -333,14 +347,6 @@ impl RealBinanceTransport {
         T: for<'de> Deserialize<'de>,
     {
         let (status, body) = self.signed_response_text(Method::GET, path, query).await?;
-        decode_response_body(status, body)
-    }
-
-    async fn signed_json<T>(&self, method: Method, path: &str, query: &str) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let (status, body) = self.signed_response_text(method, path, query).await?;
         decode_response_body(status, body)
     }
 
@@ -497,10 +503,12 @@ impl BinanceTransport for RealBinanceTransport {
             .into_iter()
             .find(|item| item.symbol == symbol)
             .ok_or_else(|| anyhow!("symbol {symbol} not found in exchangeInfo"))?;
+        let order_rules = symbol_info.into_order_rules();
         Ok(ExchangeSymbol {
             symbol: symbol_info.symbol,
             status: symbol_info.status,
             underlying_type: symbol_info.underlying_type,
+            order_rules,
         })
     }
 
@@ -531,6 +539,21 @@ impl BinanceTransport for RealBinanceTransport {
 
     fn supports_execution(&self) -> bool {
         true
+    }
+
+    async fn fetch_position_mode(&self) -> Result<PositionMode> {
+        if self.api_key.is_none() || self.api_secret.is_none() {
+            return Ok(PositionMode::Unavailable);
+        }
+
+        let response: PositionModeResponse = self
+            .get_signed_json("/fapi/v1/positionSide/dual", "")
+            .await?;
+        Ok(if response.dual_side_position {
+            PositionMode::Hedge
+        } else {
+            PositionMode::OneWay
+        })
     }
 
     async fn connect_market_stream(
@@ -657,9 +680,13 @@ impl BinanceTransport for RealBinanceTransport {
     ) -> Result<SubmitOrderResult> {
         let symbol = &snapshot.runtime.symbol;
         let query = build_submit_order_query(symbol, &request);
-        let response: SubmitOrderResponse = self
-            .signed_json(Method::POST, "/fapi/v1/order", &query)
+        let (status, body) = self
+            .signed_response_text(Method::POST, "/fapi/v1/order", &query)
             .await?;
+        if is_position_mode_mismatch_error(status, &body) {
+            anyhow::bail!("binance hedge mode is enabled; grid strategy requires one-way mode");
+        }
+        let response: SubmitOrderResponse = decode_response_body(status, body)?;
         Ok(response.into_submit_result(&request))
     }
 
@@ -817,6 +844,7 @@ async fn run_metadata_loop(
             engine
                 .sync_runtime(RuntimePatch {
                     session_state: Some(session_state),
+                    exchange_rules: Some(exchange_info.order_rules.clone()),
                     ..RuntimePatch::default()
                 })
                 .await?;
@@ -1170,6 +1198,13 @@ fn is_missing_order_error(status: reqwest::StatusCode, body: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn is_position_mode_mismatch_error(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST
+        && serde_json::from_str::<BinanceErrorResponse>(body)
+            .map(|error| error.code == -4061)
+            .unwrap_or(false)
+}
+
 fn build_submit_order_query(symbol: &str, request: &SubmitOrderRequest) -> String {
     let side = request.side.to_ascii_uppercase();
     if request.reduce_only {
@@ -1487,6 +1522,48 @@ struct ExchangeInfoSymbol {
     status: String,
     #[serde(rename = "underlyingType")]
     underlying_type: String,
+    #[serde(rename = "pricePrecision")]
+    price_precision: u32,
+    #[serde(rename = "quantityPrecision")]
+    quantity_precision: u32,
+    #[serde(default)]
+    filters: Vec<ExchangeInfoFilter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExchangeInfoFilter {
+    #[serde(rename = "filterType")]
+    filter_type: String,
+    #[serde(
+        rename = "tickSize",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    tick_size: Option<f64>,
+    #[serde(
+        rename = "minPrice",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    min_price: Option<f64>,
+    #[serde(
+        rename = "stepSize",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    step_size: Option<f64>,
+    #[serde(
+        rename = "minQty",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    min_qty: Option<f64>,
+    #[serde(
+        rename = "notional",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    notional: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1544,6 +1621,12 @@ struct ListenKeyResponse {
 struct ServerTimeResponse {
     #[serde(rename = "serverTime")]
     server_time_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PositionModeResponse {
+    #[serde(rename = "dualSidePosition")]
+    dual_side_position: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1709,6 +1792,35 @@ impl OpenOrdersResponseOrder {
     }
 }
 
+impl ExchangeInfoSymbol {
+    fn into_order_rules(&self) -> Option<ExchangeOrderRules> {
+        let price_filter = self
+            .filters
+            .iter()
+            .find(|filter| filter.filter_type == "PRICE_FILTER")?;
+        let lot_size_filter = self
+            .filters
+            .iter()
+            .find(|filter| filter.filter_type == "LOT_SIZE")?;
+        let min_notional = self
+            .filters
+            .iter()
+            .find(|filter| filter.filter_type == "MIN_NOTIONAL")
+            .and_then(|filter| filter.notional)
+            .unwrap_or(0.0);
+
+        Some(ExchangeOrderRules {
+            price_tick: price_filter.tick_size.unwrap_or(0.0),
+            price_precision: self.price_precision,
+            min_price: price_filter.min_price.unwrap_or(0.0),
+            quantity_step: lot_size_filter.step_size.unwrap_or(0.0),
+            quantity_precision: self.quantity_precision,
+            min_qty: lot_size_filter.min_qty.unwrap_or(0.0),
+            min_notional,
+        })
+    }
+}
+
 impl SubmitOrderResponse {
     fn into_submit_result(self, request: &SubmitOrderRequest) -> SubmitOrderResult {
         let updated_at_ms = self
@@ -1804,7 +1916,7 @@ mod tests {
         extract::{Query, State},
         http::StatusCode,
         response::IntoResponse,
-        routing::{delete, get},
+        routing::{get, post},
     };
     use std::fs;
     use tokio::sync::{Mutex, mpsc};
@@ -1900,6 +2012,14 @@ mod tests {
             .into_response()
     }
 
+    async fn mock_submit_order_hedge_mode() -> impl IntoResponse {
+        (
+            StatusCode::BAD_REQUEST,
+            r#"{"code":-4061,"msg":"Order's position side does not match user's setting."}"#,
+        )
+            .into_response()
+    }
+
     async fn spawn_signed_request_test_server(
         state: SignedRequestTestState,
     ) -> (String, tokio::task::JoinHandle<()>) {
@@ -1910,7 +2030,10 @@ mod tests {
         let app = Router::new()
             .route("/fapi/v1/time", get(mock_server_time))
             .route("/fapi/v1/openOrders", get(mock_open_orders))
-            .route("/fapi/v1/order", delete(mock_cancel_order))
+            .route(
+                "/fapi/v1/order",
+                post(mock_submit_order_hedge_mode).delete(mock_cancel_order),
+            )
             .with_state(state);
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test server");
@@ -2138,5 +2261,41 @@ mod tests {
         assert_eq!(state.cancel_requests.load(Ordering::SeqCst), 1);
         assert_eq!(open_orders.len(), 1);
         assert_eq!(open_orders[0].order_id, "42");
+    }
+
+    #[tokio::test]
+    async fn submit_order_surfaces_hedge_mode_mismatch_with_actionable_message() {
+        let state = SignedRequestTestState::new(Utc::now().timestamp_millis());
+        let (rest_base_url, server) = spawn_signed_request_test_server(state).await;
+
+        let mut config = BinanceConfig::testnet("ETHUSDT");
+        config.rest_base_url = rest_base_url;
+        config.api_key = Some("test-api-key".into());
+        config.api_secret = Some("test-api-secret".into());
+
+        let transport = RealBinanceTransport::new(&config).expect("transport");
+        let mut snapshot = PersistedRuntime::sqlite_bootstrap().snapshot;
+        snapshot.runtime.symbol = "ETHUSDT".into();
+
+        let error = transport
+            .submit_order(
+                SubmitOrderRequest {
+                    command_id: Some("cmd_submit_hedge".into()),
+                    order_id: "ord_001".into(),
+                    client_order_id: "grid_buy_01".into(),
+                    side: "buy".into(),
+                    price: 3000.0,
+                    qty: 0.1,
+                    reduce_only: false,
+                },
+                &snapshot,
+            )
+            .await
+            .expect_err("hedge-mode mismatch should be surfaced as an actionable error");
+
+        server.abort();
+
+        assert!(error.to_string().contains("hedge mode"));
+        assert!(error.to_string().contains("one-way mode"));
     }
 }

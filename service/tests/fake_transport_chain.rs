@@ -29,6 +29,7 @@ async fn fake_transport_market_event_drives_paper_fill_into_service_snapshot() -
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -101,6 +102,7 @@ async fn fake_transport_trade_only_event_uses_latest_trade_price_for_paper_fill(
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
@@ -175,6 +177,7 @@ async fn fake_transport_bootstrap_waits_for_first_market_price_before_placing_gr
             symbol: "XAUUSDT".into(),
             status: "TRADING".into(),
             underlying_type: "COMMODITY".into(),
+            order_rules: None,
         },
         TradingSchedule {
             update_time_ms: now_ms,
