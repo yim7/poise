@@ -12,14 +12,19 @@
 - 协议模型与兼容文档
 - TUI 可用骨架
 - 本地用户侧 E2E 基线
-- `service` 默认 bootstrap 已切换到已知空业务态，不再返回 `sample`
-- TUI 首屏已改成“等待首次快照 / 失败重试 / Ready”三态，不再展示伪造持仓、PnL、挂单和成交
+- `K4` 执行闭环与命令语义做实
+- `K5` 网格策略与风控
+- `K6` replay / paper / testnet 验证
+- `K7` Web UI 查询模型与能力边界预备
+- `K8` TUI 中英文切换
+- `K9` 主网运行安全底座
 
 当前最重要的判断是：
 
-- 近期主线已经切换为 `K8`：TUI 中英文切换
-- 开发顺序按测试优先推进
-- `K8` 不是继续扩展新的交易页面，而是为现有 `tui` 页面补本地化基础设施
+- 近期主线已经切换为 `K10`：单实例 `7x24` 值守硬化
+- 开发顺序继续按测试优先推进
+- 当前阶段继续采用“实例感知，单实例验收”的边界
+- 同一环境下的多实例支持由另一线程推进，但本主线只要求一个已配置实例达到 mainnet 自动运行与本地值守标准
 
 ## 2. 测试优先执行原则
 
@@ -31,18 +36,7 @@
 - 接口与协议测试：覆盖 HTTP / WS envelope、路由行为和协议字段兼容。
 - 本地 E2E：覆盖 `service -> transport -> tui -> 用户动作 -> service` 的关键闭环。
 
-### 2.2 当前必保的本地验收路径
-
-- 首次 `snapshot` 未返回时，TUI 明确显示等待态并禁用运行态操作
-- 首次 `snapshot` 失败时，TUI 明确显示失败重试态，不回退到 `sample`
-- 服务端返回空 bootstrap 时，TUI 首次快照成功后进入 `Ready` 并显示真实空态
-- 冷启动后成功拉取 `snapshot`
-- WebSocket 连通并接收增量事件
-- 模拟行情 tick 后 TUI 状态更新
-- `pause / resume / flatten` 命令进入时间线并收到结果
-- 重连成功后重新拉取 `snapshot`
-
-### 2.3 完成定义
+### 2.2 完成定义
 
 一个功能项只有在满足下面条件后才算完成：
 
@@ -50,196 +44,95 @@
 - 相关单测、集成测试和本地 E2E 通过
 - 对外协议和客户端体验没有无意回退
 
-## 3. 里程碑 K4：执行闭环与命令语义做实
+## 3. 里程碑 K9：主网运行安全底座
 
 ### 目标
 
-把命令从“控制面已接收”推进到“真实执行已完成/失败/超时”的闭环语义。
-
-### 先补的测试
-
-1. 为执行适配层补 fake execution transport 测试。
-2. 为 `pause / resume / cancel-all / flatten-now / shutdown-after-flatten` 补命令终态测试。
-3. 为幂等、重试和超时补内核测试。
-4. 扩展本地 E2E，覆盖撤单、平仓、重连后命令终态恢复。
-
-### 实施任务
-
-1. 建立执行适配层边界，并把下单、撤单、查单、成交回报统一接线。
-2. 定义 `command_id` 与 `client_order_id / order_id / trade_id` 的关联模型。
-3. 让命令生命周期统一输出 `accepted / ack / failed / timed_out`。
-4. 让 `open orders`、`fills` 和命令时间线共享同一组执行事实。
-5. 把执行失败原因、超时原因和幂等命中原因纳入审计和 WebSocket 事件。
-6. 让 TUI 时间线和事件页能看到真实执行结果，而不是只看控制面回包。
-
-### K4 验收标准
-
-- 命令不再只是内存状态切换
-- `ack / failure / timeout` 有明确业务意义
-- open orders 与 fills 可与命令轨迹关联
-- K4 对应测试矩阵全部通过
+让一个已配置实例具备进入 mainnet 自动运行的最低安全资格。
 
 ### 当前状态
 
-- 已完成 execution adapter 显式接口、异步 `accepted / ack / failed / timed_out`、命令关联链路、执行重试与 TUI 联动
-- `pause / resume` 已通过策略执行 gate 真实作用于“是否继续新增网格挂单”
-- K4 验收条件已满足
+- 已完成 `paper / testnet / mainnet` 运行级别解析与 `GRID_PLATFORM_ALLOW_MAINNET=1` 显式开启规则
+- 已完成实例级默认 SQLite 路径推导，默认路径按 `.data/<mode>/<instance_id>.db` 生成
+- 已完成 Binance 启动前签名持仓 / 挂单快照收集，mainnet 缺少签名状态会拒绝启动
+- 已完成启动对账决策，持仓或交易所挂单不一致时会先进入暂停态并记录稳定原因码
+- 已完成 `SystemEvent.code` 的持久化与 `/query/alerts` 暴露
+- 已完成运行期硬保护自动暂停，覆盖 breaker 命中与连续策略同步失败
+- 已通过 `cargo test -p grid-platform-service --lib`
+- 已通过 `cargo test -p grid-platform-service --test cli -- --nocapture`
+- 已通过 `cargo test -p grid-platform-service --test mainnet_bootstrap -- --nocapture`
+- 已通过 `cargo test -p grid-platform-service --test control_plane -- --nocapture`
+- 已通过 `cargo test -p grid-platform-service --test persistence_recovery -- --nocapture`
+- 已通过 `cargo test -p grid-platform-service --test kernel_flow -- --nocapture`
+- 已通过 `cargo test`
 
-## 4. 里程碑 K5：网格策略与风控
+### 验收结论
+
+- mainnet 必须显式开启，默认不会误入
+- mainnet 缺少签名持仓 / 挂单快照时，实例会拒绝启动
+- 启动对账失败时，实例会进入暂停态而不是继续自动下单
+- 稳定原因码已进入事件、持久化和查询模型
+- 运行期硬保护会自动暂停策略并留下明确原因
+- K9 验收条件已满足
+
+## 4. 里程碑 K10：单实例 `7x24` 值守硬化
 
 ### 目标
 
-让 `service` 进入真正的网格运行与风险控制阶段。
+让已经具备 mainnet 准入资格的实例具备长期本地值守所需的运行、告警与恢复能力。
 
 ### 先补的测试
 
-1. 为网格配置校验补单元测试。
-2. 为网格状态机和重建逻辑补状态流转测试。
-3. 为最大仓位、止损、单日亏损和 breaker 触发补风险测试。
-4. 为 TUI `Grid` 和风险态展示补回归快照。
+1. 为单实例重复启动保护补测试。
+2. 为长连接退化与恢复补测试。
+3. 为统一健康状态 `healthy / degraded / must_pause` 补状态迁移测试。
+4. 为自动暂停后的值守信息与告警补测试。
+5. 为服务重启后的健康状态重建补测试。
 
 ### 实施任务
 
-1. 定义网格配置 schema 和运行参数。
-2. 实现 `active / occupied / pending_rebuild` 状态模型。
-3. 建立网格层生成与重建规则。
-4. 把策略输出接到执行适配层，而不是直接改订单镜像。
-5. 接入风险阈值、breaker 和风险事件。
-6. 让 TUI `Grid` 页面展示策略状态而不是单纯订单列表。
-
-### K5 验收标准
-
-- `service` 内部有真实策略状态机
-- `Grid` 页面显示的是策略模型而非订单镜像
-- 风险事件可观测、可操作
-- K5 对应测试矩阵全部通过
+1. 固化单实例部署、工作目录、数据目录与日志目录约定。
+2. 增加重复启动保护与优雅停机流程。
+3. 抽出统一健康状态与自动降级语义。
+4. 为本地值守补足告警分类、确认与关键信息展示。
+5. 定义并打通常见故障的恢复路径与恢复后状态结论。
 
 ### 当前状态
 
-- 已完成 `strategy` 协议模型、网格配置 schema、层级生成、`active / occupied / pending_rebuild` 状态流转
-- 已完成最大仓位、止损、单日亏损与 breaker 的统一评估、`risk_alert` 广播与持久化
-- 已完成 TUI `Grid / Dashboard / Events` 对策略态、风险阈值和操作建议的联动展示
-- K5 验收条件已满足
+- 已完成里程碑设计，待开始测试与实现
 
-## 5. 里程碑 K6：回放 / paper / testnet 验证
+## 5. 里程碑 K11：单实例实盘策略收敛
 
 ### 目标
 
-建立可重复验证链路，把系统从“能运行”推进到“能被证明”。
+把当前网格策略从“已经能运行”推进到“更适合单实例 mainnet 长时间运行”。
 
 ### 先补的测试
 
-1. 为 replay runner 和 paper fill 逻辑补场景测试。
-2. 为 fake service / fake transport 集成链路补测试。
-3. 为 testnet 下单、撤单、恢复流程补最小冒烟验证。
+1. 为策略参数护栏与危险组合拦截补测试。
+2. 为实盘风控规则补测试，覆盖单日亏损、连续异常成交、连续重建失败与异常波动暂停新挂单。
+3. 为风控后的策略动作补测试。
+4. 为策略状态解释字段与最近关键变化补测试。
+5. 为复盘时间线补回归测试。
 
 ### 实施任务
 
-1. 实现 replay runner 和录制/回放输入格式。
-2. 实现 paper execution 与 fill 模拟规则。
-3. 建立 fake service / fake transport 测试夹具。
-4. 跑通 testnet 的最小命令执行与恢复闭环。
-5. 输出运维与验证手册。
-
-### K6 验收标准
-
-- 本地可重复回放
-- paper 与 testnet 可跑通关键操作
-- 关键路径有端到端验证证据
-- K6 对应测试矩阵全部通过
+1. 为当前网格策略增加参数护栏与危险参数拦截。
+2. 收敛更贴近实盘长期运行的风险规则和风险动作语义。
+3. 让策略状态与最近关键变化进入查询模型、事件流和界面展示。
+4. 让命令、成交、风险与策略状态变化形成统一复盘链路。
 
 ### 当前状态
 
-- 已完成 replay JSON 输入格式、`service::replay` runner 与最小场景夹具
-- 已完成 paper fill 模拟规则，并在市场价穿价时更新挂单、成交与仓位
-- 已完成 fake transport 驱动的服务端验证链路，并补上“首个有效市场价前不提前挂单”的回归测试
-- 已输出 [`k6-validation.md`](k6-validation.md) 手册，固化 replay / paper / testnet smoke 的验证命令与检查项
-- 已手工跑通 testnet 市场流下的 `pause -> cancel-all -> flatten-now -> resume -> restart` 最小闭环
-- K6 验收条件已满足
+- 已完成里程碑设计，待开始测试与实现
 
-## 6. 里程碑 K7：Web UI 就绪与多实例预备
+## 6. 当前并行方式
 
-### 目标
+当前主线已经明确为 `K10`，建议保持单主线串行推进：
 
-让控制面在不破坏现有 TUI 兼容性的前提下，补齐 Web UI 需要的查询模型、实例边界和能力描述。
+1. 先补值守健康状态、重复启动保护与告警测试。
+2. 再实现单实例长期运行所需的进程和恢复机制。
+3. 然后补值守可观测性和故障恢复闭环。
+4. 最后再进入 `K11` 的策略收敛。
 
-### 先补的测试
-
-1. 为 Web 查询接口补 HTTP 路由测试，覆盖 `runtime / orders / fills / alerts / commands`。
-2. 为关键列表补分页、过滤和排序测试。
-3. 为控制面能力接口补实例、认证边界和 WebSocket 能力测试。
-
-### 实施任务
-
-1. 保留现有 `/runtime/snapshot`、`/orders/open` 等 TUI 兼容接口。
-2. 新增 `/query/runtime`、`/query/orders`、`/query/fills`、`/query/alerts`、`/query/commands`。
-3. 为列表接口统一补 `items + pagination + filters + sort` 响应模型。
-4. 为 `commands` 和 `alerts` 明确默认排序与可选排序规则。
-5. 通过 `/control-plane/capabilities` 暴露 `instance_id`、局域网部署模式、简单 token 边界、WebSocket 鉴权策略、endpoint 分组和最小 Web 控制面能力。
-
-### K7 验收标准
-
-- Web UI 可直接消费统一查询模型，不必复用 TUI 的数组型旧接口
-- 关键列表具备分页、过滤和排序约束
-- `instance_id`、局域网部署模式、认证边界和 WebSocket 策略有明确输出
-- K7 对应接口测试全部通过
-
-### 当前状态
-
-- 已新增 `/query/runtime`、`/query/orders`、`/query/fills`、`/query/alerts`、`/query/commands`
-- 已为 orders / fills / alerts / commands 补分页、过滤和排序响应模型
-- 已通过 `/control-plane/capabilities` 输出 `instance_id`、局域网部署模式、简单 token 边界、WebSocket `runtime_stream` 订阅和 endpoint 分组
-- 已补控制面验收测试，覆盖查询模型、排序规则与能力接口
-- K7 验收条件已满足
-
-## 7. 里程碑 K8：TUI 中英文切换
-
-### 目标
-
-在不改服务端接口文本的前提下，让 `tui` 的本地界面文案支持 `zh-CN / en-US` 双语切换，并保持英文默认行为不回退。
-
-### 先补的测试
-
-1. 为 `Locale` 解析、默认值与切换动作补单元测试。
-2. 为 `l` 快捷键映射与切换后的状态流转补测试。
-3. 将现有语言一致性测试改为“翻译完整性 + 本地文案边界”测试。
-4. 为 `Dashboard / Grid / Help / waiting / retrying` 补中文快照。
-5. 为切换后命令链路与重连链路稳定性补最小回归测试。
-
-### 实施任务
-
-1. 新增统一 `locale` 模块，收敛页签、面板、表头、帮助页、toast、footer 与本地状态标签文案。
-2. 为 `AppConfig`、`UiState`、输入动作与归约逻辑补 locale 支持，并通过 `GRID_PLATFORM_UI_LOCALE` 指定启动语言。
-3. 支持运行时按 `l` 在 `zh-CN / en-US` 间切换，并立即重绘页面。
-4. 改造 `render / store / selectors / state`，让本地文案统一从 locale 层取值。
-5. 保持服务端返回文本原样显示，不在客户端本地改写。
-6. 为窄屏和 bootstrap 场景补中文短文案与快照保护。
-
-### K8 验收标准
-
-- 默认语言继续为英文
-- `GRID_PLATFORM_UI_LOCALE` 可指定启动语言
-- 运行时按 `l` 可在中英文之间切换
-- 切换后不影响当前页面、焦点、modal、命令链路与重连链路
-- 服务端返回文本继续原样显示
-- 中文关键页面窄屏布局稳定
-- K8 对应测试矩阵全部通过
-
-### 当前状态
-
-- 已完成 [`superpowers/specs/2026-03-22-tui-locale-switch-design.md`](superpowers/specs/2026-03-22-tui-locale-switch-design.md) 设计
-- 已明确只本地化 `tui` 本地文案，不改服务端接口文本
-- 已完成 `locale` 模块、`GRID_PLATFORM_UI_LOCALE` 启动配置、`UiState.locale` 与 `l` 热切换
-- 已完成 `render / store / selectors / state` 接线，运行时本地文案统一走 locale 层
-- 已补中文快照与 `ToggleLocale` 后 pause/ack 最小 E2E 回归
-- `cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test` 已通过
-- K8 验收条件已满足
-
-## 8. 当前并行方式
-
-当前主线已经明确为 `K8`，执行顺序建议保持单主线串行推进：
-
-1. 先补 locale 与切换相关测试。
-2. 再接入配置、状态、输入与归约。
-3. 然后改造 render / selectors / store 本地文案。
-4. 最后补中文快照、回归测试与文档同步。
+与并行中的多实例线程只对齐实例键、路径与事件字段，不把多实例运营能力拉进本主线。

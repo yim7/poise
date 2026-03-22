@@ -32,7 +32,7 @@ cargo run -p grid-platform-service
 默认行为：
 
 - 监听 `127.0.0.1:8000`
-- 使用内存运行态
+- 使用 SQLite 路径 `.data/paper/local.db`
 - 不连接真实 Binance
 
 ### 2. 另开终端启动 TUI
@@ -65,6 +65,14 @@ export GRID_PLATFORM_SERVICE_DB_PATH=.tmp/grid-platform.db
 cargo run -p grid-platform-service
 ```
 
+未显式指定 `GRID_PLATFORM_SERVICE_DB_PATH` 时，服务端会按运行环境和实例名推导默认路径：
+
+- `paper`：`.data/paper/<instance_id>.db`
+- `testnet`：`.data/testnet/<instance_id>.db`
+- `mainnet`：`.data/mainnet/<instance_id>.db`
+
+默认 `instance_id` 为 `local`，可通过 `GRID_PLATFORM_INSTANCE_ID` 覆盖。
+
 ### 接 Binance testnet
 
 ```bash
@@ -80,7 +88,9 @@ cargo run -p grid-platform-service
 
 - `GRID_PLATFORM_BINANCE_API_KEY` 当前不是强制项
 - 未配置 API Key 时，用户流不会建立，但市场元数据与市场流仍可用于联调
-- `GRID_PLATFORM_BINANCE_ENV=mainnet` 时会切到正式环境
+- `GRID_PLATFORM_BINANCE_ENV=mainnet` 时，必须额外设置 `GRID_PLATFORM_ALLOW_MAINNET=1`
+- mainnet 启动前必须收集签名持仓快照和签名挂单快照，因此需要同时配置 `GRID_PLATFORM_BINANCE_API_KEY` 与 `GRID_PLATFORM_BINANCE_API_SECRET`
+- mainnet 启动前会执行启动对账；发现交易所持仓或交易所挂单与本地持久化状态明显不一致时，会先进入暂停态而不是继续自动下单
 
 ### 自定义服务端与 TUI 连接地址
 

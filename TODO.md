@@ -5,228 +5,67 @@
 
 ## 当前状态
 
-- 当前主线：`K8` TUI 中英文切换
-- 并行预研：无
-- 最近完成：`K8` TUI 中英文切换已实现并验收通过，包含 `locale` 模块、`GRID_PLATFORM_UI_LOCALE` 启动语言、`l` 热切换、`render / store / selectors / state` 本地化接线、中文快照和 `ToggleLocale` 后 pause/ack 最小 E2E 回归；`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新；补齐 `/query/alerts` `acknowledged` 过滤回归测试，并补上 `strategy / risk` 直接单元测试；TUI 连接健康判定已移除 Binance 元数据 REST `latency_ms` 的降级条件，延迟数值仅保留展示；服务端与 TUI 协议、状态和界面已彻底移除 `latency_ms` 字段
-- 最近验证：`2026-03-21` 对照 [`docs/roadmap.md`](docs/roadmap.md) 与 [`docs/plan.md`](docs/plan.md) 复核 `K4` 到 `K7`，`cargo fmt --check`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test control_plane web_query_alerts_acknowledged_false`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui` 与 `cargo test` 已通过；执行闭环、网格策略与风控、replay / paper / fake transport 验证链路、Web 查询模型与能力接口均已复核，未发现新的阻断项；testnet 最小闭环仍维持手工冒烟验证结论。`2026-03-22` 新增 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli`、`cargo test -p grid-platform-tui --lib`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`，均已通过，并覆盖 TUI 中英文切换、中文快照、运行时热切换链路和全工作区回归
+- 当前主线：`K10` 单实例 `7x24` 值守硬化
+- 并行线程：同一环境多实例支持正在推进；本主线只要求“实例感知，单实例验收”
+- 最近完成：`K9` 主网运行安全底座已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
+- 最近验证：`2026-03-22` 已通过 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli -- --nocapture`、`cargo test -p grid-platform-service --test mainnet_bootstrap -- --nocapture`、`cargo test -p grid-platform-service --test control_plane -- --nocapture`、`cargo test -p grid-platform-service --test persistence_recovery -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-tui --test local_paper_e2e` 与 `cargo test`
 
-## 首次快照空态验收
+## K9 主网运行安全底座
 
-- [x] 服务端默认 bootstrap 返回已知空业务态，不再走 `sample`
-- [x] TUI 启动默认进入 `WaitingFirstSnapshot`
-- [x] 首次快照失败后进入 `SnapshotRetrying` 并自动退避重试
-- [x] 首次快照未就绪前禁用 `p / r / c / f / s` 操作并显示正确 toast
-- [x] `Help` 页在 bootstrap 期间保持可访问
-- [x] 首次快照成功后进入 `Ready`，空 bootstrap 显示真实空态
-- [x] 渲染快照已覆盖 waiting / retrying / help bootstrap 页面
-- [x] 本地 E2E 已覆盖 waiting 禁用操作与首次成功后的真实空态
+### K9.1 测试先补齐
 
-## 验收补缺
+- [x] 为 `paper / testnet / mainnet` 运行级别解析与显式开启规则补测试
+- [x] 为启动前交易所快照收集补测试
+- [x] 为启动对账补测试，覆盖“继续运行 / 暂停待确认”语义
+- [x] 为稳定原因码持久化与查询暴露补测试
+- [x] 为硬保护命中后的自动暂停补测试
 
-- [x] 修复 paper 模式在持仓已建立且后续只有行情波动时 `runtime.unrealized_pnl` 不刷新
-- [x] 为 paper 模式持仓后的连续行情更新补回归测试
-- [x] 修复空价格 replay `market` step 复用旧价导致的幽灵成交
-- [x] 统一 reduce-only 成交数量与已实现盈亏口径
-- [x] 修复 TUI 将 `Ctrl-C` 误判为 `cancel-all` 的问题
-- [x] 为 `Ctrl-C` 退出与带修饰键快捷键补回归测试
-- [x] 区分 TUI 服务控制面与行情流的重连状态文案
-- [x] 为连接状态标签补回归测试
-- [x] 区分 TUI 策略订单与交易所挂单视图
-- [x] 为执行快照补 `open_orders_source` 并兼容旧 payload / 旧快照
-- [x] 接入 Binance 真实交易所挂单同步到 `exchange_open_orders`
-- [x] 修复本地 E2E 并发启动 service 时的 Cargo 构建锁超时
+### K9.2 运行级别与准入保护
 
-## 已完成里程碑
+- [x] 明确 `paper / testnet / mainnet` 运行级别模型
+- [x] 增加 mainnet 显式开启入口，默认不能误入
+- [x] 建立实例级默认 SQLite 路径推导
 
-- [x] `K1` 服务端内核重构
-- [x] `K2` 持久化与恢复
-- [x] `K3` 市场与账户接入准备
+### K9.3 启动对账与自动暂停
 
-## K4 执行闭环与命令语义做实
+- [x] 建立 Binance 启动前签名持仓 / 挂单快照收集
+- [x] 建立启动对账流程
+- [x] 让 mainnet 缺少签名状态时拒绝启动
+- [x] 让持仓或交易所挂单不一致默认进入暂停态
+- [x] 为启动暂停和运行期保护写入稳定原因码
+- [x] 让 breaker 命中和连续策略同步失败自动暂停策略
 
-### K4.1 测试先补齐
+### K9.4 事件、日志与实例边界
 
-- [x] 为 execution transport 增加 fake adapter 测试
-- [x] 为 `pause / resume / cancel-all / flatten-now / shutdown-after-flatten` 增加命令终态测试
-- [x] 为执行失败、超时和幂等命中增加内核测试
-- [x] 扩展本地 E2E，覆盖撤单、平仓和重连后终态恢复
-- [x] 扩展协议测试，覆盖命令结果与订单/成交关联字段
+- [x] 为启动暂停和运行期保护补 `SystemEvent.code`
+- [x] 为 `SystemEvent.code` 补 SQLite 持久化
+- [x] 为 `/query/alerts` 暴露系统事件原因码
+- [x] 为默认数据路径保留实例边界
 
-### K4.2 执行适配层与关联模型
+### K9.5 收尾与验收
 
-- [x] 建立 execution adapter 模块边界
-- [x] 明确下单、撤单、查单、成交回报的适配接口
-- [x] 定义 `command_id -> client_order_id -> order_id -> trade_id` 关联模型
-- [x] 让 open orders、fills 和 recent commands 共用同一执行事实来源
-
-### K4.3 命令真实语义
-
-- [x] 让 `pause` 变成“停止新增策略下单”
-- [x] 让 `resume` 变成“恢复策略下单能力”
-- [x] 让 `cancel-all` 变成“等待现有挂单全部清空”
-- [x] 让 `flatten-now` 变成“提交 reduce-only 平仓并等待仓位归零”
-- [x] 让 `shutdown-after-flatten` 建立在 `flatten-now` 完成之后
-
-### K4.4 终态、超时与审计
-
-- [x] 统一 `accepted / ack / failed / timed_out` 的状态流转
-- [x] 记录执行失败原因、超时原因和幂等命中原因
-- [x] 让持久化审计与 WebSocket 事件使用同一终态语义
-- [x] 补充执行重试与重放保护策略
-
-### K4.5 TUI 联动
-
-- [x] 时间线展示真实执行结果与失败原因
-- [x] 订单区与成交区能反查对应命令
-- [x] 事件页展示执行失败和超时细节
-- [x] 为执行闭环后的关键页面补快照验证
-
-### K4.6 收尾与验收
-
-- [x] 跑通 `cargo test`
-- [x] 复核 K4 验收标准
+- [x] 跑通 K9 对应测试矩阵
+- [x] 复核 K9 验收标准
 - [x] 更新 `docs/plan.md` 与本文件状态
-- 验收结论：K4 已验收通过
+- [x] 记录最近一次验证结果
+- [x] 验收结论：K9 已验收通过
 
-## K5 网格策略与风控
+## K10 单实例 `7x24` 值守硬化
 
-### K5.1 测试先补齐
+- [ ] 固化单实例部署、工作目录、数据目录与日志目录约定
+- [ ] 增加重复启动保护与优雅停机流程
+- [ ] 抽出统一健康状态与自动降级语义
+- [ ] 为本地值守补足告警分类、确认与关键信息展示
+- [ ] 打通常见故障的恢复路径与恢复后状态结论
 
-- [x] 为网格配置校验增加单元测试
-- [x] 为网格状态机和重建逻辑增加状态流转测试
-- [x] 为最大仓位、止损、单日亏损和 breaker 增加风险测试
-- [x] 为 TUI `Grid` 与风险展示增加快照回归
+## K11 单实例实盘策略收敛
 
-### K5.2 策略模型
-
-- [x] 定义网格配置 schema
-- [x] 定义 `active / occupied / pending rebuild` 状态模型
-- [x] 实现网格层生成规则
-- [x] 实现网格重建规则
-- [x] 把策略输出接到执行层，而不是直接改订单镜像
-
-### K5.3 风控模型
-
-- [x] 接入最大仓位限制
-- [x] 接入止损阈值
-- [x] 接入单日亏损限制
-- [x] 接入 breaker 触发与解除逻辑
-- [x] 统一风险事件落盘与广播
-
-### K5.4 TUI 联动
-
-- [x] `Grid` 页面展示策略状态机
-- [x] Dashboard 展示核心风险阈值与 breaker 状态
-- [x] Events 页面展示风险事件和操作建议
-- [x] 为策略/风险联动后的页面补回归快照
-
-### K5.5 收尾与验收
-
-- [x] 跑通 `cargo test`
-- [x] 复核 K5 验收标准
-- [x] 更新 `docs/plan.md` 与本文件状态
-- 验收结论：K5 已验收通过
-
-## K6 回放 / paper / testnet 验证
-
-### K6.1 测试先补齐
-
-- [x] 为 replay runner 增加场景测试
-- [x] 为 paper fill 逻辑增加成交模拟测试
-- [x] 为 fake service / fake transport 集成链路增加测试
-- [x] 为 testnet 下单、撤单、恢复增加最小冒烟清单
-
-### K6.2 回放与 paper
-
-- [x] 设计 replay 输入格式
-- [x] 实现 replay runner
-- [x] 实现 paper execution 和 fill 模拟规则
-- [x] 建立录制或构造的市场事件流夹具
-
-### K6.3 验证链路
-
-- [x] 建立 fake service / fake transport 组合测试夹具
-- [x] 跑通本地 replay 闭环
-- [x] 跑通 paper 模式命令闭环
-- [x] 跑通 testnet 最小执行闭环
-
-### K6.4 运维与验收
-
-- [x] 输出运维与验证手册
-- [x] 固化验证命令和检查项
-- [x] 跑通 `cargo test`
-- [x] 复核 K6 验收标准
-- [x] 更新 `docs/plan.md` 与本文件状态
-- 验收结论：K6 已验收通过
-
-## K7 Web UI 就绪与多实例预备
-
-### K7.1 查询模型整理
-
-- [x] 梳理 `runtime / orders / fills / alerts / commands` 的 Web 友好查询模型
-- [x] 为关键列表设计分页参数
-- [x] 为关键列表设计过滤参数
-- [x] 为命令与风险事件设计查询排序规则
-
-### K7.2 实例维度与认证边界
-
-- [x] 预留 `instance_id`
-- [x] 定义局域网部署模式
-- [x] 设计简单认证与 token 边界
-- [x] 明确 WebSocket 连接的鉴权策略
-
-### K7.3 Web 客户端准备
-
-- [x] 整理 Web UI 所需 endpoint 分组
-- [x] 评估 WebSocket 订阅模型是否需要补充
-- [x] 为 Web 客户端列出最小控制面能力清单
-
-### K7.4 收尾与验收
-
-- [x] 跑通 `cargo test -p grid-platform-service --test control_plane -- --nocapture`
-- [x] 复核 K7 验收标准
-- [x] 更新 `docs/plan.md` 与本文件状态
-- 验收结论：K7 已验收通过
-
-## K8 TUI 中英文切换
-
-### K8.1 测试先补齐
-
-- [x] 为 `Locale` 解析、默认值与切换动作补单元测试
-- [x] 为 `l` 快捷键映射与切换后的状态流转补测试
-- [x] 将现有语言一致性测试改为“翻译完整性 + 本地文案边界”测试
-- [x] 为 `Dashboard / Grid / Help / waiting / retrying` 补中文快照
-- [x] 为切换后命令链路与重连链路稳定性补最小回归测试
-
-### K8.2 本地化基础设施
-
-- [x] 新建 `tui/src/locale.rs`，统一管理 `zh-CN / en-US` 本地文案
-- [x] 为 `AppConfig` 增加 `GRID_PLATFORM_UI_LOCALE` 启动配置
-- [x] 为 `UiState` 增加当前 locale 状态
-- [x] 新增 `ToggleLocale` 输入动作与 `l` 快捷键
-
-### K8.3 界面接线
-
-- [x] 改造 `render.rs`，让页签、面板标题、表头、帮助页、footer 与 modal 统一走 locale
-- [x] 改造 `store.rs`，让本地 toast 与 bootstrap 阻断提示统一走 locale
-- [x] 改造 `selectors.rs`，让本地生成的风险提示和状态标签统一走 locale
-- [x] 保持服务端返回文本原样显示，不在客户端本地重写
-- [x] 为中文窄屏场景补短文案，避免布局错位
-
-### K8.4 收尾与验收
-
-- [x] 跑通 `cargo test -p grid-platform-tui`
-- [x] 跑通 `cargo test`
-- [x] 复核 K8 验收标准
-- [x] 更新 `docs/plan.md` 与本文件状态
-- [x] 验收结论：K8 已验收通过
+- [ ] 为当前网格策略增加参数护栏与危险参数拦截
+- [ ] 收敛更贴近实盘长期运行的风险规则和风险动作语义
+- [ ] 让策略状态与最近关键变化进入查询模型、事件流和界面展示
+- [ ] 让命令、成交、风险与策略状态变化形成统一复盘链路
 
 ## 当前并行方式
 
-- 无，当前按 `K8` 单主线串行推进
-
-## 完成后必做
-
-- [x] 更新 `docs/plan.md` 中对应里程碑状态
-- [x] 更新本文件中的任务勾选状态
-- [x] 记录最近一次验证结果
+- 按 `K10 -> K11` 单主线串行推进
+- 与多实例线程只对齐实例键、路径与事件字段，不把多实例运营能力拉进本主线
