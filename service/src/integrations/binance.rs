@@ -25,6 +25,7 @@ use crate::{
 
 const MARKET_STREAM_BUFFER: usize = 256;
 const USER_STREAM_BUFFER: usize = 128;
+const SIGNED_RECV_WINDOW_MS: i64 = 5_000;
 
 #[derive(Debug, Clone)]
 pub struct BinanceConfig {
@@ -222,6 +223,7 @@ pub struct RealBinanceTransport {
     ws_base_url: String,
     api_key: Option<String>,
     api_secret: Option<String>,
+    signed_time_offset_ms: Arc<Mutex<Option<i64>>>,
 }
 
 impl RealBinanceTransport {
@@ -235,6 +237,7 @@ impl RealBinanceTransport {
             ws_base_url: config.ws_base_url.clone(),
             api_key: config.api_key.clone(),
             api_secret: config.api_secret.clone(),
+            signed_time_offset_ms: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -258,6 +261,25 @@ impl RealBinanceTransport {
     where
         T: for<'de> Deserialize<'de>,
     {
+        let response = self.send_signed_get(path, query, false).await?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("failed to read response body")?;
+        if is_timestamp_outside_recv_window(status, &body) {
+            let retry = self.send_signed_get(path, query, true).await?;
+            return decode_response(retry).await;
+        }
+        decode_response_body(status, body)
+    }
+
+    async fn send_signed_get(
+        &self,
+        path: &str,
+        query: &str,
+        force_time_sync: bool,
+    ) -> Result<reqwest::Response> {
         let api_key = self
             .api_key
             .as_ref()
@@ -266,19 +288,46 @@ impl RealBinanceTransport {
             .api_secret
             .as_ref()
             .context("binance api_secret is required for signed requests")?;
-        let signature = sign_query(query, api_secret)?;
+        let signed_query = self.signed_query(query, force_time_sync).await?;
+        let signature = sign_query(&signed_query, api_secret)?;
         let url = format!(
             "{}{}?{}&signature={}",
-            self.rest_base_url, path, query, signature
+            self.rest_base_url, path, signed_query, signature
         );
-        let response = self
-            .http
+        self.http
             .get(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
             .await
-            .with_context(|| format!("failed to call {url}"))?;
-        decode_response(response).await
+            .with_context(|| format!("failed to call {url}"))
+    }
+
+    async fn signed_query(&self, query: &str, force_time_sync: bool) -> Result<String> {
+        let timestamp_ms = self.signed_timestamp_millis(force_time_sync).await?;
+        if query.is_empty() {
+            return Ok(format!(
+                "recvWindow={SIGNED_RECV_WINDOW_MS}&timestamp={timestamp_ms}"
+            ));
+        }
+        Ok(format!(
+            "{query}&recvWindow={SIGNED_RECV_WINDOW_MS}&timestamp={timestamp_ms}"
+        ))
+    }
+
+    async fn signed_timestamp_millis(&self, force_time_sync: bool) -> Result<i64> {
+        let offset_ms = self.load_signed_time_offset(force_time_sync).await?;
+        Ok(Utc::now().timestamp_millis() + offset_ms)
+    }
+
+    async fn load_signed_time_offset(&self, force_time_sync: bool) -> Result<i64> {
+        if !force_time_sync && let Some(offset_ms) = *self.signed_time_offset_ms.lock().await {
+            return Ok(offset_ms);
+        }
+
+        let response: ServerTimeResponse = self.get_json("/fapi/v1/time").await?;
+        let offset_ms = response.server_time_ms - Utc::now().timestamp_millis();
+        *self.signed_time_offset_ms.lock().await = Some(offset_ms);
+        Ok(offset_ms)
     }
 
     async fn create_listen_key(&self) -> Result<Option<String>> {
@@ -461,10 +510,7 @@ impl BinanceTransport for RealBinanceTransport {
             return Ok(PositionSnapshotState::Unavailable);
         }
 
-        let query = format!(
-            "symbol={symbol}&timestamp={}",
-            Utc::now().timestamp_millis()
-        );
+        let query = format!("symbol={symbol}");
         let positions: Vec<PositionRiskResponsePosition> = self
             .get_signed_json("/fapi/v3/positionRisk", &query)
             .await?;
@@ -479,10 +525,7 @@ impl BinanceTransport for RealBinanceTransport {
             return Ok(None);
         }
 
-        let query = format!(
-            "symbol={symbol}&timestamp={}",
-            Utc::now().timestamp_millis()
-        );
+        let query = format!("symbol={symbol}");
         let orders: Vec<OpenOrdersResponseOrder> =
             self.get_signed_json("/fapi/v1/openOrders", &query).await?;
         Ok(Some(
@@ -935,10 +978,24 @@ where
         .text()
         .await
         .context("failed to read response body")?;
+    decode_response_body(status, body)
+}
+
+fn decode_response_body<T>(status: reqwest::StatusCode, body: String) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
     if status.is_success() {
         return serde_json::from_str(&body).context("failed to decode binance response");
     }
     anyhow::bail!("binance request failed with status {status}: {body}");
+}
+
+fn is_timestamp_outside_recv_window(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST
+        && serde_json::from_str::<BinanceErrorResponse>(body)
+            .map(|error| error.code == -1021)
+            .unwrap_or(false)
 }
 
 fn decode_market_stream(payload: &str) -> Result<MarketStreamEvent> {
@@ -1282,6 +1339,17 @@ struct ListenKeyResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ServerTimeResponse {
+    #[serde(rename = "serverTime")]
+    server_time_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BinanceErrorResponse {
+    code: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct UserStreamEnvelope {
     #[serde(rename = "e")]
     event_type: String,
@@ -1434,10 +1502,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Arc};
+    use std::{
+        collections::{HashMap, VecDeque},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
+    use axum::{
+        Json, Router,
+        extract::{Query, State},
+        http::StatusCode,
+        response::IntoResponse,
+        routing::get,
+    };
     use std::fs;
     use tokio::sync::{Mutex, mpsc};
 
@@ -1448,6 +1529,92 @@ mod tests {
         kernel::spawn_engine_with_runtime,
         storage::{PersistedRuntime, SqliteStorage},
     };
+
+    #[derive(Clone)]
+    struct SignedRequestTestState {
+        server_time_ms: i64,
+        time_requests: Arc<AtomicUsize>,
+    }
+
+    impl SignedRequestTestState {
+        fn new(server_time_ms: i64) -> Self {
+            Self {
+                server_time_ms,
+                time_requests: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    async fn mock_server_time(
+        State(state): State<SignedRequestTestState>,
+    ) -> Json<serde_json::Value> {
+        state.time_requests.fetch_add(1, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "serverTime": state.server_time_ms,
+        }))
+    }
+
+    async fn mock_open_orders(
+        State(state): State<SignedRequestTestState>,
+        Query(params): Query<HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        let timestamp = params
+            .get("timestamp")
+            .and_then(|value| value.parse::<i64>().ok());
+        let recv_window_ms = params
+            .get("recvWindow")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(5_000)
+            .min(60_000);
+
+        let Some(timestamp) = timestamp else {
+            return (
+                StatusCode::BAD_REQUEST,
+                r#"{"code":-1022,"msg":"Signature for this request is not valid."}"#,
+            )
+                .into_response();
+        };
+
+        if (state.server_time_ms - timestamp).abs() > recv_window_ms {
+            return (
+                StatusCode::BAD_REQUEST,
+                r#"{"code":-1021,"msg":"Timestamp for this request is outside of the recvWindow."}"#,
+            )
+                .into_response();
+        }
+
+        Json(serde_json::json!([
+            {
+                "orderId": 42,
+                "clientOrderId": "grid-order-42",
+                "side": "BUY",
+                "price": "3100.5",
+                "origQty": "0.25",
+                "executedQty": "0.05",
+                "status": "NEW",
+                "time": 1_710_000_000_000_i64,
+                "updateTime": 1_710_000_060_000_i64
+            }
+        ]))
+        .into_response()
+    }
+
+    async fn spawn_signed_request_test_server(
+        state: SignedRequestTestState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let app = Router::new()
+            .route("/fapi/v1/time", get(mock_server_time))
+            .route("/fapi/v1/openOrders", get(mock_open_orders))
+            .with_state(state);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{address}"), handle)
+    }
 
     #[test]
     fn summarize_positions_uses_directional_average_for_hedged_exposure() {
@@ -1610,5 +1777,31 @@ mod tests {
             observed.is_ok(),
             "market connect should retry connection state sync and clear old heartbeat"
         );
+    }
+
+    #[tokio::test]
+    async fn signed_open_orders_syncs_server_time_when_local_clock_is_skewed() {
+        let state = SignedRequestTestState::new(Utc::now().timestamp_millis() + 90_000);
+        let (rest_base_url, server) = spawn_signed_request_test_server(state.clone()).await;
+
+        let mut config = BinanceConfig::testnet("ETHUSDT");
+        config.rest_base_url = rest_base_url;
+        config.api_key = Some("test-api-key".into());
+        config.api_secret = Some("test-api-secret".into());
+
+        let transport = RealBinanceTransport::new(&config).expect("transport");
+        let orders = transport
+            .fetch_open_orders("ETHUSDT")
+            .await
+            .expect("signed request should recover after syncing server time")
+            .expect("open orders should be available");
+
+        server.abort();
+
+        assert_eq!(state.time_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].order_id, "42");
+        assert_eq!(orders[0].client_order_id, "grid-order-42");
+        assert_eq!(orders[0].side, "buy");
     }
 }

@@ -8,7 +8,7 @@
 - 当前主线：`K10` 单实例 `7x24` 值守硬化
 - 并行线程：多实例固定区间网格已实现并并入主线，后续只维护实例边界与运行安全配套
 - 最近完成：`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
-- 最近验证：`2026-03-22` 已通过 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli -- --nocapture`、`cargo test -p grid-platform-service --test mainnet_bootstrap -- --nocapture`、`cargo test -p grid-platform-service --test control_plane -- --nocapture`、`cargo test -p grid-platform-service --test persistence_recovery -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test multi_instance_control_plane`、`cargo test -p grid-platform-tui --test instance_switching`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`
+- 最近验证：`2026-03-22` 已通过 `cargo test -p grid-platform-service`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli -- --nocapture`、`cargo test -p grid-platform-service --test mainnet_bootstrap -- --nocapture`、`cargo test -p grid-platform-service --test control_plane -- --nocapture`、`cargo test -p grid-platform-service --test persistence_recovery -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test multi_instance_control_plane`、`cargo test -p grid-platform-tui --test instance_switching`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`
 
 ## K9 主网运行安全底座
 
@@ -52,6 +52,7 @@
 
 ## K10 单实例 `7x24` 值守硬化
 
+- [x] 为 Binance 签名请求补 server time 校准与 `-1021` 自动恢复
 - [ ] 固化单实例部署、工作目录、数据目录与日志目录约定
 - [ ] 增加重复启动保护与优雅停机流程
 - [ ] 抽出统一健康状态与自动降级语义
