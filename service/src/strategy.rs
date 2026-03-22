@@ -6,27 +6,24 @@ use crate::protocol::{
 const EPSILON: f64 = 1e-9;
 
 pub fn validate_config(config: &GridConfig) -> Result<(), String> {
-    if config.levels_per_side == 0 {
-        return Err("levels_per_side must be greater than 0".into());
+    if !config.lower_price.is_finite() || !config.upper_price.is_finite() {
+        return Err("lower_price and upper_price must be finite".into());
     }
-    if config.spacing_bps <= 0.0 {
-        return Err("spacing_bps must be greater than 0".into());
+    if config.lower_price >= config.upper_price {
+        return Err("lower_price must be less than upper_price".into());
     }
-    if config.quantity_per_level <= 0.0 {
-        return Err("quantity_per_level must be greater than 0".into());
+    if config.grid_levels < 2 {
+        return Err("grid_levels must be at least 2".into());
     }
-    if config.max_position_qty <= 0.0 {
-        return Err("max_position_qty must be greater than 0".into());
-    }
-    if config.rebuild_threshold_bps <= 0.0 {
-        return Err("rebuild_threshold_bps must be greater than 0".into());
+    if !config.max_position_notional.is_finite() || config.max_position_notional <= 0.0 {
+        return Err("max_position_notional must be greater than 0".into());
     }
     Ok(())
 }
 
 pub fn reconcile(
     runtime: &RuntimeState,
-    risk: &RiskState,
+    _risk: &RiskState,
     previous: &StrategyState,
 ) -> StrategyState {
     let config = if validate_config(&previous.config).is_ok() {
@@ -34,134 +31,83 @@ pub fn reconcile(
     } else {
         GridConfig::default()
     };
-    let market_price = market_price(runtime);
-    let reference_price = if previous.rebuild_reference_price > EPSILON {
-        previous.rebuild_reference_price
-    } else if previous.center_price > EPSILON {
-        previous.center_price
-    } else {
-        market_price
-    };
-    let drift_bps = price_drift_bps(market_price, reference_price);
-    let occupied_count = occupied_levels(runtime.position_qty, config.quantity_per_level);
+    let lower_bound = round_price(config.lower_price);
+    let upper_bound = round_price(config.upper_price);
+    let center_price = round_price(config.midpoint_price());
+    let occupied_count = occupied_levels(runtime.position_qty, config.quantity_per_level());
 
-    if drift_bps >= config.rebuild_threshold_bps {
-        if occupied_count > 0 || risk.breaker_engaged || runtime.strategy_state == "paused" {
-            let mut levels = build_levels(reference_price, &config);
-            apply_level_states(
-                &mut levels,
-                runtime.position_qty,
-                occupied_count,
-                GridLifecycleMode::PendingRebuild,
-            );
-            let (lower_bound, upper_bound) = bounds(&levels);
-            return StrategyState {
-                config,
-                status: StrategyStatus::PendingRebuild,
-                center_price: reference_price,
-                lower_bound,
-                upper_bound,
-                rebuild_reference_price: reference_price,
-                pending_rebuild_reason: Some(pending_rebuild_reason(
-                    drift_bps,
-                    occupied_count > 0,
-                    risk.breaker_engaged,
-                    runtime.strategy_state == "paused",
-                )),
-                levels,
-            };
-        }
-
-        let mut levels = build_levels(market_price, &config);
-        apply_level_states(
-            &mut levels,
-            runtime.position_qty,
-            occupied_count,
-            GridLifecycleMode::Normal,
-        );
-        let (lower_bound, upper_bound) = bounds(&levels);
+    let Some(market_price) = market_price(runtime) else {
         return StrategyState {
             config,
-            status: strategy_status(occupied_count),
-            center_price: market_price,
+            status: StrategyStatus::WaitingMarketPrice,
+            center_price,
             lower_bound,
             upper_bound,
-            rebuild_reference_price: market_price,
-            pending_rebuild_reason: None,
-            levels,
+            status_reason: Some("waiting for first market price".into()),
+            levels: Vec::new(),
         };
-    }
+    };
 
-    let mut levels = build_levels(reference_price, &config);
-    apply_level_states(
-        &mut levels,
-        runtime.position_qty,
-        occupied_count,
-        GridLifecycleMode::Normal,
-    );
-    let (lower_bound, upper_bound) = bounds(&levels);
+    let mut levels = build_levels(market_price, &config);
+    apply_level_states(&mut levels, runtime.position_qty, occupied_count);
+
+    let outside_range =
+        market_price < config.lower_price - EPSILON || market_price > config.upper_price + EPSILON;
+    let status = if outside_range && occupied_count == 0 {
+        StrategyStatus::WaitingRangeEntry
+    } else if occupied_count > 0 {
+        StrategyStatus::Occupied
+    } else {
+        StrategyStatus::Active
+    };
+    let status_reason = if outside_range {
+        Some(range_status_reason(
+            market_price,
+            lower_bound,
+            upper_bound,
+            occupied_count > 0,
+        ))
+    } else {
+        None
+    };
+
     StrategyState {
         config,
-        status: strategy_status(occupied_count),
-        center_price: reference_price,
+        status,
+        center_price,
         lower_bound,
         upper_bound,
-        rebuild_reference_price: reference_price,
-        pending_rebuild_reason: None,
+        status_reason,
         levels,
     }
 }
 
-#[derive(Clone, Copy)]
-enum GridLifecycleMode {
-    Normal,
-    PendingRebuild,
-}
-
-fn market_price(runtime: &RuntimeState) -> f64 {
+fn market_price(runtime: &RuntimeState) -> Option<f64> {
     if runtime.mark_price.abs() > EPSILON {
-        runtime.mark_price
+        Some(runtime.mark_price)
     } else if runtime.last_price.abs() > EPSILON {
-        runtime.last_price
+        Some(runtime.last_price)
     } else {
-        1.0
+        None
     }
 }
 
-fn strategy_status(occupied_count: usize) -> StrategyStatus {
-    if occupied_count > 0 {
-        StrategyStatus::Occupied
-    } else {
-        StrategyStatus::Active
-    }
-}
-
-fn pending_rebuild_reason(
-    drift_bps: f64,
+fn range_status_reason(
+    market_price: f64,
+    lower_bound: f64,
+    upper_bound: f64,
     occupied: bool,
-    breaker_engaged: bool,
-    paused: bool,
 ) -> String {
     if occupied {
         return format!(
-            "price drift {:.1}bps while inventory is still occupied",
-            drift_bps
+            "current price {:.2} is outside configured range {:.2}-{:.2}; stopped placing new orders",
+            market_price, lower_bound, upper_bound
         );
     }
-    if breaker_engaged {
-        return format!("price drift {:.1}bps while breaker is engaged", drift_bps);
-    }
-    if paused {
-        return format!("price drift {:.1}bps while strategy is paused", drift_bps);
-    }
-    format!("price drift {:.1}bps exceeded rebuild threshold", drift_bps)
-}
-
-fn price_drift_bps(current_price: f64, reference_price: f64) -> f64 {
-    if reference_price.abs() <= EPSILON {
-        return 0.0;
-    }
-    ((current_price - reference_price).abs() / reference_price) * 10_000.0
+    format!(
+        "current price {:.2} is outside configured range {:.2}-{:.2}",
+        market_price, lower_bound, upper_bound
+    )
 }
 
 fn occupied_levels(position_qty: f64, quantity_per_level: f64) -> usize {
@@ -171,82 +117,70 @@ fn occupied_levels(position_qty: f64, quantity_per_level: f64) -> usize {
     (position_qty.abs() / quantity_per_level).ceil() as usize
 }
 
-fn build_levels(center_price: f64, config: &GridConfig) -> Vec<GridLevel> {
-    let mut levels = Vec::with_capacity((config.levels_per_side * 2) as usize);
+fn build_levels(market_price: f64, config: &GridConfig) -> Vec<GridLevel> {
+    let step = (config.upper_price - config.lower_price) / (config.grid_levels - 1) as f64;
+    let quantity = config.quantity_per_level();
 
-    for step in 1..=config.levels_per_side {
-        let multiplier = (config.spacing_bps * step as f64) / 10_000.0;
+    let mut levels = Vec::with_capacity(config.grid_levels as usize);
+    for index in 0..config.grid_levels {
+        let price = round_price(config.lower_price + step * index as f64);
+        let side = if price < market_price - EPSILON {
+            Some(GridSide::Buy)
+        } else if price > market_price + EPSILON {
+            Some(GridSide::Sell)
+        } else {
+            None
+        };
+        let Some(side) = side else {
+            continue;
+        };
+        let step_id = index + 1;
+        let side_label = match side {
+            GridSide::Buy => "buy",
+            GridSide::Sell => "sell",
+        };
         levels.push(GridLevel {
-            level_id: format!("buy_{step:02}"),
-            side: GridSide::Buy,
-            price: round_price(center_price * (1.0 - multiplier)),
-            quantity: config.quantity_per_level,
+            level_id: format!("{side_label}_{step_id:02}"),
+            side,
+            price,
+            quantity,
             state: GridLevelState::Active,
-            client_order_id: Some(format!("grid_buy_{step:02}")),
-            order_id: Some(format!("ord_buy_{step:02}")),
-        });
-    }
-
-    for step in 1..=config.levels_per_side {
-        let multiplier = (config.spacing_bps * step as f64) / 10_000.0;
-        levels.push(GridLevel {
-            level_id: format!("sell_{step:02}"),
-            side: GridSide::Sell,
-            price: round_price(center_price * (1.0 + multiplier)),
-            quantity: config.quantity_per_level,
-            state: GridLevelState::Active,
-            client_order_id: Some(format!("grid_sell_{step:02}")),
-            order_id: Some(format!("ord_sell_{step:02}")),
+            client_order_id: Some(format!("grid_{side_label}_{step_id:02}")),
+            order_id: Some(format!("ord_{side_label}_{step_id:02}")),
         });
     }
 
     levels
 }
 
-fn apply_level_states(
-    levels: &mut [GridLevel],
-    position_qty: f64,
-    occupied_count: usize,
-    mode: GridLifecycleMode,
-) {
+fn apply_level_states(levels: &mut [GridLevel], position_qty: f64, occupied_count: usize) {
     match position_qty.partial_cmp(&0.0) {
         Some(std::cmp::Ordering::Greater) => mark_levels(levels, GridSide::Buy, occupied_count),
         Some(std::cmp::Ordering::Less) => mark_levels(levels, GridSide::Sell, occupied_count),
         _ => {}
     }
-
-    if matches!(mode, GridLifecycleMode::PendingRebuild) {
-        for level in levels.iter_mut() {
-            if level.state == GridLevelState::Active {
-                level.state = GridLevelState::PendingRebuild;
-            }
-        }
-    }
 }
 
 fn mark_levels(levels: &mut [GridLevel], side: GridSide, occupied_count: usize) {
-    let mut remaining = occupied_count;
-    for level in levels.iter_mut().filter(|level| level.side == side) {
-        if remaining == 0 {
-            break;
-        }
-        level.state = GridLevelState::Occupied;
-        remaining -= 1;
+    let mut indices = levels
+        .iter()
+        .enumerate()
+        .filter(|(_, level)| level.side == side)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    indices.sort_by(|left, right| match side {
+        GridSide::Buy => levels[*right]
+            .price
+            .partial_cmp(&levels[*left].price)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        GridSide::Sell => levels[*left]
+            .price
+            .partial_cmp(&levels[*right].price)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    });
+    for index in indices.into_iter().take(occupied_count) {
+        levels[index].state = GridLevelState::Occupied;
     }
-}
-
-fn bounds(levels: &[GridLevel]) -> (f64, f64) {
-    let lower = levels
-        .iter()
-        .map(|level| level.price)
-        .reduce(f64::min)
-        .unwrap_or_default();
-    let upper = levels
-        .iter()
-        .map(|level| level.price)
-        .reduce(f64::max)
-        .unwrap_or_default();
-    (lower, upper)
 }
 
 fn round_price(value: f64) -> f64 {
@@ -295,16 +229,15 @@ mod tests {
             center_price: 100.0,
             lower_bound: 0.0,
             upper_bound: 0.0,
-            rebuild_reference_price: 100.0,
-            pending_rebuild_reason: None,
+            status_reason: None,
             levels: Vec::new(),
         }
     }
 
     #[test]
-    fn validate_config_rejects_zero_levels() {
+    fn validate_config_rejects_invalid_range_levels() {
         let config = GridConfig {
-            levels_per_side: 0,
+            grid_levels: 1,
             ..GridConfig::default()
         };
 
@@ -312,38 +245,66 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_marks_levels_pending_rebuild_when_paused_blocks_rebuild() {
-        let mut runtime = runtime_state();
-        runtime.strategy_state = "paused".into();
-        runtime.last_price = 102.0;
-        runtime.mark_price = 102.0;
+    fn builds_range_ladder_with_inclusive_boundaries() {
+        let levels = build_levels(100.0, &config());
+        let prices: Vec<f64> = levels.iter().map(|level| level.price).collect();
 
-        let risk = risk_state();
-        let mut previous = previous_state();
-        previous.config.rebuild_threshold_bps = 50.0;
-
-        let strategy = reconcile(&runtime, &risk, &previous);
-
-        assert_eq!(strategy.status, StrategyStatus::PendingRebuild);
-        assert!(
-            strategy
-                .pending_rebuild_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("paused"))
-        );
-        assert!(
-            strategy
-                .levels
-                .iter()
-                .all(|level| level.state == GridLevelState::PendingRebuild)
+        assert_eq!(prices, vec![90.0, 94.0, 98.0, 102.0, 106.0, 110.0]);
+        assert_eq!(
+            levels.iter().map(|level| level.side).collect::<Vec<_>>(),
+            vec![
+                GridSide::Buy,
+                GridSide::Buy,
+                GridSide::Buy,
+                GridSide::Sell,
+                GridSide::Sell,
+                GridSide::Sell
+            ]
         );
     }
 
     #[test]
-    fn reconcile_marks_buy_levels_occupied_for_long_inventory() {
+    fn reconcile_waits_when_market_price_is_missing() {
         let mut runtime = runtime_state();
-        runtime.position_qty = 0.15;
-        runtime.position_avg_price = 99.0;
+        runtime.last_price = 0.0;
+        runtime.mark_price = 0.0;
+
+        let strategy = reconcile(&runtime, &risk_state(), &previous_state());
+
+        assert_eq!(strategy.status, StrategyStatus::WaitingMarketPrice);
+        assert!(
+            strategy
+                .status_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("market price"))
+        );
+        assert!(strategy.levels.is_empty());
+    }
+
+    #[test]
+    fn reconcile_waits_when_price_is_out_of_range_and_flat() {
+        let mut runtime = runtime_state();
+        runtime.last_price = 112.0;
+        runtime.mark_price = 112.0;
+
+        let strategy = reconcile(&runtime, &risk_state(), &previous_state());
+
+        assert_eq!(strategy.status, StrategyStatus::WaitingRangeEntry);
+        assert!(
+            strategy
+                .status_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("112.00"))
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_occupied_when_price_is_out_of_range_but_inventory_exists() {
+        let mut runtime = runtime_state();
+        runtime.last_price = 112.0;
+        runtime.mark_price = 112.0;
+        runtime.position_qty = 5.0;
+        runtime.position_avg_price = 98.0;
 
         let strategy = reconcile(&runtime, &risk_state(), &previous_state());
 
@@ -355,7 +316,7 @@ mod tests {
                 .filter(|level| level.side == GridSide::Buy)
                 .filter(|level| level.state == GridLevelState::Occupied)
                 .count(),
-            2
+            1
         );
         assert_eq!(
             strategy
@@ -366,6 +327,20 @@ mod tests {
                 .count(),
             0
         );
-        assert!(strategy.pending_rebuild_reason.is_none());
+        assert!(
+            strategy
+                .status_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("outside configured range"))
+        );
+    }
+
+    fn config() -> GridConfig {
+        GridConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            grid_levels: 6,
+            max_position_notional: 3000.0,
+        }
     }
 }

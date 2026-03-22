@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 pub const PROTOCOL_VERSION: &str = "v1alpha1";
@@ -57,6 +57,8 @@ pub enum RiskLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyStatus {
+    WaitingMarketPrice,
+    WaitingRangeEntry,
     Active,
     Occupied,
     PendingRebuild,
@@ -78,23 +80,44 @@ pub enum GridLevelState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GridConfig {
-    pub spacing_bps: f64,
-    pub levels_per_side: u32,
-    pub quantity_per_level: f64,
-    pub max_position_qty: f64,
-    pub rebuild_threshold_bps: f64,
+    pub lower_price: f64,
+    pub upper_price: f64,
+    pub grid_levels: u32,
+    pub max_position_notional: f64,
 }
 
 impl Default for GridConfig {
     fn default() -> Self {
         Self {
-            spacing_bps: 35.0,
-            levels_per_side: 3,
-            quantity_per_level: 0.1,
-            max_position_qty: 0.3,
-            rebuild_threshold_bps: 120.0,
+            lower_price: 90.0,
+            upper_price: 110.0,
+            grid_levels: 6,
+            max_position_notional: 3000.0,
         }
+    }
+}
+
+impl GridConfig {
+    pub fn midpoint_price(&self) -> f64 {
+        (self.lower_price + self.upper_price) / 2.0
+    }
+
+    pub fn max_position_qty(&self) -> f64 {
+        let midpoint = self.midpoint_price();
+        if midpoint.abs() <= f64::EPSILON {
+            0.0
+        } else {
+            self.max_position_notional / midpoint
+        }
+    }
+
+    pub fn quantity_per_level(&self) -> f64 {
+        if self.grid_levels <= 1 {
+            return 0.0;
+        }
+        self.max_position_qty() / (self.grid_levels - 1) as f64
     }
 }
 
@@ -111,7 +134,7 @@ pub struct GridLevel {
     pub order_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StrategyState {
     #[serde(default)]
     pub config: GridConfig,
@@ -119,25 +142,147 @@ pub struct StrategyState {
     pub center_price: f64,
     pub lower_bound: f64,
     pub upper_bound: f64,
-    pub rebuild_reference_price: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_rebuild_reason: Option<String>,
+    #[serde(
+        default,
+        alias = "pending_rebuild_reason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status_reason: Option<String>,
     #[serde(default)]
     pub levels: Vec<GridLevel>,
 }
 
 impl Default for StrategyState {
     fn default() -> Self {
+        let config = GridConfig::default();
         Self {
-            config: GridConfig::default(),
-            status: StrategyStatus::Active,
-            center_price: 0.0,
-            lower_bound: 0.0,
-            upper_bound: 0.0,
-            rebuild_reference_price: 0.0,
-            pending_rebuild_reason: None,
+            center_price: config.midpoint_price(),
+            lower_bound: config.lower_price,
+            upper_bound: config.upper_price,
+            config,
+            status: StrategyStatus::WaitingMarketPrice,
+            status_reason: None,
             levels: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StrategyStateWire {
+    #[serde(default)]
+    config: GridConfigWire,
+    status: StrategyStatus,
+    center_price: f64,
+    lower_bound: f64,
+    upper_bound: f64,
+    #[serde(default, alias = "pending_rebuild_reason")]
+    status_reason: Option<String>,
+    #[serde(default)]
+    levels: Vec<GridLevel>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GridConfigWire {
+    lower_price: Option<f64>,
+    upper_price: Option<f64>,
+    grid_levels: Option<u32>,
+    max_position_notional: Option<f64>,
+    #[serde(rename = "spacing_bps")]
+    _spacing_bps: Option<f64>,
+    levels_per_side: Option<u32>,
+    quantity_per_level: Option<f64>,
+    max_position_qty: Option<f64>,
+}
+
+impl GridConfigWire {
+    fn into_grid_config(self, center_price: f64, lower_bound: f64, upper_bound: f64) -> GridConfig {
+        let default = GridConfig::default();
+        let bounds_are_valid =
+            lower_bound.is_finite() && upper_bound.is_finite() && lower_bound < upper_bound;
+        let midpoint_price = if center_price.is_finite() && center_price.abs() > f64::EPSILON {
+            center_price.abs()
+        } else if bounds_are_valid {
+            (lower_bound + upper_bound) / 2.0
+        } else {
+            default.midpoint_price()
+        };
+        let lower_price = self.lower_price.unwrap_or_else(|| {
+            if bounds_are_valid {
+                lower_bound
+            } else {
+                default.lower_price
+            }
+        });
+        let upper_price = self.upper_price.unwrap_or_else(|| {
+            if bounds_are_valid {
+                upper_bound
+            } else {
+                default.upper_price
+            }
+        });
+        let grid_levels = self
+            .grid_levels
+            .or_else(|| {
+                self.levels_per_side
+                    .map(|levels| levels.saturating_mul(2).saturating_add(1))
+            })
+            .unwrap_or(default.grid_levels);
+        let legacy_max_position_qty = self.max_position_qty.or_else(|| {
+            match (self.quantity_per_level, self.levels_per_side) {
+                (Some(quantity_per_level), Some(levels_per_side))
+                    if quantity_per_level.is_finite()
+                        && quantity_per_level > 0.0
+                        && levels_per_side > 0 =>
+                {
+                    Some(quantity_per_level * levels_per_side as f64)
+                }
+                _ => None,
+            }
+        });
+        let max_position_notional = self
+            .max_position_notional
+            .or_else(|| legacy_max_position_qty.map(|qty| qty * midpoint_price))
+            .unwrap_or(default.max_position_notional);
+        let candidate = GridConfig {
+            lower_price,
+            upper_price,
+            grid_levels,
+            max_position_notional,
+        };
+
+        if candidate.lower_price.is_finite()
+            && candidate.upper_price.is_finite()
+            && candidate.lower_price < candidate.upper_price
+            && candidate.grid_levels >= 2
+            && candidate.max_position_notional.is_finite()
+            && candidate.max_position_notional > 0.0
+        {
+            candidate
+        } else {
+            default
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StrategyState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = StrategyStateWire::deserialize(deserializer)?;
+        Ok(Self {
+            config: wire.config.into_grid_config(
+                wire.center_price,
+                wire.lower_bound,
+                wire.upper_bound,
+            ),
+            status: wire.status,
+            center_price: wire.center_price,
+            lower_bound: wire.lower_bound,
+            upper_bound: wire.upper_bound,
+            status_reason: wire.status_reason,
+            levels: wire.levels,
+        })
     }
 }
 
@@ -528,7 +673,7 @@ impl RuntimeSnapshot {
             },
             risk: RiskState {
                 current_notional: 0.0,
-                max_notional: 1500.0,
+                max_notional: 3000.0,
                 daily_loss_limit: -120.0,
                 stop_loss_pct: 4.0,
                 risk_level: RiskLevel::Ok,
@@ -645,13 +790,17 @@ impl Pagination {
 
 fn sample_strategy() -> StrategyState {
     StrategyState {
-        config: GridConfig::default(),
+        config: GridConfig {
+            lower_price: 2336.68,
+            upper_price: 2386.28,
+            grid_levels: 7,
+            max_position_notional: 1416.89,
+        },
         status: StrategyStatus::Occupied,
         center_price: 2361.48,
-        lower_bound: 2336.76,
-        upper_bound: 2386.20,
-        rebuild_reference_price: 2361.48,
-        pending_rebuild_reason: None,
+        lower_bound: 2336.68,
+        upper_bound: 2386.28,
+        status_reason: None,
         levels: vec![
             GridLevel {
                 level_id: "buy_01".into(),
@@ -717,13 +866,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn strategy_state_default_uses_waiting_market_price_status() {
+        let serialized = serde_json::to_value(StrategyState::default()).expect("serialize default");
+
+        assert_eq!(serialized["status"], "waiting_market_price");
+        assert!(serialized.get("rebuild_reference_price").is_none());
+        assert!(serialized.get("pending_rebuild_reason").is_none());
+    }
+
+    #[test]
     fn runtime_snapshot_sample_matches_expected_symbol() {
         let snapshot = RuntimeSnapshot::sample();
         assert_eq!(snapshot.runtime.symbol, "XAUUSDT");
         assert_eq!(snapshot.execution.open_orders.len(), 2);
         assert_eq!(snapshot.strategy.status, StrategyStatus::Occupied);
         assert_eq!(snapshot.strategy.levels.len(), 6);
-        assert_eq!(snapshot.strategy.config.levels_per_side, 3);
+        assert_eq!(snapshot.strategy.config.grid_levels, 7);
+        assert_eq!(snapshot.strategy.config.lower_price, 2336.68);
+        assert_eq!(snapshot.strategy.config.upper_price, 2386.28);
+    }
+
+    #[test]
+    fn runtime_snapshot_sample_serializes_fixed_range_grid_config() {
+        let serialized = serde_json::to_value(RuntimeSnapshot::sample()).expect("serialize sample");
+
+        assert_eq!(serialized["strategy"]["config"]["lower_price"], 2336.68);
+        assert_eq!(serialized["strategy"]["config"]["upper_price"], 2386.28);
+        assert_eq!(serialized["strategy"]["config"]["grid_levels"], 7);
+        assert_eq!(
+            serialized["strategy"]["config"]["max_position_notional"],
+            1416.89
+        );
+        assert!(
+            serialized["strategy"]["config"]
+                .get("spacing_bps")
+                .is_none()
+        );
+        assert!(
+            serialized["strategy"]["config"]
+                .get("levels_per_side")
+                .is_none()
+        );
     }
 
     #[test]
@@ -798,6 +981,73 @@ mod tests {
             serialized["execution"]["exchange_open_orders_source"],
             "unavailable"
         );
+    }
+
+    #[test]
+    fn runtime_snapshot_decodes_legacy_grid_config_into_fixed_range_shape() {
+        let raw = json!({
+            "connection": {
+                "http_available": true,
+                "ws_connected": false,
+                "user_stream_connected": null,
+                "last_heartbeat_at": "2025-01-01T00:00:00Z",
+                "reconnect_backoff_ms": 0,
+                "stale_age_ms": 0
+            },
+            "runtime": {
+                "symbol": "XAUUSDT",
+                "env": "testnet",
+                "session_state": "regular",
+                "strategy_state": "running",
+                "last_price": 100.0,
+                "mark_price": 100.0,
+                "position_qty": 0.25,
+                "position_avg_price": 99.5,
+                "unrealized_pnl": 1.84,
+                "realized_pnl": 14.52
+            },
+            "execution": {
+                "open_orders": [],
+                "recent_fills": [],
+                "pending_commands": [],
+                "last_command_ack": null,
+                "last_command_ack_event": null,
+                "recent_commands": []
+            },
+            "strategy": {
+                "config": {
+                    "spacing_bps": 35.0,
+                    "levels_per_side": 3,
+                    "quantity_per_level": 0.1,
+                    "max_position_qty": 0.3,
+                    "rebuild_threshold_bps": 120.0
+                },
+                "status": "occupied",
+                "center_price": 100.0,
+                "lower_bound": 98.95,
+                "upper_bound": 101.05,
+                "rebuild_reference_price": 100.0,
+                "pending_rebuild_reason": null,
+                "levels": []
+            },
+            "risk": {
+                "current_notional": 590.39,
+                "max_notional": 1500.0,
+                "daily_loss_limit": -120.0,
+                "stop_loss_pct": 4.0,
+                "risk_level": "watch",
+                "breaker_engaged": false,
+                "unacked_alerts": 1
+            }
+        });
+
+        let snapshot: RuntimeSnapshot =
+            serde_json::from_value(raw).expect("decode legacy grid config");
+
+        assert_eq!(snapshot.strategy.config.lower_price, 98.95);
+        assert_eq!(snapshot.strategy.config.upper_price, 101.05);
+        assert_eq!(snapshot.strategy.config.grid_levels, 7);
+        assert_eq!(snapshot.strategy.config.max_position_notional, 30.0);
     }
 
     #[test]

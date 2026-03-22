@@ -82,7 +82,7 @@ impl BinanceConfig {
     }
 }
 
-pub(crate) fn prepare_bootstrap_runtime(
+pub fn prepare_bootstrap_runtime(
     mut runtime: PersistedRuntime,
     config: &BinanceConfig,
 ) -> PersistedRuntime {

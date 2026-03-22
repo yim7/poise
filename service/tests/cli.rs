@@ -31,6 +31,18 @@ fn version_flag_prints_version_and_exits_promptly() -> Result<()> {
 }
 
 #[test]
+fn config_flag_reads_file_and_reports_missing_path_promptly() -> Result<()> {
+    let output = run_cli_and_wait(&["--config", "tests/fixtures/does-not-exist.toml"])?;
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("--config"));
+    assert!(stderr.contains("does-not-exist.toml"));
+
+    Ok(())
+}
+
+#[test]
 fn mainnet_requires_explicit_opt_in() -> Result<()> {
     let output = run_cli_and_wait_with_env(
         &[],
@@ -76,8 +88,7 @@ fn mainnet_requires_signed_startup_state() -> Result<()> {
     )?;
 
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?
-        .contains("STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE"));
+    assert!(String::from_utf8(output.stderr)?.contains("STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE"));
     Ok(())
 }
 

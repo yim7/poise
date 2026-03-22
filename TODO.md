@@ -6,9 +6,9 @@
 ## 当前状态
 
 - 当前主线：`K10` 单实例 `7x24` 值守硬化
-- 并行线程：同一环境多实例支持正在推进；本主线只要求“实例感知，单实例验收”
-- 最近完成：`K9` 主网运行安全底座已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
-- 最近验证：`2026-03-22` 已通过 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli -- --nocapture`、`cargo test -p grid-platform-service --test mainnet_bootstrap -- --nocapture`、`cargo test -p grid-platform-service --test control_plane -- --nocapture`、`cargo test -p grid-platform-service --test persistence_recovery -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-tui --test local_paper_e2e` 与 `cargo test`
+- 并行线程：多实例固定区间网格已实现并并入主线，后续只维护实例边界与运行安全配套
+- 最近完成：`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
+- 最近验证：`2026-03-22` 已通过 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli -- --nocapture`、`cargo test -p grid-platform-service --test mainnet_bootstrap -- --nocapture`、`cargo test -p grid-platform-service --test control_plane -- --nocapture`、`cargo test -p grid-platform-service --test persistence_recovery -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test multi_instance_control_plane`、`cargo test -p grid-platform-tui --test instance_switching`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`
 
 ## K9 主网运行安全底座
 
@@ -65,7 +65,45 @@
 - [ ] 让策略状态与最近关键变化进入查询模型、事件流和界面展示
 - [ ] 让命令、成交、风险与策略状态变化形成统一复盘链路
 
+## 并行线程：多实例固定区间网格（已验收）
+
+### K9.1 服务端配置与注册表
+
+- [x] 增加环境级 TOML 配置文件模型与校验
+- [x] 支持 `service --config <path>` 启动多标的实例
+- [x] 自动推导 `.data/<environment>/<symbol-lowercase>.db` 持久化路径
+- [x] 增加多实例注册表与默认 symbol 兼容别名
+
+### K9.2 固定区间梯子策略
+
+- [x] 协议改为 `lower_price / upper_price / grid_levels / max_position_notional`
+- [x] 用固定区间梯子替代中心对称网格
+- [x] 支持 `WaitingMarketPrice / WaitingRangeEntry / Active / Occupied` 状态
+- [x] 价格回到区间后自动恢复挂单
+
+### K9.3 多实例控制面与 TUI
+
+- [x] 增加 `/instances` 与 `/instances/{symbol}/...` 控制面路由
+- [x] TUI 启动先拉实例目录，再按默认 symbol 拉快照和建立实例作用域 WebSocket
+- [x] TUI 支持切换当前实例并清空旧实例运行态
+- [x] Market 页展示实例列表、当前实例和默认实例
+
+### K9.4 收尾与验收
+
+- [x] 跑通 `cargo test -p grid-platform-service --test multi_instance_control_plane`
+- [x] 跑通 `cargo test -p grid-platform-tui --test instance_switching`
+- [x] 跑通 `cargo test -p grid-platform-tui --test local_paper_e2e`
+- [x] 跑通 `cargo test -p grid-platform-tui`
+- [x] 更新 `README.md` 与本文件状态
+- [x] 验收结论：K9 已验收通过
+
 ## 当前并行方式
 
 - 按 `K10 -> K11` 单主线串行推进
-- 与多实例线程只对齐实例键、路径与事件字段，不把多实例运营能力拉进本主线
+- 多实例能力已并入主线，后续只补实例键、路径、事件和运行安全边界
+
+## 完成后必做
+
+- [x] 更新 `docs/plan.md` 中对应里程碑状态
+- [x] 更新本文件中的任务勾选状态
+- [x] 记录最近一次验证结果

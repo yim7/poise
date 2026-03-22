@@ -1,5 +1,6 @@
 ---
 source: tui/src/render.rs
+assertion_line: 2514
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Tape                           
@@ -10,9 +11,9 @@ expression: snapshot
 │Mark  2361.55                   ││Market WS  DOWN   User WS  DOWN││Heartbeat  2025-01-01T00:00:00Z│
 │Basis  +0.07                    ││Stale  12000ms   Retry  3      ││Strategy  running              │
 │                                ││Market Backoff  4000ms         ││                               │
-│                                ││Mode  SERVICE RECONNECTING     ││                               │
-│                                ││Service control-plane WebSocket││                               │
-│                                ││is down. Wait for the client   ││                               │
+│                                ││Mode  SERVICE RECONNECTING     ││Instances Env testnet · Default│
+│                                ││Service control-plane WebSocket││XAUUSDT · Current XAUUSDT      │
+│                                ││is down. Wait for the client   ││> XAUUSDT · testnet            │
 │                                ││stream to recover.             ││                               │
 │                                ││                               ││                               │
 └────────────────────────────────┘└───────────────────────────────┘└───────────────────────────────┘

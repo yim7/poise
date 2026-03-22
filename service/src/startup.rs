@@ -231,16 +231,12 @@ pub fn reconcile_startup(
         });
     }
 
-    if exchange
-        .open_orders
-        .as_deref()
-        .is_some_and(|open_orders| {
-            startup_open_orders_mismatch(
-                &persisted.snapshot.execution.exchange_open_orders,
-                open_orders,
-            )
-        })
-    {
+    if exchange.open_orders.as_deref().is_some_and(|open_orders| {
+        startup_open_orders_mismatch(
+            &persisted.snapshot.execution.exchange_open_orders,
+            open_orders,
+        )
+    }) {
         return Ok(StartupDecision::Pause {
             code: "STARTUP_RECONCILE_OPEN_ORDERS_MISMATCH",
             message: "exchange open orders differ from persisted exchange state".into(),

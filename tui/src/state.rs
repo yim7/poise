@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 
 use crate::locale::{self, Locale};
 use crate::protocol::{
-    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, OpenOrdersSource,
-    PendingCommand, RecentFill, RiskEvent, RiskLevel, RuntimeSnapshot, StrategyState, SystemEvent,
+    CommandAck, CommandLinks, CommandRecord, CommandStatus, CommandType, InstanceSummary,
+    InstancesDirectory, OpenOrdersSource, PendingCommand, RecentFill, RiskEvent, RiskLevel,
+    RuntimeSnapshot, StrategyState, SystemEvent,
 };
 
 pub const COMMAND_TIMEOUT_TICKS: u64 = 15;
@@ -226,12 +227,22 @@ pub struct UiState {
 }
 
 #[derive(Debug, Clone)]
+pub struct InstancesViewState {
+    pub environment: String,
+    pub default_symbol: Option<String>,
+    pub current_symbol: Option<String>,
+    pub generation: u64,
+    pub items: Vec<InstanceSummary>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AppState {
     pub connection: ConnectionViewState,
     pub runtime: RuntimeViewState,
     pub execution: ExecutionViewState,
     pub risk: RiskViewState,
     pub strategy: StrategyState,
+    pub instances: InstancesViewState,
     pub ui: UiState,
     pub snapshot_state: SnapshotBootstrapState,
     pub system_events: VecDeque<SystemEvent>,
@@ -293,6 +304,13 @@ impl AppState {
                 alerts: VecDeque::new(),
             },
             strategy: StrategyState::default(),
+            instances: InstancesViewState {
+                environment: String::new(),
+                default_symbol: None,
+                current_symbol: None,
+                generation: 0,
+                items: Vec::new(),
+            },
             ui: UiState {
                 page: Page::Dashboard,
                 focus_index: 0,
@@ -313,6 +331,8 @@ impl AppState {
     }
 
     pub fn from_snapshot_with_locale(snapshot: RuntimeSnapshot, locale: Locale) -> Self {
+        let environment = snapshot.runtime.env.clone();
+        let symbol = snapshot.runtime.symbol.clone();
         let command_timeline = command_timeline_from_snapshot(&snapshot, locale);
         Self {
             connection: ConnectionViewState {
@@ -360,6 +380,7 @@ impl AppState {
                 alerts: VecDeque::new(),
             },
             strategy: snapshot.strategy,
+            instances: InstancesViewState::single(environment, symbol),
             ui: UiState {
                 page: Page::Dashboard,
                 focus_index: 0,
@@ -504,9 +525,12 @@ impl AppState {
     }
 
     pub fn sync_runtime_snapshot(&mut self, snapshot: RuntimeSnapshot) {
+        let current_symbol = snapshot.runtime.symbol.clone();
+        let current_environment = snapshot.runtime.env.clone();
         let ws_connected = self.connection.ws_connected;
         let reconnect_attempt = self.connection.reconnect_attempt;
         let reconnect_backoff_ms = self.connection.reconnect_backoff_ms;
+        let instances = self.instances.clone();
         let ui = self.ui.clone();
         let system_events = self.system_events.clone();
         let alerts = self.risk.alerts.clone();
@@ -517,6 +541,24 @@ impl AppState {
         self.connection.ws_connected = ws_connected;
         self.connection.reconnect_attempt = reconnect_attempt;
         self.connection.reconnect_backoff_ms = reconnect_backoff_ms;
+        self.instances = if instances.items.is_empty() {
+            InstancesViewState::single(current_environment, current_symbol)
+        } else {
+            let mut instances = instances;
+            instances.current_symbol = Some(current_symbol.clone());
+            if instances.environment.is_empty() {
+                instances.environment = current_environment.clone();
+            }
+            if !instances
+                .items
+                .iter()
+                .any(|item| item.symbol == current_symbol)
+            {
+                InstancesViewState::single(current_environment, current_symbol)
+            } else {
+                instances
+            }
+        };
         self.ui = ui;
         self.system_events = system_events;
         self.risk.alerts = alerts;
@@ -525,6 +567,56 @@ impl AppState {
         self.dirty = DirtyFlags::all();
         self.immediate_render = true;
         self.trim_command_timeline();
+    }
+
+    pub fn begin_instance_bootstrap(&mut self, symbol: String) {
+        let locale = self.ui.locale;
+        let page = self.ui.page;
+        let focus_index = self.ui.focus_index;
+        let width = self.ui.width;
+        let height = self.ui.height;
+        let clock_ticks = self.clock_ticks;
+        let next_command_seq = self.next_command_seq;
+        let mut instances = self.instances.clone();
+        instances.current_symbol = Some(symbol);
+        instances.generation = instances.generation.saturating_add(1);
+
+        *self = Self::waiting_first_snapshot_with_locale(locale);
+        self.ui.page = page;
+        self.ui.focus_index = page.normalize_focus(focus_index);
+        self.ui.width = width;
+        self.ui.height = height;
+        self.instances = instances;
+        self.clock_ticks = clock_ticks;
+        self.next_command_seq = next_command_seq;
+        self.dirty = DirtyFlags::all();
+        self.immediate_render = true;
+    }
+}
+
+impl InstancesViewState {
+    pub fn from_directory(directory: InstancesDirectory) -> Self {
+        Self {
+            environment: directory.environment,
+            default_symbol: Some(directory.default_symbol.clone()),
+            current_symbol: Some(directory.default_symbol),
+            generation: 0,
+            items: directory.instances,
+        }
+    }
+
+    fn single(environment: String, symbol: String) -> Self {
+        Self {
+            environment: environment.clone(),
+            default_symbol: Some(symbol.clone()),
+            current_symbol: Some(symbol.clone()),
+            generation: 0,
+            items: vec![InstanceSummary {
+                symbol,
+                environment,
+                is_default: true,
+            }],
+        }
     }
 }
 

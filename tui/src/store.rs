@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque};
 
 use crate::effects::Effect;
 use crate::events::{
-    AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent, SystemEvent,
+    AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent, ProtocolEvent, SystemEvent,
 };
 use crate::locale;
 use crate::protocol::{CommandAck, CommandStatus, CommandType, ServerEvent};
@@ -22,8 +22,19 @@ pub fn reduce(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     }
 }
 
-fn handle_protocol_event(state: &mut AppState, event: ServerEvent) -> Vec<Effect> {
-    match event {
+fn handle_protocol_event(state: &mut AppState, protocol: ProtocolEvent) -> Vec<Effect> {
+    if let Some(symbol) = protocol.symbol.as_deref()
+        && !current_symbol_matches(state, symbol)
+    {
+        return Vec::new();
+    }
+    if let Some(generation) = protocol.generation
+        && !current_generation_matches(state, generation)
+    {
+        return Vec::new();
+    }
+
+    match protocol.event {
         ServerEvent::RuntimeSnapshot(snapshot) => {
             state.sync_runtime_snapshot(snapshot);
             Vec::new()
@@ -106,6 +117,8 @@ fn handle_input_event(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
             KeyAction::ToggleHelp => switch_page(state, Page::Help),
             KeyAction::NextFocus => advance_focus(state, 1),
             KeyAction::PrevFocus => advance_focus(state, -1),
+            KeyAction::NextInstance => cycle_instance(state, 1),
+            KeyAction::PrevInstance => cycle_instance(state, -1),
             KeyAction::Pause => submit_command(state, CommandType::Pause),
             KeyAction::Resume => submit_command(state, CommandType::Resume),
             KeyAction::CancelAll => open_confirm(state, CommandType::CancelAll),
@@ -170,59 +183,144 @@ fn handle_system_event(state: &mut AppState, event: SystemEvent) -> Vec<Effect> 
 
 fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<Effect> {
     match event {
-        EffectResultEvent::SnapshotLoaded(snapshot) => {
+        EffectResultEvent::InstancesLoaded(directory) => {
+            let selected_symbol = state
+                .instances
+                .current_symbol
+                .as_ref()
+                .filter(|symbol| {
+                    directory
+                        .instances
+                        .iter()
+                        .any(|item| item.symbol == **symbol)
+                })
+                .cloned()
+                .unwrap_or_else(|| directory.default_symbol.clone());
+            state.instances = crate::state::InstancesViewState::from_directory(directory);
+            state.begin_instance_bootstrap(selected_symbol.clone());
+            let generation = state.instances.generation;
+            vec![
+                Effect::UseInstance {
+                    symbol: selected_symbol.clone(),
+                    generation,
+                },
+                Effect::FetchSnapshot {
+                    symbol: selected_symbol,
+                    generation,
+                },
+            ]
+        }
+        EffectResultEvent::InstancesFailed(error) => {
+            let retry_count = match &state.snapshot_state {
+                SnapshotBootstrapState::WaitingFirstSnapshot => 1,
+                SnapshotBootstrapState::SnapshotRetrying { retry_count, .. } => {
+                    retry_count.saturating_add(1)
+                }
+                SnapshotBootstrapState::Ready => 1,
+            };
+            let retry_in_ms = AppState::snapshot_retry_backoff_ms(retry_count);
+            state.snapshot_state = SnapshotBootstrapState::SnapshotRetrying {
+                last_error: error.clone(),
+                retry_count,
+                retry_in_ms,
+            };
+            state.ui.modal = None;
+            state.ui.toast = Some(Toast {
+                level: ToastLevel::Danger,
+                message: locale::copy(state.ui.locale)
+                    .toast()
+                    .snapshot_failed(&error),
+                ttl_ticks: 24,
+            });
+            state.mark_dirty(DirtyFlags::all(), true);
+            vec![Effect::FetchInstancesAfterDelay { retry_in_ms }]
+        }
+        EffectResultEvent::SnapshotLoaded {
+            symbol,
+            generation,
+            snapshot,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             let was_connected = state.connection.ws_connected;
             state.sync_runtime_snapshot(snapshot);
             if was_connected {
-                vec![Effect::FetchRiskEvents]
+                vec![Effect::FetchRiskEvents { symbol, generation }]
             } else {
-                vec![Effect::FetchRiskEvents, Effect::ConnectWs]
+                vec![
+                    Effect::FetchRiskEvents {
+                        symbol: symbol.clone(),
+                        generation,
+                    },
+                    Effect::ConnectWs { symbol, generation },
+                ]
             }
         }
-        EffectResultEvent::SnapshotFailed(error) => match &state.snapshot_state {
-            SnapshotBootstrapState::Ready => {
-                let toast_copy = locale::copy(state.ui.locale).toast();
-                state.ui.toast = Some(Toast {
-                    level: ToastLevel::Danger,
-                    message: toast_copy.snapshot_failed(&error),
-                    ttl_ticks: 24,
-                });
-                state.mark_dirty(
-                    DirtyFlags {
-                        ui: true,
-                        ..DirtyFlags::default()
-                    },
-                    true,
-                );
-                Vec::new()
+        EffectResultEvent::SnapshotFailed {
+            symbol,
+            generation,
+            error,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
             }
-            SnapshotBootstrapState::WaitingFirstSnapshot
-            | SnapshotBootstrapState::SnapshotRetrying { .. } => {
-                let retry_count = match &state.snapshot_state {
-                    SnapshotBootstrapState::WaitingFirstSnapshot => 1,
-                    SnapshotBootstrapState::SnapshotRetrying { retry_count, .. } => {
-                        retry_count.saturating_add(1)
-                    }
-                    SnapshotBootstrapState::Ready => unreachable!(),
-                };
-                let retry_in_ms = AppState::snapshot_retry_backoff_ms(retry_count);
-                state.snapshot_state = SnapshotBootstrapState::SnapshotRetrying {
-                    last_error: error,
-                    retry_count,
-                    retry_in_ms,
-                };
-                state.ui.modal = None;
-                state.mark_dirty(
-                    DirtyFlags {
-                        ui: true,
-                        ..DirtyFlags::default()
-                    },
-                    true,
-                );
-                vec![Effect::FetchSnapshotAfterDelay { retry_in_ms }]
+            match &state.snapshot_state {
+                SnapshotBootstrapState::Ready => {
+                    let toast_copy = locale::copy(state.ui.locale).toast();
+                    state.ui.toast = Some(Toast {
+                        level: ToastLevel::Danger,
+                        message: toast_copy.snapshot_failed(&error),
+                        ttl_ticks: 24,
+                    });
+                    state.mark_dirty(
+                        DirtyFlags {
+                            ui: true,
+                            ..DirtyFlags::default()
+                        },
+                        true,
+                    );
+                    Vec::new()
+                }
+                SnapshotBootstrapState::WaitingFirstSnapshot
+                | SnapshotBootstrapState::SnapshotRetrying { .. } => {
+                    let retry_count = match &state.snapshot_state {
+                        SnapshotBootstrapState::WaitingFirstSnapshot => 1,
+                        SnapshotBootstrapState::SnapshotRetrying { retry_count, .. } => {
+                            retry_count.saturating_add(1)
+                        }
+                        SnapshotBootstrapState::Ready => unreachable!(),
+                    };
+                    let retry_in_ms = AppState::snapshot_retry_backoff_ms(retry_count);
+                    state.snapshot_state = SnapshotBootstrapState::SnapshotRetrying {
+                        last_error: error,
+                        retry_count,
+                        retry_in_ms,
+                    };
+                    state.ui.modal = None;
+                    state.mark_dirty(
+                        DirtyFlags {
+                            ui: true,
+                            ..DirtyFlags::default()
+                        },
+                        true,
+                    );
+                    vec![Effect::FetchSnapshotAfterDelay {
+                        symbol,
+                        generation,
+                        retry_in_ms,
+                    }]
+                }
             }
-        },
-        EffectResultEvent::RiskEventsLoaded(alerts) => {
+        }
+        EffectResultEvent::RiskEventsLoaded {
+            symbol,
+            generation,
+            alerts,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             state.risk.alerts = merge_risk_alerts(&state.risk.alerts, alerts);
             state.risk.unacked_alerts = state
                 .risk
@@ -239,7 +337,14 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             );
             Vec::new()
         }
-        EffectResultEvent::RiskEventsFailed(error) => {
+        EffectResultEvent::RiskEventsFailed {
+            symbol,
+            generation,
+            error,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             let toast_copy = locale::copy(state.ui.locale).toast();
             state.ui.toast = Some(Toast {
                 level: ToastLevel::Warning,
@@ -255,7 +360,10 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             );
             Vec::new()
         }
-        EffectResultEvent::WsConnected => {
+        EffectResultEvent::WsConnected { symbol, generation } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             let reconnect_attempt = state.connection.reconnect_attempt;
             state.connection.ws_connected = true;
             state.connection.reconnect_attempt = 0;
@@ -283,12 +391,19 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
                 true,
             );
             if reconnect_attempt > 0 {
-                vec![Effect::FetchSnapshot]
+                vec![Effect::FetchSnapshot { symbol, generation }]
             } else {
                 Vec::new()
             }
         }
-        EffectResultEvent::WsDisconnected(reason) => {
+        EffectResultEvent::WsDisconnected {
+            symbol,
+            generation,
+            reason,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             state.connection.ws_connected = false;
             state.connection.reconnect_attempt += 1;
             let backoff_multiplier = 2u64
@@ -311,10 +426,19 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             });
             state.mark_dirty(DirtyFlags::all(), true);
             vec![Effect::ReconnectWs {
+                symbol,
+                generation,
                 attempt: state.connection.reconnect_attempt,
             }]
         }
-        EffectResultEvent::CommandAccepted(accepted) => {
+        EffectResultEvent::CommandAccepted {
+            symbol,
+            generation,
+            accepted,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             if let Some(item) = state
                 .execution
                 .pending_commands
@@ -344,7 +468,15 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             );
             Vec::new()
         }
-        EffectResultEvent::CommandFailed { command_id, error } => {
+        EffectResultEvent::CommandFailed {
+            symbol,
+            generation,
+            command_id,
+            error,
+        } => {
+            if !current_instance_matches(state, &symbol, generation) {
+                return Vec::new();
+            }
             let command = state
                 .execution
                 .pending_commands
@@ -387,6 +519,18 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             Vec::new()
         }
     }
+}
+
+fn current_symbol_matches(state: &AppState, symbol: &str) -> bool {
+    state.instances.current_symbol.as_deref() == Some(symbol)
+}
+
+fn current_generation_matches(state: &AppState, generation: u64) -> bool {
+    state.instances.generation == generation
+}
+
+fn current_instance_matches(state: &AppState, symbol: &str, generation: u64) -> bool {
+    current_symbol_matches(state, symbol) && current_generation_matches(state, generation)
 }
 
 fn merge_risk_alerts(
@@ -470,6 +614,28 @@ fn handle_local_ui_event(state: &mut AppState, event: LocalUiEvent) -> Vec<Effec
                 Vec::new()
             }
         }
+        LocalUiEvent::SelectInstance(symbol) => {
+            if state.instances.current_symbol.as_deref() == Some(symbol.as_str()) {
+                return Vec::new();
+            }
+            if !state
+                .instances
+                .items
+                .iter()
+                .any(|item| item.symbol == symbol)
+            {
+                return Vec::new();
+            }
+            state.begin_instance_bootstrap(symbol.clone());
+            let generation = state.instances.generation;
+            vec![
+                Effect::UseInstance {
+                    symbol: symbol.clone(),
+                    generation,
+                },
+                Effect::FetchSnapshot { symbol, generation },
+            ]
+        }
         LocalUiEvent::CancelModal => {
             state.ui.modal = None;
             state.mark_dirty(
@@ -500,6 +666,11 @@ fn submit_command(state: &mut AppState, command: CommandType) -> Vec<Effect> {
         set_bootstrap_blocked_toast(state);
         return Vec::new();
     }
+    let Some(symbol) = state.instances.current_symbol.clone() else {
+        set_bootstrap_blocked_toast(state);
+        return Vec::new();
+    };
+    let generation = state.instances.generation;
     let command_id = state.queue_command(command);
     state.ui.modal = None;
     state.mark_dirty(
@@ -511,6 +682,8 @@ fn submit_command(state: &mut AppState, command: CommandType) -> Vec<Effect> {
         true,
     );
     vec![Effect::SendCommand {
+        symbol,
+        generation,
         command,
         command_id,
     }]
@@ -548,6 +721,29 @@ fn advance_focus(state: &mut AppState, delta: isize) -> Vec<Effect> {
         );
     }
     Vec::new()
+}
+
+fn cycle_instance(state: &mut AppState, delta: isize) -> Vec<Effect> {
+    let count = state.instances.items.len();
+    if count <= 1 {
+        return Vec::new();
+    }
+
+    let current_index = state
+        .instances
+        .current_symbol
+        .as_ref()
+        .and_then(|symbol| {
+            state
+                .instances
+                .items
+                .iter()
+                .position(|item| item.symbol == *symbol)
+        })
+        .unwrap_or(0);
+    let next_index = (current_index as isize + delta).rem_euclid(count as isize) as usize;
+    let next_symbol = state.instances.items[next_index].symbol.clone();
+    handle_local_ui_event(state, LocalUiEvent::SelectInstance(next_symbol))
 }
 
 fn apply_command_ack(state: &mut AppState, ack: CommandAck) {
@@ -775,9 +971,13 @@ fn command_status_level(status: CommandStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent};
+    use crate::events::{
+        AppEvent, EffectResultEvent, InputEvent, KeyAction, LocalUiEvent, ProtocolEvent,
+    };
     use crate::locale::Locale;
-    use crate::protocol::{CommandAccepted, CommandRecord, RuntimeSnapshot};
+    use crate::protocol::{
+        CommandAccepted, CommandRecord, InstanceSummary, InstancesDirectory, RuntimeSnapshot,
+    };
     use crate::state::SnapshotBootstrapState;
 
     #[test]
@@ -797,15 +997,25 @@ mod tests {
     #[test]
     fn first_snapshot_failure_enters_retrying_state() {
         let mut state = AppState::waiting_first_snapshot();
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state.instances.generation = 1;
 
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                error: "boom".into(),
+            }),
         );
 
         assert_eq!(
             effects,
-            vec![Effect::FetchSnapshotAfterDelay { retry_in_ms: 1_000 }]
+            vec![Effect::FetchSnapshotAfterDelay {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                retry_in_ms: 1_000,
+            }]
         );
         match state.snapshot_state {
             SnapshotBootstrapState::SnapshotRetrying {
@@ -824,21 +1034,227 @@ mod tests {
     #[test]
     fn retrying_snapshot_success_returns_to_ready() {
         let mut state = AppState::waiting_first_snapshot();
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state.instances.generation = 1;
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                error: "boom".into(),
+            }),
         );
 
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(RuntimeSnapshot::sample())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                snapshot: RuntimeSnapshot::sample(),
+            }),
         );
 
         assert!(matches!(
             state.snapshot_state,
             SnapshotBootstrapState::Ready
         ));
-        assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::FetchRiskEvents {
+                    symbol: "XAUUSDT".into(),
+                    generation: 1,
+                },
+                Effect::ConnectWs {
+                    symbol: "XAUUSDT".into(),
+                    generation: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn instances_loaded_selects_default_symbol_and_bootstraps_snapshot() {
+        let mut state = AppState::waiting_first_snapshot();
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::InstancesLoaded(InstancesDirectory {
+                environment: "testnet".into(),
+                default_symbol: "BTCUSDT".into(),
+                instances: vec![
+                    InstanceSummary {
+                        symbol: "BTCUSDT".into(),
+                        environment: "testnet".into(),
+                        is_default: true,
+                    },
+                    InstanceSummary {
+                        symbol: "ETHUSDT".into(),
+                        environment: "testnet".into(),
+                        is_default: false,
+                    },
+                ],
+            })),
+        );
+
+        assert_eq!(state.instances.current_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(state.instances.environment, "testnet");
+        assert_eq!(state.instances.generation, 1);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::UseInstance {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+                Effect::FetchSnapshot {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn selecting_instance_resets_runtime_and_requests_new_snapshot() {
+        let mut state = AppState::sample();
+        state.instances = crate::state::InstancesViewState::from_directory(InstancesDirectory {
+            environment: "testnet".into(),
+            default_symbol: "XAUUSDT".into(),
+            instances: vec![
+                InstanceSummary {
+                    symbol: "XAUUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: true,
+                },
+                InstanceSummary {
+                    symbol: "BTCUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+            ],
+        });
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state
+            .system_events
+            .push_front(crate::protocol::SystemEvent {
+                level: "info".into(),
+                source: "test".into(),
+                message: "old".into(),
+                created_at: "T+00s".into(),
+            });
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::LocalUi(LocalUiEvent::SelectInstance("BTCUSDT".into())),
+        );
+
+        assert_eq!(state.instances.current_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(state.instances.generation, 1);
+        assert!(matches!(
+            state.snapshot_state,
+            SnapshotBootstrapState::WaitingFirstSnapshot
+        ));
+        assert_eq!(state.runtime.symbol, "");
+        assert!(state.execution.open_orders.is_empty());
+        assert!(state.risk.alerts.is_empty());
+        assert!(state.system_events.is_empty());
+        assert!(!state.connection.ws_connected);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::UseInstance {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+                Effect::FetchSnapshot {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn next_instance_shortcut_cycles_symbols() {
+        let mut state = AppState::sample();
+        state.instances = crate::state::InstancesViewState::from_directory(InstancesDirectory {
+            environment: "testnet".into(),
+            default_symbol: "XAUUSDT".into(),
+            instances: vec![
+                InstanceSummary {
+                    symbol: "XAUUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: true,
+                },
+                InstanceSummary {
+                    symbol: "BTCUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+            ],
+        });
+        state.instances.current_symbol = Some("XAUUSDT".into());
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(KeyAction::NextInstance)),
+        );
+
+        assert_eq!(state.instances.current_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(state.instances.generation, 1);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::UseInstance {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+                Effect::FetchSnapshot {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_stale_snapshot_for_non_current_symbol() {
+        let mut state = AppState::waiting_first_snapshot();
+        state.instances = crate::state::InstancesViewState::from_directory(InstancesDirectory {
+            environment: "testnet".into(),
+            default_symbol: "BTCUSDT".into(),
+            instances: vec![
+                InstanceSummary {
+                    symbol: "BTCUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: true,
+                },
+                InstanceSummary {
+                    symbol: "ETHUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+            ],
+        });
+        state.instances.current_symbol = Some("BTCUSDT".into());
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "ETHUSDT".into(),
+                generation: 0,
+                snapshot: RuntimeSnapshot::sample(),
+            }),
+        );
+
+        assert!(effects.is_empty());
+        assert_eq!(state.instances.current_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(state.runtime.symbol, "");
+        assert!(matches!(
+            state.snapshot_state,
+            SnapshotBootstrapState::WaitingFirstSnapshot
+        ));
     }
 
     #[test]
@@ -865,9 +1281,15 @@ mod tests {
     #[test]
     fn retrying_snapshot_blocks_runtime_shortcuts_and_toasts() {
         let mut state = AppState::waiting_first_snapshot();
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state.instances.generation = 1;
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                error: "boom".into(),
+            }),
         );
 
         for action in [
@@ -913,9 +1335,15 @@ mod tests {
     fn retrying_snapshot_blocks_runtime_shortcuts_and_toasts_in_chinese() {
         let mut state = AppState::waiting_first_snapshot();
         state.ui.locale = Locale::ZhCn;
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state.instances.generation = 1;
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                error: "boom".into(),
+            }),
         );
 
         for action in [
@@ -938,6 +1366,7 @@ mod tests {
     #[test]
     fn pause_shortcut_creates_send_command_effect() {
         let mut state = AppState::sample();
+        state.instances.generation = 7;
         let pending_before = state.execution.pending_commands.len();
         let effects = reduce(
             &mut state,
@@ -947,6 +1376,7 @@ mod tests {
             effects.first(),
             Some(Effect::SendCommand {
                 command: CommandType::Pause,
+                generation: 7,
                 ..
             })
         ));
@@ -958,11 +1388,19 @@ mod tests {
         let mut state = AppState::sample();
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::WsDisconnected("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::WsDisconnected {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                reason: "boom".into(),
+            }),
         );
         assert!(matches!(
             effects.first(),
-            Some(Effect::ReconnectWs { attempt: 1 })
+            Some(Effect::ReconnectWs {
+                symbol,
+                generation: 0,
+                attempt: 1,
+            }) if symbol == "XAUUSDT"
         ));
         assert!(!state.connection.ws_connected);
     }
@@ -974,7 +1412,11 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                error: "boom".into(),
+            }),
         );
         assert_eq!(
             state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
@@ -983,7 +1425,10 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::WsConnected),
+            AppEvent::EffectResult(EffectResultEvent::WsConnected {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+            }),
         );
         assert_eq!(
             state
@@ -999,7 +1444,11 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::WsDisconnected("boom".into())),
+            AppEvent::EffectResult(EffectResultEvent::WsDisconnected {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                reason: "boom".into(),
+            }),
         );
         assert_eq!(
             state
@@ -1022,6 +1471,8 @@ mod tests {
         reduce(
             &mut state,
             AppEvent::EffectResult(EffectResultEvent::CommandFailed {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
                 command_id: "cmd_fail_zh".into(),
                 error: "boom".into(),
             }),
@@ -1044,13 +1495,17 @@ mod tests {
         };
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::CommandAccepted(CommandAccepted {
-                version: "v1alpha1".into(),
-                command_id: command_id.clone(),
-                command: CommandType::Pause,
-                status: CommandStatus::Accepted,
-                accepted_at: "2025-01-01T00:00:01Z".into(),
-            })),
+            AppEvent::EffectResult(EffectResultEvent::CommandAccepted {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                accepted: CommandAccepted {
+                    version: "v1alpha1".into(),
+                    command_id: command_id.clone(),
+                    command: CommandType::Pause,
+                    status: CommandStatus::Accepted,
+                    accepted_at: "2025-01-01T00:00:01Z".into(),
+                },
+            }),
         );
         for _ in 0..COMMAND_TIMEOUT_TICKS {
             reduce(&mut state, AppEvent::System(SystemEvent::HealthTick));
@@ -1111,10 +1566,19 @@ mod tests {
 
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::WsConnected),
+            AppEvent::EffectResult(EffectResultEvent::WsConnected {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+            }),
         );
 
-        assert_eq!(effects, vec![Effect::FetchSnapshot]);
+        assert_eq!(
+            effects,
+            vec![Effect::FetchSnapshot {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+            }]
+        );
         assert!(state.connection.ws_connected);
     }
 
@@ -1144,12 +1608,29 @@ mod tests {
         state.connection.ws_connected = false;
         let mut snapshot = RuntimeSnapshot::sample();
         snapshot.runtime.symbol = "TSLAUSDT".into();
+        state.instances.current_symbol = Some("TSLAUSDT".into());
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "TSLAUSDT".into(),
+                generation: 0,
+                snapshot,
+            }),
         );
         assert_eq!(state.runtime.symbol, "TSLAUSDT");
-        assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::FetchRiskEvents {
+                    symbol: "TSLAUSDT".into(),
+                    generation: 0,
+                },
+                Effect::ConnectWs {
+                    symbol: "TSLAUSDT".into(),
+                    generation: 0,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1164,7 +1645,7 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::Protocol(ServerEvent::RuntimeSnapshot(snapshot)),
+            AppEvent::Protocol(ProtocolEvent::from(ServerEvent::RuntimeSnapshot(snapshot))),
         );
 
         assert!(state.connection.ws_connected);
@@ -1179,10 +1660,20 @@ mod tests {
 
         let effects = reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(RuntimeSnapshot::sample())),
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                snapshot: RuntimeSnapshot::sample(),
+            }),
         );
 
-        assert_eq!(effects, vec![Effect::FetchRiskEvents]);
+        assert_eq!(
+            effects,
+            vec![Effect::FetchRiskEvents {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+            }]
+        );
     }
 
     #[test]
@@ -1207,7 +1698,11 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded(alerts)),
+            AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                alerts,
+            }),
         );
 
         assert_eq!(state.risk.alerts.len(), 2);
@@ -1248,7 +1743,7 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::Protocol(ServerEvent::RuntimeSnapshot(snapshot)),
+            AppEvent::Protocol(ProtocolEvent::from(ServerEvent::RuntimeSnapshot(snapshot))),
         );
 
         assert!(
@@ -1278,13 +1773,17 @@ mod tests {
         };
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::CommandAccepted(CommandAccepted {
-                version: "v1alpha1".into(),
-                command_id: command_id.clone(),
-                command: CommandType::Pause,
-                status: CommandStatus::Accepted,
-                accepted_at: "2025-01-01T00:00:00Z".into(),
-            })),
+            AppEvent::EffectResult(EffectResultEvent::CommandAccepted {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                accepted: CommandAccepted {
+                    version: "v1alpha1".into(),
+                    command_id: command_id.clone(),
+                    command: CommandType::Pause,
+                    status: CommandStatus::Accepted,
+                    accepted_at: "2025-01-01T00:00:00Z".into(),
+                },
+            }),
         );
         assert_eq!(
             state
@@ -1305,6 +1804,126 @@ mod tests {
                 .unwrap()
                 .stage,
             CommandTimelineStage::Accepted
+        );
+    }
+
+    #[test]
+    fn stale_same_symbol_command_result_from_previous_generation_is_ignored() {
+        let mut state = AppState::sample();
+        state.instances.environment = "testnet".into();
+        state.instances.default_symbol = Some("XAUUSDT".into());
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state.instances.generation = 1;
+        state.instances.items = vec![
+            InstanceSummary {
+                symbol: "XAUUSDT".into(),
+                environment: "testnet".into(),
+                is_default: true,
+            },
+            InstanceSummary {
+                symbol: "BTCUSDT".into(),
+                environment: "testnet".into(),
+                is_default: false,
+            },
+        ];
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(KeyAction::Pause)),
+        );
+        let stale_command_id = match effects.first().unwrap() {
+            Effect::SendCommand {
+                symbol,
+                command,
+                generation,
+                command_id,
+            } => {
+                assert_eq!(symbol, "XAUUSDT");
+                assert_eq!(*command, CommandType::Pause);
+                assert_eq!(*generation, 1);
+                command_id.clone()
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        };
+
+        let _ = reduce(
+            &mut state,
+            AppEvent::LocalUi(LocalUiEvent::SelectInstance("BTCUSDT".into())),
+        );
+        let _ = reduce(
+            &mut state,
+            AppEvent::LocalUi(LocalUiEvent::SelectInstance("XAUUSDT".into())),
+        );
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "XAUUSDT".into(),
+                generation: 3,
+                snapshot: RuntimeSnapshot::sample(),
+            }),
+        );
+        let current_effects = reduce(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(KeyAction::Pause)),
+        );
+        let current_command_id = match current_effects.first().unwrap() {
+            Effect::SendCommand {
+                symbol,
+                command,
+                generation,
+                command_id,
+            } => {
+                assert_eq!(symbol, "XAUUSDT");
+                assert_eq!(*command, CommandType::Pause);
+                assert_eq!(*generation, 3);
+                command_id.clone()
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        };
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::CommandAccepted {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+                accepted: CommandAccepted {
+                    version: "v1alpha1".into(),
+                    command_id: stale_command_id.clone(),
+                    command: CommandType::Pause,
+                    status: CommandStatus::Accepted,
+                    accepted_at: "2025-01-01T00:00:00Z".into(),
+                },
+            }),
+        );
+
+        assert_eq!(state.instances.current_symbol.as_deref(), Some("XAUUSDT"));
+        assert_eq!(state.instances.generation, 3);
+        assert_eq!(
+            state
+                .execution
+                .pending_commands
+                .iter()
+                .find(|item| item.command_id == current_command_id)
+                .unwrap()
+                .status,
+            CommandStatus::Pending
+        );
+        assert_eq!(
+            state
+                .execution
+                .command_timeline
+                .iter()
+                .find(|item| item.command_id == current_command_id)
+                .unwrap()
+                .stage,
+            CommandTimelineStage::Pending
+        );
+        assert!(
+            state
+                .execution
+                .command_timeline
+                .iter()
+                .all(|item| item.command_id != stale_command_id)
         );
     }
 
@@ -1338,14 +1957,14 @@ mod tests {
         };
         reduce(
             &mut state,
-            AppEvent::Protocol(ServerEvent::CommandAck(CommandAck {
+            AppEvent::Protocol(ProtocolEvent::from(ServerEvent::CommandAck(CommandAck {
                 command_id: command_id.clone(),
                 command: CommandType::Pause,
                 status: CommandStatus::Completed,
                 message: "Paused.".into(),
                 links: crate::protocol::CommandLinks::default(),
                 emitted_at: "2025-01-01T00:00:02Z".into(),
-            })),
+            }))),
         );
         assert!(
             state
@@ -1379,13 +1998,17 @@ mod tests {
         };
         reduce(
             &mut state,
-            AppEvent::EffectResult(EffectResultEvent::CommandAccepted(CommandAccepted {
-                version: "v1alpha1".into(),
-                command_id: command_id.clone(),
-                command: CommandType::Pause,
-                status: CommandStatus::Accepted,
-                accepted_at: "2025-01-01T00:00:01Z".into(),
-            })),
+            AppEvent::EffectResult(EffectResultEvent::CommandAccepted {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                accepted: CommandAccepted {
+                    version: "v1alpha1".into(),
+                    command_id: command_id.clone(),
+                    command: CommandType::Pause,
+                    status: CommandStatus::Accepted,
+                    accepted_at: "2025-01-01T00:00:01Z".into(),
+                },
+            }),
         );
         for _ in 0..COMMAND_TIMEOUT_TICKS {
             reduce(&mut state, AppEvent::System(SystemEvent::HealthTick));
@@ -1415,14 +2038,14 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::Protocol(ServerEvent::CommandAck(CommandAck {
+            AppEvent::Protocol(ProtocolEvent::from(ServerEvent::CommandAck(CommandAck {
                 command_id: "cmd_failed_level".into(),
                 command: CommandType::CancelAll,
                 status: CommandStatus::Failed,
                 message: "exchange rejected cancel-all".into(),
                 links: crate::protocol::CommandLinks::default(),
                 emitted_at: "2025-01-01T00:00:02Z".into(),
-            })),
+            }))),
         );
 
         assert_eq!(
@@ -1438,7 +2061,7 @@ mod tests {
 
         reduce(
             &mut state,
-            AppEvent::Protocol(ServerEvent::CommandAck(CommandAck {
+            AppEvent::Protocol(ProtocolEvent::from(ServerEvent::CommandAck(CommandAck {
                 command_id: "cmd_shutdown_local".into(),
                 command: CommandType::ShutdownAfterFlatten,
                 status: CommandStatus::Completed,
@@ -1449,7 +2072,7 @@ mod tests {
                     trade_ids: vec!["trade_cmd".into()],
                 },
                 emitted_at: "2025-01-01T00:00:02Z".into(),
-            })),
+            }))),
         );
 
         assert!(state.execution.open_orders.is_empty());

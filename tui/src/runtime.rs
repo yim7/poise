@@ -11,6 +11,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{
     select,
     sync::mpsc,
+    task::JoinHandle,
     time::{interval, sleep},
 };
 
@@ -53,7 +54,7 @@ impl AppConfig {
 mod tests {
     use std::{env, sync::Mutex};
 
-    use super::AppConfig;
+    use super::{AppConfig, current_instance_matches};
     use crate::locale::Locale;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -102,6 +103,12 @@ mod tests {
 
         assert_eq!(AppConfig::from_env().ui_locale, Locale::ZhCn);
     }
+
+    #[test]
+    fn stale_generation_for_same_symbol_does_not_match_current_instance() {
+        assert!(current_instance_matches(Some("BTCUSDT"), 3, "BTCUSDT", 3,));
+        assert!(!current_instance_matches(Some("BTCUSDT"), 3, "BTCUSDT", 1,));
+    }
 }
 
 pub async fn run_app(config: AppConfig) -> Result<()> {
@@ -133,8 +140,13 @@ async fn run_loop(
 
     tokio::spawn(input_task(app_tx.clone()));
     tokio::spawn(clock_task(app_tx.clone()));
-    tokio::spawn(effect_task(transport, app_tx.clone(), effect_rx));
-    effect_tx.send(Effect::FetchSnapshot).await.ok();
+    tokio::spawn(effect_task(
+        transport,
+        app_tx.clone(),
+        effect_tx.clone(),
+        effect_rx,
+    ));
+    effect_tx.send(Effect::FetchInstances).await.ok();
 
     terminal.draw(|frame| draw(frame, &state, &theme))?;
     state.dirty.clear();
@@ -208,90 +220,223 @@ async fn clock_task(app_tx: mpsc::Sender<AppEvent>) {
 async fn effect_task(
     transport: TransportClient,
     app_tx: mpsc::Sender<AppEvent>,
+    effect_tx: mpsc::Sender<Effect>,
     mut effect_rx: mpsc::Receiver<Effect>,
 ) {
+    let mut current_symbol: Option<String> = None;
+    let mut current_generation = 0;
+    let mut ws_task: Option<JoinHandle<()>> = None;
+
     while let Some(effect) = effect_rx.recv().await {
         match effect {
-            Effect::FetchSnapshot => match transport.fetch_snapshot().await {
-                Ok(snapshot) => {
+            Effect::FetchInstances => match transport.fetch_instances().await {
+                Ok(directory) => {
                     let _ = app_tx
-                        .send(AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(
-                            snapshot,
+                        .send(AppEvent::EffectResult(EffectResultEvent::InstancesLoaded(
+                            directory,
                         )))
                         .await;
                 }
                 Err(error) => {
                     let _ = app_tx
-                        .send(AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
+                        .send(AppEvent::EffectResult(EffectResultEvent::InstancesFailed(
                             error.to_string(),
                         )))
                         .await;
                 }
             },
-            Effect::FetchSnapshotAfterDelay { retry_in_ms } => {
-                sleep(Duration::from_millis(retry_in_ms)).await;
-                match transport.fetch_snapshot().await {
+            Effect::FetchInstancesAfterDelay { retry_in_ms } => {
+                spawn_delayed_effect(
+                    effect_tx.clone(),
+                    Duration::from_millis(retry_in_ms),
+                    Effect::FetchInstances,
+                );
+            }
+            Effect::UseInstance { symbol, generation } => {
+                current_symbol = Some(symbol);
+                current_generation = generation;
+                if let Some(task) = ws_task.take() {
+                    task.abort();
+                }
+            }
+            Effect::FetchSnapshot { symbol, generation } => {
+                if !current_instance_matches(
+                    current_symbol.as_deref(),
+                    current_generation,
+                    &symbol,
+                    generation,
+                ) {
+                    continue;
+                }
+                match transport.fetch_instance_snapshot(&symbol).await {
                     Ok(snapshot) => {
                         let _ = app_tx
-                            .send(AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(
+                            .send(AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                                symbol,
+                                generation,
                                 snapshot,
-                            )))
+                            }))
                             .await;
                     }
                     Err(error) => {
                         let _ = app_tx
-                            .send(AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
-                                error.to_string(),
-                            )))
+                            .send(AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                                symbol,
+                                generation,
+                                error: error.to_string(),
+                            }))
                             .await;
                     }
                 }
             }
-            Effect::FetchRiskEvents => match transport.fetch_risk_events().await {
-                Ok(alerts) => {
-                    let _ = app_tx
-                        .send(AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded(
-                            alerts,
-                        )))
-                        .await;
+            Effect::FetchSnapshotAfterDelay {
+                symbol,
+                generation,
+                retry_in_ms,
+            } => {
+                if !current_instance_matches(
+                    current_symbol.as_deref(),
+                    current_generation,
+                    &symbol,
+                    generation,
+                ) {
+                    continue;
                 }
-                Err(error) => {
-                    let _ = app_tx
-                        .send(AppEvent::EffectResult(EffectResultEvent::RiskEventsFailed(
-                            error.to_string(),
-                        )))
-                        .await;
-                }
-            },
-            Effect::ConnectWs => {
-                transport.spawn_ws_listener(app_tx.clone());
+                spawn_delayed_effect(
+                    effect_tx.clone(),
+                    Duration::from_millis(retry_in_ms),
+                    Effect::FetchSnapshot { symbol, generation },
+                );
             }
-            Effect::ReconnectWs { attempt } => {
+            Effect::FetchRiskEvents { symbol, generation } => {
+                if !current_instance_matches(
+                    current_symbol.as_deref(),
+                    current_generation,
+                    &symbol,
+                    generation,
+                ) {
+                    continue;
+                }
+                match transport.fetch_instance_risk_events(&symbol).await {
+                    Ok(alerts) => {
+                        let _ = app_tx
+                            .send(AppEvent::EffectResult(
+                                EffectResultEvent::RiskEventsLoaded {
+                                    symbol,
+                                    generation,
+                                    alerts,
+                                },
+                            ))
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = app_tx
+                            .send(AppEvent::EffectResult(
+                                EffectResultEvent::RiskEventsFailed {
+                                    symbol,
+                                    generation,
+                                    error: error.to_string(),
+                                },
+                            ))
+                            .await;
+                    }
+                }
+            }
+            Effect::ConnectWs { symbol, generation } => {
+                if !current_instance_matches(
+                    current_symbol.as_deref(),
+                    current_generation,
+                    &symbol,
+                    generation,
+                ) {
+                    continue;
+                }
+                if let Some(task) = ws_task.take() {
+                    task.abort();
+                }
+                ws_task =
+                    Some(transport.spawn_instance_ws_listener(symbol, generation, app_tx.clone()));
+            }
+            Effect::ReconnectWs {
+                symbol,
+                generation,
+                attempt,
+            } => {
+                if !current_instance_matches(
+                    current_symbol.as_deref(),
+                    current_generation,
+                    &symbol,
+                    generation,
+                ) {
+                    continue;
+                }
                 let backoff_secs = 2u64.saturating_pow(attempt.saturating_sub(1)).min(8);
-                sleep(Duration::from_secs(backoff_secs)).await;
-                transport.spawn_ws_listener(app_tx.clone());
+                spawn_delayed_effect(
+                    effect_tx.clone(),
+                    Duration::from_secs(backoff_secs),
+                    Effect::ConnectWs { symbol, generation },
+                );
             }
             Effect::SendCommand {
+                symbol,
+                generation,
                 command,
                 command_id,
-            } => match transport.send_command(command, command_id.clone()).await {
-                Ok(accepted) => {
-                    let _ = app_tx
-                        .send(AppEvent::EffectResult(EffectResultEvent::CommandAccepted(
-                            accepted,
-                        )))
-                        .await;
+            } => {
+                if !current_instance_matches(
+                    current_symbol.as_deref(),
+                    current_generation,
+                    &symbol,
+                    generation,
+                ) {
+                    continue;
                 }
-                Err(error) => {
-                    let _ = app_tx
-                        .send(AppEvent::EffectResult(EffectResultEvent::CommandFailed {
-                            command_id,
-                            error: error.to_string(),
-                        }))
-                        .await;
+                match transport
+                    .send_instance_command(&symbol, command, command_id.clone())
+                    .await
+                {
+                    Ok(accepted) => {
+                        let _ = app_tx
+                            .send(AppEvent::EffectResult(EffectResultEvent::CommandAccepted {
+                                symbol,
+                                generation,
+                                accepted,
+                            }))
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = app_tx
+                            .send(AppEvent::EffectResult(EffectResultEvent::CommandFailed {
+                                symbol,
+                                generation,
+                                command_id,
+                                error: error.to_string(),
+                            }))
+                            .await;
+                    }
                 }
-            },
+            }
             Effect::LogClientSideEvent(_) => {}
         }
     }
+
+    if let Some(task) = ws_task {
+        task.abort();
+    }
+}
+
+fn spawn_delayed_effect(effect_tx: mpsc::Sender<Effect>, delay: Duration, effect: Effect) {
+    tokio::spawn(async move {
+        sleep(delay).await;
+        let _ = effect_tx.send(effect).await;
+    });
+}
+
+fn current_instance_matches(
+    current_symbol: Option<&str>,
+    current_generation: u64,
+    symbol: &str,
+    generation: u64,
+) -> bool {
+    current_symbol == Some(symbol) && current_generation == generation
 }

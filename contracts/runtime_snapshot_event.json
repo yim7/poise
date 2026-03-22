@@ -92,18 +92,15 @@
     },
     "strategy": {
       "config": {
-        "spacing_bps": 35.0,
-        "levels_per_side": 3,
-        "quantity_per_level": 0.1,
-        "max_position_qty": 0.3,
-        "rebuild_threshold_bps": 120.0
+        "lower_price": 2336.68,
+        "upper_price": 2386.28,
+        "grid_levels": 7,
+        "max_position_notional": 1416.89
       },
       "status": "occupied",
       "center_price": 2361.48,
-      "lower_bound": 2336.76,
-      "upper_bound": 2386.2,
-      "rebuild_reference_price": 2361.48,
-      "pending_rebuild_reason": null,
+      "lower_bound": 2336.68,
+      "upper_bound": 2386.28,
       "levels": [
         {
           "level_id": "buy_01",

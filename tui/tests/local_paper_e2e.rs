@@ -4,7 +4,7 @@ use std::{
     path::Path,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -13,7 +13,7 @@ use grid_platform_tui::{
     effects::Effect,
     events::{AppEvent, EffectResultEvent, InputEvent, KeyAction},
     locale::Locale,
-    protocol::{CommandRequest, CommandType},
+    protocol::{CommandRequest, CommandType, InstanceSummary, InstancesDirectory, RuntimeSnapshot},
     render::draw,
     state::{AppState, CommandTimelineStage, Page, SnapshotBootstrapState},
     store::reduce,
@@ -23,6 +23,8 @@ use grid_platform_tui::{
 use ratatui::{Terminal, backend::TestBackend};
 use tempfile::{TempDir, tempdir};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener as TokioTcpListener,
     sync::mpsc,
     task::JoinHandle,
     time::{sleep, timeout},
@@ -54,12 +56,10 @@ impl ServiceProcess {
         let base_url = format!("http://127.0.0.1:{port}");
         let ws_url = format!("ws://127.0.0.1:{port}/ws");
         let http = reqwest::Client::new();
+        let service_bin = workspace_dir.join("target/debug/grid-platform-service");
 
-        let mut command = Command::new("cargo");
+        let mut command = Command::new(&service_bin);
         command
-            .arg("run")
-            .arg("-p")
-            .arg("grid-platform-service")
             .current_dir(&workspace_dir)
             .env("GRID_PLATFORM_SERVICE_ADDR", format!("127.0.0.1:{port}"))
             .stdout(Stdio::null())
@@ -170,11 +170,39 @@ impl AppHarness {
     }
 
     async fn bootstrap_once(&mut self) -> Result<Vec<Effect>> {
-        let snapshot = self.transport.fetch_snapshot().await?;
-        Ok(reduce(
+        let directory = self.transport.fetch_instances().await?;
+        let mut pending = VecDeque::from(reduce(
             &mut self.state,
-            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
-        ))
+            AppEvent::EffectResult(EffectResultEvent::InstancesLoaded(directory)),
+        ));
+        let mut next_effects = Vec::new();
+
+        while let Some(effect) = pending.pop_front() {
+            match effect {
+                Effect::UseInstance {
+                    symbol: _,
+                    generation: _,
+                } => {
+                    if let Some(task) = self.ws_task.take() {
+                        task.abort();
+                    }
+                }
+                Effect::FetchSnapshot { symbol, generation } => {
+                    let snapshot = self.transport.fetch_instance_snapshot(&symbol).await?;
+                    next_effects.extend(reduce(
+                        &mut self.state,
+                        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                            symbol,
+                            generation,
+                            snapshot,
+                        }),
+                    ));
+                }
+                other => next_effects.push(other),
+            }
+        }
+
+        Ok(next_effects)
     }
 
     async fn submit_key(&mut self, action: KeyAction) -> Result<()> {
@@ -186,9 +214,23 @@ impl AppHarness {
         if let Some(task) = self.ws_task.take() {
             task.abort();
         }
+        let symbol = self
+            .state
+            .instances
+            .current_symbol
+            .clone()
+            .or_else(|| {
+                (!self.state.runtime.symbol.is_empty()).then(|| self.state.runtime.symbol.clone())
+            })
+            .unwrap_or_default();
+        let generation = self.state.instances.generation;
         reduce(
             &mut self.state,
-            AppEvent::EffectResult(EffectResultEvent::WsDisconnected(reason.into())),
+            AppEvent::EffectResult(EffectResultEvent::WsDisconnected {
+                symbol,
+                generation,
+                reason: reason.into(),
+            }),
         )
     }
 
@@ -226,50 +268,110 @@ impl AppHarness {
         let mut pending = VecDeque::from(effects);
         while let Some(effect) = pending.pop_front() {
             match effect {
-                Effect::FetchSnapshot => {
-                    let snapshot = self.transport.fetch_snapshot().await?;
+                Effect::FetchInstances => {
+                    let directory = self.transport.fetch_instances().await?;
                     pending.extend(reduce(
                         &mut self.state,
-                        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
+                        AppEvent::EffectResult(EffectResultEvent::InstancesLoaded(directory)),
                     ));
                 }
-                Effect::FetchSnapshotAfterDelay { retry_in_ms } => {
+                Effect::FetchInstancesAfterDelay { retry_in_ms } => {
                     sleep(Duration::from_millis(retry_in_ms)).await;
-                    let snapshot = self.transport.fetch_snapshot().await?;
+                    let directory = self.transport.fetch_instances().await?;
                     pending.extend(reduce(
                         &mut self.state,
-                        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded(snapshot)),
+                        AppEvent::EffectResult(EffectResultEvent::InstancesLoaded(directory)),
                     ));
                 }
-                Effect::FetchRiskEvents => {
-                    let alerts = self.transport.fetch_risk_events().await?;
-                    pending.extend(reduce(
-                        &mut self.state,
-                        AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded(alerts)),
-                    ));
-                }
-                Effect::ConnectWs => {
+                Effect::UseInstance {
+                    symbol: _,
+                    generation: _,
+                } => {
                     if let Some(task) = self.ws_task.take() {
                         task.abort();
                     }
-                    self.ws_task = Some(self.transport.spawn_ws_listener(self.app_tx.clone()));
                 }
-                Effect::ReconnectWs { attempt } => {
+                Effect::FetchSnapshot { symbol, generation } => {
+                    let snapshot = self.transport.fetch_instance_snapshot(&symbol).await?;
+                    pending.extend(reduce(
+                        &mut self.state,
+                        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                            symbol,
+                            generation,
+                            snapshot,
+                        }),
+                    ));
+                }
+                Effect::FetchSnapshotAfterDelay {
+                    symbol,
+                    generation,
+                    retry_in_ms,
+                } => {
+                    sleep(Duration::from_millis(retry_in_ms)).await;
+                    let snapshot = self.transport.fetch_instance_snapshot(&symbol).await?;
+                    pending.extend(reduce(
+                        &mut self.state,
+                        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                            symbol,
+                            generation,
+                            snapshot,
+                        }),
+                    ));
+                }
+                Effect::FetchRiskEvents { symbol, generation } => {
+                    let alerts = self.transport.fetch_instance_risk_events(&symbol).await?;
+                    pending.extend(reduce(
+                        &mut self.state,
+                        AppEvent::EffectResult(EffectResultEvent::RiskEventsLoaded {
+                            symbol,
+                            generation,
+                            alerts,
+                        }),
+                    ));
+                }
+                Effect::ConnectWs { symbol, generation } => {
+                    if let Some(task) = self.ws_task.take() {
+                        task.abort();
+                    }
+                    self.ws_task = Some(self.transport.spawn_instance_ws_listener(
+                        symbol,
+                        generation,
+                        self.app_tx.clone(),
+                    ));
+                }
+                Effect::ReconnectWs {
+                    symbol,
+                    generation,
+                    attempt,
+                } => {
                     let backoff_secs = 2u64.saturating_pow(attempt.saturating_sub(1)).min(8);
                     sleep(Duration::from_secs(backoff_secs)).await;
                     if let Some(task) = self.ws_task.take() {
                         task.abort();
                     }
-                    self.ws_task = Some(self.transport.spawn_ws_listener(self.app_tx.clone()));
+                    self.ws_task = Some(self.transport.spawn_instance_ws_listener(
+                        symbol,
+                        generation,
+                        self.app_tx.clone(),
+                    ));
                 }
                 Effect::SendCommand {
+                    symbol,
+                    generation,
                     command,
                     command_id,
                 } => {
-                    let accepted = self.transport.send_command(command, command_id).await?;
+                    let accepted = self
+                        .transport
+                        .send_instance_command(&symbol, command, command_id)
+                        .await?;
                     pending.extend(reduce(
                         &mut self.state,
-                        AppEvent::EffectResult(EffectResultEvent::CommandAccepted(accepted)),
+                        AppEvent::EffectResult(EffectResultEvent::CommandAccepted {
+                            symbol,
+                            generation,
+                            accepted,
+                        }),
                     ));
                 }
                 Effect::LogClientSideEvent(_) => {}
@@ -285,6 +387,174 @@ impl Drop for AppHarness {
             task.abort();
         }
     }
+}
+
+struct RecordingHttpServer {
+    base_url: String,
+    recorded_paths: Arc<tokio::sync::Mutex<Vec<String>>>,
+    handle: JoinHandle<()>,
+}
+
+impl RecordingHttpServer {
+    async fn start() -> Result<Self> {
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind recording server")?;
+        let port = listener
+            .local_addr()
+            .context("failed to read recording server addr")?
+            .port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let recorded_paths = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let paths = Arc::clone(&recorded_paths);
+
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let paths = Arc::clone(&paths);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 4096];
+                    let mut request = Vec::new();
+                    loop {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                request.extend_from_slice(&buffer[..count]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    }
+
+                    let request_text = String::from_utf8_lossy(&request);
+                    let path = request_text
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    paths.lock().await.push(path.clone());
+
+                    let (status, body) = response_body_for_path(&path);
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok(Self {
+            base_url,
+            recorded_paths,
+            handle,
+        })
+    }
+
+    async fn recorded_paths(&self) -> Vec<String> {
+        self.recorded_paths.lock().await.clone()
+    }
+}
+
+impl Drop for RecordingHttpServer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn response_body_for_path(path: &str) -> (&'static str, String) {
+    match path {
+        "/instances" => {
+            let directory = InstancesDirectory {
+                environment: "testnet".into(),
+                default_symbol: "BTCUSDT".into(),
+                instances: vec![
+                    InstanceSummary {
+                        symbol: "BTCUSDT".into(),
+                        environment: "testnet".into(),
+                        is_default: true,
+                    },
+                    InstanceSummary {
+                        symbol: "ETHUSDT".into(),
+                        environment: "testnet".into(),
+                        is_default: false,
+                    },
+                ],
+            };
+            (
+                "200 OK",
+                serde_json::json!({
+                    "version": "1",
+                    "status": "ok",
+                    "data": directory,
+                })
+                .to_string(),
+            )
+        }
+        "/runtime/snapshot" => (
+            "200 OK",
+            serde_json::json!({
+                "version": "1",
+                "status": "ok",
+                "data": RuntimeSnapshot::sample(),
+            })
+            .to_string(),
+        ),
+        path if path.starts_with("/instances/") && path.ends_with("/runtime/snapshot") => (
+            "200 OK",
+            serde_json::json!({
+                "version": "1",
+                "status": "ok",
+                "data": RuntimeSnapshot::sample(),
+            })
+            .to_string(),
+        ),
+        "/risk/events" => (
+            "200 OK",
+            serde_json::json!({
+                "version": "1",
+                "status": "ok",
+                "data": []
+            })
+            .to_string(),
+        ),
+        _ => (
+            "404 Not Found",
+            serde_json::json!({
+                "version": "1",
+                "status": "error",
+                "error": {
+                    "code": "not_found",
+                    "message": format!("unhandled path: {path}"),
+                    "details": null
+                }
+            })
+            .to_string(),
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_bootstrap_should_load_instances_before_default_snapshot() -> Result<()> {
+    let server = RecordingHttpServer::start().await?;
+    let mut app =
+        AppHarness::new_waiting(server.base_url.clone(), "ws://127.0.0.1:0/ws".into()).await?;
+
+    let _ = app.bootstrap_once().await?;
+
+    let paths = server.recorded_paths().await;
+    assert_eq!(
+        paths,
+        vec![
+            "/instances".to_string(),
+            "/instances/BTCUSDT/runtime/snapshot".to_string()
+        ]
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -425,7 +695,19 @@ async fn local_paper_first_snapshot_success_shows_real_empty_state() -> Result<(
         app.state.snapshot_state,
         SnapshotBootstrapState::Ready
     ));
-    assert_eq!(effects, vec![Effect::FetchRiskEvents, Effect::ConnectWs]);
+    assert_eq!(
+        effects,
+        vec![
+            Effect::FetchRiskEvents {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+            },
+            Effect::ConnectWs {
+                symbol: "XAUUSDT".into(),
+                generation: 1,
+            },
+        ]
+    );
     assert!(app.state.execution.open_orders.is_empty());
     assert!(app.state.execution.recent_fills.is_empty());
     assert!(app.state.execution.command_timeline.is_empty());

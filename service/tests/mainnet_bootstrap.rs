@@ -140,8 +140,8 @@ fn startup_reconcile_pauses_when_exchange_position_exists_but_persisted_runtime_
         open_orders: Some(vec![]),
     };
 
-    let decision = reconcile_startup(RuntimeMode::Mainnet, &persisted, &exchange)
-        .expect("decision");
+    let decision =
+        reconcile_startup(RuntimeMode::Mainnet, &persisted, &exchange).expect("decision");
 
     assert!(matches!(
         decision,
@@ -161,8 +161,8 @@ fn startup_reconcile_pauses_when_persisted_runtime_has_position_but_exchange_is_
         open_orders: Some(vec![]),
     };
 
-    let decision = reconcile_startup(RuntimeMode::Mainnet, &persisted, &exchange)
-        .expect("decision");
+    let decision =
+        reconcile_startup(RuntimeMode::Mainnet, &persisted, &exchange).expect("decision");
 
     assert!(matches!(
         decision,
@@ -182,8 +182,8 @@ fn startup_reconcile_pauses_when_exchange_open_orders_differ_from_persisted_stat
         open_orders: Some(vec![sample_open_order("grid_buy_02")]),
     };
 
-    let decision = reconcile_startup(RuntimeMode::Mainnet, &persisted, &exchange)
-        .expect("decision");
+    let decision =
+        reconcile_startup(RuntimeMode::Mainnet, &persisted, &exchange).expect("decision");
 
     assert!(matches!(
         decision,
@@ -207,9 +207,11 @@ async fn bootstrap_refuses_mainnet_when_signed_exchange_state_is_unavailable() -
     .err()
     .expect("mainnet should refuse unavailable signed startup state");
 
-    assert!(error
-        .to_string()
-        .contains("STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE"));
+    assert!(
+        error
+            .to_string()
+            .contains("STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE")
+    );
     Ok(())
 }
 

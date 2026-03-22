@@ -47,6 +47,37 @@ impl Application {
         Self::build_from_engine(spawn_engine())
     }
 
+    pub fn bootstrap_with_runtime(
+        runtime: PersistedRuntime,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        Self::bootstrap_with_runtime_and_storage(runtime, None, instance_id)
+    }
+
+    pub fn bootstrap_with_runtime_and_storage(
+        runtime: PersistedRuntime,
+        storage: Option<SqliteStorage>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        Self::build_from_engine_with_instance_id(
+            spawn_engine_with_runtime(runtime, storage),
+            instance_id.into(),
+        )
+    }
+
+    pub fn bootstrap_with_runtime_storage_and_binance(
+        runtime: PersistedRuntime,
+        storage: Option<SqliteStorage>,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+        instance_id: impl Into<String>,
+    ) -> Self {
+        let application =
+            Self::bootstrap_with_runtime_and_storage(runtime, storage, instance_id.into());
+        application.start_binance_supervisor(config, transport);
+        application
+    }
+
     pub fn bootstrap_with_binance(
         config: BinanceConfig,
         transport: Arc<dyn BinanceTransport>,
@@ -66,9 +97,13 @@ impl Application {
     ) -> Self {
         let mut runtime = prepare_bootstrap_runtime(runtime, &config);
         runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
-        let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
-        application.start_binance_supervisor(config, transport);
-        application
+        Self::bootstrap_with_runtime_storage_and_binance(
+            runtime,
+            None,
+            config,
+            transport,
+            default_instance_id(),
+        )
     }
 
     pub fn bootstrap_with_sqlite(path: impl AsRef<Path>) -> Result<Self> {
@@ -81,10 +116,11 @@ impl Application {
                 runtime
             }
         };
-        Ok(Self::build_from_engine(spawn_engine_with_runtime(
+        Ok(Self::bootstrap_with_runtime_and_storage(
             runtime,
             Some(storage),
-        )))
+            default_instance_id(),
+        ))
     }
 
     pub fn bootstrap_with_sqlite_and_binance(
@@ -100,10 +136,13 @@ impl Application {
         let mut runtime = prepare_bootstrap_runtime(runtime, &config);
         runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
         storage.persist_runtime(&runtime)?;
-        let application =
-            Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
-        application.start_binance_supervisor(config, transport);
-        Ok(application)
+        Ok(Self::bootstrap_with_runtime_storage_and_binance(
+            runtime,
+            Some(storage),
+            config,
+            transport,
+            default_instance_id(),
+        ))
     }
 
     pub async fn bootstrap_with_startup_and_binance(
@@ -134,28 +173,34 @@ impl Application {
         }
 
         Ok(Self::bootstrap_with_runtime_storage_and_binance(
-            runtime, storage, config, transport,
+            runtime,
+            Some(storage),
+            config,
+            transport,
+            default_instance_id(),
         ))
     }
 
-    pub fn bootstrap_with_runtime_storage_and_binance(
-        runtime: PersistedRuntime,
-        storage: SqliteStorage,
-        config: BinanceConfig,
-        transport: Arc<dyn BinanceTransport>,
+    fn build_from_engine(
+        (engine, read_model, engine_events_rx): (
+            EngineHandle,
+            SharedReadModel,
+            tokio::sync::mpsc::Receiver<crate::kernel::SequencedEngineEvent>,
+        ),
     ) -> Self {
-        let application =
-            Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
-        application.start_binance_supervisor(config, transport);
-        application
+        Self::build_from_engine_with_instance_id(
+            (engine, read_model, engine_events_rx),
+            default_instance_id(),
+        )
     }
 
-    fn build_from_engine(
+    fn build_from_engine_with_instance_id(
         (engine, read_model, mut engine_events_rx): (
             EngineHandle,
             SharedReadModel,
             tokio::sync::mpsc::Receiver<crate::kernel::SequencedEngineEvent>,
         ),
+        instance_id: String,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(256);
         let publish_tx = events_tx.clone();
@@ -173,7 +218,7 @@ impl Application {
             engine,
             read_model,
             events_tx,
-            instance_id: default_instance_id(),
+            instance_id,
         }
     }
 
@@ -382,11 +427,25 @@ impl Application {
     }
 
     pub fn control_plane_capabilities(&self) -> ControlPlaneCapabilities {
+        self.control_plane_capabilities_with_scope("single_instance", "")
+    }
+
+    pub fn instance_scoped_control_plane_capabilities(&self) -> ControlPlaneCapabilities {
+        let base_path = format!("/instances/{}", self.instance_id);
+        self.control_plane_capabilities_with_scope("instance_scoped", &base_path)
+    }
+
+    fn control_plane_capabilities_with_scope(
+        &self,
+        scope: &str,
+        base_path: &str,
+    ) -> ControlPlaneCapabilities {
+        let prefixed = |path: &str| format!("{base_path}{path}");
         ControlPlaneCapabilities {
             instance_id: self.instance_id.clone(),
             deployment: DeploymentDescriptor {
                 mode: "lan".into(),
-                scope: "single_instance".into(),
+                scope: scope.into(),
             },
             auth: AuthDescriptor {
                 mode: "optional_static_token".into(),
@@ -398,38 +457,38 @@ impl Application {
             endpoint_groups: vec![
                 EndpointGroup {
                     name: "runtime".into(),
-                    paths: vec!["/runtime/snapshot".into(), "/query/runtime".into()],
+                    paths: vec![prefixed("/runtime/snapshot"), prefixed("/query/runtime")],
                 },
                 EndpointGroup {
                     name: "orders".into(),
-                    paths: vec!["/orders/open".into(), "/query/orders".into()],
+                    paths: vec![prefixed("/orders/open"), prefixed("/query/orders")],
                 },
                 EndpointGroup {
                     name: "fills".into(),
-                    paths: vec!["/fills/recent".into(), "/query/fills".into()],
+                    paths: vec![prefixed("/fills/recent"), prefixed("/query/fills")],
                 },
                 EndpointGroup {
                     name: "alerts".into(),
                     paths: vec![
-                        "/risk/events".into(),
-                        "/system/events".into(),
-                        "/query/alerts".into(),
+                        prefixed("/risk/events"),
+                        prefixed("/system/events"),
+                        prefixed("/query/alerts"),
                     ],
                 },
                 EndpointGroup {
                     name: "commands".into(),
                     paths: vec![
-                        "/commands/pause".into(),
-                        "/commands/resume".into(),
-                        "/commands/cancel-all".into(),
-                        "/commands/flatten-now".into(),
-                        "/commands/shutdown-after-flatten".into(),
-                        "/query/commands".into(),
+                        prefixed("/commands/pause"),
+                        prefixed("/commands/resume"),
+                        prefixed("/commands/cancel-all"),
+                        prefixed("/commands/flatten-now"),
+                        prefixed("/commands/shutdown-after-flatten"),
+                        prefixed("/query/commands"),
                     ],
                 },
             ],
             websocket: WebSocketDescriptor {
-                path: "/ws".into(),
+                path: prefixed("/ws"),
                 subscriptions: vec!["runtime_stream".into()],
                 auth: WebSocketAuthDescriptor {
                     query_param: "access_token".into(),

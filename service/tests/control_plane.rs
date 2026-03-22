@@ -739,7 +739,7 @@ fn seed_query_runtime() -> PersistedRuntime {
 fn empty_bootstrap_risk_state() -> RiskState {
     RiskState {
         current_notional: 0.0,
-        max_notional: 0.3,
+        max_notional: 3000.0,
         daily_loss_limit: -120.0,
         stop_loss_pct: 4.0,
         risk_level: RiskLevel::Ok,

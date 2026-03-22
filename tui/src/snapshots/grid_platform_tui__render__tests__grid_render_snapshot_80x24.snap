@@ -1,5 +1,6 @@
 ---
 source: tui/src/render.rs
+assertion_line: 2334
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  Focus Strategy Orders         
@@ -15,8 +16,8 @@ expression: snapshot
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Grid Summary ────────────────────────────────────────────────────────────────┐
 │Status  OCCUPIED                                                              │
-│Lower  2336.76   Upper  2386.20                                               │
-│Center  2361.48   Span  2.09%                                                 │
+│Lower  2336.68   Upper  2386.28                                               │
+│Center  2361.48   Span  2.10%                                                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Operator Notes ──────────────────────────────────────────────────────────────┐
 │Current Price  2361.48                                                        │
