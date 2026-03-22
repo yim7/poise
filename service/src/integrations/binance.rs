@@ -1804,7 +1804,7 @@ mod tests {
         extract::{Query, State},
         http::StatusCode,
         response::IntoResponse,
-        routing::get,
+        routing::{delete, get},
     };
     use std::fs;
     use tokio::sync::{Mutex, mpsc};
@@ -1821,6 +1821,7 @@ mod tests {
     struct SignedRequestTestState {
         server_time_ms: i64,
         time_requests: Arc<AtomicUsize>,
+        cancel_requests: Arc<AtomicUsize>,
     }
 
     impl SignedRequestTestState {
@@ -1828,6 +1829,7 @@ mod tests {
             Self {
                 server_time_ms,
                 time_requests: Arc::new(AtomicUsize::new(0)),
+                cancel_requests: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -1886,6 +1888,18 @@ mod tests {
         .into_response()
     }
 
+    async fn mock_cancel_order(
+        State(state): State<SignedRequestTestState>,
+        Query(_params): Query<HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        state.cancel_requests.fetch_add(1, Ordering::SeqCst);
+        (
+            StatusCode::BAD_REQUEST,
+            r#"{"code":-2011,"msg":"Unknown order sent."}"#,
+        )
+            .into_response()
+    }
+
     async fn spawn_signed_request_test_server(
         state: SignedRequestTestState,
     ) -> (String, tokio::task::JoinHandle<()>) {
@@ -1896,6 +1910,7 @@ mod tests {
         let app = Router::new()
             .route("/fapi/v1/time", get(mock_server_time))
             .route("/fapi/v1/openOrders", get(mock_open_orders))
+            .route("/fapi/v1/order", delete(mock_cancel_order))
             .with_state(state);
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test server");
@@ -2090,5 +2105,38 @@ mod tests {
         assert_eq!(orders[0].order_id, "42");
         assert_eq!(orders[0].client_order_id, "grid-order-42");
         assert_eq!(orders[0].side, "buy");
+    }
+
+    #[tokio::test]
+    async fn cancel_orders_treats_missing_order_response_as_success() {
+        let state = SignedRequestTestState::new(Utc::now().timestamp_millis());
+        let (rest_base_url, server) = spawn_signed_request_test_server(state.clone()).await;
+
+        let mut config = BinanceConfig::testnet("ETHUSDT");
+        config.rest_base_url = rest_base_url;
+        config.api_key = Some("test-api-key".into());
+        config.api_secret = Some("test-api-secret".into());
+
+        let transport = RealBinanceTransport::new(&config).expect("transport");
+        let mut snapshot = PersistedRuntime::sqlite_bootstrap().snapshot;
+        snapshot.runtime.symbol = "ETHUSDT".into();
+
+        let open_orders = transport
+            .cancel_orders(
+                CancelOrdersRequest {
+                    command_id: Some("cmd_cancel_missing".into()),
+                    order_ids: vec!["42".into()],
+                    client_order_ids: Vec::new(),
+                },
+                &snapshot,
+            )
+            .await
+            .expect("missing-order cancel should still succeed");
+
+        server.abort();
+
+        assert_eq!(state.cancel_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(open_orders.len(), 1);
+        assert_eq!(open_orders[0].order_id, "42");
     }
 }

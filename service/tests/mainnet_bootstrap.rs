@@ -10,8 +10,8 @@ use grid_platform_service::{
     },
     protocol::{OpenOrder, OpenOrdersSource},
     startup::{
-        RuntimeMode, StartupDecision, StartupExchangeState, collect_startup_exchange_state,
-        reconcile_startup,
+        RuntimeMode, StartupDecision, StartupExchangeState, StartupReport,
+        collect_startup_exchange_state, reconcile_startup,
     },
     storage::PersistedRuntime,
 };
@@ -190,6 +190,41 @@ fn startup_reconcile_pauses_when_exchange_open_orders_differ_from_persisted_stat
         StartupDecision::Pause { code, .. }
             if code == "STARTUP_RECONCILE_OPEN_ORDERS_MISMATCH"
     ));
+}
+
+#[test]
+fn startup_apply_clears_stale_strategy_mirror_when_exchange_has_no_live_orders() {
+    let mut persisted = PersistedRuntime::sqlite_bootstrap();
+    persisted.snapshot.execution.open_orders = vec![OpenOrder {
+        order_id: "ord_buy_01".into(),
+        client_order_id: "grid_buy_01".into(),
+        side: "BUY".into(),
+        price: 2360.0,
+        qty: 0.1,
+        filled_qty: 0.0,
+        status: "NEW".into(),
+        created_at: "2025-01-01T00:00:00Z".into(),
+        updated_at: "2025-01-01T00:00:00Z".into(),
+    }];
+    persisted.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
+
+    let applied = StartupReport {
+        exchange: StartupExchangeState {
+            position: PositionSnapshotState::Flat,
+            open_orders: Some(vec![]),
+        },
+        decision: StartupDecision::Continue,
+    }
+    .apply_to(persisted);
+
+    assert!(
+        applied.snapshot.execution.open_orders.is_empty(),
+        "startup should not retain stale local strategy mirror orders when exchange is empty"
+    );
+    assert_eq!(
+        applied.snapshot.execution.exchange_open_orders_source,
+        OpenOrdersSource::ExchangeLive
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -19,8 +19,8 @@ use grid_platform_service::{
         TradingSchedule, TradingSession, UserStreamEvent, UserStreamOrderUpdate,
     },
     protocol::{
-        CommandRequest, CommandStatus, CommandType, OpenOrder, OpenOrdersSource, RecentFill,
-        RuntimeSnapshot, SystemEvent,
+        CommandRequest, CommandStatus, CommandType, GridConfig, OpenOrder, OpenOrdersSource,
+        RecentFill, RuntimeSnapshot, SystemEvent,
     },
     storage::{PersistedRuntime, SqliteStorage},
 };
@@ -1007,6 +1007,100 @@ async fn binance_mode_routes_strategy_cancels_through_transport_without_absorbin
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_clears_stale_strategy_mirror_so_resume_can_replace_real_binance_orders()
+-> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let storage = SqliteStorage::open(&db_path)?;
+    let mut persisted = PersistedRuntime::sqlite_bootstrap();
+    persisted.snapshot.runtime.symbol = "XAUUSDT".into();
+    persisted.snapshot.runtime.env = "testnet".into();
+    persisted.snapshot.runtime.strategy_state = "paused".into();
+    persisted.snapshot.runtime.last_price = 100.0;
+    persisted.snapshot.runtime.mark_price = 100.0;
+    persisted.snapshot.strategy.config = GridConfig {
+        lower_price: 90.0,
+        upper_price: 110.0,
+        grid_levels: 6,
+        max_position_notional: 3000.0,
+    };
+    persisted.snapshot.execution.open_orders = vec![
+        stale_strategy_order("buy", 1, 90.0),
+        stale_strategy_order("buy", 2, 94.0),
+        stale_strategy_order("buy", 3, 98.0),
+        stale_strategy_order("sell", 4, 102.0),
+        stale_strategy_order("sell", 5, 106.0),
+        stale_strategy_order("sell", 6, 110.0),
+    ];
+    persisted.last_sequence = 1;
+    storage.persist_runtime(&persisted)?;
+
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_execution_enabled()
+    .with_open_orders(vec![]);
+    let (_market_tx, market_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_startup_and_binance(
+        &db_path,
+        config,
+        Arc::new(transport.clone()),
+    )
+    .await?;
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.http_available
+            && snapshot.connection.ws_connected
+            && snapshot.execution.open_orders.is_empty()
+    })
+    .await
+    .context("binance startup did not clear stale strategy mirror before resume")?;
+
+    let accepted = app
+        .submit_command(
+            CommandType::Resume,
+            CommandRequest {
+                command_id: "cmd_resume_after_reconcile".into(),
+            },
+        )
+        .await?;
+    assert_eq!(accepted.status, CommandStatus::Accepted);
+
+    wait_until(Duration::from_secs(2), || transport.submit_calls() == 6)
+        .await
+        .context("resume did not replace missing strategy orders through transport execution")?;
+
+    Ok(())
+}
+
 async fn wait_until<F>(within: Duration, predicate: F) -> Result<()>
 where
     F: Fn() -> bool,
@@ -1020,6 +1114,20 @@ where
             return Err(anyhow!("timed out waiting for expected condition"));
         }
         sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn stale_strategy_order(side: &str, step_id: u32, price: f64) -> OpenOrder {
+    OpenOrder {
+        order_id: format!("ord_{side}_{step_id:02}"),
+        client_order_id: format!("grid_{side}_{step_id:02}"),
+        side: side.into(),
+        price,
+        qty: 0.5,
+        filled_qty: 0.0,
+        status: "NEW".into(),
+        created_at: "2025-01-01T00:00:00Z".into(),
+        updated_at: "2025-01-01T00:00:00Z".into(),
     }
 }
 

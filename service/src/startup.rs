@@ -155,6 +155,11 @@ impl StartupReport {
 
         match &self.exchange.open_orders {
             Some(open_orders) => {
+                runtime.snapshot.execution.open_orders = open_orders
+                    .iter()
+                    .filter(|order| is_strategy_managed_order(order))
+                    .cloned()
+                    .collect();
                 runtime.snapshot.execution.exchange_open_orders = open_orders.clone();
                 runtime.snapshot.execution.exchange_open_orders_source =
                     OpenOrdersSource::ExchangeLive;
@@ -266,6 +271,10 @@ fn startup_positions_mismatch(runtime: &RuntimeState, position: &PositionSnapsho
 
 fn startup_open_orders_mismatch(persisted: &[OpenOrder], exchange: &[OpenOrder]) -> bool {
     normalize_open_orders(persisted) != normalize_open_orders(exchange)
+}
+
+fn is_strategy_managed_order(order: &OpenOrder) -> bool {
+    order.client_order_id.starts_with("grid_") || order.client_order_id.starts_with("reduce_only_")
 }
 
 fn normalize_open_orders(orders: &[OpenOrder]) -> Vec<String> {
