@@ -13,7 +13,7 @@ use crate::background::spawn_task;
 use crate::execution::{
     CancelOrdersRequest, ExecutionAdapter, ExecutionMode, ExecutionOutcome, ExecutionRuntimePatch,
     ExecutionStatePatch, FakeExecutionAdapter, PaperFillMarketUpdate, SubmitOrderRequest,
-    simulate_paper_fills,
+    apply_fill_to_runtime, simulate_paper_fills,
 };
 use crate::protocol::{
     CommandAccepted, CommandAck, CommandLinks, CommandRecord, CommandRequest, CommandStatus,
@@ -964,6 +964,16 @@ async fn maybe_sync_strategy_orders(
     }
     aggregate.snapshot.execution.open_orders = working_snapshot.execution.open_orders.clone();
     aggregate.snapshot.execution.recent_fills = working_snapshot.execution.recent_fills.clone();
+    let runtime_changed = aggregate.snapshot.runtime != working_snapshot.runtime;
+    if runtime_changed {
+        aggregate.snapshot.runtime = working_snapshot.runtime.clone();
+        let reconcile = aggregate.reconcile_runtime();
+        let mut events = vec![
+            aggregate.sequenced_event(EngineEvent::RuntimeSnapshot(aggregate.snapshot.clone())),
+        ];
+        events.extend(aggregate.risk_alert_events(reconcile.risk_alerts));
+        return Ok(events);
+    }
 
     if aggregate.snapshot == before {
         return Ok(Vec::new());
@@ -1016,7 +1026,18 @@ fn apply_submit_result(
     if let Some(open_order) = submitted.open_order {
         upsert_open_order(&mut snapshot.execution.open_orders, open_order);
     }
-    if let Some(fill) = submitted.fill {
+    if let Some(mut fill) = submitted.fill {
+        let realized_pnl = apply_fill_to_runtime(
+            &mut snapshot.runtime.position_qty,
+            &mut snapshot.runtime.position_avg_price,
+            &mut snapshot.runtime.realized_pnl,
+            &fill.side,
+            fill.price,
+            fill.qty,
+        );
+        if realized_pnl.abs() > f64::EPSILON {
+            fill.realized_pnl = realized_pnl;
+        }
         snapshot.execution.recent_fills.insert(0, fill);
     }
 }

@@ -196,6 +196,88 @@ impl ExecutionAdapter for CountingExecutionAdapter {
     }
 }
 
+struct ImmediateFillExecutionAdapter {
+    immediate_client_order_id: &'static str,
+    submit_calls: Mutex<Vec<String>>,
+    cancel_calls: Mutex<Vec<String>>,
+}
+
+impl ImmediateFillExecutionAdapter {
+    fn new(immediate_client_order_id: &'static str) -> Self {
+        Self {
+            immediate_client_order_id,
+            submit_calls: Mutex::new(Vec::new()),
+            cancel_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn submit_calls(&self) -> Vec<String> {
+        self.submit_calls
+            .lock()
+            .expect("immediate-fill adapter poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ExecutionAdapter for ImmediateFillExecutionAdapter {
+    async fn submit_order(
+        &self,
+        request: SubmitOrderRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> anyhow::Result<SubmitOrderResult> {
+        self.submit_calls
+            .lock()
+            .expect("immediate-fill adapter poisoned")
+            .push(request.client_order_id.clone());
+        if !request.reduce_only && request.client_order_id == self.immediate_client_order_id {
+            return Ok(SubmitOrderResult {
+                open_order: None,
+                fill: Some(RecentFill {
+                    trade_id: format!("trade_{}", request.client_order_id),
+                    order_id: request.order_id,
+                    client_order_id: Some(request.client_order_id),
+                    side: request.side,
+                    price: request.price + 10.0,
+                    qty: request.qty,
+                    fee: 0.0,
+                    realized_pnl: 0.0,
+                    event_time: "2025-01-01T00:00:00Z".into(),
+                }),
+            });
+        }
+        Ok(FakeExecutionAdapter.submit_order(request, snapshot).await?)
+    }
+
+    async fn cancel_orders(
+        &self,
+        request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> anyhow::Result<Vec<OpenOrder>> {
+        self.cancel_calls
+            .lock()
+            .expect("immediate-fill adapter poisoned")
+            .extend(request.client_order_ids.iter().cloned());
+        Ok(FakeExecutionAdapter
+            .cancel_orders(request, snapshot)
+            .await?)
+    }
+
+    async fn query_open_orders(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> anyhow::Result<Vec<OpenOrder>> {
+        Ok(FakeExecutionAdapter.query_open_orders(snapshot).await?)
+    }
+
+    async fn list_recent_fills(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> anyhow::Result<Vec<RecentFill>> {
+        Ok(FakeExecutionAdapter.list_recent_fills(snapshot).await?)
+    }
+}
+
 #[derive(Default)]
 struct FailingPlacementExecutionAdapter {
     submit_failures_remaining: AtomicUsize,
@@ -973,6 +1055,46 @@ async fn price_tick_places_missing_active_grid_orders_when_strategy_is_running()
             "grid_buy_02".to_string(),
             "grid_sell_03".to_string()
         ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immediate_live_fill_updates_runtime_before_next_strategy_sync() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.position_qty = 0.0;
+    runtime.snapshot.runtime.position_avg_price = 0.0;
+    runtime.snapshot.execution.open_orders.clear();
+    runtime.snapshot.execution.recent_fills.clear();
+    runtime.snapshot.strategy.config.grid_levels = 3;
+
+    let adapter = Arc::new(ImmediateFillExecutionAdapter::new("grid_sell_03"));
+    let (engine, read_model, _events_rx) =
+        spawn_engine_with_runtime_and_adapter(runtime, None, adapter.clone());
+
+    engine.emit_price_tick().await?;
+    engine.emit_price_tick().await?;
+
+    let snapshot = read_model.read().expect("read model").snapshot();
+    assert!(snapshot.runtime.position_qty < 0.0);
+    assert!(snapshot.runtime.position_avg_price > 0.0);
+    let submit_calls = adapter.submit_calls();
+    assert_eq!(
+        submit_calls,
+        vec![
+            "grid_buy_01".to_string(),
+            "grid_buy_02".to_string(),
+            "grid_sell_03".to_string(),
+        ]
+    );
+    assert_eq!(
+        submit_calls
+            .iter()
+            .filter(|client_order_id| client_order_id.as_str() == "grid_sell_03")
+            .count(),
+        1
     );
 
     Ok(())

@@ -8,7 +8,7 @@
 - 当前主线：`K10` 单实例 `7x24` 值守硬化
 - 并行线程：多实例固定区间网格已实现并并入主线，后续只维护实例边界与运行安全配套
 - 最近完成：`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
-- 最近验证：`2026-03-23` 已通过 `cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test binance_integration -- --nocapture` 与 `cargo build -p grid-platform-service`
+- 最近验证：`2026-03-23` 已通过 `cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow immediate_live_fill_updates_runtime_before_next_strategy_sync -- --nocapture`、`cargo test -p grid-platform-service --test binance_integration -- --nocapture` 与 `cargo build -p grid-platform-service`
 
 ## K9 主网运行安全底座
 
@@ -56,6 +56,7 @@
 - [x] 让 Binance 模式下策略挂单与撤单走真实交易所 execution 路径
 - [x] 让 Binance 策略挂单按交易所过滤器归整价格和数量，并在 Hedge Mode 账号上给出明确暂停原因
 - [x] 放宽批量策略补单的同步预算，避免 testnet 大网格在首单成功后因总超时过早中断
+- [x] 让真实立即成交的订单先同步本地运行态，避免同一网格在下一轮策略补单中被重复提交
 - [ ] 固化单实例部署、工作目录、数据目录与日志目录约定
 - [ ] 增加重复启动保护与优雅停机流程
 - [ ] 抽出统一健康状态与自动降级语义

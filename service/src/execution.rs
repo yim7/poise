@@ -324,7 +324,7 @@ fn should_fill_order(order: &OpenOrder, market_price: f64) -> bool {
     }
 }
 
-fn apply_fill_to_runtime(
+pub(crate) fn apply_fill_to_runtime(
     position_qty: &mut f64,
     position_avg_price: &mut f64,
     realized_pnl: &mut f64,
