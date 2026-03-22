@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
     draw_footer(frame, outer[3], state, theme, viewport);
 
     if let Some(modal) = &state.ui.modal {
-        draw_modal(frame, modal, state.ui.locale, theme);
+        draw_modal(frame, state, modal, theme);
     }
 }
 
@@ -222,6 +222,9 @@ fn draw_bootstrap_main(
         Page::Market => draw_bootstrap_market(frame, area, state, theme, viewport),
         Page::Events => draw_bootstrap_events(frame, area, state, theme, viewport),
         Page::Help => draw_help(frame, area, state, theme, viewport),
+    }
+    if !matches!(state.ui.page, Page::Help) {
+        draw_bootstrap_overlay(frame, area, state, theme);
     }
 }
 
@@ -512,45 +515,69 @@ fn bootstrap_block(
     title: &str,
     focused: bool,
     tone: PanelTone,
-    state: &AppState,
+    _state: &AppState,
 ) {
-    let body = bootstrap_lines(state, theme, title);
     frame.render_widget(
-        Paragraph::new(body)
+        Paragraph::new(Vec::<Line<'static>>::new())
             .block(panel_block(theme, title, focused, tone))
             .wrap(Wrap { trim: true }),
         area,
     );
 }
 
-fn bootstrap_lines(state: &AppState, theme: &Theme, title: &str) -> Vec<Line<'static>> {
+fn bootstrap_overlay_lines(state: &AppState, theme: &Theme) -> (&'static str, Vec<Line<'static>>) {
     let copy = locale::copy(state.ui.locale);
     match &state.snapshot_state {
-        SnapshotBootstrapState::WaitingFirstSnapshot => vec![
-            Line::from(vec![Span::styled(
-                copy.bootstrap().pending_title(),
-                theme.warning(),
-            )]),
-            Line::from(copy.bootstrap().pending_detail()),
-            Line::from(copy.bootstrap().pending_actions_disabled()),
-            Line::from(copy.bootstrap().panel_line(title)),
-        ],
+        SnapshotBootstrapState::WaitingFirstSnapshot => (
+            copy.bootstrap().pending_title(),
+            vec![
+                Line::from(copy.bootstrap().pending_detail()),
+                Line::from(Span::styled(
+                    copy.bootstrap().pending_actions_disabled(),
+                    theme.warning(),
+                )),
+            ],
+        ),
         SnapshotBootstrapState::SnapshotRetrying {
             last_error,
             retry_count,
             retry_in_ms,
-        } => vec![
-            Line::from(vec![Span::styled(
-                copy.bootstrap().failed_title(),
-                theme.danger(),
-            )]),
-            Line::from(copy.bootstrap().failed_retry(*retry_count, *retry_in_ms)),
-            Line::from(copy.bootstrap().error_line(last_error)),
-            Line::from(copy.bootstrap().failed_actions_disabled()),
-            Line::from(copy.bootstrap().panel_line(title)),
-        ],
-        SnapshotBootstrapState::Ready => Vec::new(),
+        } => (
+            copy.bootstrap().failed_title(),
+            vec![
+                Line::from(copy.bootstrap().failed_retry(*retry_count, *retry_in_ms)),
+                Line::from(copy.bootstrap().error_line(last_error)),
+                Line::from(Span::styled(
+                    copy.bootstrap().failed_actions_disabled(),
+                    theme.warning(),
+                )),
+            ],
+        ),
+        SnapshotBootstrapState::Ready => ("", Vec::new()),
     }
+}
+
+fn draw_bootstrap_overlay(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let (title, lines) = bootstrap_overlay_lines(state, theme);
+    if title.is_empty() {
+        return;
+    }
+    let tone = match state.snapshot_state {
+        SnapshotBootstrapState::WaitingFirstSnapshot => PanelTone::Warning,
+        SnapshotBootstrapState::SnapshotRetrying { .. } => PanelTone::Danger,
+        SnapshotBootstrapState::Ready => return,
+    };
+    let width = area.width.saturating_sub(10).clamp(42, 72);
+    let height = (lines.len() as u16 + 4).clamp(6, area.height.saturating_sub(2).max(6));
+    let overlay = centered_rect(width, height, area);
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .block(panel_block(theme, title, true, tone))
+            .wrap(Wrap { trim: true }),
+        overlay,
+    );
 }
 
 fn draw_dashboard(
@@ -968,20 +995,20 @@ fn draw_grid(
     if viewport.compact() {
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(6),
-                Constraint::Length(5),
-                Constraint::Min(4),
-            ])
+            .constraints([Constraint::Min(10), Constraint::Length(7)])
             .split(area);
+        let bottom = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[1]);
 
         draw_strategy_orders(frame, layout[0], state, theme);
-        draw_grid_summary(frame, layout[1], state, theme, &vm);
-        draw_grid_notes(frame, layout[2], state, theme);
+        draw_grid_summary(frame, bottom[0], state, theme, &vm);
+        draw_grid_notes(frame, bottom[1], state, theme);
     } else {
         let layout = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
             .split(area);
         let right = Layout::default()
             .direction(Direction::Vertical)
@@ -996,44 +1023,52 @@ fn draw_grid(
 
 fn draw_strategy_orders(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
     let copy = locale::copy(state.ui.locale);
-    let order_rows = selectors::strategy_orders(state)
-        .into_iter()
-        .take(table_capacity(area))
-        .map(|order| {
-            Row::new(vec![
-                Cell::from(order.side),
-                Cell::from(order.price),
-                Cell::from(order.qty),
-                Cell::from(order.status),
-            ])
-        });
-    frame.render_widget(
-        Table::new(
-            order_rows,
-            [
-                Constraint::Length(6),
-                Constraint::Length(10),
-                Constraint::Length(8),
-                Constraint::Min(10),
-            ],
-        )
-        .header(
-            Row::new(vec![
-                copy.dashboard().side_header(),
-                copy.dashboard().price_header(),
-                copy.dashboard().qty_header(),
-                copy.dashboard().status_header(),
-            ])
-            .style(theme.emphasis()),
-        )
-        .column_spacing(1)
-        .block(panel_block(
-            theme,
-            copy.grid().strategy_orders_title(),
-            panel_focused(state, 0),
-            PanelTone::Neutral,
-        )),
-        area,
+    let outer_block = panel_block(
+        theme,
+        copy.grid().strategy_orders_title(),
+        panel_focused(state, 0),
+        PanelTone::Neutral,
+    );
+    let inner = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    if inner.height < 3 || inner.width < 20 {
+        return;
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner);
+    let orders = selectors::strategy_orders(state);
+    let buy_orders = orders
+        .iter()
+        .filter(|order| order.side == "BUY")
+        .cloned()
+        .collect::<Vec<_>>();
+    let sell_orders = orders
+        .iter()
+        .filter(|order| order.side == "SELL")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    draw_strategy_order_side(
+        frame,
+        sections[0],
+        state,
+        copy.grid().buy_orders_title(),
+        &buy_orders,
+        state.ui.locale,
+        theme,
+    );
+    draw_strategy_order_side(
+        frame,
+        sections[1],
+        state,
+        copy.grid().sell_orders_title(),
+        &sell_orders,
+        state.ui.locale,
+        theme,
     );
 }
 
@@ -1046,34 +1081,42 @@ fn draw_grid_summary(
 ) {
     let copy = locale::copy(state.ui.locale);
     let summary = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(copy.grid().status_label(), theme.muted()),
-            Span::styled(vm.status.clone(), theme.emphasis()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().lower_label(), theme.muted()),
-            Span::styled(vm.lower.clone(), theme.panel()),
-            Span::styled(copy.grid().upper_label(), theme.muted()),
-            Span::styled(vm.upper.clone(), theme.panel()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().center_label(), theme.muted()),
-            Span::styled(vm.center.clone(), theme.emphasis()),
-            Span::styled(copy.grid().span_label(), theme.muted()),
-            Span::styled(vm.span_pct.clone(), theme.warning()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().active_label(), theme.muted()),
-            Span::styled(vm.active_levels.to_string(), theme.panel()),
-            Span::styled(copy.grid().occupied_label(), theme.muted()),
-            Span::styled(vm.occupied_levels.to_string(), theme.warning()),
-            Span::styled(copy.grid().pending_label(), theme.muted()),
-            Span::styled(vm.pending_levels.to_string(), theme.warning()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().bias_label(), theme.muted()),
-            Span::styled(vm.inventory_bias.clone(), theme.warning()),
-        ]),
+        dual_kv_line(
+            theme,
+            copy.grid().status_label(),
+            vm.status.clone(),
+            theme.emphasis(),
+            copy.grid().bias_label(),
+            short_inventory_bias(state.ui.locale, state.runtime.position_qty),
+            theme.warning(),
+        ),
+        dual_kv_line(
+            theme,
+            copy.grid().lower_label(),
+            vm.lower.clone(),
+            theme.panel(),
+            copy.grid().upper_label(),
+            vm.upper.clone(),
+            theme.panel(),
+        ),
+        dual_kv_line(
+            theme,
+            copy.grid().center_label(),
+            vm.center.clone(),
+            theme.emphasis(),
+            copy.grid().span_label(),
+            vm.span_pct.clone(),
+            theme.warning(),
+        ),
+        dual_kv_line(
+            theme,
+            copy.grid().active_label(),
+            vm.active_levels.to_string(),
+            theme.panel(),
+            copy.grid().occupied_label(),
+            vm.occupied_levels.to_string(),
+            theme.warning(),
+        ),
     ])
     .block(panel_block(
         theme,
@@ -1089,45 +1132,49 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
     let copy = locale::copy(state.ui.locale);
     let common = copy.common();
     let health = selectors::connection_health(state);
-    let notes = vec![
-        Line::from(vec![
-            Span::styled(copy.grid().current_price_label(), theme.muted()),
-            Span::styled(format!("{:.2}", state.runtime.last_price), theme.emphasis()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().session_label(), theme.muted()),
-            Span::styled(state.runtime.session_state.clone(), theme.panel()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().health_label(), theme.muted()),
-            Span::styled(
-                health.label,
-                theme.status(status_tone_for_connection(health.kind)),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.grid().breaker_label(), theme.muted()),
-            Span::styled(
-                if state.risk.breaker_engaged {
-                    common.on()
-                } else {
-                    common.off()
-                },
-                if state.risk.breaker_engaged {
-                    theme.danger()
-                } else {
-                    theme.success()
-                },
-            ),
-        ]),
-        Line::from(
+    let mut notes = vec![
+        dual_kv_line(
+            theme,
+            copy.grid().current_price_label(),
+            format!("{:.2}", state.runtime.last_price),
+            theme.emphasis(),
+            copy.grid().pending_label(),
+            state.execution.pending_commands.len().to_string(),
+            theme.warning(),
+        ),
+        dual_kv_line(
+            theme,
+            copy.grid().session_label(),
+            state.runtime.session_state.clone(),
+            theme.panel(),
+            copy.grid().health_label(),
+            health.label.into(),
+            theme.status(status_tone_for_connection(health.kind)),
+        ),
+        single_kv_line(
+            theme,
+            copy.grid().breaker_label(),
+            if state.risk.breaker_engaged {
+                common.on().into()
+            } else {
+                common.off().into()
+            },
+            if state.risk.breaker_engaged {
+                theme.danger()
+            } else {
+                theme.success()
+            },
+        ),
+    ];
+    if area.height > 5 {
+        notes.push(Line::from(
             state
                 .strategy
                 .status_reason
                 .clone()
                 .unwrap_or_else(|| copy.grid().aligned_message().into()),
-        ),
-    ];
+        ));
+    }
     frame.render_widget(
         Paragraph::new(notes)
             .block(panel_block(
@@ -1141,6 +1188,129 @@ fn draw_grid_notes(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &
     );
 }
 
+fn draw_strategy_order_side(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    title: &str,
+    orders: &[selectors::StrategyOrderItemViewModel],
+    locale: crate::locale::Locale,
+    theme: &Theme,
+) {
+    let copy = locale::copy(locale);
+    if orders.is_empty() {
+        let empty_reason =
+            if state.execution.exchange_open_orders_source != OpenOrdersSource::ExchangeLive {
+                copy.grid().no_strategy_orders_unavailable()
+            } else if state.strategy.status_reason.is_some() {
+                copy.grid().no_strategy_orders_waiting()
+            } else {
+                copy.grid().no_strategy_orders_waiting()
+            };
+        let next_reason = state
+            .strategy
+            .status_reason
+            .clone()
+            .unwrap_or_else(|| copy.grid().no_strategy_orders_next().into());
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(copy.grid().no_strategy_orders()),
+                Line::from(empty_reason),
+                Line::from(next_reason),
+            ])
+            .alignment(Alignment::Center)
+            .block(panel_block(theme, title, false, PanelTone::Neutral))
+            .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    let rows = orders.iter().take(table_capacity(area)).map(|order| {
+        Row::new(vec![
+            Cell::from(order.price.clone()),
+            Cell::from(order.qty.clone()),
+            Cell::from(order.distance_pct.clone()),
+            Cell::from(order.status.clone()),
+        ])
+    });
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(8),
+                Constraint::Length(5),
+                Constraint::Length(6),
+                Constraint::Min(5),
+            ],
+        )
+        .header(
+            Row::new(vec![
+                copy.dashboard().price_header(),
+                copy.dashboard().qty_header(),
+                copy.grid().distance_header(),
+                copy.dashboard().status_header(),
+            ])
+            .style(theme.emphasis()),
+        )
+        .column_spacing(1)
+        .block(panel_block(theme, title, false, PanelTone::Neutral)),
+        area,
+    );
+}
+
+fn dual_kv_line(
+    theme: &Theme,
+    left_label: &str,
+    left_value: String,
+    left_style: Style,
+    right_label: &str,
+    right_value: String,
+    right_style: Style,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{} ", left_label.trim()), theme.muted()),
+        Span::styled(left_value, left_style),
+        Span::styled("   ", theme.muted()),
+        Span::styled(format!("{} ", right_label.trim()), theme.muted()),
+        Span::styled(right_value, right_style),
+    ])
+}
+
+fn single_kv_line(theme: &Theme, label: &str, value: String, value_style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{} ", label.trim()), theme.muted()),
+        Span::styled(value, value_style),
+    ])
+}
+
+fn short_inventory_bias(locale: crate::locale::Locale, position_qty: f64) -> String {
+    let copy = locale::copy(locale).selector();
+    if position_qty > 0.0 {
+        copy.long_inventory_short().into()
+    } else if position_qty < 0.0 {
+        copy.short_inventory_short().into()
+    } else {
+        copy.flat_inventory_short().into()
+    }
+}
+
+fn status_tone_for_flag(is_up: bool) -> StatusTone {
+    if is_up {
+        StatusTone::Success
+    } else {
+        StatusTone::Danger
+    }
+}
+
+fn status_tone_for_optional_flag(is_up: Option<bool>) -> StatusTone {
+    match is_up {
+        Some(true) => StatusTone::Success,
+        Some(false) => StatusTone::Danger,
+        None => StatusTone::Warning,
+    }
+}
+
 fn draw_market(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1149,7 +1319,6 @@ fn draw_market(
     viewport: Viewport,
 ) {
     let copy = locale::copy(state.ui.locale);
-    let common = copy.common();
     let vm = selectors::market(state);
     let instances = selectors::instances(state);
     let health = selectors::connection_health(state);
@@ -1205,15 +1374,31 @@ fn draw_market(
     let connectivity = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(copy.market().service_ws_label(), theme.muted()),
-            Span::styled(vm.service_ws_status, theme.panel()),
+            badge_span(
+                vm.service_ws_status.as_str(),
+                theme,
+                status_tone_for_flag(state.connection.ws_connected),
+            ),
             Span::styled(copy.market().http_label(), theme.muted()),
-            Span::styled(vm.http_status, theme.panel()),
+            badge_span(
+                vm.http_status.as_str(),
+                theme,
+                status_tone_for_flag(state.connection.http_available),
+            ),
         ]),
         Line::from(vec![
             Span::styled(copy.market().market_ws_label(), theme.muted()),
-            Span::styled(vm.market_ws_status, theme.panel()),
+            badge_span(
+                vm.market_ws_status.as_str(),
+                theme,
+                status_tone_for_flag(state.connection.market_ws_connected),
+            ),
             Span::styled(copy.market().user_ws_label(), theme.muted()),
-            Span::styled(vm.user_stream_status, theme.panel()),
+            badge_span(
+                vm.user_stream_status.as_str(),
+                theme,
+                status_tone_for_optional_flag(state.connection.user_stream_connected),
+            ),
         ]),
         Line::from(vec![
             Span::styled(copy.market().stale_label(), theme.muted()),
@@ -1227,12 +1412,9 @@ fn draw_market(
         ]),
         Line::from(vec![
             Span::styled(copy.market().mode_label(), theme.muted()),
-            Span::styled(
-                health.label,
-                theme.status(status_tone_for_connection(health.kind)),
-            ),
+            badge_span(health.label, theme, status_tone_for_connection(health.kind)),
         ]),
-        Line::from(health.hint),
+        Line::from(Span::styled(health.detail, theme.muted())),
     ])
     .block(panel_block(
         theme,
@@ -1261,7 +1443,6 @@ fn draw_market(
         .into_iter()
         .chain(instance_list_lines(
             &copy,
-            &common,
             theme,
             &instances,
             layout[2].height,
@@ -1280,7 +1461,6 @@ fn draw_market(
 
 fn instance_list_lines(
     copy: &crate::locale::UiCopy,
-    common: &crate::locale::CommonCopy,
     theme: &Theme,
     instances: &selectors::InstancesViewModel,
     available_height: u16,
@@ -1292,14 +1472,9 @@ fn instance_list_lines(
         )])];
     }
 
-    let default_symbol = instances
-        .default_symbol
-        .as_deref()
-        .unwrap_or(common.none_value());
-    let current_symbol = instances
-        .current_symbol
-        .as_deref()
-        .unwrap_or(common.none_value());
+    let current_index = instances
+        .current_index
+        .map(|index| copy.instances().index(index, instances.total_instances));
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -1309,11 +1484,11 @@ fn instance_list_lines(
             Span::styled(" ", theme.muted()),
             Span::styled(instances.environment.clone(), theme.panel()),
             Span::styled(" · ", theme.muted()),
-            Span::styled(copy.instances().default_label(), theme.muted()),
-            Span::styled(format!(" {}", default_symbol), theme.warning()),
-            Span::styled(" · ", theme.muted()),
-            Span::styled(copy.instances().current_label(), theme.muted()),
-            Span::styled(format!(" {}", current_symbol), theme.emphasis()),
+            Span::styled(
+                current_index
+                    .unwrap_or_else(|| copy.instances().index(0, instances.total_instances)),
+                theme.warning(),
+            ),
         ]),
     ];
 
@@ -1525,29 +1700,30 @@ fn draw_help(
     );
 
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(copy.help().focus_label(), theme.muted()),
-                Span::styled(
-                    state
-                        .ui
-                        .page
-                        .focus_label(state.ui.locale, state.ui.focus_index),
-                    theme.emphasis(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(copy.help().health_label(), theme.muted()),
-                Span::styled(
-                    health.label,
-                    theme.status(status_tone_for_connection(health.kind)),
-                ),
-            ]),
-            Line::from(copy.help().glossary_lines()[0]),
-            Line::from(copy.help().glossary_lines()[1]),
-            Line::from(copy.help().glossary_lines()[2]),
-            Line::from(copy.help().glossary_lines()[3]),
-        ])
+        Paragraph::new(
+            vec![
+                Line::from(vec![
+                    Span::styled(copy.help().focus_label(), theme.muted()),
+                    Span::styled(
+                        state
+                            .ui
+                            .page
+                            .focus_label(state.ui.locale, state.ui.focus_index),
+                        theme.emphasis(),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(copy.help().health_label(), theme.muted()),
+                    Span::styled(
+                        health.label,
+                        theme.status(status_tone_for_connection(health.kind)),
+                    ),
+                ]),
+            ]
+            .into_iter()
+            .chain(copy.help().glossary_lines().into_iter().map(Line::from))
+            .collect::<Vec<_>>(),
+        )
         .block(panel_block(
             theme,
             copy.help().glossary_title(),
@@ -1567,13 +1743,23 @@ fn draw_footer(
     viewport: Viewport,
 ) {
     let copy = locale::copy(state.ui.locale);
-    let toast_line = if let Some(toast) = &state.ui.toast {
-        let style = match toast.level {
-            ToastLevel::Info => theme.info(),
-            ToastLevel::Warning => theme.warning(),
-            ToastLevel::Danger => theme.danger(),
+    let footer_line = if let Some(toast) = &state.ui.toast {
+        let (tone, style) = match toast.level {
+            ToastLevel::Info => (StatusTone::Success, theme.info()),
+            ToastLevel::Warning => (StatusTone::Warning, theme.warning()),
+            ToastLevel::Danger => (StatusTone::Danger, theme.danger()),
         };
-        Line::from(vec![Span::styled(format!(" {} ", toast.message), style)])
+        let shortcuts = if state.is_snapshot_ready() {
+            copy.footer().toast_ready_shortcuts(viewport.narrow())
+        } else {
+            copy.footer().toast_bootstrap_shortcuts(viewport.narrow())
+        };
+        Line::from(vec![
+            badge_span(copy.toast().level_badge(&toast.level), theme, tone),
+            Span::styled(format!(" {shortcuts} "), theme.muted()),
+            Span::styled("|", theme.muted()),
+            Span::styled(format!(" {} ", toast.message), style),
+        ])
     } else if !state.is_snapshot_ready() {
         match &state.snapshot_state {
             SnapshotBootstrapState::WaitingFirstSnapshot => Line::from(vec![Span::styled(
@@ -1613,7 +1799,7 @@ fn draw_footer(
         )])
     };
     frame.render_widget(
-        Paragraph::new(toast_line).style(theme.panel()).block(
+        Paragraph::new(footer_line).style(theme.panel()).block(
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border_idle)),
@@ -1622,19 +1808,14 @@ fn draw_footer(
     );
 }
 
-fn draw_modal(
-    frame: &mut Frame<'_>,
-    modal: &Modal,
-    app_locale: crate::locale::Locale,
-    theme: &Theme,
-) {
+fn draw_modal(frame: &mut Frame<'_>, state: &AppState, modal: &Modal, theme: &Theme) {
     let area = centered_rect(
         frame.area().width.saturating_sub(8).clamp(48, 76),
-        if frame.area().height < 20 { 9 } else { 10 },
+        if frame.area().height < 20 { 11 } else { 12 },
         frame.area(),
     );
     frame.render_widget(Clear, area);
-    let (title, lines) = danger_copy(app_locale, modal);
+    let (title, lines) = danger_copy(state, modal);
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
@@ -1644,11 +1825,9 @@ fn draw_modal(
     );
 }
 
-fn danger_copy(
-    app_locale: crate::locale::Locale,
-    modal: &Modal,
-) -> (&'static str, Vec<Line<'static>>) {
-    let copy = locale::copy(app_locale);
+fn danger_copy(state: &AppState, modal: &Modal) -> (&'static str, Vec<Line<'static>>) {
+    let copy = locale::copy(state.ui.locale);
+    let context = selectors::danger_modal_context(state);
     match modal {
         Modal::Confirm(command) => {
             let (title, body, detail) = copy.modal().confirm(*command);
@@ -1659,6 +1838,20 @@ fn danger_copy(
                     Line::from(Span::styled(
                         detail,
                         Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::raw(
+                        copy.modal()
+                            .instance_line(&context.symbol, &context.environment),
+                    )),
+                    Line::from(Span::raw(copy.modal().runtime_line(
+                        context.position_label,
+                        &context.position_qty,
+                        context.health_label,
+                        context.pending_commands,
+                    ))),
+                    Line::from(Span::styled(
+                        copy.modal().health_detail_line(&context.health_detail),
+                        Style::default().add_modifier(Modifier::ITALIC),
                     )),
                     Line::from(copy.modal().confirm_hint()),
                 ],
@@ -1720,12 +1913,22 @@ fn list_from_lines(
 fn command_timeline_items(state: &AppState, theme: &Theme, area: Rect) -> Vec<ListItem<'static>> {
     let copy = locale::copy(state.ui.locale);
     let compact = area.height < 6;
+    let compact_line_budget = area.height.saturating_sub(2);
+    let compact_supports_detail = compact && compact_line_budget >= 2;
     let limit = if compact {
-        list_capacity(area)
+        if compact_supports_detail {
+            (compact_line_budget / 2).max(1) as usize
+        } else {
+            1
+        }
     } else {
         command_capacity(area)
     };
-    let items = selectors::command_timeline(state, limit);
+    let items = if compact {
+        selectors::command_timeline_compact(state, limit)
+    } else {
+        selectors::command_timeline(state, limit)
+    };
     if items.is_empty() {
         return vec![ListItem::new(Line::from(vec![Span::styled(
             copy.common().no_recent_commands().to_string(),
@@ -1736,21 +1939,24 @@ fn command_timeline_items(state: &AppState, theme: &Theme, area: Rect) -> Vec<Li
     items
         .into_iter()
         .map(|item| {
-            if compact {
-                ListItem::new(Line::from(vec![
+            if compact_supports_detail {
+                let mut lines = vec![Line::from(vec![
                     badge_span(item.stage_label, theme, stage_tone(item.stage)),
                     Span::styled(format!(" {} ", item.command_label), theme.emphasis()),
-                ]))
+                ])];
+                if let Some(detail) = item.compact_detail {
+                    lines.push(Line::from(Span::styled(detail, theme.muted())));
+                }
+                ListItem::new(lines)
             } else {
-                ListItem::new(vec![
-                    Line::from(vec![
-                        badge_span(item.stage_label, theme, stage_tone(item.stage)),
-                        Span::styled(format!(" {} ", item.command_label), theme.emphasis()),
-                        Span::styled(item.command_id, theme.muted()),
-                    ]),
-                    Line::from(item.summary),
-                    Line::from(Span::styled(item.timing, theme.muted())),
-                ])
+                let mut first_line = vec![
+                    badge_span(item.stage_label, theme, stage_tone(item.stage)),
+                    Span::styled(format!(" {} ", item.command_label), theme.emphasis()),
+                ];
+                if let Some(detail) = item.compact_detail {
+                    first_line.push(Span::styled(format!(" · {detail}"), theme.muted()));
+                }
+                ListItem::new(Line::from(first_line))
             }
         })
         .collect()
@@ -1776,8 +1982,8 @@ fn dashboard_right_constraints(height: u16) -> [Constraint; 3] {
     if height < 12 {
         [
             Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(4),
-            Constraint::Min(3),
         ]
     } else {
         [
@@ -1889,7 +2095,7 @@ mod tests {
         protocol::{
             CommandLinks, CommandStatus, CommandType, PendingCommand, RiskEvent, RiskLevel,
         },
-        state::{AppState, CommandTimelineEntry, Page},
+        state::{AppState, CommandTimelineEntry, Page, Toast},
         store::reduce,
         theme::Theme,
     };
@@ -1953,17 +2159,35 @@ mod tests {
 
     #[test]
     fn grid_render_snapshot_120x18() {
-        assert_page_snapshot(Page::Grid, 120, 18, "grid_render_snapshot_120x18", |_| {});
+        assert_page_snapshot(
+            Page::Grid,
+            120,
+            18,
+            "grid_render_snapshot_120x18",
+            apply_live_grid_orders_state,
+        );
     }
 
     #[test]
     fn grid_render_snapshot_100x16() {
-        assert_page_snapshot(Page::Grid, 100, 16, "grid_render_snapshot_100x16", |_| {});
+        assert_page_snapshot(
+            Page::Grid,
+            100,
+            16,
+            "grid_render_snapshot_100x16",
+            apply_live_grid_orders_state,
+        );
     }
 
     #[test]
     fn grid_render_snapshot_80x24() {
-        assert_page_snapshot(Page::Grid, 80, 24, "grid_render_snapshot_80x24", |_| {});
+        assert_page_snapshot(
+            Page::Grid,
+            80,
+            24,
+            "grid_render_snapshot_80x24",
+            apply_live_grid_orders_state,
+        );
     }
 
     #[test]
@@ -1974,7 +2198,7 @@ mod tests {
             100,
             16,
             "grid_render_snapshot_zh_cn_100x16",
-            |_| {},
+            apply_live_grid_orders_state,
         );
     }
 
@@ -1986,7 +2210,7 @@ mod tests {
             80,
             24,
             "grid_render_snapshot_zh_cn_80x24",
-            |_| {},
+            apply_live_grid_orders_state,
         );
     }
 
@@ -2039,10 +2263,10 @@ mod tests {
 
         assert!(rendered.contains("Instances"));
         assert!(rendered.contains("Env"));
-        assert!(rendered.contains("Current"));
         assert!(rendered.contains("ETHUSDT"));
         assert!(rendered.contains("BTCUSDT"));
         assert!(rendered.contains("SOLUSDT"));
+        assert!(rendered.contains("2/3"));
         assert!(rendered.contains(">ETHUSDT"));
     }
 
@@ -2074,10 +2298,10 @@ mod tests {
 
         assert!(rendered.contains("实例列表"));
         assert!(rendered.contains("环境"));
-        assert!(rendered.contains("当前"));
         assert!(rendered.contains("ETHUSDT"));
         assert!(rendered.contains("BTCUSDT"));
         assert!(rendered.contains("SOLUSDT"));
+        assert!(rendered.contains("2/3"));
         assert!(rendered.contains(">ETHUSDT"));
     }
 
@@ -2130,6 +2354,16 @@ mod tests {
                 *state = AppState::waiting_first_snapshot();
             },
         );
+    }
+
+    #[test]
+    fn waiting_first_snapshot_hides_repeated_panel_copy() {
+        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+            *state = AppState::waiting_first_snapshot();
+        });
+
+        assert_eq!(rendered.matches("Initial snapshot pending").count(), 1);
+        assert!(!rendered.contains("Panel:"));
     }
 
     #[test]
@@ -2224,7 +2458,7 @@ mod tests {
 
     #[test]
     fn dashboard_renders_service_ws_status_when_transport_is_down() {
-        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |state| {
             state.connection.ws_connected = false;
             state.connection.reconnect_attempt = 2;
             state.connection.reconnect_backoff_ms = 2_000;
@@ -2233,13 +2467,13 @@ mod tests {
             state.connection.user_stream_connected = Some(true);
         });
 
-        assert!(rendered.contains("Svc WS"));
-        assert!(rendered.contains("Mkt WS"));
+        assert!(rendered.contains("SERVICERECONNECTING"));
+        assert!(rendered.contains("HealthSERVICE"));
     }
 
     #[test]
     fn dashboard_keeps_prices_and_degraded_reason_visible_at_common_width() {
-        let rendered = render_page_to_string(Page::Dashboard, 100, 16, |state| {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |state| {
             state.connection.ws_connected = true;
             state.connection.market_ws_connected = true;
             state.connection.http_available = true;
@@ -2249,7 +2483,8 @@ mod tests {
 
         assert!(rendered.contains("Last"));
         assert!(rendered.contains("Mark"));
-        assert!(rendered.to_ascii_lowercase().contains("user down"));
+        assert!(rendered.contains("DEGRADED"));
+        assert!(rendered.contains("HealthDEGRADED"));
     }
 
     #[test]
@@ -2347,6 +2582,44 @@ mod tests {
     }
 
     #[test]
+    fn compact_command_timeline_shows_latest_failure_reason() {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |state| {
+            state.execution.command_timeline.clear();
+            state
+                .execution
+                .command_timeline
+                .push_front(CommandTimelineEntry {
+                    command_id: "cmd_timeout_01".into(),
+                    command: CommandType::FlattenNow,
+                    stage: CommandTimelineStage::TimedOut,
+                    summary: "flatten timed out while waiting for reduce-only fill".into(),
+                    requested_at: "2025-01-01T00:00:02Z".into(),
+                    accepted_at: Some("2025-01-01T00:00:03Z".into()),
+                    finished_at: Some("2025-01-01T00:00:18Z".into()),
+                    links: CommandLinks::default(),
+                    timeout_at_tick: None,
+                });
+            state
+                .execution
+                .command_timeline
+                .push_front(CommandTimelineEntry {
+                    command_id: "cmd_failed_01".into(),
+                    command: CommandType::CancelAll,
+                    stage: CommandTimelineStage::Failed,
+                    summary: "exchange ack timeout".into(),
+                    requested_at: "2025-01-01T00:00:06Z".into(),
+                    accepted_at: Some("2025-01-01T00:00:07Z".into()),
+                    finished_at: Some("2025-01-01T00:00:08Z".into()),
+                    links: CommandLinks::default(),
+                    timeout_at_tick: None,
+                });
+        });
+
+        assert!(rendered.contains("FAILED"));
+        assert!(rendered.contains("exchangeacktimeout"));
+    }
+
+    #[test]
     fn events_render_snapshot_failure_details_100x16() {
         assert_page_snapshot(
             Page::Events,
@@ -2386,6 +2659,132 @@ mod tests {
                     });
             },
         );
+    }
+
+    #[test]
+    fn danger_modal_includes_runtime_context() {
+        let mut state = AppState::waiting_first_snapshot();
+        state.instances.environment = "paper-testnet".into();
+        state.instances.current_symbol = Some("XAUUSDT".into());
+        state.runtime.position_qty = -2.25;
+        state.connection.http_available = false;
+        state.connection.market_ws_connected = false;
+        state.connection.ws_connected = false;
+        state.connection.reconnect_attempt = 2;
+        state.connection.reconnect_backoff_ms = 4_000;
+        state.execution.pending_commands = vec![
+            PendingCommand {
+                command_id: "cmd_alpha".into(),
+                command: CommandType::Pause,
+                status: CommandStatus::Pending,
+                requested_at: "TplusA".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_beta".into(),
+                command: CommandType::Resume,
+                status: CommandStatus::Accepted,
+                requested_at: "TplusB".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_gamma".into(),
+                command: CommandType::CancelAll,
+                status: CommandStatus::Pending,
+                requested_at: "TplusC".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_delta".into(),
+                command: CommandType::FlattenNow,
+                status: CommandStatus::Pending,
+                requested_at: "TplusD".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_epsilon".into(),
+                command: CommandType::ShutdownAfterFlatten,
+                status: CommandStatus::Pending,
+                requested_at: "TplusE".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_zeta".into(),
+                command: CommandType::Pause,
+                status: CommandStatus::Pending,
+                requested_at: "TplusF".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_eta".into(),
+                command: CommandType::Resume,
+                status: CommandStatus::Pending,
+                requested_at: "TplusG".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_theta".into(),
+                command: CommandType::CancelAll,
+                status: CommandStatus::Pending,
+                requested_at: "TplusH".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_iota".into(),
+                command: CommandType::FlattenNow,
+                status: CommandStatus::Pending,
+                requested_at: "TplusI".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_kappa".into(),
+                command: CommandType::Pause,
+                status: CommandStatus::Pending,
+                requested_at: "TplusJ".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_lambda".into(),
+                command: CommandType::Resume,
+                status: CommandStatus::Pending,
+                requested_at: "TplusK".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_mu".into(),
+                command: CommandType::CancelAll,
+                status: CommandStatus::Pending,
+                requested_at: "TplusL".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_nu".into(),
+                command: CommandType::FlattenNow,
+                status: CommandStatus::Pending,
+                requested_at: "TplusM".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_xi".into(),
+                command: CommandType::Pause,
+                status: CommandStatus::Pending,
+                requested_at: "TplusN".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_omicron".into(),
+                command: CommandType::Resume,
+                status: CommandStatus::Pending,
+                requested_at: "TplusO".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_pi".into(),
+                command: CommandType::CancelAll,
+                status: CommandStatus::Pending,
+                requested_at: "TplusP".into(),
+            },
+            PendingCommand {
+                command_id: "cmd_rho".into(),
+                command: CommandType::ShutdownAfterFlatten,
+                status: CommandStatus::Pending,
+                requested_at: "TplusQ".into(),
+            },
+        ];
+
+        let (_, lines) = danger_copy(&state, &Modal::Confirm(CommandType::FlattenNow));
+        let rendered = normalized_lines_string(&lines);
+
+        assert!(rendered.contains("InstanceXAUUSDT·paper-testnet"));
+        assert!(rendered.contains("Positionshort2.250"));
+        assert!(rendered.contains("HealthSERVICERECONNECTING"));
+        assert!(rendered.contains("Healthdetailservicewsretry2in4000ms"));
+        assert!(rendered.contains("Pendingcommands17"));
     }
 
     #[test]
@@ -2441,41 +2840,30 @@ mod tests {
 
     #[test]
     fn grid_page_shows_only_live_strategy_orders() {
-        let rendered = normalized_page_string(Page::Grid, 100, 16, |state| {
-            state.execution.open_orders_source = crate::protocol::OpenOrdersSource::StrategyMirror;
-            state.execution.exchange_open_orders_source =
-                crate::protocol::OpenOrdersSource::ExchangeLive;
-            state.execution.exchange_open_orders = vec![
-                crate::protocol::OpenOrder {
-                    order_id: "real_ord_01".into(),
-                    client_order_id: "grid_sell_live_01".into(),
-                    side: "sell".into(),
-                    price: 42424.25,
-                    qty: 0.2,
-                    filled_qty: 0.0,
-                    status: "NEW".into(),
-                    created_at: "2025-01-01T00:00:00Z".into(),
-                    updated_at: "2025-01-01T00:00:00Z".into(),
-                },
-                crate::protocol::OpenOrder {
-                    order_id: "manual_ord_01".into(),
-                    client_order_id: "manual_sell_01".into(),
-                    side: "sell".into(),
-                    price: 99999.99,
-                    qty: 0.5,
-                    filled_qty: 0.0,
-                    status: "NEW".into(),
-                    created_at: "2025-01-01T00:00:00Z".into(),
-                    updated_at: "2025-01-01T00:00:00Z".into(),
-                },
-            ];
-        });
+        let rendered = normalized_page_string(Page::Grid, 100, 16, apply_live_grid_orders_state);
 
         assert!(rendered.contains("StrategyOrders"));
-        assert!(rendered.contains("Status"));
-        assert!(!rendered.contains("Placement"));
-        assert!(rendered.contains("42424.25"));
-        assert!(!rendered.contains("99999.99"));
+        assert!(rendered.contains("BUY"));
+        assert!(rendered.contains("SELL"));
+        assert!(rendered.contains("Dist"));
+        assert!(rendered.contains("2358.80"));
+        assert!(rendered.contains("2368.30"));
+        assert!(rendered.contains("0.11%"));
+        assert!(rendered.contains("0.29%"));
+        assert!(!rendered.contains("2400.00"));
+    }
+
+    #[test]
+    fn grid_empty_state_explains_why_no_live_orders() {
+        let rendered = normalized_page_string(Page::Grid, 100, 16, |state| {
+            state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
+            state.execution.exchange_open_orders.clear();
+            state.strategy.status_reason = Some("waiting for range re-entry".into());
+        });
+
+        assert!(rendered.contains("Noliveorders"));
+        assert!(rendered.contains("Norestingstrategyorders."));
+        assert!(rendered.contains("waitingforrangere-entry"));
     }
 
     #[test]
@@ -2511,10 +2899,35 @@ mod tests {
     }
 
     #[test]
+    fn help_page_explains_command_stages_and_instance_markers() {
+        let rendered = normalized_page_string(Page::Help, 120, 18, |_| {});
+
+        assert!(rendered.contains(">current*default."));
+        assert!(rendered.contains("PENDING/ACCEPTED/ACK/FAILED/TIMEDOUT"));
+    }
+
+    #[test]
     fn help_page_mentions_ctrl_c_exit_shortcut() {
         let rendered = normalized_page_string(Page::Help, 100, 16, |_| {});
 
         assert!(rendered.contains("q/Ctrl-C"));
+    }
+
+    #[test]
+    fn footer_keeps_shortcuts_visible_when_toast_is_present() {
+        let rendered = normalized_page_string(Page::Dashboard, 100, 16, |state| {
+            state.ui.toast = Some(Toast {
+                level: ToastLevel::Warning,
+                message: "risk sync failed".into(),
+                ttl_ticks: 8,
+            });
+        });
+
+        assert!(rendered.contains("WARN"));
+        assert!(rendered.contains("1-4?help"));
+        assert!(rendered.contains("Tab"));
+        assert!(rendered.contains("Enter/Esc"));
+        assert!(rendered.contains("risksyncfailed"));
     }
 
     fn assert_page_snapshot<F>(page: Page, width: u16, height: u16, name: &str, mutate: F)
@@ -2699,6 +3112,69 @@ mod tests {
             });
     }
 
+    fn apply_live_grid_orders_state(state: &mut AppState) {
+        state.execution.open_orders_source = crate::protocol::OpenOrdersSource::StrategyMirror;
+        state.execution.exchange_open_orders_source =
+            crate::protocol::OpenOrdersSource::ExchangeLive;
+        state.execution.exchange_open_orders = vec![
+            crate::protocol::OpenOrder {
+                order_id: "buy_near".into(),
+                client_order_id: "grid_buy_live_01".into(),
+                side: "buy".into(),
+                price: 2358.80,
+                qty: 0.12,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "buy_far".into(),
+                client_order_id: "grid_buy_live_02".into(),
+                side: "buy".into(),
+                price: 2352.80,
+                qty: 0.10,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "sell_near".into(),
+                client_order_id: "grid_sell_live_01".into(),
+                side: "sell".into(),
+                price: 2368.30,
+                qty: 0.10,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "sell_far".into(),
+                client_order_id: "grid_sell_live_02".into(),
+                side: "sell".into(),
+                price: 2376.60,
+                qty: 0.14,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "manual_ord_01".into(),
+                client_order_id: "manual_sell_01".into(),
+                side: "sell".into(),
+                price: 2400.00,
+                qty: 0.50,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+        ];
+    }
+
     fn buffer_to_string(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
         let mut output = String::new();
         for y in 0..height {
@@ -2709,5 +3185,14 @@ mod tests {
             output.push('\n');
         }
         output
+    }
+
+    fn normalized_lines_string(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .flat_map(|span| span.content.chars())
+            .filter(|ch| !ch.is_whitespace())
+            .collect()
     }
 }

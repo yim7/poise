@@ -13,7 +13,7 @@ expression: snapshot
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
 ┌ Commands (2) ──────────────────────────────────┐┌ System (2) · pending 0 ────────────────────────┐
 │ FAILED  CANCEL ALL                             ││[info] WebSocket connected and streaming.       │
-│ TIMED OUT  FLATTEN NOW                         ││[info] Initial runtime snapshot loaded.         │
+│error: exchange rejected cancel-all because the ││[info] Initial runtime snapshot loaded.         │
 │                                                ││                                                │
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────

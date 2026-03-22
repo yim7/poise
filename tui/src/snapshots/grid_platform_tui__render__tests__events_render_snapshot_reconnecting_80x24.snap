@@ -1,6 +1,5 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2207
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Fills      
@@ -18,12 +17,12 @@ expression: snapshot
 │                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ Commands (3) ────────────────────────┐┌ System (2) · pending 1 ──────────────┐
-│ ACCEPTED  SHUTDOWN local_cmd_0099    ││[info] WebSocket connected and streami│
-│Service accepted shutdown request; wai││[info] Initial runtime snapshot loaded│
-│req T+09s -> acc T+10s                ││                                      │
-│ ACK  PAUSE cmd_hist_0001             ││                                      │
-│Strategy acknowledged pause and stoppe││                                      │
-│req 2025-01-01T00:00:03Z -> acc 2025-0││                                      │
+│ ACCEPTED  SHUTDOWN  · accepted, waiti││[info] WebSocket connected and streami│
+│ ACK  PAUSE  · completed              ││[info] Initial runtime snapshot loaded│
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────
  Focus Fills | Tab panels | p/r run | c/f/s danger | Enter/Esc

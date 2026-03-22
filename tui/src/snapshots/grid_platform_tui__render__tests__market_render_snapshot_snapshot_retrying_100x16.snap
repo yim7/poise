@@ -1,20 +1,21 @@
 ---
 source: tui/src/render.rs
+assertion_line: 2964
 expression: snapshot
 ---
  GRID PLATFORM  SNAPSHOT FAILED  retry 1 in 1000ms                                                  
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Tape ──────────────────────────┐┌ Connectivity ─────────────────┐┌ Runtime ──────────────────────┐
-│Initial snapshot failed         ││Initial snapshot failed        ││Initial snapshot failed        │
-│Retry 1 in 1000ms.              ││Retry 1 in 1000ms.             ││Retry 1 in 1000ms.             │
-│Error: upstream timeout         ││Error: upstream timeout        ││Error: upstream timeout        │
-│p/r/c/f/s stay disabled until   ││p/r/c/f/s stay disabled until  ││p/r/c/f/s stay disabled until  │
-│retry completes.                ││retry completes.               ││retry completes.               │
-│Panel: Tape                     ││Panel: Connectivity            ││Panel: Runtime                 │
 │                                ││                               ││                               │
 │                                ││                               ││                               │
 │                                ││                               ││                               │
-└────────────────────────────────┘└───────────────────────────────┘└───────────────────────────────┘
+│                           ┌ Initial snapshot failed ─────────────────────────────────────────────┐
+│                           │                          Retry 1 in 1000ms.                          │
+│                           │                        Error: upstream timeout                       │
+│                           │            p/r/c/f/s stay disabled until retry completes.            │
+│                           │                                                                      │
+│                           │                                                                      │
+└───────────────────────────└──────────────────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  Snapshot failed, retry in 1000ms | p/r/c/f/s disabled

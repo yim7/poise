@@ -61,12 +61,23 @@ pub struct InstancesViewModel {
     pub environment: String,
     pub default_symbol: Option<String>,
     pub current_symbol: Option<String>,
+    pub current_index: Option<usize>,
+    pub total_instances: usize,
     pub items: Vec<InstanceItemViewModel>,
 }
 
 pub fn instances(state: &AppState) -> InstancesViewModel {
     let current_symbol = state.instances.current_symbol.clone();
     let default_symbol = state.instances.default_symbol.clone();
+    let total_instances = state.instances.items.len();
+    let current_index = current_symbol.as_ref().and_then(|symbol| {
+        state
+            .instances
+            .items
+            .iter()
+            .position(|item| item.symbol == *symbol)
+            .map(|index| index + 1)
+    });
     let mut items: Vec<_> = state
         .instances
         .items
@@ -91,6 +102,8 @@ pub fn instances(state: &AppState) -> InstancesViewModel {
         environment: state.instances.environment.clone(),
         default_symbol,
         current_symbol,
+        current_index,
+        total_instances,
         items,
     }
 }
@@ -159,6 +172,7 @@ pub struct StrategyOrderItemViewModel {
     pub side: String,
     pub price: String,
     pub qty: String,
+    pub distance_pct: String,
     pub status: String,
 }
 
@@ -169,9 +183,20 @@ pub fn strategy_orders(state: &AppState) -> Vec<StrategyOrderItemViewModel> {
         .cloned()
         .collect::<Vec<_>>();
     orders.sort_by(|a, b| {
-        a.price
-            .partial_cmp(&b.price)
+        let side_cmp = strategy_order_side_rank(&a.side).cmp(&strategy_order_side_rank(&b.side));
+        if side_cmp != std::cmp::Ordering::Equal {
+            return side_cmp;
+        }
+
+        let price_distance = |price: f64| (price - state.runtime.last_price).abs();
+        price_distance(a.price)
+            .partial_cmp(&price_distance(b.price))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.price
+                    .partial_cmp(&b.price)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     orders
@@ -180,9 +205,28 @@ pub fn strategy_orders(state: &AppState) -> Vec<StrategyOrderItemViewModel> {
             side: order.side.to_uppercase(),
             price: format!("{:.2}", order.price),
             qty: format!("{:.3}", order.qty),
+            distance_pct: strategy_order_distance_pct(state.runtime.last_price, order.price),
             status: order.status.clone(),
         })
         .collect()
+}
+
+fn strategy_order_side_rank(side: &str) -> u8 {
+    if side.eq_ignore_ascii_case("buy") {
+        0
+    } else if side.eq_ignore_ascii_case("sell") {
+        1
+    } else {
+        2
+    }
+}
+
+fn strategy_order_distance_pct(last_price: f64, order_price: f64) -> String {
+    if last_price.abs() <= f64::EPSILON {
+        return "0.00%".into();
+    }
+
+    format!("{:+.2}%", ((order_price - last_price) / last_price) * 100.0)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -375,7 +419,7 @@ pub fn market(state: &AppState) -> MarketViewModel {
         stale_age: format!("{}ms", state.connection.stale_age_ms),
         reconnect_attempt: state.connection.reconnect_attempt.to_string(),
         market_backoff: format!("{}ms", state.connection.market_reconnect_backoff_ms),
-        heartbeat: state.connection.last_heartbeat_at.clone(),
+        heartbeat: selector_copy.relative_age_short(state.connection.stale_age_ms),
     }
 }
 
@@ -412,6 +456,17 @@ pub struct ConnectionHealthViewModel {
     pub detail: String,
     pub hint: String,
     pub kind: ConnectionHealthKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DangerModalContextViewModel {
+    pub symbol: String,
+    pub environment: String,
+    pub position_label: &'static str,
+    pub position_qty: String,
+    pub health_label: &'static str,
+    pub health_detail: String,
+    pub pending_commands: usize,
 }
 
 pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
@@ -473,6 +528,44 @@ pub fn connection_health(state: &AppState) -> ConnectionHealthViewModel {
     }
 }
 
+pub fn danger_modal_context(state: &AppState) -> DangerModalContextViewModel {
+    let copy = locale::copy(state.ui.locale);
+    let selector_copy = copy.selector();
+    let common = copy.common();
+    let health = connection_health(state);
+    let symbol = state
+        .instances
+        .current_symbol
+        .clone()
+        .filter(|symbol| !symbol.is_empty())
+        .or_else(|| (!state.runtime.symbol.is_empty()).then(|| state.runtime.symbol.clone()))
+        .unwrap_or_else(|| common.none_value().into());
+    let environment = if !state.instances.environment.is_empty() {
+        state.instances.environment.clone()
+    } else if !state.runtime.env.is_empty() {
+        state.runtime.env.clone()
+    } else {
+        common.none_value().into()
+    };
+    let position_label = if state.runtime.position_qty > 0.0 {
+        selector_copy.long_inventory_short()
+    } else if state.runtime.position_qty < 0.0 {
+        selector_copy.short_inventory_short()
+    } else {
+        selector_copy.flat_inventory_short()
+    };
+
+    DangerModalContextViewModel {
+        symbol,
+        environment,
+        position_label,
+        position_qty: format!("{:.3}", state.runtime.position_qty.abs()),
+        health_label: health.label,
+        health_detail: health.detail,
+        pending_commands: state.execution.pending_commands.len(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandTimelineItemViewModel {
     pub command_id: String,
@@ -480,6 +573,7 @@ pub struct CommandTimelineItemViewModel {
     pub stage_label: &'static str,
     pub stage: CommandTimelineStage,
     pub summary: String,
+    pub compact_detail: Option<String>,
     pub timing: String,
 }
 
@@ -490,19 +584,68 @@ pub fn command_timeline(state: &AppState, limit: usize) -> Vec<CommandTimelineIt
         .command_timeline
         .iter()
         .take(limit)
-        .map(|entry| CommandTimelineItemViewModel {
-            command_id: entry.command_id.clone(),
-            command_label: selector_copy.command_label(entry.command),
-            stage_label: selector_copy.stage_label(entry.stage),
-            stage: entry.stage,
-            summary: entry.summary.clone(),
-            timing: selector_copy.command_timing(
-                &entry.requested_at,
-                entry.accepted_at.as_deref(),
-                entry.finished_at.as_deref(),
-            ),
-        })
+        .map(|entry| command_timeline_item_view_model(selector_copy, entry))
         .collect()
+}
+
+pub fn command_timeline_compact(
+    state: &AppState,
+    limit: usize,
+) -> Vec<CommandTimelineItemViewModel> {
+    let selector_copy = locale::copy(state.ui.locale).selector();
+    let mut entries = state
+        .execution
+        .command_timeline
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.stage,
+                CommandTimelineStage::Failed | CommandTimelineStage::TimedOut
+            )
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    if entries.len() < limit {
+        for entry in state.execution.command_timeline.iter() {
+            if entries
+                .iter()
+                .any(|candidate| std::ptr::eq(*candidate, entry))
+            {
+                continue;
+            }
+            entries.push(entry);
+            if entries.len() == limit {
+                break;
+            }
+        }
+    }
+
+    entries
+        .into_iter()
+        .map(|entry| command_timeline_item_view_model(selector_copy, entry))
+        .collect()
+}
+
+fn command_timeline_item_view_model(
+    selector_copy: locale::SelectorCopy,
+    entry: &CommandTimelineEntry,
+) -> CommandTimelineItemViewModel {
+    CommandTimelineItemViewModel {
+        command_id: entry.command_id.clone(),
+        command_label: selector_copy.command_label(entry.command),
+        stage_label: selector_copy.stage_label(entry.stage),
+        stage: entry.stage,
+        summary: entry.summary.clone(),
+        compact_detail: Some(
+            selector_copy.command_timeline_compact_detail(entry.stage, &entry.summary),
+        ),
+        timing: selector_copy.command_timing(
+            &entry.requested_at,
+            entry.accepted_at.as_deref(),
+            entry.finished_at.as_deref(),
+        ),
+    }
 }
 
 pub fn command_label(locale: Locale, command: CommandType) -> &'static str {
@@ -742,6 +885,145 @@ mod tests {
     }
 
     #[test]
+    fn command_timeline_selector_provides_compact_details_for_each_stage() {
+        let mut state = AppState::sample();
+        state.execution.command_timeline.clear();
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_timeout".into(),
+                command: CommandType::FlattenNow,
+                stage: CommandTimelineStage::TimedOut,
+                summary: "timed out waiting for reduce-only fill".into(),
+                requested_at: "2025-01-01T00:00:01Z".into(),
+                accepted_at: Some("2025-01-01T00:00:02Z".into()),
+                finished_at: Some("2025-01-01T00:00:03Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_failed".into(),
+                command: CommandType::CancelAll,
+                stage: CommandTimelineStage::Failed,
+                summary: "exchange rejected cancel-all because the order set changed".into(),
+                requested_at: "2025-01-01T00:00:04Z".into(),
+                accepted_at: Some("2025-01-01T00:00:05Z".into()),
+                finished_at: Some("2025-01-01T00:00:06Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_ack".into(),
+                command: CommandType::Pause,
+                stage: CommandTimelineStage::Ack,
+                summary: "Strategy paused.".into(),
+                requested_at: "2025-01-01T00:00:07Z".into(),
+                accepted_at: Some("2025-01-01T00:00:08Z".into()),
+                finished_at: Some("2025-01-01T00:00:09Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_accepted".into(),
+                command: CommandType::Resume,
+                stage: CommandTimelineStage::Accepted,
+                summary: "resume accepted".into(),
+                requested_at: "2025-01-01T00:00:10Z".into(),
+                accepted_at: Some("2025-01-01T00:00:11Z".into()),
+                finished_at: None,
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_pending".into(),
+                command: CommandType::ShutdownAfterFlatten,
+                stage: CommandTimelineStage::Pending,
+                summary: "pending".into(),
+                requested_at: "2025-01-01T00:00:12Z".into(),
+                accepted_at: None,
+                finished_at: None,
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+
+        let items = command_timeline(&state, 5);
+
+        assert_eq!(
+            items[0].compact_detail.as_deref(),
+            Some("waiting for service ack")
+        );
+        assert_eq!(
+            items[1].compact_detail.as_deref(),
+            Some("accepted, waiting for ack")
+        );
+        assert_eq!(items[2].compact_detail.as_deref(), Some("completed"));
+        assert_eq!(
+            items[3].compact_detail.as_deref(),
+            Some("error: exchange rejected cancel-all because the order set changed")
+        );
+        assert_eq!(
+            items[4].compact_detail.as_deref(),
+            Some("timeout: timed out waiting for reduce-only fill")
+        );
+    }
+
+    #[test]
+    fn compact_command_timeline_prioritizes_failures_when_space_is_limited() {
+        let mut state = AppState::sample();
+        state.execution.command_timeline.clear();
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_failed".into(),
+                command: CommandType::FlattenNow,
+                stage: CommandTimelineStage::Failed,
+                summary: "exchange ack timeout".into(),
+                requested_at: "2025-01-01T00:00:01Z".into(),
+                accepted_at: Some("2025-01-01T00:00:02Z".into()),
+                finished_at: Some("2025-01-01T00:00:03Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+        state
+            .execution
+            .command_timeline
+            .push_front(CommandTimelineEntry {
+                command_id: "cmd_ack".into(),
+                command: CommandType::Pause,
+                stage: CommandTimelineStage::Ack,
+                summary: "Strategy paused.".into(),
+                requested_at: "2025-01-01T00:00:04Z".into(),
+                accepted_at: Some("2025-01-01T00:00:05Z".into()),
+                finished_at: Some("2025-01-01T00:00:06Z".into()),
+                links: CommandLinks::default(),
+                timeout_at_tick: None,
+            });
+
+        let items = command_timeline_compact(&state, 1);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].stage, CommandTimelineStage::Failed);
+        assert_eq!(
+            items[0].compact_detail.as_deref(),
+            Some("error: exchange ack timeout")
+        );
+    }
+
+    #[test]
     fn instances_selector_marks_current_item_first() {
         let mut state = AppState::sample();
         state.instances.environment = "testnet".into();
@@ -770,6 +1052,8 @@ mod tests {
         assert_eq!(vm.environment, "testnet");
         assert_eq!(vm.current_symbol.as_deref(), Some("ETHUSDT"));
         assert_eq!(vm.default_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(vm.current_index, Some(2));
+        assert_eq!(vm.total_instances, 3);
         assert_eq!(vm.items[0].symbol, "ETHUSDT");
         assert!(vm.items[0].is_current);
         assert!(vm.items[1].is_default);
@@ -824,6 +1108,74 @@ mod tests {
         mirror_state.execution.exchange_open_orders = mirror_state.execution.open_orders.clone();
         let vm = strategy_orders(&mirror_state);
         assert!(vm.is_empty());
+    }
+
+    #[test]
+    fn strategy_orders_sort_by_fill_proximity_within_each_side() {
+        let mut state = AppState::sample();
+        state.runtime.last_price = 100.0;
+        state.execution.exchange_open_orders_source = OpenOrdersSource::ExchangeLive;
+        state.execution.exchange_open_orders = vec![
+            crate::protocol::OpenOrder {
+                order_id: "buy_near".into(),
+                client_order_id: "grid_buy_near".into(),
+                side: "buy".into(),
+                price: 99.0,
+                qty: 0.1,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "buy_far".into(),
+                client_order_id: "grid_buy_far".into(),
+                side: "buy".into(),
+                price: 97.5,
+                qty: 0.1,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "sell_near".into(),
+                client_order_id: "grid_sell_near".into(),
+                side: "sell".into(),
+                price: 101.0,
+                qty: 0.1,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+            crate::protocol::OpenOrder {
+                order_id: "sell_far".into(),
+                client_order_id: "grid_sell_far".into(),
+                side: "sell".into(),
+                price: 103.5,
+                qty: 0.1,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            },
+        ];
+
+        let vm = strategy_orders(&state);
+        let buy_prices = vm
+            .iter()
+            .filter(|item| item.side == "BUY")
+            .map(|item| item.price.as_str())
+            .collect::<Vec<_>>();
+        let sell_prices = vm
+            .iter()
+            .filter(|item| item.side == "SELL")
+            .map(|item| item.price.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(buy_prices, vec!["99.00", "97.50"]);
+        assert_eq!(sell_prices, vec!["101.00", "103.50"]);
     }
 
     #[test]

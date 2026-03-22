@@ -11,10 +11,10 @@ expression: snapshot
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Exchange Orders ─────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
 │Current mode exposes strategy-order mirrors only.     ││Last  2361.48   Mark  2361.55             │
-│Live exchange-order queries are not enabled.          ││Svc WS  UP   Mkt WS  UP   stale 0ms       │
-└──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
-┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
-│BUY 2349.10 x 0.050  pnl +2.51                        ││ ACK  PAUSE                               │
+│Live exchange-order queries are not enabled.          │└──────────────────────────────────────────┘
+└──────────────────────────────────────────────────────┘┌ Command Timeline ────────────────────────┐
+┌ Recent Fills ────────────────────────────────────────┐│ FAILED  FLATTEN NOW                      │
+│BUY 2349.10 x 0.050  pnl +2.51                        ││error: Exchange rejected flatten request d│
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  Focus Execution Focus | Tab panels | p/r run | c/f/s danger | Enter/Esc

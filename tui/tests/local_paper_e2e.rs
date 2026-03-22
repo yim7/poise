@@ -507,12 +507,30 @@ fn response_body_for_path(path: &str) -> (&'static str, String) {
             })
             .to_string(),
         ),
-        path if path.starts_with("/instances/") && path.ends_with("/runtime/snapshot") => (
+        path if path.starts_with("/instances/") && path.ends_with("/runtime/snapshot") => {
+            let symbol = path
+                .trim_start_matches("/instances/")
+                .trim_end_matches("/runtime/snapshot")
+                .trim_end_matches('/');
+            let mut snapshot = RuntimeSnapshot::sample();
+            snapshot.runtime.symbol = symbol.into();
+            snapshot.runtime.env = "testnet".into();
+            (
+                "200 OK",
+                serde_json::json!({
+                    "version": "1",
+                    "status": "ok",
+                    "data": snapshot,
+                })
+                .to_string(),
+            )
+        }
+        path if path.starts_with("/instances/") && path.ends_with("/risk/events") => (
             "200 OK",
             serde_json::json!({
                 "version": "1",
                 "status": "ok",
-                "data": RuntimeSnapshot::sample(),
+                "data": []
             })
             .to_string(),
         ),
@@ -555,6 +573,73 @@ async fn local_paper_bootstrap_should_load_instances_before_default_snapshot() -
         vec![
             "/instances".to_string(),
             "/instances/BTCUSDT/runtime/snapshot".to_string()
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_paper_instance_switch_updates_transition_toasts() -> Result<()> {
+    let server = RecordingHttpServer::start().await?;
+    let mut app =
+        AppHarness::new_waiting(server.base_url.clone(), "ws://127.0.0.1:0/ws".into()).await?;
+
+    let _ = app.bootstrap_once().await?;
+    assert_eq!(
+        app.state.instances.current_symbol.as_deref(),
+        Some("BTCUSDT")
+    );
+    assert_eq!(app.state.runtime.symbol, "BTCUSDT");
+
+    let effects = reduce(
+        &mut app.state,
+        AppEvent::Input(InputEvent::Key(KeyAction::NextInstance)),
+    );
+
+    assert_eq!(
+        app.state
+            .ui
+            .toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some("switching to ETHUSDT")
+    );
+
+    let eth_snapshot = app.transport.fetch_instance_snapshot("ETHUSDT").await?;
+    let _ = reduce(
+        &mut app.state,
+        AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+            symbol: "ETHUSDT".into(),
+            generation: 2,
+            snapshot: eth_snapshot,
+        }),
+    );
+
+    assert_eq!(app.state.runtime.symbol, "ETHUSDT");
+    assert_eq!(
+        app.state.instances.current_symbol.as_deref(),
+        Some("ETHUSDT")
+    );
+    assert_eq!(
+        app.state
+            .ui
+            .toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some("switched to ETHUSDT")
+    );
+    assert_eq!(
+        effects,
+        vec![
+            Effect::UseInstance {
+                symbol: "ETHUSDT".into(),
+                generation: 2,
+            },
+            Effect::FetchSnapshot {
+                symbol: "ETHUSDT".into(),
+                generation: 2,
+            },
         ]
     );
 

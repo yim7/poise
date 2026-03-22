@@ -1,6 +1,6 @@
 use crate::{
     protocol::{CommandType, GridLevelState, RiskLevel, StrategyStatus},
-    state::CommandTimelineStage,
+    state::{CommandTimelineStage, ToastLevel},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,6 +540,20 @@ impl GridCopy {
         }
     }
 
+    pub fn buy_orders_title(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "BUY",
+            Locale::ZhCn => "买单",
+        }
+    }
+
+    pub fn sell_orders_title(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "SELL",
+            Locale::ZhCn => "卖单",
+        }
+    }
+
     pub fn grid_summary_title(self) -> &'static str {
         match self.locale {
             Locale::EnUs => "Grid Summary",
@@ -565,6 +579,13 @@ impl GridCopy {
         match self.locale {
             Locale::EnUs => "Placement",
             Locale::ZhCn => "落单",
+        }
+    }
+
+    pub fn distance_header(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Dist",
+            Locale::ZhCn => "距离",
         }
     }
 
@@ -663,6 +684,34 @@ impl GridCopy {
         match self.locale {
             Locale::EnUs => "Grid levels are aligned with the current strategy state.",
             Locale::ZhCn => "当前网格层级与策略状态一致。",
+        }
+    }
+
+    pub fn no_strategy_orders(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "No live orders",
+            Locale::ZhCn => "暂无实时挂单",
+        }
+    }
+
+    pub fn no_strategy_orders_unavailable(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Live exchange orders are unavailable.",
+            Locale::ZhCn => "当前没有实时交易所挂单数据。",
+        }
+    }
+
+    pub fn no_strategy_orders_waiting(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "No resting strategy orders.",
+            Locale::ZhCn => "当前没有策略挂单。",
+        }
+    }
+
+    pub fn no_strategy_orders_next(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Next: check the operator notes for the current trigger.",
+            Locale::ZhCn => "下一步：查看右侧备注里的当前触发原因。",
         }
     }
 }
@@ -840,6 +889,10 @@ impl InstancesCopy {
             Locale::ZhCn => format!("还有 {count} 项"),
         }
     }
+
+    pub fn index(self, current: usize, total: usize) -> String {
+        format!("{current}/{total}")
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -988,19 +1041,21 @@ impl HelpCopy {
         }
     }
 
-    pub fn glossary_lines(self) -> [&'static str; 4] {
+    pub fn glossary_lines(self) -> [&'static str; 5] {
         match self.locale {
             Locale::EnUs => [
                 "Strategy Orders: current open orders managed by the strategy.",
                 "Exchange Orders: shown only when live exchange data is available.",
-                "Filled levels move to fills and position instead of staying here.",
-                "If exchange data is unavailable, this table stays empty.",
+                "> current   * default.",
+                "PENDING / ACCEPTED / ACK / FAILED / TIMED OUT: command stages.",
+                "HEALTHY / DEGRADED / STALE / RECONNECTING: health states.",
             ],
             Locale::ZhCn => [
                 "策略订单：当前仍然挂着的真实策略单。",
                 "交易所挂单：仅在存在实时交易所数据时显示。",
-                "已经成交的档位会进入成交和仓位，不再留在这里。",
-                "如果交易所数据不可用，这张表保持为空。",
+                "> 当前   * 默认。",
+                "PENDING / ACCEPTED / ACK / FAILED / TIMED OUT：命令阶段。",
+                "HEALTHY / DEGRADED / STALE / RECONNECTING：健康状态。",
             ],
         }
     }
@@ -1058,6 +1113,24 @@ impl FooterCopy {
             ),
         }
     }
+
+    pub fn toast_ready_shortcuts(self, narrow: bool) -> &'static str {
+        match (self.locale, narrow) {
+            (Locale::EnUs, true) => "1-4 ? help | Tab | p/r | c/f/s | Enter/Esc",
+            (Locale::EnUs, false) => "1-4 ? help | [/] inst | Tab | p/r | c/f/s | Enter/Esc",
+            (Locale::ZhCn, true) => "1-4 ? 帮助 | Tab | p/r | c/f/s | Enter/Esc",
+            (Locale::ZhCn, false) => "1-4 ? 帮助 | [/] 实例 | Tab | p/r | c/f/s | Enter/Esc",
+        }
+    }
+
+    pub fn toast_bootstrap_shortcuts(self, narrow: bool) -> &'static str {
+        match (self.locale, narrow) {
+            (Locale::EnUs, true) => "1-4 ? help | p/r/c/f/s disabled",
+            (Locale::EnUs, false) => "1-4 ? help | [/] inst | p/r/c/f/s disabled | Tab",
+            (Locale::ZhCn, true) => "1-4 ? 帮助 | p/r/c/f/s 不可用",
+            (Locale::ZhCn, false) => "1-4 ? 帮助 | [/] 实例 | p/r/c/f/s 不可用 | Tab",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1066,6 +1139,31 @@ pub struct ToastCopy {
 }
 
 impl ToastCopy {
+    pub fn level_badge(self, level: &ToastLevel) -> &'static str {
+        match (self.locale, level) {
+            (Locale::EnUs, ToastLevel::Info) => "INFO",
+            (Locale::EnUs, ToastLevel::Warning) => "WARN",
+            (Locale::EnUs, ToastLevel::Danger) => "ERROR",
+            (Locale::ZhCn, ToastLevel::Info) => "提示",
+            (Locale::ZhCn, ToastLevel::Warning) => "警告",
+            (Locale::ZhCn, ToastLevel::Danger) => "错误",
+        }
+    }
+
+    pub fn switching_instance(self, symbol: &str) -> String {
+        match self.locale {
+            Locale::EnUs => format!("switching to {symbol}"),
+            Locale::ZhCn => format!("正在切换到 {symbol}"),
+        }
+    }
+
+    pub fn switched_instance(self, symbol: &str) -> String {
+        match self.locale {
+            Locale::EnUs => format!("switched to {symbol}"),
+            Locale::ZhCn => format!("已切换到 {symbol}"),
+        }
+    }
+
     pub fn snapshot_failed(self, error: &str) -> String {
         match self.locale {
             Locale::EnUs => format!("snapshot failed: {error}"),
@@ -1232,6 +1330,27 @@ impl SelectorCopy {
     pub fn flat_inventory(self) -> &'static str {
         match self.locale {
             Locale::EnUs => "flat inventory",
+            Locale::ZhCn => "空仓",
+        }
+    }
+
+    pub fn long_inventory_short(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "long",
+            Locale::ZhCn => "多头",
+        }
+    }
+
+    pub fn short_inventory_short(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "short",
+            Locale::ZhCn => "空头",
+        }
+    }
+
+    pub fn flat_inventory_short(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "flat",
             Locale::ZhCn => "空仓",
         }
     }
@@ -1494,6 +1613,33 @@ impl SelectorCopy {
         }
     }
 
+    pub fn command_timeline_compact_detail(
+        self,
+        stage: CommandTimelineStage,
+        summary: &str,
+    ) -> String {
+        match (self.locale, stage) {
+            (Locale::EnUs, CommandTimelineStage::Pending) => "waiting for service ack".into(),
+            (Locale::EnUs, CommandTimelineStage::Accepted) => "accepted, waiting for ack".into(),
+            (Locale::EnUs, CommandTimelineStage::Ack) => "completed".into(),
+            (Locale::EnUs, CommandTimelineStage::Failed) => format!("error: {summary}"),
+            (Locale::EnUs, CommandTimelineStage::TimedOut) => format!("timeout: {summary}"),
+            (Locale::ZhCn, CommandTimelineStage::Pending) => "等待服务确认".into(),
+            (Locale::ZhCn, CommandTimelineStage::Accepted) => "已接受，等待确认".into(),
+            (Locale::ZhCn, CommandTimelineStage::Ack) => "已完成".into(),
+            (Locale::ZhCn, CommandTimelineStage::Failed) => format!("错误：{summary}"),
+            (Locale::ZhCn, CommandTimelineStage::TimedOut) => format!("超时：{summary}"),
+        }
+    }
+
+    pub fn relative_age_short(self, stale_age_ms: u64) -> String {
+        let seconds = stale_age_ms / 1_000;
+        match self.locale {
+            Locale::EnUs => format!("{seconds}s ago"),
+            Locale::ZhCn => format!("{seconds} 秒前"),
+        }
+    }
+
     pub fn stage_label(self, stage: CommandTimelineStage) -> &'static str {
         match (self.locale, stage) {
             (Locale::EnUs, CommandTimelineStage::Pending) => "PENDING",
@@ -1598,6 +1744,37 @@ impl ModalCopy {
                 "收到确认后，策略将恢复正常订单管理。",
                 "如果客户端显示滞后或重连状态，请先确认行情健康。",
             ),
+        }
+    }
+
+    pub fn instance_line(self, symbol: &str, environment: &str) -> String {
+        match self.locale {
+            Locale::EnUs => format!("Instance {symbol} · {environment}"),
+            Locale::ZhCn => format!("实例 {symbol} · {environment}"),
+        }
+    }
+
+    pub fn runtime_line(
+        self,
+        position_label: &str,
+        position_qty: &str,
+        health_label: &str,
+        pending_commands: usize,
+    ) -> String {
+        match self.locale {
+            Locale::EnUs => format!(
+                "Position {position_label} {position_qty} · Health {health_label} · Pending commands {pending_commands}"
+            ),
+            Locale::ZhCn => format!(
+                "仓位 {position_label} {position_qty} · 健康 {health_label} · 待处理命令 {pending_commands}"
+            ),
+        }
+    }
+
+    pub fn health_detail_line(self, detail: &str) -> String {
+        match self.locale {
+            Locale::EnUs => format!("Health detail {detail}"),
+            Locale::ZhCn => format!("健康详情 {detail}"),
         }
     }
 

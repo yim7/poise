@@ -7,8 +7,8 @@
 
 - 当前主线：`K10` 单实例 `7x24` 值守硬化
 - 并行线程：多实例固定区间网格已实现并并入主线，后续只维护实例边界与运行安全配套
-- 最近完成：`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
-- 最近验证：`2026-03-23` 已通过 `cargo test -p grid-platform-tui -- --nocapture`、`cargo test -p grid-platform-service --test binance_integration -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow -- --nocapture`、`cargo test -p grid-platform-service --test kernel_flow immediate_live_fill_updates_runtime_before_next_strategy_sync -- --nocapture` 与 `cargo build -p grid-platform-service`
+- 最近完成：`K10` TUI 值守体验优化已实现并验收通过；`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
+- 最近验证：`2026-03-23` 已通过 `cargo fmt`、`cargo build -p grid-platform-service`、`cargo test -p grid-platform-tui -- --nocapture` 与 `cargo test -p grid-platform-service --test binance_integration -- --nocapture`
 
 ## K9 主网运行安全底座
 
@@ -57,15 +57,17 @@
 - [x] 让 Binance 策略挂单按交易所过滤器归整价格和数量，并在 Hedge Mode 账号上给出明确暂停原因
 - [x] 放宽批量策略补单的同步预算，避免 testnet 大网格在首单成功后因总超时过早中断
 - [x] 让真实立即成交的订单先同步本地运行态，避免同一网格在下一轮策略补单中被重复提交
+- [x] 完成 TUI 值守体验优化，补命令失败摘要、危险操作上下文、实例切换反馈、等待态 overlay 和连接状态扫读
 - [ ] 固化单实例部署、工作目录、数据目录与日志目录约定
 - [ ] 增加重复启动保护与优雅停机流程
 - [ ] 抽出统一健康状态与自动降级语义
-- [ ] 为本地值守补足告警分类、确认与关键信息展示
+- [x] 为本地值守补足告警分类、确认与关键信息展示
 - [ ] 打通常见故障的恢复路径与恢复后状态结论
 
 ## K11 单实例实盘策略收敛
 
 - [x] 让 Grid 页策略订单只显示当前真实挂单，库存占用改由仓位和摘要表达
+- [x] 调整 Grid 页策略订单为买卖双栏展示，并显示到成交比例距离
 - [ ] 为当前网格策略增加参数护栏与危险参数拦截
 - [ ] 收敛更贴近实盘长期运行的风险规则和风险动作语义
 - [ ] 让策略状态与最近关键变化进入查询模型、事件流和界面展示

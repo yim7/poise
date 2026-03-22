@@ -1,6 +1,5 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2506
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  stale 0ms  Focus Execution Focus  Pending 0                           
@@ -16,8 +15,8 @@ expression: snapshot
 │Live exchange-order queries are not enabled.                            ││Svc WS  UP   Mkt WS  UP   stale 0ms         │
 └────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 ┌ Recent Fills ──────────────────────────────────────────────────────────┐┌ Command Timeline ──────────────────────────┐
-│BUY 2349.10 x 0.050  pnl +2.51                                          ││ ACK  PAUSE                                 │
-│                                                                        ││ FAILED  FLATTEN NOW                        │
+│BUY 2349.10 x 0.050  pnl +2.51                                          ││ FAILED  FLATTEN NOW                        │
+│                                                                        ││error: Exchange rejected flatten request due│
 └────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  Focus Execution Focus | 1-4 pages ? help | [/] inst | Tab panels | p/r run | c/f/s danger | Enter/Esc

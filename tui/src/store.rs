@@ -245,6 +245,16 @@ fn handle_effect_result(state: &mut AppState, event: EffectResultEvent) -> Vec<E
             }
             let was_connected = state.connection.ws_connected;
             state.sync_runtime_snapshot(snapshot);
+            if state.ui.pending_instance_switch.as_deref() == Some(symbol.as_str()) {
+                state.ui.toast = Some(Toast {
+                    level: ToastLevel::Info,
+                    message: locale::copy(state.ui.locale)
+                        .toast()
+                        .switched_instance(&symbol),
+                    ttl_ticks: 24,
+                });
+                state.ui.pending_instance_switch = None;
+            }
             if was_connected {
                 vec![Effect::FetchRiskEvents { symbol, generation }]
             } else {
@@ -627,6 +637,14 @@ fn handle_local_ui_event(state: &mut AppState, event: LocalUiEvent) -> Vec<Effec
                 return Vec::new();
             }
             state.begin_instance_bootstrap(symbol.clone());
+            state.ui.pending_instance_switch = Some(symbol.clone());
+            state.ui.toast = Some(Toast {
+                level: ToastLevel::Info,
+                message: locale::copy(state.ui.locale)
+                    .toast()
+                    .switching_instance(&symbol),
+                ttl_ticks: 24,
+            });
             let generation = state.instances.generation;
             vec![
                 Effect::UseInstance {
@@ -1172,6 +1190,135 @@ mod tests {
                     generation: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn instance_switch_shows_transition_toasts() {
+        let mut state = AppState::sample();
+        state.ui.locale = Locale::ZhCn;
+        state.instances = crate::state::InstancesViewState::from_directory(InstancesDirectory {
+            environment: "paper-testnet".into(),
+            default_symbol: "XAUUSDT".into(),
+            instances: vec![
+                InstanceSummary {
+                    symbol: "XAUUSDT".into(),
+                    environment: "paper-testnet".into(),
+                    is_default: true,
+                },
+                InstanceSummary {
+                    symbol: "BTCUSDT".into(),
+                    environment: "paper-testnet".into(),
+                    is_default: false,
+                },
+            ],
+        });
+        state.instances.current_symbol = Some("XAUUSDT".into());
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(KeyAction::NextInstance)),
+        );
+
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("正在切换到 BTCUSDT")
+        );
+        assert_eq!(
+            effects,
+            vec![
+                Effect::UseInstance {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+                Effect::FetchSnapshot {
+                    symbol: "BTCUSDT".into(),
+                    generation: 1,
+                },
+            ]
+        );
+
+        let mut snapshot = RuntimeSnapshot::sample();
+        snapshot.runtime.symbol = "BTCUSDT".into();
+        snapshot.runtime.env = "paper-testnet".into();
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "BTCUSDT".into(),
+                generation: 1,
+                snapshot,
+            }),
+        );
+
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("已切换到 BTCUSDT")
+        );
+    }
+
+    #[test]
+    fn initial_snapshot_load_does_not_emit_switch_complete_toast() {
+        let mut state = AppState::waiting_first_snapshot();
+        state.instances.environment = "paper-testnet".into();
+        state.instances.current_symbol = Some("XAUUSDT".into());
+
+        let mut snapshot = RuntimeSnapshot::sample();
+        snapshot.runtime.symbol = "XAUUSDT".into();
+        snapshot.runtime.env = "paper-testnet".into();
+
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                snapshot,
+            }),
+        );
+
+        assert_eq!(state.ui.toast, None);
+    }
+
+    #[test]
+    fn reconnect_snapshot_reload_keeps_transport_toast() {
+        let mut state = AppState::sample();
+        state.connection.ws_connected = false;
+        state.connection.reconnect_attempt = 2;
+
+        let effects = reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::WsConnected {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+            }),
+        );
+
+        assert_eq!(
+            effects,
+            vec![Effect::FetchSnapshot {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+            }]
+        );
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("ws connected")
+        );
+
+        let mut snapshot = RuntimeSnapshot::sample();
+        snapshot.runtime.symbol = "XAUUSDT".into();
+        snapshot.runtime.env = "testnet".into();
+        reduce(
+            &mut state,
+            AppEvent::EffectResult(EffectResultEvent::SnapshotLoaded {
+                symbol: "XAUUSDT".into(),
+                generation: 0,
+                snapshot,
+            }),
+        );
+
+        assert_eq!(
+            state.ui.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some("ws connected")
         );
     }
 

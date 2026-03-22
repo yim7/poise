@@ -18,9 +18,9 @@ expression: snapshot
 │Live exchange-order queries are not        ││Health  HEALTHY   stale 0ms      │
 │enabled.                                   │└─────────────────────────────────┘
 └───────────────────────────────────────────┘┌ Command Timeline ───────────────┐
-┌ Recent Fills ─────────────────────────────┐│ ACK  PAUSE cmd_hist_0001        │
-│BUY 2349.10 x 0.050  pnl +2.51             ││Strategy acknowledged pause and s│
-│                                           ││req 2025-01-01T00:00:03Z -> acc 2│
+┌ Recent Fills ─────────────────────────────┐│ ACK  PAUSE  · completed         │
+│BUY 2349.10 x 0.050  pnl +2.51             ││                                 │
+│                                           ││                                 │
 │                                           ││                                 │
 │                                           ││                                 │
 └───────────────────────────────────────────┘└─────────────────────────────────┘

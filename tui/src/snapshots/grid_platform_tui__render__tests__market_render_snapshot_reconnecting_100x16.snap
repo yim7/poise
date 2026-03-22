@@ -1,20 +1,20 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2514
+assertion_line: 2937
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  SERVICE RECONNECTING  Focus Tape                           
  Dashboard   Grid   Market   Events   Help                                                          
                                                                                                     
 ┌ Tape ──────────────────────────┐┌ Connectivity ─────────────────┐┌ Runtime ──────────────────────┐
-│Last  2361.48                   ││Service WS  DOWN   HTTP  DOWN  ││Session  regular               │
-│Mark  2361.55                   ││Market WS  DOWN   User WS  DOWN││Heartbeat  2025-01-01T00:00:00Z│
-│Basis  +0.07                    ││Stale  12000ms   Retry  3      ││Strategy  running              │
-│                                ││Market Backoff  4000ms         ││                               │
-│                                ││Mode  SERVICE RECONNECTING     ││Instances Env testnet · Default│
-│                                ││Service control-plane WebSocket││XAUUSDT · Current XAUUSDT      │
-│                                ││is down. Wait for the client   ││> XAUUSDT · testnet            │
-│                                ││stream to recover.             ││                               │
+│Last  2361.48                   ││Service WS   DOWN    HTTP      ││Session  regular               │
+│Mark  2361.55                   ││DOWN                           ││Heartbeat  12s ago             │
+│Basis  +0.07                    ││Market WS   DOWN    User WS    ││Strategy  running              │
+│                                ││DOWN                           ││                               │
+│                                ││Stale  12000ms   Retry  3      ││Instances Env testnet · 1/1    │
+│                                ││Market Backoff  4000ms         ││> XAUUSDT · testnet            │
+│                                ││Mode   SERVICE RECONNECTING    ││                               │
+│                                ││service ws retry 3 in 4000ms   ││                               │
 │                                ││                               ││                               │
 └────────────────────────────────┘└───────────────────────────────┘└───────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────

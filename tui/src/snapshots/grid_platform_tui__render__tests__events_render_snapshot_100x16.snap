@@ -12,8 +12,8 @@ expression: snapshot
 │                                                ││                                                │
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
 ┌ Commands (2) ──────────────────────────────────┐┌ System (2) · pending 0 ────────────────────────┐
-│ ACK  PAUSE                                     ││[info] WebSocket connected and streaming.       │
-│ FAILED  FLATTEN NOW                            ││[info] Initial runtime snapshot loaded.         │
+│ FAILED  FLATTEN NOW                            ││[info] WebSocket connected and streaming.       │
+│error: Exchange rejected flatten request due to ││[info] Initial runtime snapshot loaded.         │
 │                                                ││                                                │
 └────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────

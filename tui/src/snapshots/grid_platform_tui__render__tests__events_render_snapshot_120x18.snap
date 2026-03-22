@@ -1,6 +1,5 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2506
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  stale 0ms  Focus Fills  Pending 0                                     
@@ -14,9 +13,9 @@ expression: snapshot
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 ┌ Commands (2) ────────────────────────────────────────────┐┌ System (2) · pending 0 ──────────────────────────────────┐
-│ ACK  PAUSE cmd_hist_0001                                 ││[info] WebSocket connected and streaming.                 │
-│Strategy acknowledged pause and stopped placing new orders││[info] Initial runtime snapshot loaded.                   │
-│req 2025-01-01T00:00:03Z -> acc 2025-01-01T00:00:04Z -> en││                                                          │
+│ ACK  PAUSE  · completed                                  ││[info] WebSocket connected and streaming.                 │
+│                                                          ││[info] Initial runtime snapshot loaded.                   │
+│                                                          ││                                                          │
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
