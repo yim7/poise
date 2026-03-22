@@ -35,7 +35,8 @@ struct ServiceProcess {
     base_url: String,
     ws_url: String,
     http: reqwest::Client,
-    _temp_dir: Option<TempDir>,
+    _db_temp_dir: Option<TempDir>,
+    _run_dir: TempDir,
 }
 
 impl ServiceProcess {
@@ -53,6 +54,7 @@ impl ServiceProcess {
         let _startup_guard = service_start_lock().lock().await;
         let port = reserve_port()?;
         let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let run_dir = tempdir()?;
         let base_url = format!("http://127.0.0.1:{port}");
         let ws_url = format!("ws://127.0.0.1:{port}/ws");
         let http = reqwest::Client::new();
@@ -60,7 +62,8 @@ impl ServiceProcess {
 
         let mut command = Command::new(&service_bin);
         command
-            .current_dir(&workspace_dir)
+            .current_dir(run_dir.path())
+            .env_clear()
             .env("GRID_PLATFORM_SERVICE_ADDR", format!("127.0.0.1:{port}"))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -79,7 +82,8 @@ impl ServiceProcess {
             base_url,
             ws_url,
             http,
-            _temp_dir: temp_dir,
+            _db_temp_dir: temp_dir,
+            _run_dir: run_dir,
         })
     }
 
