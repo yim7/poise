@@ -39,6 +39,7 @@ impl PersistedRuntime {
             system_events: vec![SystemEvent {
                 level: "info".into(),
                 source: "bootstrap".into(),
+                code: None,
                 message: message.into(),
                 created_at: now,
             }],
@@ -226,6 +227,7 @@ impl SqliteStorage {
                     list_index INTEGER PRIMARY KEY,
                     level TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    code TEXT,
                     message TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );",
@@ -249,7 +251,8 @@ impl SqliteStorage {
             "trade_ids_json",
             "TEXT NOT NULL DEFAULT '[]'",
         )?;
-        ensure_column(connection, "fills", "client_order_id", "TEXT")
+        ensure_column(connection, "fills", "client_order_id", "TEXT")?;
+        ensure_column(connection, "system_events", "code", "TEXT")
     }
 }
 
@@ -387,8 +390,8 @@ fn replace_system_events(tx: &Transaction<'_>, events: &[SystemEvent]) -> Result
         .context("failed to clear system_events")?;
     let mut statement = tx
         .prepare(
-            "INSERT INTO system_events (list_index, level, source, message, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO system_events (list_index, level, source, code, message, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .context("failed to prepare system_events insert")?;
     for (index, event) in events.iter().enumerate() {
@@ -397,6 +400,7 @@ fn replace_system_events(tx: &Transaction<'_>, events: &[SystemEvent]) -> Result
                 index as i64,
                 event.level,
                 event.source,
+                event.code,
                 event.message,
                 event.created_at
             ])
@@ -517,7 +521,7 @@ fn load_risk_events(connection: &Connection) -> Result<Vec<RiskEvent>> {
 fn load_system_events(connection: &Connection) -> Result<Vec<SystemEvent>> {
     let mut statement = connection
         .prepare(
-            "SELECT level, source, message, created_at
+            "SELECT level, source, code, message, created_at
              FROM system_events
              ORDER BY list_index ASC",
         )
@@ -527,8 +531,9 @@ fn load_system_events(connection: &Connection) -> Result<Vec<SystemEvent>> {
             Ok(SystemEvent {
                 level: row.get(0)?,
                 source: row.get(1)?,
-                message: row.get(2)?,
-                created_at: row.get(3)?,
+                code: row.get(2)?,
+                message: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })
         .context("failed to query system_events")?;

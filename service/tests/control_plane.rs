@@ -490,6 +490,27 @@ async fn web_query_alerts_acknowledged_false_still_allows_system_source_filter()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_query_alerts_include_system_event_codes() -> Result<()> {
+    let (_temp_dir, app) = app_with_persisted_runtime(seed_query_runtime())?;
+
+    let alerts = decode_json::<Value>(
+        app,
+        Request::builder()
+            .uri("/query/alerts?category=system&source=bootstrap")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await?;
+
+    assert_eq!(
+        alerts["data"]["items"][0]["code"],
+        "STARTUP_RECONCILE_POSITION_MISMATCH"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_plane_capabilities_expose_web_ui_boundary() -> Result<()> {
     let app = build_app(Application::bootstrap());
 
@@ -699,12 +720,14 @@ fn seed_query_runtime() -> PersistedRuntime {
             SystemEvent {
                 level: "info".into(),
                 source: "bootstrap".into(),
+                code: Some("STARTUP_RECONCILE_POSITION_MISMATCH".into()),
                 message: "Runtime restored for web query tests.".into(),
                 created_at: "2025-01-01T00:00:02Z".into(),
             },
             SystemEvent {
                 level: "warn".into(),
                 source: "ws".into(),
+                code: None,
                 message: "WebSocket connection recovering.".into(),
                 created_at: "2025-01-01T00:00:04Z".into(),
             },

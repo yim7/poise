@@ -120,6 +120,7 @@ fn sqlite_storage_persists_command_audit_and_recovers_latest_runtime() -> Result
         system_events: vec![SystemEvent {
             level: "info".into(),
             source: "commands".into(),
+            code: None,
             message: "Strategy paused.".into(),
             created_at: "2025-01-01T00:01:00Z".into(),
         }],
@@ -179,6 +180,7 @@ fn sqlite_storage_persists_failed_command_reason() -> Result<()> {
         system_events: vec![SystemEvent {
             level: "error".into(),
             source: "commands".into(),
+            code: None,
             message: "exchange rejected cancel-all".into(),
             created_at: "2025-01-01T00:02:00Z".into(),
         }],
@@ -328,6 +330,34 @@ fn sqlite_storage_roundtrips_command_association_fields() -> Result<()> {
     assert_eq!(
         serialized["execution"]["exchange_open_orders_source"],
         "unavailable"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_storage_roundtrips_system_event_code() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let storage = SqliteStorage::open(&db_path)?;
+
+    storage.persist_runtime(&PersistedRuntime {
+        snapshot: RuntimeSnapshot::sample(),
+        risk_events: vec![],
+        system_events: vec![SystemEvent {
+            level: "error".into(),
+            source: "startup".into(),
+            code: Some("STARTUP_RECONCILE_POSITION_MISMATCH".into()),
+            message: "startup paused".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+        }],
+        last_sequence: 1,
+    })?;
+
+    let recovered = storage.load_runtime()?.expect("runtime");
+    assert_eq!(
+        recovered.system_events[0].code.as_deref(),
+        Some("STARTUP_RECONCILE_POSITION_MISMATCH")
     );
 
     Ok(())

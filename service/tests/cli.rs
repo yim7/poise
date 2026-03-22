@@ -30,10 +30,66 @@ fn version_flag_prints_version_and_exits_promptly() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn mainnet_requires_explicit_opt_in() -> Result<()> {
+    let output = run_cli_and_wait_with_env(
+        &[],
+        &[
+            ("GRID_PLATFORM_SERVICE_ADDR", "127.0.0.1:0"),
+            ("GRID_PLATFORM_BINANCE_ENABLED", "1"),
+            ("GRID_PLATFORM_BINANCE_ENV", "mainnet"),
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("GRID_PLATFORM_ALLOW_MAINNET=1"));
+    Ok(())
+}
+
+#[test]
+fn mainnet_rejects_non_one_allow_flag_value() -> Result<()> {
+    let output = run_cli_and_wait_with_env(
+        &[],
+        &[
+            ("GRID_PLATFORM_SERVICE_ADDR", "127.0.0.1:0"),
+            ("GRID_PLATFORM_BINANCE_ENABLED", "1"),
+            ("GRID_PLATFORM_BINANCE_ENV", "mainnet"),
+            ("GRID_PLATFORM_ALLOW_MAINNET", "true"),
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("GRID_PLATFORM_ALLOW_MAINNET=1"));
+    Ok(())
+}
+
+#[test]
+fn mainnet_requires_signed_startup_state() -> Result<()> {
+    let output = run_cli_and_wait_with_env(
+        &[],
+        &[
+            ("GRID_PLATFORM_SERVICE_ADDR", "127.0.0.1:0"),
+            ("GRID_PLATFORM_BINANCE_ENABLED", "1"),
+            ("GRID_PLATFORM_BINANCE_ENV", "mainnet"),
+            ("GRID_PLATFORM_ALLOW_MAINNET", "1"),
+        ],
+    )?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?
+        .contains("STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE"));
+    Ok(())
+}
+
 fn run_cli_and_wait(args: &[&str]) -> Result<Output> {
+    run_cli_and_wait_with_env(args, &[])
+}
+
+fn run_cli_and_wait_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_grid-platform-service"))
         .args(args)
         .env("GRID_PLATFORM_SERVICE_ADDR", "127.0.0.1:0")
+        .envs(envs.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

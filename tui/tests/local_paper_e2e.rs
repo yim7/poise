@@ -21,7 +21,7 @@ use grid_platform_tui::{
     transport::TransportClient,
 };
 use ratatui::{Terminal, backend::TestBackend};
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
@@ -33,18 +33,21 @@ struct ServiceProcess {
     base_url: String,
     ws_url: String,
     http: reqwest::Client,
+    _temp_dir: Option<TempDir>,
 }
 
 impl ServiceProcess {
     async fn start() -> Result<Self> {
-        Self::start_inner(None).await
+        let temp_dir = tempdir()?;
+        let db_path = temp_dir.path().join("service.db");
+        Self::start_inner(Some(db_path.as_path()), Some(temp_dir)).await
     }
 
     async fn start_with_db(db_path: &Path) -> Result<Self> {
-        Self::start_inner(Some(db_path)).await
+        Self::start_inner(Some(db_path), None).await
     }
 
-    async fn start_inner(db_path: Option<&Path>) -> Result<Self> {
+    async fn start_inner(db_path: Option<&Path>, temp_dir: Option<TempDir>) -> Result<Self> {
         let _startup_guard = service_start_lock().lock().await;
         let port = reserve_port()?;
         let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -76,6 +79,7 @@ impl ServiceProcess {
             base_url,
             ws_url,
             http,
+            _temp_dir: temp_dir,
         })
     }
 

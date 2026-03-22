@@ -24,6 +24,7 @@ use crate::{
         QueryCollection, RuntimeQueryResult, RuntimeSnapshot, ServerEnvelope, ServerEvent,
         WebSocketAuthDescriptor, WebSocketDescriptor,
     },
+    startup::{RuntimeMode, StartupDecision, StartupReport},
     storage::{PersistedRuntime, SqliteStorage},
 };
 
@@ -103,6 +104,50 @@ impl Application {
             Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
         application.start_binance_supervisor(config, transport);
         Ok(application)
+    }
+
+    pub async fn bootstrap_with_startup_and_binance(
+        path: impl AsRef<Path>,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+    ) -> Result<Self> {
+        let storage = SqliteStorage::open(path)?;
+        let persisted = match storage.load_runtime()? {
+            Some(runtime) => runtime,
+            None => PersistedRuntime::sqlite_bootstrap(),
+        };
+        let runtime_mode = if config.env.eq_ignore_ascii_case("mainnet") {
+            RuntimeMode::Mainnet
+        } else {
+            RuntimeMode::Testnet
+        };
+        let startup =
+            StartupReport::collect(runtime_mode, &config.symbol, &persisted, transport.clone())
+                .await?;
+
+        let mut runtime = prepare_bootstrap_runtime(persisted, &config);
+        runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
+        let runtime = startup.apply_to(runtime);
+        storage.persist_runtime(&runtime)?;
+        if let StartupDecision::Refuse { code, message } = &startup.decision {
+            anyhow::bail!("{code}: {message}");
+        }
+
+        Ok(Self::bootstrap_with_runtime_storage_and_binance(
+            runtime, storage, config, transport,
+        ))
+    }
+
+    pub fn bootstrap_with_runtime_storage_and_binance(
+        runtime: PersistedRuntime,
+        storage: SqliteStorage,
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+    ) -> Self {
+        let application =
+            Self::build_from_engine(spawn_engine_with_runtime(runtime, Some(storage)));
+        application.start_binance_supervisor(config, transport);
+        application
     }
 
     fn build_from_engine(
@@ -243,7 +288,7 @@ impl Application {
                 category: "system".into(),
                 severity: event.level.clone(),
                 source: event.source,
-                code: None,
+                code: event.code,
                 message: event.message,
                 created_at: event.created_at,
                 acknowledged_at: None,

@@ -432,6 +432,7 @@ async fn sqlite_binance_bootstrap_seeds_runtime_config_before_background_sync() 
         system_events: vec![SystemEvent {
             level: "info".into(),
             source: "bootstrap".into(),
+            code: None,
             message: "persisted runtime".into(),
             created_at: "2025-01-01T00:00:00Z".into(),
         }],
@@ -555,7 +556,11 @@ async fn sqlite_binance_stream_sync_retries_after_temporary_persist_failure() ->
     assert_ne!(during_outage.runtime.position_qty, 1.75);
 
     fs::remove_dir(&db_path)?;
-    SqliteStorage::open(&db_path)?;
+    wait_until(Duration::from_secs(2), || {
+        SqliteStorage::open(&db_path).is_ok()
+    })
+    .await
+    .context("sqlite db was not recreatable after persistence recovered")?;
 
     wait_until(Duration::from_secs(2), || {
         let snapshot = app.snapshot();

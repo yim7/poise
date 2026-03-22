@@ -9,6 +9,7 @@ pub mod integrations;
 pub mod kernel;
 pub mod protocol;
 pub mod replay;
+pub mod startup;
 pub mod storage;
 
 pub use application::Application;

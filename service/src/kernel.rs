@@ -30,6 +30,7 @@ const EXECUTION_TIMEOUT: Duration = Duration::from_millis(250);
 const EXECUTION_MAX_ATTEMPTS: usize = 3;
 const EXECUTION_RETRY_DELAY: Duration = Duration::from_millis(20);
 const STRATEGY_SYNC_TIMEOUT: Duration = Duration::from_millis(250);
+const STRATEGY_SYNC_FAILURE_THRESHOLD: usize = 3;
 
 pub type SharedReadModel = Arc<RwLock<ReadModel>>;
 
@@ -336,9 +337,19 @@ async fn run_engine(
                         match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone())
                             .await
                         {
-                            Ok(events) => events,
+                            Ok(events) => {
+                                aggregate.reset_strategy_sync_failures();
+                                events
+                            }
                             Err(error) => {
                                 aggregate = previous.clone();
+                                apply_strategy_sync_failure_guard(
+                                    &mut aggregate,
+                                    read_model.clone(),
+                                    &events_tx,
+                                    storage.as_ref(),
+                                )
+                                .await;
                                 let error = error.context("failed to sync strategy orders");
                                 warn!(?error, "failed to sync strategy orders; reverting command");
                                 let _ = reply_to.send(Err(error));
@@ -416,9 +427,19 @@ async fn run_engine(
                 let (tick, mut events) =
                     aggregate.emit_price_tick(execution_adapter.mode() == ExecutionMode::Paper);
                 match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
-                    Ok(strategy_events) => events.extend(strategy_events),
+                    Ok(strategy_events) => {
+                        aggregate.reset_strategy_sync_failures();
+                        events.extend(strategy_events);
+                    }
                     Err(error) => {
                         aggregate = previous.clone();
+                        apply_strategy_sync_failure_guard(
+                            &mut aggregate,
+                            read_model.clone(),
+                            &events_tx,
+                            storage.as_ref(),
+                        )
+                        .await;
                         let error =
                             error.context("failed to sync strategy orders after price tick");
                         warn!(
@@ -469,9 +490,19 @@ async fn run_engine(
                 let previous = aggregate.clone();
                 let mut events = aggregate.sync_runtime(patch);
                 match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
-                    Ok(strategy_events) => events.extend(strategy_events),
+                    Ok(strategy_events) => {
+                        aggregate.reset_strategy_sync_failures();
+                        events.extend(strategy_events);
+                    }
                     Err(error) => {
                         aggregate = previous.clone();
+                        apply_strategy_sync_failure_guard(
+                            &mut aggregate,
+                            read_model.clone(),
+                            &events_tx,
+                            storage.as_ref(),
+                        )
+                        .await;
                         let error =
                             error.context("failed to sync strategy orders after runtime sync");
                         warn!(
@@ -535,9 +566,19 @@ async fn run_engine(
                     execution_adapter.mode() == ExecutionMode::Paper,
                 );
                 match maybe_sync_strategy_orders(&mut aggregate, execution_adapter.clone()).await {
-                    Ok(strategy_events) => events.extend(strategy_events),
+                    Ok(strategy_events) => {
+                        aggregate.reset_strategy_sync_failures();
+                        events.extend(strategy_events);
+                    }
                     Err(error) => {
                         aggregate = previous.clone();
+                        apply_strategy_sync_failure_guard(
+                            &mut aggregate,
+                            read_model.clone(),
+                            &events_tx,
+                            storage.as_ref(),
+                        )
+                        .await;
                         let error =
                             error.context("failed to sync strategy orders after market price sync");
                         warn!(
@@ -636,6 +677,28 @@ fn replace_read_model(read_model: &SharedReadModel, aggregate: &RuntimeAggregate
     *read_model
         .write()
         .expect("service read model rwlock poisoned") = ReadModel::from(aggregate);
+}
+
+async fn apply_strategy_sync_failure_guard(
+    aggregate: &mut RuntimeAggregate,
+    read_model: SharedReadModel,
+    events_tx: &mpsc::Sender<SequencedEngineEvent>,
+    storage: Option<&SqliteStorage>,
+) {
+    let Some(events) = aggregate.record_strategy_sync_failure() else {
+        return;
+    };
+
+    if let Err(error) = persist_runtime_state(storage, aggregate) {
+        warn!(
+            ?error,
+            "failed to persist runtime guard state after strategy sync failures"
+        );
+        return;
+    }
+
+    replace_read_model(&read_model, aggregate);
+    publish_events(events_tx, events).await;
 }
 
 async fn run_deferred_execution(
@@ -1042,6 +1105,7 @@ struct RuntimeAggregate {
     risk_events: Vec<RiskEvent>,
     system_events: Vec<SystemEvent>,
     last_sequence: u64,
+    strategy_sync_failures: usize,
 }
 
 #[derive(Debug)]
@@ -1080,6 +1144,7 @@ impl RuntimeAggregate {
             risk_events: runtime.risk_events,
             system_events: runtime.system_events,
             last_sequence: runtime.last_sequence,
+            strategy_sync_failures: 0,
         };
         let _ = aggregate.reconcile_runtime();
         aggregate
@@ -1446,6 +1511,7 @@ impl RuntimeAggregate {
             SystemEvent {
                 level: status_level(ack.status).into(),
                 source: "commands".into(),
+                code: None,
                 message: ack.message.clone(),
                 created_at: ack.emitted_at.clone(),
             },
@@ -1515,6 +1581,7 @@ impl RuntimeAggregate {
             SystemEvent {
                 level: status_level(ack.status).into(),
                 source: "commands".into(),
+                code: None,
                 message: ack.message.clone(),
                 created_at: ack.emitted_at.clone(),
             },
@@ -1549,6 +1616,13 @@ impl RuntimeAggregate {
             self.record_risk_event(event.clone());
         }
 
+        if self.snapshot.risk.breaker_engaged {
+            self.apply_runtime_guard(
+                "RUNTIME_GUARD_PAUSED",
+                "breaker engaged; strategy paused automatically",
+            );
+        }
+
         self.snapshot.strategy = strategy::reconcile(
             &self.snapshot.runtime,
             &self.snapshot.risk,
@@ -1581,8 +1655,54 @@ impl RuntimeAggregate {
                 }
                 .into(),
                 source: "risk".into(),
+                code: Some(event.code.clone()),
                 message: format!("{}: {}", event.code, event.message),
                 created_at: event.created_at.clone(),
+            },
+        );
+        while self.system_events.len() > 50 {
+            self.system_events.pop();
+        }
+    }
+
+    fn reset_strategy_sync_failures(&mut self) {
+        self.strategy_sync_failures = 0;
+    }
+
+    fn record_strategy_sync_failure(&mut self) -> Option<Vec<SequencedEngineEvent>> {
+        self.strategy_sync_failures = self.strategy_sync_failures.saturating_add(1);
+        if self.strategy_sync_failures < STRATEGY_SYNC_FAILURE_THRESHOLD {
+            return None;
+        }
+
+        self.strategy_sync_failures = 0;
+        if self.snapshot.runtime.strategy_state == "paused" {
+            return None;
+        }
+
+        self.apply_runtime_guard(
+            "RUNTIME_GUARD_EXECUTION_FAILURES",
+            "strategy order sync failed repeatedly; strategy paused automatically",
+        );
+        Some(vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(
+            self.snapshot.clone(),
+        ))])
+    }
+
+    fn apply_runtime_guard(&mut self, reason_code: &'static str, message: &str) {
+        if self.snapshot.runtime.strategy_state == "paused" {
+            return;
+        }
+
+        self.snapshot.runtime.strategy_state = "paused".into();
+        self.system_events.insert(
+            0,
+            SystemEvent {
+                level: "error".into(),
+                source: "runtime_guard".into(),
+                code: Some(reason_code.into()),
+                message: message.into(),
+                created_at: now_utc(),
             },
         );
         while self.system_events.len() > 50 {

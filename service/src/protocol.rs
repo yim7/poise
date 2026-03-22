@@ -427,6 +427,8 @@ pub struct RiskEvent {
 pub struct SystemEvent {
     pub level: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub message: String,
     pub created_at: String,
 }

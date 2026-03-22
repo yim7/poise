@@ -1,10 +1,11 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use anyhow::Context;
 use clap::Parser;
 use grid_platform_service::{
     Application, build_app,
     integrations::binance::{BinanceConfig, RealBinanceTransport},
+    startup,
 };
 use tokio::net::TcpListener;
 use tracing::info;
@@ -23,6 +24,8 @@ struct Cli;
 async fn main() -> anyhow::Result<()> {
     Cli::parse();
 
+    let startup = startup::StartupConfig::from_env()?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -36,25 +39,23 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {addr}"))?;
 
     let binance_config = binance_config_from_env()?;
-    let application = match (env::var("GRID_PLATFORM_SERVICE_DB_PATH"), binance_config) {
-        (Ok(path), Some(config)) => {
+    let db_path = env::var("GRID_PLATFORM_SERVICE_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| startup.db_path.clone());
+    let application = match binance_config {
+        Some(config) => {
             let transport = RealBinanceTransport::new(&config)
                 .with_context(|| "failed to build real binance transport")?;
-            Application::bootstrap_with_sqlite_and_binance(
-                path,
+            Application::bootstrap_with_startup_and_binance(
+                db_path,
                 config,
                 std::sync::Arc::new(transport),
             )
+            .await
             .with_context(|| "failed to bootstrap application with sqlite and binance")?
         }
-        (Ok(path), None) => Application::bootstrap_with_sqlite(path)
+        None => Application::bootstrap_with_sqlite(db_path)
             .with_context(|| "failed to bootstrap application with sqlite storage")?,
-        (Err(_), Some(config)) => {
-            let transport = RealBinanceTransport::new(&config)
-                .with_context(|| "failed to build real binance transport")?;
-            Application::bootstrap_with_binance(config, std::sync::Arc::new(transport))
-        }
-        (Err(_), None) => Application::bootstrap(),
     };
     info!("grid-platform service listening on {addr}");
     axum::serve(listener, build_app(application))

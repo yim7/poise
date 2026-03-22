@@ -1162,6 +1162,65 @@ async fn price_tick_engages_breaker_and_broadcasts_risk_alert_when_stop_loss_is_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn breaker_engagement_auto_pauses_strategy_and_records_guard_code() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.last_price = 100.0;
+    runtime.snapshot.runtime.mark_price = 100.0;
+    runtime.snapshot.runtime.position_qty = -0.25;
+    runtime.snapshot.runtime.position_avg_price = 100.0;
+    runtime.snapshot.risk.stop_loss_pct = 0.05;
+    runtime.snapshot.execution.open_orders.clear();
+
+    let (engine, read_model, _events_rx) =
+        grid_platform_service::kernel::spawn_engine_with_runtime(runtime, None);
+
+    engine.emit_price_tick().await?;
+
+    let guard = read_model.read().expect("read model");
+    let snapshot = guard.snapshot();
+    assert_eq!(snapshot.runtime.strategy_state, "paused");
+    assert!(
+        guard
+            .system_events()
+            .iter()
+            .any(|event| event.code.as_deref() == Some("RUNTIME_GUARD_PAUSED"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_strategy_sync_failures_pause_strategy_after_threshold() -> Result<()> {
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot = RuntimeSnapshot::sample();
+    runtime.snapshot.runtime.position_qty = 0.0;
+    runtime.snapshot.runtime.position_avg_price = 0.0;
+    runtime.snapshot.execution.open_orders.clear();
+    runtime.snapshot.strategy.config.levels_per_side = 1;
+
+    let adapter = Arc::new(FailingPlacementExecutionAdapter::with_failures(3));
+    let (engine, read_model, _events_rx) =
+        spawn_engine_with_runtime_and_adapter(runtime, None, adapter);
+
+    for _ in 0..3 {
+        let _ = engine.emit_price_tick().await;
+    }
+
+    let guard = read_model.read().expect("read model");
+    let snapshot = guard.snapshot();
+    assert_eq!(snapshot.runtime.strategy_state, "paused");
+    assert!(
+        guard
+            .system_events()
+            .iter()
+            .any(|event| event.code.as_deref() == Some("RUNTIME_GUARD_EXECUTION_FAILURES"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_execution_command_fails_while_another_is_in_flight() -> Result<()> {
     let ready = Arc::new(Notify::new());
     let entered = Arc::new(AtomicBool::new(false));

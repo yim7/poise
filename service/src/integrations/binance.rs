@@ -167,6 +167,26 @@ pub struct PositionSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum PositionSnapshotState {
+    Unavailable,
+    Flat,
+    Position(PositionSnapshot),
+}
+
+impl PositionSnapshotState {
+    pub fn as_ref(&self) -> Option<&PositionSnapshot> {
+        match self {
+            Self::Position(snapshot) => Some(snapshot),
+            Self::Unavailable | Self::Flat => None,
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        !matches!(self, Self::Unavailable)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserStreamOrderUpdate {
     pub symbol: String,
     pub order: OpenOrder,
@@ -177,6 +197,9 @@ pub struct UserStreamOrderUpdate {
 pub trait BinanceTransport: Send + Sync + 'static {
     async fn fetch_exchange_info(&self, symbol: &str) -> Result<ExchangeSymbol>;
     async fn fetch_trading_schedule(&self) -> Result<TradingSchedule>;
+    async fn fetch_position_snapshot(&self, _symbol: &str) -> Result<PositionSnapshotState> {
+        Ok(PositionSnapshotState::Unavailable)
+    }
     async fn connect_market_stream(
         &self,
         symbol: &str,
@@ -431,6 +454,24 @@ impl BinanceTransport for RealBinanceTransport {
 
     async fn keepalive_user_stream(&self, _listen_key: &str) -> Result<()> {
         self.keepalive_listen_key().await
+    }
+
+    async fn fetch_position_snapshot(&self, symbol: &str) -> Result<PositionSnapshotState> {
+        if self.api_key.is_none() || self.api_secret.is_none() {
+            return Ok(PositionSnapshotState::Unavailable);
+        }
+
+        let query = format!(
+            "symbol={symbol}&timestamp={}",
+            Utc::now().timestamp_millis()
+        );
+        let positions: Vec<PositionRiskResponsePosition> = self
+            .get_signed_json("/fapi/v3/positionRisk", &query)
+            .await?;
+        Ok(match summarize_position_risk(positions) {
+            Some(position) => PositionSnapshotState::Position(position),
+            None => PositionSnapshotState::Flat,
+        })
     }
 
     async fn fetch_open_orders(&self, symbol: &str) -> Result<Option<Vec<OpenOrder>>> {
@@ -1053,6 +1094,61 @@ fn summarize_positions(positions: Vec<AccountUpdatePosition>) -> Vec<PositionSna
         .collect()
 }
 
+fn summarize_position_risk(
+    positions: Vec<PositionRiskResponsePosition>,
+) -> Option<PositionSnapshot> {
+    let mut matching = positions.into_iter().filter(|position| {
+        let qty = position.signed_position_amount();
+        qty.abs() > f64::EPSILON
+    });
+    let first = matching.next()?;
+    let symbol = first.symbol.clone();
+    let mut total_qty = first.signed_position_amount();
+    let mut long_qty = 0.0;
+    let mut short_qty = 0.0;
+    let mut long_notional = 0.0;
+    let mut short_notional = 0.0;
+    let mut unrealized_pnl = first.unrealized_pnl;
+
+    if total_qty > f64::EPSILON {
+        long_qty += total_qty;
+        long_notional += total_qty * first.entry_price;
+    } else if total_qty < -f64::EPSILON {
+        short_qty += total_qty.abs();
+        short_notional += total_qty.abs() * first.entry_price;
+    }
+
+    for position in matching {
+        let qty = position.signed_position_amount();
+        total_qty += qty;
+        unrealized_pnl += position.unrealized_pnl;
+
+        if qty > f64::EPSILON {
+            long_qty += qty;
+            long_notional += qty * position.entry_price;
+        } else if qty < -f64::EPSILON {
+            short_qty += qty.abs();
+            short_notional += qty.abs() * position.entry_price;
+        }
+    }
+
+    let avg_price = if total_qty > f64::EPSILON && long_qty > f64::EPSILON {
+        long_notional / long_qty
+    } else if total_qty < -f64::EPSILON && short_qty > f64::EPSILON {
+        short_notional / short_qty
+    } else {
+        0.0
+    };
+
+    Some(PositionSnapshot {
+        symbol,
+        qty: total_qty,
+        avg_price,
+        unrealized_pnl,
+        realized_pnl: 0.0,
+    })
+}
+
 async fn sync_market_prices_until_applied(
     engine: &EngineHandle,
     event: MarketStreamEvent,
@@ -1273,6 +1369,32 @@ struct OpenOrdersResponseOrder {
     created_at_ms: i64,
     #[serde(rename = "updateTime")]
     updated_at_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PositionRiskResponsePosition {
+    symbol: String,
+    #[serde(rename = "positionSide", default = "default_position_side")]
+    position_side: String,
+    #[serde(rename = "positionAmt", deserialize_with = "deserialize_string_number")]
+    position_amount: f64,
+    #[serde(rename = "entryPrice", deserialize_with = "deserialize_string_number")]
+    entry_price: f64,
+    #[serde(
+        rename = "unRealizedProfit",
+        deserialize_with = "deserialize_string_number"
+    )]
+    unrealized_pnl: f64,
+}
+
+impl PositionRiskResponsePosition {
+    fn signed_position_amount(&self) -> f64 {
+        match self.position_side.as_str() {
+            "LONG" => self.position_amount.abs(),
+            "SHORT" => -self.position_amount.abs(),
+            _ => self.position_amount,
+        }
+    }
 }
 
 impl OpenOrdersResponseOrder {
