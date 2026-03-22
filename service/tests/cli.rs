@@ -149,8 +149,11 @@ fn run_cli_and_wait(args: &[&str]) -> Result<Output> {
 }
 
 fn run_cli_and_wait_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output> {
+    let cwd = TempDir::new()?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_grid-platform-service"))
         .args(args)
+        .current_dir(cwd.path())
+        .env_clear()
         .env("GRID_PLATFORM_SERVICE_ADDR", "127.0.0.1:0")
         .envs(envs.iter().copied())
         .stdout(Stdio::piped())
