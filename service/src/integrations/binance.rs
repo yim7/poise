@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
-use reqwest::header::CONTENT_TYPE;
+use reqwest::{Method, header::CONTENT_TYPE};
 use serde::Deserialize;
 use sha2::Sha256;
 use tokio::{
@@ -18,8 +18,12 @@ use tracing::warn;
 
 use crate::{
     background::spawn_task,
+    execution::{
+        CancelOrdersRequest, ExecutionAdapter, FakeExecutionAdapter, SubmitOrderRequest,
+        SubmitOrderResult,
+    },
     kernel::{EngineHandle, RuntimePatch},
-    protocol::{ConnectionState, OpenOrder, OpenOrdersSource},
+    protocol::{ConnectionState, OpenOrder, OpenOrdersSource, RecentFill, RuntimeSnapshot},
     storage::PersistedRuntime,
 };
 
@@ -198,6 +202,9 @@ pub struct UserStreamOrderUpdate {
 pub trait BinanceTransport: Send + Sync + 'static {
     async fn fetch_exchange_info(&self, symbol: &str) -> Result<ExchangeSymbol>;
     async fn fetch_trading_schedule(&self) -> Result<TradingSchedule>;
+    fn supports_execution(&self) -> bool {
+        false
+    }
     async fn fetch_position_snapshot(&self, _symbol: &str) -> Result<PositionSnapshotState> {
         Ok(PositionSnapshotState::Unavailable)
     }
@@ -213,6 +220,70 @@ pub trait BinanceTransport: Send + Sync + 'static {
     async fn keepalive_user_stream(&self, listen_key: &str) -> Result<()>;
     async fn fetch_open_orders(&self, _symbol: &str) -> Result<Option<Vec<OpenOrder>>> {
         Ok(None)
+    }
+    async fn submit_order(
+        &self,
+        _request: SubmitOrderRequest,
+        _snapshot: &RuntimeSnapshot,
+    ) -> Result<SubmitOrderResult> {
+        Err(anyhow!("binance transport execution is not available"))
+    }
+    async fn cancel_orders(
+        &self,
+        _request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Vec<OpenOrder>> {
+        Ok(snapshot.execution.open_orders.clone())
+    }
+}
+
+pub(crate) fn execution_adapter_for_binance(
+    config: &BinanceConfig,
+    transport: Arc<dyn BinanceTransport>,
+) -> Arc<dyn ExecutionAdapter> {
+    if config.api_key.is_some() && config.api_secret.is_some() && transport.supports_execution() {
+        Arc::new(BinanceExecutionAdapter { transport })
+    } else {
+        Arc::new(FakeExecutionAdapter)
+    }
+}
+
+#[derive(Clone)]
+struct BinanceExecutionAdapter {
+    transport: Arc<dyn BinanceTransport>,
+}
+
+#[async_trait]
+impl ExecutionAdapter for BinanceExecutionAdapter {
+    async fn submit_order(
+        &self,
+        request: SubmitOrderRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<SubmitOrderResult> {
+        self.transport.submit_order(request, snapshot).await
+    }
+
+    async fn cancel_orders(
+        &self,
+        request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Vec<OpenOrder>> {
+        let open_orders = self.transport.cancel_orders(request, snapshot).await?;
+        Ok(filter_strategy_mirror_open_orders(snapshot, open_orders))
+    }
+
+    async fn query_open_orders(&self, snapshot: &RuntimeSnapshot) -> Result<Vec<OpenOrder>> {
+        Ok(filter_strategy_mirror_open_orders(
+            snapshot,
+            self.transport
+                .fetch_open_orders(&snapshot.runtime.symbol)
+                .await?
+                .unwrap_or_default(),
+        ))
+    }
+
+    async fn list_recent_fills(&self, snapshot: &RuntimeSnapshot) -> Result<Vec<RecentFill>> {
+        Ok(snapshot.execution.recent_fills.clone())
     }
 }
 
@@ -261,21 +332,44 @@ impl RealBinanceTransport {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let response = self.send_signed_get(path, query, false).await?;
+        let (status, body) = self.signed_response_text(Method::GET, path, query).await?;
+        decode_response_body(status, body)
+    }
+
+    async fn signed_json<T>(&self, method: Method, path: &str, query: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let (status, body) = self.signed_response_text(method, path, query).await?;
+        decode_response_body(status, body)
+    }
+
+    async fn signed_response_text(
+        &self,
+        method: Method,
+        path: &str,
+        query: &str,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        let response = self
+            .send_signed_request(method.clone(), path, query, false)
+            .await?;
         let status = response.status();
         let body = response
             .text()
             .await
             .context("failed to read response body")?;
         if is_timestamp_outside_recv_window(status, &body) {
-            let retry = self.send_signed_get(path, query, true).await?;
-            return decode_response(retry).await;
+            let retry = self.send_signed_request(method, path, query, true).await?;
+            let retry_status = retry.status();
+            let retry_body = retry.text().await.context("failed to read response body")?;
+            return Ok((retry_status, retry_body));
         }
-        decode_response_body(status, body)
+        Ok((status, body))
     }
 
-    async fn send_signed_get(
+    async fn send_signed_request(
         &self,
+        method: Method,
         path: &str,
         query: &str,
         force_time_sync: bool,
@@ -295,8 +389,9 @@ impl RealBinanceTransport {
             self.rest_base_url, path, signed_query, signature
         );
         self.http
-            .get(&url)
+            .request(method, &url)
             .header("X-MBX-APIKEY", api_key)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .send()
             .await
             .with_context(|| format!("failed to call {url}"))
@@ -378,6 +473,21 @@ impl RealBinanceTransport {
     }
 }
 
+fn filter_strategy_mirror_open_orders(
+    snapshot: &RuntimeSnapshot,
+    open_orders: Vec<OpenOrder>,
+) -> Vec<OpenOrder> {
+    open_orders
+        .into_iter()
+        .filter(|candidate| {
+            snapshot.execution.open_orders.iter().any(|known| {
+                known.order_id == candidate.order_id
+                    || known.client_order_id == candidate.client_order_id
+            })
+        })
+        .collect()
+}
+
 #[async_trait]
 impl BinanceTransport for RealBinanceTransport {
     async fn fetch_exchange_info(&self, symbol: &str) -> Result<ExchangeSymbol> {
@@ -417,6 +527,10 @@ impl BinanceTransport for RealBinanceTransport {
                 })
                 .collect(),
         })
+    }
+
+    fn supports_execution(&self) -> bool {
+        true
     }
 
     async fn connect_market_stream(
@@ -534,6 +648,57 @@ impl BinanceTransport for RealBinanceTransport {
                 .map(OpenOrdersResponseOrder::into_open_order)
                 .collect(),
         ))
+    }
+
+    async fn submit_order(
+        &self,
+        request: SubmitOrderRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<SubmitOrderResult> {
+        let symbol = &snapshot.runtime.symbol;
+        let query = build_submit_order_query(symbol, &request);
+        let response: SubmitOrderResponse = self
+            .signed_json(Method::POST, "/fapi/v1/order", &query)
+            .await?;
+        Ok(response.into_submit_result(&request))
+    }
+
+    async fn cancel_orders(
+        &self,
+        request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Vec<OpenOrder>> {
+        let symbol = &snapshot.runtime.symbol;
+        let targets = request
+            .order_ids
+            .iter()
+            .map(Some)
+            .chain(std::iter::repeat(None))
+            .zip(
+                request
+                    .client_order_ids
+                    .iter()
+                    .map(Some)
+                    .chain(std::iter::repeat(None)),
+            )
+            .take(request.order_ids.len().max(request.client_order_ids.len()));
+
+        for (order_id, client_order_id) in targets {
+            if order_id.is_none() && client_order_id.is_none() {
+                continue;
+            }
+
+            let query = build_cancel_order_query(symbol, order_id, client_order_id);
+            let (status, body) = self
+                .signed_response_text(Method::DELETE, "/fapi/v1/order", &query)
+                .await?;
+            if status.is_success() || is_missing_order_error(status, &body) {
+                continue;
+            }
+            anyhow::bail!("binance request failed with status {status}: {body}");
+        }
+
+        Ok(self.fetch_open_orders(symbol).await?.unwrap_or_default())
     }
 }
 
@@ -998,6 +1163,43 @@ fn is_timestamp_outside_recv_window(status: reqwest::StatusCode, body: &str) -> 
             .unwrap_or(false)
 }
 
+fn is_missing_order_error(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST
+        && serde_json::from_str::<BinanceErrorResponse>(body)
+            .map(|error| error.code == -2011)
+            .unwrap_or(false)
+}
+
+fn build_submit_order_query(symbol: &str, request: &SubmitOrderRequest) -> String {
+    let side = request.side.to_ascii_uppercase();
+    if request.reduce_only {
+        return format!(
+            "symbol={symbol}&side={side}&type=MARKET&quantity={}&reduceOnly=true&newClientOrderId={}&newOrderRespType=RESULT",
+            request.qty, request.client_order_id
+        );
+    }
+
+    format!(
+        "symbol={symbol}&side={side}&type=LIMIT&timeInForce=GTC&quantity={}&price={}&newClientOrderId={}&newOrderRespType=RESULT",
+        request.qty, request.price, request.client_order_id
+    )
+}
+
+fn build_cancel_order_query(
+    symbol: &str,
+    order_id: Option<&String>,
+    client_order_id: Option<&String>,
+) -> String {
+    let mut query = format!("symbol={symbol}");
+    if let Some(order_id) = order_id {
+        query.push_str(&format!("&orderId={order_id}"));
+    }
+    if let Some(client_order_id) = client_order_id {
+        query.push_str(&format!("&origClientOrderId={client_order_id}"));
+    }
+    query
+}
+
 fn decode_market_stream(payload: &str) -> Result<MarketStreamEvent> {
     let envelope: CombinedStreamEnvelope =
         serde_json::from_str(payload).context("failed to decode market stream envelope")?;
@@ -1350,6 +1552,32 @@ struct BinanceErrorResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct SubmitOrderResponse {
+    #[serde(rename = "orderId")]
+    order_id: i64,
+    #[serde(rename = "clientOrderId")]
+    client_order_id: String,
+    side: String,
+    #[serde(rename = "price", deserialize_with = "deserialize_string_number")]
+    price: f64,
+    #[serde(rename = "origQty", deserialize_with = "deserialize_string_number")]
+    orig_qty: f64,
+    #[serde(rename = "executedQty", deserialize_with = "deserialize_string_number")]
+    executed_qty: f64,
+    status: String,
+    #[serde(
+        rename = "avgPrice",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    avg_price: Option<f64>,
+    #[serde(rename = "updateTime", default)]
+    update_time_ms: Option<i64>,
+    #[serde(rename = "transactTime", default)]
+    transact_time_ms: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UserStreamEnvelope {
     #[serde(rename = "e")]
     event_type: String,
@@ -1481,6 +1709,53 @@ impl OpenOrdersResponseOrder {
     }
 }
 
+impl SubmitOrderResponse {
+    fn into_submit_result(self, request: &SubmitOrderRequest) -> SubmitOrderResult {
+        let updated_at_ms = self
+            .update_time_ms
+            .or(self.transact_time_ms)
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        let updated_at = timestamp_millis_to_rfc3339(updated_at_ms);
+        let open_order = (!is_terminal_order_status(&self.status)).then(|| OpenOrder {
+            order_id: self.order_id.to_string(),
+            client_order_id: self.client_order_id.clone(),
+            side: self.side.to_ascii_lowercase(),
+            price: if self.price > f64::EPSILON {
+                self.price
+            } else {
+                request.price
+            },
+            qty: self.orig_qty,
+            filled_qty: self.executed_qty,
+            status: self.status.clone(),
+            created_at: updated_at.clone(),
+            updated_at: updated_at.clone(),
+        });
+        let fill = (self.executed_qty > f64::EPSILON).then(|| RecentFill {
+            trade_id: format!("binance_{}_{}", self.order_id, updated_at_ms),
+            order_id: self.order_id.to_string(),
+            client_order_id: Some(self.client_order_id.clone()),
+            side: self.side.to_ascii_lowercase(),
+            price: self
+                .avg_price
+                .filter(|price| *price > f64::EPSILON)
+                .unwrap_or_else(|| {
+                    if self.price > f64::EPSILON {
+                        self.price
+                    } else {
+                        request.price
+                    }
+                }),
+            qty: self.executed_qty,
+            fee: 0.0,
+            realized_pnl: 0.0,
+            event_time: updated_at,
+        });
+
+        SubmitOrderResult { open_order, fill }
+    }
+}
+
 fn sign_query(query: &str, api_secret: &str) -> Result<String> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(api_secret.as_bytes()).context("invalid hmac key")?;
@@ -1498,6 +1773,18 @@ where
 {
     let value = String::deserialize(deserializer)?;
     value.parse::<f64>().map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_string_number<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| value.parse::<f64>().map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 #[cfg(test)]

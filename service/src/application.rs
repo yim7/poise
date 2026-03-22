@@ -9,11 +9,12 @@ use uuid::Uuid;
 use crate::{
     background::spawn_task,
     integrations::binance::{
-        BinanceConfig, BinanceTransport, prepare_bootstrap_runtime, spawn_supervisor,
+        BinanceConfig, BinanceTransport, execution_adapter_for_binance, prepare_bootstrap_runtime,
+        spawn_supervisor,
     },
     kernel::{
         EngineEvent, EngineHandle, ReadModel, SharedReadModel, now_utc, spawn_engine,
-        spawn_engine_with_runtime,
+        spawn_engine_with_runtime, spawn_engine_with_runtime_and_adapter,
     },
     protocol::{
         AlertRecord, AlertsFilters, AlertsQueryResult, AuthDescriptor, CommandAccepted,
@@ -72,8 +73,14 @@ impl Application {
         transport: Arc<dyn BinanceTransport>,
         instance_id: impl Into<String>,
     ) -> Self {
-        let application =
-            Self::bootstrap_with_runtime_and_storage(runtime, storage, instance_id.into());
+        let application = Self::build_from_engine_with_instance_id(
+            spawn_engine_with_runtime_and_adapter(
+                runtime,
+                storage,
+                execution_adapter_for_binance(&config, transport.clone()),
+            ),
+            instance_id.into(),
+        );
         application.start_binance_supervisor(config, transport);
         application
     }
@@ -85,7 +92,11 @@ impl Application {
         let mut runtime =
             prepare_bootstrap_runtime(PersistedRuntime::in_memory_bootstrap(), &config);
         runtime.snapshot.execution.open_orders_source = OpenOrdersSource::StrategyMirror;
-        let application = Self::build_from_engine(spawn_engine_with_runtime(runtime, None));
+        let application = Self::build_from_engine(spawn_engine_with_runtime_and_adapter(
+            runtime,
+            None,
+            execution_adapter_for_binance(&config, transport.clone()),
+        ));
         application.start_binance_supervisor(config, transport);
         application
     }

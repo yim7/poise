@@ -13,11 +13,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use grid_platform_service::{
     Application,
+    execution::{CancelOrdersRequest, SubmitOrderRequest, SubmitOrderResult},
     integrations::binance::{
         BinanceConfig, BinanceTransport, ExchangeSymbol, MarketStreamEvent, PositionSnapshot,
         TradingSchedule, TradingSession, UserStreamEvent, UserStreamOrderUpdate,
     },
-    protocol::{OpenOrder, OpenOrdersSource, RuntimeSnapshot, SystemEvent},
+    protocol::{
+        CommandRequest, CommandStatus, CommandType, OpenOrder, OpenOrdersSource, RecentFill,
+        RuntimeSnapshot, SystemEvent,
+    },
     storage::{PersistedRuntime, SqliteStorage},
 };
 use tempfile::tempdir;
@@ -35,6 +39,10 @@ struct FakeBinanceTransport {
     market_connects: Arc<AtomicUsize>,
     user_connects: Arc<AtomicUsize>,
     keepalive_calls: Arc<AtomicUsize>,
+    submit_calls: Arc<AtomicUsize>,
+    cancel_calls: Arc<AtomicUsize>,
+    cancel_result: Arc<Mutex<Option<Vec<OpenOrder>>>>,
+    execution_enabled: bool,
     listen_key: Option<String>,
     open_orders: Option<Vec<OpenOrder>>,
 }
@@ -49,6 +57,10 @@ impl FakeBinanceTransport {
             market_connects: Arc::new(AtomicUsize::new(0)),
             user_connects: Arc::new(AtomicUsize::new(0)),
             keepalive_calls: Arc::new(AtomicUsize::new(0)),
+            submit_calls: Arc::new(AtomicUsize::new(0)),
+            cancel_calls: Arc::new(AtomicUsize::new(0)),
+            cancel_result: Arc::new(Mutex::new(None)),
+            execution_enabled: false,
             listen_key: None,
             open_orders: None,
         }
@@ -72,12 +84,29 @@ impl FakeBinanceTransport {
         self
     }
 
+    fn with_execution_enabled(mut self) -> Self {
+        self.execution_enabled = true;
+        self
+    }
+
     fn market_connects(&self) -> usize {
         self.market_connects.load(Ordering::SeqCst)
     }
 
     fn keepalive_calls(&self) -> usize {
         self.keepalive_calls.load(Ordering::SeqCst)
+    }
+
+    fn submit_calls(&self) -> usize {
+        self.submit_calls.load(Ordering::SeqCst)
+    }
+
+    fn cancel_calls(&self) -> usize {
+        self.cancel_calls.load(Ordering::SeqCst)
+    }
+
+    async fn set_cancel_result(&self, orders: Vec<OpenOrder>) {
+        *self.cancel_result.lock().await = Some(orders);
     }
 }
 
@@ -92,6 +121,10 @@ impl BinanceTransport for FakeBinanceTransport {
 
     async fn fetch_trading_schedule(&self) -> Result<TradingSchedule> {
         Ok(self.trading_schedule.clone())
+    }
+
+    fn supports_execution(&self) -> bool {
+        self.execution_enabled
     }
 
     async fn connect_market_stream(
@@ -129,6 +162,69 @@ impl BinanceTransport for FakeBinanceTransport {
 
     async fn fetch_open_orders(&self, _symbol: &str) -> Result<Option<Vec<OpenOrder>>> {
         Ok(self.open_orders.clone())
+    }
+
+    async fn submit_order(
+        &self,
+        request: SubmitOrderRequest,
+        _snapshot: &RuntimeSnapshot,
+    ) -> Result<SubmitOrderResult> {
+        self.submit_calls.fetch_add(1, Ordering::SeqCst);
+        if request.reduce_only {
+            return Ok(SubmitOrderResult {
+                open_order: None,
+                fill: Some(RecentFill {
+                    trade_id: format!("trade_{}", request.client_order_id),
+                    order_id: request.order_id,
+                    client_order_id: Some(request.client_order_id),
+                    side: request.side,
+                    price: request.price,
+                    qty: request.qty,
+                    fee: 0.0,
+                    realized_pnl: 0.0,
+                    event_time: "2025-01-01T00:00:00Z".into(),
+                }),
+            });
+        }
+
+        Ok(SubmitOrderResult {
+            open_order: Some(OpenOrder {
+                order_id: request.order_id,
+                client_order_id: request.client_order_id,
+                side: request.side,
+                price: request.price,
+                qty: request.qty,
+                filled_qty: 0.0,
+                status: "NEW".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            }),
+            fill: None,
+        })
+    }
+
+    async fn cancel_orders(
+        &self,
+        request: CancelOrdersRequest,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Vec<OpenOrder>> {
+        self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(result) = self.cancel_result.lock().await.take() {
+            return Ok(result);
+        }
+        Ok(snapshot
+            .execution
+            .open_orders
+            .iter()
+            .filter(|order| {
+                !request.order_ids.iter().any(|id| id == &order.order_id)
+                    && !request
+                        .client_order_ids
+                        .iter()
+                        .any(|id| id == &order.client_order_id)
+            })
+            .cloned()
+            .collect())
     }
 }
 
@@ -748,6 +844,165 @@ async fn fake_binance_bootstrap_and_user_stream_sync_real_exchange_open_orders()
             && snapshot.execution.exchange_open_orders.is_empty()
     })
     .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binance_mode_routes_strategy_placements_through_transport_execution() -> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_execution_enabled();
+    let (market_tx, market_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_binance(config, Arc::new(transport.clone()));
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.http_available && snapshot.connection.ws_connected
+    })
+    .await
+    .context("binance market bootstrap did not become ready")?;
+
+    market_tx
+        .send(MarketStreamEvent {
+            event_time_ms: now_ms + 1_000,
+            last_price: Some(100.0),
+            mark_price: Some(100.0),
+        })
+        .await
+        .context("failed to send market event for strategy placement")?;
+
+    wait_until(Duration::from_secs(2), || transport.submit_calls() == 6)
+        .await
+        .context("strategy placements did not route through transport execution")?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binance_mode_routes_strategy_cancels_through_transport_without_absorbing_unrelated_orders()
+-> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_execution_enabled();
+    let (market_tx, market_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_binance(config, Arc::new(transport.clone()));
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.http_available && snapshot.connection.ws_connected
+    })
+    .await
+    .context("binance market bootstrap did not become ready")?;
+
+    market_tx
+        .send(MarketStreamEvent {
+            event_time_ms: now_ms + 1_000,
+            last_price: Some(100.0),
+            mark_price: Some(100.0),
+        })
+        .await
+        .context("failed to send market event for strategy placement")?;
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        transport.submit_calls() == 6 && snapshot.execution.open_orders.len() == 6
+    })
+    .await
+    .context("strategy placements were not ready before cancel test")?;
+
+    transport
+        .set_cancel_result(vec![OpenOrder {
+            order_id: "manual_ord_01".into(),
+            client_order_id: "manual_order_01".into(),
+            side: "buy".into(),
+            price: 88.88,
+            qty: 0.1,
+            filled_qty: 0.0,
+            status: "NEW".into(),
+            created_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }])
+        .await;
+
+    let accepted = app
+        .submit_command(
+            CommandType::CancelAll,
+            CommandRequest {
+                command_id: "cmd_binance_cancel".into(),
+            },
+        )
+        .await?;
+    assert_eq!(accepted.status, CommandStatus::Accepted);
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        transport.cancel_calls() == 1
+            && snapshot.execution.open_orders.is_empty()
+            && snapshot
+                .execution
+                .last_command_ack_event
+                .as_ref()
+                .is_some_and(|ack| {
+                    ack.command_id == "cmd_binance_cancel" && ack.status == CommandStatus::Completed
+                })
+    })
+    .await
+    .context("cancel path did not finish through transport without polluting strategy mirror")?;
 
     Ok(())
 }
