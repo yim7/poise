@@ -136,7 +136,9 @@ fn bootstrap_instance_application(
     let db_path = default_sqlite_path(&config.environment, &instance.symbol);
     let storage = SqliteStorage::open(&db_path)
         .with_context(|| format!("failed to open sqlite for {}", instance.symbol))?;
-    let runtime = storage.load_runtime()?.unwrap_or_else(PersistedRuntime::sqlite_bootstrap);
+    let runtime = storage
+        .load_runtime()?
+        .unwrap_or_else(PersistedRuntime::sqlite_bootstrap);
     let runtime = apply_instance_config(runtime, config, instance);
 
     let application = if let Some(binance) = binance {
@@ -145,8 +147,12 @@ fn bootstrap_instance_application(
         runtime.snapshot.execution.open_orders_source =
             grid_platform_service::protocol::OpenOrdersSource::StrategyMirror;
         storage.persist_runtime(&runtime)?;
-        let transport = RealBinanceTransport::new(&binance_config)
-            .with_context(|| format!("failed to build real binance transport for {}", instance.symbol))?;
+        let transport = RealBinanceTransport::new(&binance_config).with_context(|| {
+            format!(
+                "failed to build real binance transport for {}",
+                instance.symbol
+            )
+        })?;
         Application::bootstrap_with_runtime_storage_and_binance(
             runtime,
             Some(storage),

@@ -390,11 +390,25 @@ impl Application {
     }
 
     pub fn control_plane_capabilities(&self) -> ControlPlaneCapabilities {
+        self.control_plane_capabilities_with_scope("single_instance", "")
+    }
+
+    pub fn instance_scoped_control_plane_capabilities(&self) -> ControlPlaneCapabilities {
+        let base_path = format!("/instances/{}", self.instance_id);
+        self.control_plane_capabilities_with_scope("instance_scoped", &base_path)
+    }
+
+    fn control_plane_capabilities_with_scope(
+        &self,
+        scope: &str,
+        base_path: &str,
+    ) -> ControlPlaneCapabilities {
+        let prefixed = |path: &str| format!("{base_path}{path}");
         ControlPlaneCapabilities {
             instance_id: self.instance_id.clone(),
             deployment: DeploymentDescriptor {
                 mode: "lan".into(),
-                scope: "single_instance".into(),
+                scope: scope.into(),
             },
             auth: AuthDescriptor {
                 mode: "optional_static_token".into(),
@@ -406,38 +420,38 @@ impl Application {
             endpoint_groups: vec![
                 EndpointGroup {
                     name: "runtime".into(),
-                    paths: vec!["/runtime/snapshot".into(), "/query/runtime".into()],
+                    paths: vec![prefixed("/runtime/snapshot"), prefixed("/query/runtime")],
                 },
                 EndpointGroup {
                     name: "orders".into(),
-                    paths: vec!["/orders/open".into(), "/query/orders".into()],
+                    paths: vec![prefixed("/orders/open"), prefixed("/query/orders")],
                 },
                 EndpointGroup {
                     name: "fills".into(),
-                    paths: vec!["/fills/recent".into(), "/query/fills".into()],
+                    paths: vec![prefixed("/fills/recent"), prefixed("/query/fills")],
                 },
                 EndpointGroup {
                     name: "alerts".into(),
                     paths: vec![
-                        "/risk/events".into(),
-                        "/system/events".into(),
-                        "/query/alerts".into(),
+                        prefixed("/risk/events"),
+                        prefixed("/system/events"),
+                        prefixed("/query/alerts"),
                     ],
                 },
                 EndpointGroup {
                     name: "commands".into(),
                     paths: vec![
-                        "/commands/pause".into(),
-                        "/commands/resume".into(),
-                        "/commands/cancel-all".into(),
-                        "/commands/flatten-now".into(),
-                        "/commands/shutdown-after-flatten".into(),
-                        "/query/commands".into(),
+                        prefixed("/commands/pause"),
+                        prefixed("/commands/resume"),
+                        prefixed("/commands/cancel-all"),
+                        prefixed("/commands/flatten-now"),
+                        prefixed("/commands/shutdown-after-flatten"),
+                        prefixed("/query/commands"),
                     ],
                 },
             ],
             websocket: WebSocketDescriptor {
-                path: "/ws".into(),
+                path: prefixed("/ws"),
                 subscriptions: vec!["runtime_stream".into()],
                 auth: WebSocketAuthDescriptor {
                     query_param: "access_token".into(),

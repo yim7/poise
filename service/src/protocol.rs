@@ -197,9 +197,8 @@ struct GridConfigWire {
 impl GridConfigWire {
     fn into_grid_config(self, center_price: f64, lower_bound: f64, upper_bound: f64) -> GridConfig {
         let default = GridConfig::default();
-        let bounds_are_valid = lower_bound.is_finite()
-            && upper_bound.is_finite()
-            && lower_bound < upper_bound;
+        let bounds_are_valid =
+            lower_bound.is_finite() && upper_bound.is_finite() && lower_bound < upper_bound;
         let midpoint_price = if center_price.is_finite() && center_price.abs() > f64::EPSILON {
             center_price.abs()
         } else if bounds_are_valid {
@@ -272,9 +271,11 @@ impl<'de> Deserialize<'de> for StrategyState {
     {
         let wire = StrategyStateWire::deserialize(deserializer)?;
         Ok(Self {
-            config: wire
-                .config
-                .into_grid_config(wire.center_price, wire.lower_bound, wire.upper_bound),
+            config: wire.config.into_grid_config(
+                wire.center_price,
+                wire.lower_bound,
+                wire.upper_bound,
+            ),
             status: wire.status,
             center_price: wire.center_price,
             lower_bound: wire.lower_bound,
@@ -894,8 +895,16 @@ mod tests {
             serialized["strategy"]["config"]["max_position_notional"],
             1416.89
         );
-        assert!(serialized["strategy"]["config"].get("spacing_bps").is_none());
-        assert!(serialized["strategy"]["config"].get("levels_per_side").is_none());
+        assert!(
+            serialized["strategy"]["config"]
+                .get("spacing_bps")
+                .is_none()
+        );
+        assert!(
+            serialized["strategy"]["config"]
+                .get("levels_per_side")
+                .is_none()
+        );
     }
 
     #[test]

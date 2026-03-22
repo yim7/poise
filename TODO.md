@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 当前主线：`K8` TUI 中英文切换
+- 当前主线：`K9` 多实例固定区间网格
 - 并行预研：无
-- 最近完成：`K8` TUI 中英文切换已实现并验收通过，包含 `locale` 模块、`GRID_PLATFORM_UI_LOCALE` 启动语言、`l` 热切换、`render / store / selectors / state` 本地化接线、中文快照和 `ToggleLocale` 后 pause/ack 最小 E2E 回归；`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新；补齐 `/query/alerts` `acknowledged` 过滤回归测试，并补上 `strategy / risk` 直接单元测试；TUI 连接健康判定已移除 Binance 元数据 REST `latency_ms` 的降级条件，延迟数值仅保留展示；服务端与 TUI 协议、状态和界面已彻底移除 `latency_ms` 字段
-- 最近验证：`2026-03-21` 对照 [`docs/roadmap.md`](docs/roadmap.md) 与 [`docs/plan.md`](docs/plan.md) 复核 `K4` 到 `K7`，`cargo fmt --check`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test control_plane web_query_alerts_acknowledged_false`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui` 与 `cargo test` 已通过；执行闭环、网格策略与风控、replay / paper / fake transport 验证链路、Web 查询模型与能力接口均已复核，未发现新的阻断项；testnet 最小闭环仍维持手工冒烟验证结论。`2026-03-22` 新增 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli`、`cargo test -p grid-platform-tui --lib`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`，均已通过，并覆盖 TUI 中英文切换、中文快照、运行时热切换链路和全工作区回归
+- 最近完成：`K9` 多实例固定区间网格已实现并验收通过，包含 `service --config` 多实例启动、环境级 TOML 配置、固定区间梯子策略、区间外等待态、`/instances` 与实例作用域控制面路由、TUI 实例目录加载与 symbol 切换、Market 页实例列表展示，以及多实例控制面和本地 E2E 回归；`K8` TUI 中英文切换已实现并验收通过，包含 `locale` 模块、`GRID_PLATFORM_UI_LOCALE` 启动语言、`l` 热切换、`render / store / selectors / state` 本地化接线、中文快照和 `ToggleLocale` 后 pause/ack 最小 E2E 回归；`K7` Web UI 就绪与多实例预备；`K6` 回放 / paper / testnet 验证；`K5` 网格策略与风控；服务端 CLI 已接入 `clap` 并支持 `--help / --version`；TUI `Ctrl-C` 误触发 `cancel-all` 已修复；TUI 服务流与行情流重连状态文案已区分；TUI 订单视图已拆分为“策略订单”和“交易所挂单”，并为执行快照补上 `open_orders_source` 来源语义；Binance testnet 已接入真实 `exchange_open_orders` 启动同步与用户流订单更新；补齐 `/query/alerts` `acknowledged` 过滤回归测试，并补上 `strategy / risk` 直接单元测试；TUI 连接健康判定已移除 Binance 元数据 REST `latency_ms` 的降级条件，延迟数值仅保留展示；服务端与 TUI 协议、状态和界面已彻底移除 `latency_ms` 字段
+- 最近验证：`2026-03-21` 对照 [`docs/roadmap.md`](docs/roadmap.md) 与 [`docs/plan.md`](docs/plan.md) 复核 `K4` 到 `K7`，`cargo fmt --check`、`cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test control_plane web_query_alerts_acknowledged_false`、`cargo test -p grid-platform-tui --test language_consistency`、`cargo test -p grid-platform-tui` 与 `cargo test` 已通过；执行闭环、网格策略与风控、replay / paper / fake transport 验证链路、Web 查询模型与能力接口均已复核，未发现新的阻断项；testnet 最小闭环仍维持手工冒烟验证结论。`2026-03-22` 新增 `cargo test -p grid-platform-service --lib`、`cargo test -p grid-platform-service --test cli`、`cargo test -p grid-platform-service --test multi_instance_control_plane`、`cargo test -p grid-platform-tui --lib`、`cargo test -p grid-platform-tui --test instance_switching`、`cargo test -p grid-platform-tui --test local_paper_e2e`、`cargo test -p grid-platform-tui` 与 `cargo test`，均已通过，并覆盖多实例启动、固定区间策略、TUI 实例切换、中文快照、运行时热切换链路和全工作区回归
 
 ## 首次快照空态验收
 
@@ -221,9 +221,41 @@
 - [x] 更新 `docs/plan.md` 与本文件状态
 - [x] 验收结论：K8 已验收通过
 
+## K9 多实例固定区间网格
+
+### K9.1 服务端配置与注册表
+
+- [x] 增加环境级 TOML 配置文件模型与校验
+- [x] 支持 `service --config <path>` 启动多标的实例
+- [x] 自动推导 `.data/<environment>/<symbol-lowercase>.db` 持久化路径
+- [x] 增加多实例注册表与默认 symbol 兼容别名
+
+### K9.2 固定区间梯子策略
+
+- [x] 协议改为 `lower_price / upper_price / grid_levels / max_position_notional`
+- [x] 用固定区间梯子替代中心对称网格
+- [x] 支持 `WaitingMarketPrice / WaitingRangeEntry / Active / Occupied` 状态
+- [x] 价格回到区间后自动恢复挂单
+
+### K9.3 多实例控制面与 TUI
+
+- [x] 增加 `/instances` 与 `/instances/{symbol}/...` 控制面路由
+- [x] TUI 启动先拉实例目录，再按默认 symbol 拉快照和建立实例作用域 WebSocket
+- [x] TUI 支持切换当前实例并清空旧实例运行态
+- [x] Market 页展示实例列表、当前实例和默认实例
+
+### K9.4 收尾与验收
+
+- [x] 跑通 `cargo test -p grid-platform-service --test multi_instance_control_plane`
+- [x] 跑通 `cargo test -p grid-platform-tui --test instance_switching`
+- [x] 跑通 `cargo test -p grid-platform-tui --test local_paper_e2e`
+- [x] 跑通 `cargo test -p grid-platform-tui`
+- [x] 更新 `README.md` 与本文件状态
+- [x] 验收结论：K9 已验收通过
+
 ## 当前并行方式
 
-- 无，当前按 `K8` 单主线串行推进
+- 无，当前按 `K9` 单主线串行推进
 
 ## 完成后必做
 

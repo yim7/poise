@@ -74,6 +74,12 @@ impl UiCopy {
         }
     }
 
+    pub fn instances(self) -> InstancesCopy {
+        InstancesCopy {
+            locale: self.locale,
+        }
+    }
+
     pub fn events(self) -> EventsCopy {
         EventsCopy {
             locale: self.locale,
@@ -139,9 +145,11 @@ impl StatusCopy {
     pub fn waiting_snapshot_message(self, narrow: bool) -> &'static str {
         match (self.locale, narrow) {
             (Locale::EnUs, true) => " Waiting for first snapshot ",
-            (Locale::EnUs, false) => " Waiting for /runtime/snapshot before showing live data ",
+            (Locale::EnUs, false) => {
+                " Waiting for /instances and the first instance snapshot before showing live data "
+            }
             (Locale::ZhCn, true) => " 等待首个快照 ",
-            (Locale::ZhCn, false) => " 等待 /runtime/snapshot 后再显示实时数据 ",
+            (Locale::ZhCn, false) => " 等待 /instances 与实例首个快照后再显示实时数据 ",
         }
     }
 
@@ -189,8 +197,12 @@ impl BootstrapCopy {
 
     pub fn pending_detail(self) -> &'static str {
         match self.locale {
-            Locale::EnUs => "Waiting for /runtime/snapshot before showing live data.",
-            Locale::ZhCn => "等待 /runtime/snapshot 后再显示实时数据。",
+            Locale::EnUs => {
+                "Waiting for /instances and /instances/{symbol}/runtime/snapshot before showing live data."
+            }
+            Locale::ZhCn => {
+                "等待 /instances 与 /instances/{symbol}/runtime/snapshot 后再显示实时数据。"
+            }
         }
     }
 
@@ -783,6 +795,55 @@ impl MarketCopy {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct InstancesCopy {
+    locale: Locale,
+}
+
+impl InstancesCopy {
+    pub fn title(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Instances",
+            Locale::ZhCn => "实例列表",
+        }
+    }
+
+    pub fn summary_label(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Env",
+            Locale::ZhCn => "环境",
+        }
+    }
+
+    pub fn current_label(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Current",
+            Locale::ZhCn => "当前",
+        }
+    }
+
+    pub fn default_label(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "Default",
+            Locale::ZhCn => "默认",
+        }
+    }
+
+    pub fn empty(self) -> &'static str {
+        match self.locale {
+            Locale::EnUs => "No instances",
+            Locale::ZhCn => "暂无实例",
+        }
+    }
+
+    pub fn more(self, count: usize) -> String {
+        match self.locale {
+            Locale::EnUs => format!("+{count} more"),
+            Locale::ZhCn => format!("还有 {count} 项"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct EventsCopy {
     locale: Locale,
 }
@@ -912,7 +973,7 @@ impl HelpCopy {
             Locale::EnUs => [
                 "1 Dashboard   2 Grid   3 Market   4 Events   ? Help",
                 "Tab / Shift-Tab moves focus between panels on the current page.",
-                "p Pause   r Resume   l Toggle language",
+                "[/] Cycle inst   p Pause   r Resume   l Language",
                 "c Cancel all   f Flatten now   s Shutdown after flatten",
                 "Enter confirms danger actions; Esc or n cancels.",
                 "q / Ctrl-C exits the client only; the service keeps running.",
@@ -920,7 +981,7 @@ impl HelpCopy {
             Locale::ZhCn => [
                 "1 概览   2 网格   3 行情   4 事件   ? 帮助",
                 "Tab / Shift-Tab 在当前页面的面板之间切换焦点。",
-                "p 暂停   r 恢复   l 切换语言",
+                "[/] 切实例   p 暂停   r 恢复   l 语言",
                 "c 取消全部   f 立即平仓   s 平仓后停机",
                 "Enter 确认高风险操作；Esc 或 n 取消。",
                 "q / Ctrl-C 只退出客户端；服务端会继续运行。",
@@ -956,11 +1017,11 @@ impl FooterCopy {
         match (self.locale, narrow) {
             (Locale::EnUs, true) => " Snapshot pending | p/r/c/f/s disabled | 1-4 pages ? help ",
             (Locale::EnUs, false) => {
-                " Snapshot pending | p/r/c/f/s disabled | 1-4 pages ? help | Tab/Shift-Tab panels "
+                " Snapshot pending | [/] inst | p/r/c/f/s disabled | 1-4 pages ? help | Tab panels "
             }
             (Locale::ZhCn, true) => " 等待快照 | p/r/c/f/s 不可用 | 1-4 切页 ? 帮助 ",
             (Locale::ZhCn, false) => {
-                " 等待快照 | p/r/c/f/s 不可用 | 1-4 切页 ? 帮助 | Tab/Shift-Tab 切面板 "
+                " 等待快照 | [/] 实例 | p/r/c/f/s 不可用 | 1-4 切页 ? 帮助 | Tab 切面板 "
             }
         }
     }
@@ -971,13 +1032,13 @@ impl FooterCopy {
                 format!(" Snapshot failed, retry in {retry_in_ms}ms | p/r/c/f/s disabled ")
             }
             (Locale::EnUs, false) => format!(
-                " Snapshot failed, retry in {retry_in_ms}ms | p/r/c/f/s disabled | 1-4 pages ? help | Tab/Shift-Tab panels "
+                " Snapshot failed, retry in {retry_in_ms}ms | [/] inst | p/r/c/f/s disabled | 1-4 pages ? help | Tab panels "
             ),
             (Locale::ZhCn, true) => {
                 format!(" 快照失败，{retry_in_ms}ms 后重试 | p/r/c/f/s 不可用 ")
             }
             (Locale::ZhCn, false) => format!(
-                " 快照失败，{retry_in_ms}ms 后重试 | p/r/c/f/s 不可用 | 1-4 切页 ? 帮助 | Tab/Shift-Tab 切面板 "
+                " 快照失败，{retry_in_ms}ms 后重试 | [/] 实例 | p/r/c/f/s 不可用 | 1-4 切页 ? 帮助 | Tab 切面板 "
             ),
         }
     }
@@ -988,13 +1049,13 @@ impl FooterCopy {
                 format!(" Focus {focus} | Tab panels | p/r run | c/f/s danger | Enter/Esc ")
             }
             (Locale::EnUs, false) => format!(
-                " Focus {focus} | 1-4 pages ? help | Tab/Shift-Tab panels | p/r runtime | c/f/s danger ops | Enter/Esc modal "
+                " Focus {focus} | 1-4 pages ? help | [/] inst | Tab panels | p/r run | c/f/s danger | Enter/Esc "
             ),
             (Locale::ZhCn, true) => {
                 format!(" 焦点 {focus} | Tab 切面板 | p/r 运行 | c/f/s 高风险 | Enter/Esc ")
             }
             (Locale::ZhCn, false) => format!(
-                " 焦点 {focus} | 1-4 切页 ? 帮助 | Tab/Shift-Tab 切面板 | p/r 运行 | c/f/s 高风险操作 | Enter/Esc 弹窗 "
+                " 焦点 {focus} | 1-4 切页 ? 帮助 | [/] 实例 | Tab 切面板 | p/r 运行 | c/f/s 高风险 | Enter/Esc "
             ),
         }
     }

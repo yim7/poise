@@ -51,8 +51,8 @@ pub fn reconcile(
     let mut levels = build_levels(market_price, &config);
     apply_level_states(&mut levels, runtime.position_qty, occupied_count);
 
-    let outside_range = market_price < config.lower_price - EPSILON
-        || market_price > config.upper_price + EPSILON;
+    let outside_range =
+        market_price < config.lower_price - EPSILON || market_price > config.upper_price + EPSILON;
     let status = if outside_range && occupied_count == 0 {
         StrategyStatus::WaitingRangeEntry
     } else if occupied_count > 0 {

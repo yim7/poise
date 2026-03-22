@@ -824,8 +824,10 @@ async fn maybe_sync_strategy_orders(
             execution_adapter.cancel_orders(cancel_request.clone(), &working_snapshot)
         })
         .await?;
-        if targeted_open_orders_still_present(&working_snapshot.execution.open_orders, &cancel_request)
-        {
+        if targeted_open_orders_still_present(
+            &working_snapshot.execution.open_orders,
+            &cancel_request,
+        ) {
             return Err(anyhow!(
                 "strategy waiting state did not clear all targeted strategy orders"
             ));
@@ -841,9 +843,9 @@ async fn maybe_sync_strategy_orders(
             return Ok(Vec::new());
         }
 
-        return Ok(vec![aggregate.sequenced_event(EngineEvent::RuntimeSnapshot(
-            aggregate.snapshot.clone(),
-        ))]);
+        return Ok(vec![aggregate.sequenced_event(
+            EngineEvent::RuntimeSnapshot(aggregate.snapshot.clone()),
+        )]);
     }
 
     let deadline = tokio::time::Instant::now() + STRATEGY_SYNC_TIMEOUT;

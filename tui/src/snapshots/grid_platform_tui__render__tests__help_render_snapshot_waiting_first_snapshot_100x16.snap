@@ -1,6 +1,6 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2210
+assertion_line: 2506
 expression: snapshot
 ---
  GRID PLATFORM  WAITING SNAPSHOT  Waiting for first snapshot                                        
@@ -10,7 +10,7 @@ expression: snapshot
 │1 Dashboard   2 Grid   3 Market   4 Events   ? Help  ││Focus  Shortcuts                           │
 │Tab / Shift-Tab moves focus between panels on the    ││Health  SERVICE RECONNECTING               │
 │current page.                                        ││Strategy Orders: target orders produced by │
-│p Pause   r Resume   l Toggle language               ││the strategy.                              │
+│[/] Cycle inst   p Pause   r Resume   l Language     ││the strategy.                              │
 │c Cancel all   f Flatten now   s Shutdown after      ││Exchange Orders: shown only when live      │
 │flatten                                              ││exchange data is available.                │
 │Enter confirms danger actions; Esc or n cancels.     ││If the dashboard shows an unavailable      │

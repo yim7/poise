@@ -11,6 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Application,
     application::success,
     protocol::{
         AlertsFilters, AlertsQueryResult, CommandAccepted, CommandRequest, CommandType,
@@ -20,7 +21,6 @@ use crate::{
         ServerEnvelope,
     },
     registry::{ApplicationRegistry, InstancesDirectory},
-    Application,
 };
 
 pub fn build_app(registry: impl Into<ApplicationRegistry>) -> Router {
@@ -56,14 +56,38 @@ pub fn build_app(registry: impl Into<ApplicationRegistry>) -> Router {
             "/instances/{symbol}/runtime/snapshot",
             get(runtime_snapshot_for_instance),
         )
-        .route("/instances/{symbol}/orders/open", get(open_orders_for_instance))
-        .route("/instances/{symbol}/fills/recent", get(recent_fills_for_instance))
-        .route("/instances/{symbol}/risk/events", get(risk_events_for_instance))
-        .route("/instances/{symbol}/system/events", get(system_events_for_instance))
-        .route("/instances/{symbol}/query/runtime", get(query_runtime_for_instance))
-        .route("/instances/{symbol}/query/orders", get(query_orders_for_instance))
-        .route("/instances/{symbol}/query/fills", get(query_fills_for_instance))
-        .route("/instances/{symbol}/query/alerts", get(query_alerts_for_instance))
+        .route(
+            "/instances/{symbol}/orders/open",
+            get(open_orders_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/fills/recent",
+            get(recent_fills_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/risk/events",
+            get(risk_events_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/system/events",
+            get(system_events_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/query/runtime",
+            get(query_runtime_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/query/orders",
+            get(query_orders_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/query/fills",
+            get(query_fills_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/query/alerts",
+            get(query_alerts_for_instance),
+        )
         .route(
             "/instances/{symbol}/query/commands",
             get(query_commands_for_instance),
@@ -72,8 +96,14 @@ pub fn build_app(registry: impl Into<ApplicationRegistry>) -> Router {
             "/instances/{symbol}/control-plane/capabilities",
             get(control_plane_capabilities_for_instance),
         )
-        .route("/instances/{symbol}/commands/pause", post(pause_for_instance))
-        .route("/instances/{symbol}/commands/resume", post(resume_for_instance))
+        .route(
+            "/instances/{symbol}/commands/pause",
+            post(pause_for_instance),
+        )
+        .route(
+            "/instances/{symbol}/commands/resume",
+            post(resume_for_instance),
+        )
         .route(
             "/instances/{symbol}/commands/cancel-all",
             post(cancel_all_for_instance),
@@ -314,14 +344,16 @@ async fn query_orders_for_instance(
     Query(params): Query<OrdersQueryParams>,
 ) -> Result<Json<HttpSuccessEnvelope<OrdersQueryResult>>, ApiError> {
     let (page, per_page) = normalize_pagination(params.page, params.per_page);
-    Ok(Json(success(application_for_symbol(&registry, &symbol)?.query_orders(
-        page,
-        per_page,
-        OrdersFilters {
-            side: params.side,
-            status: params.status,
-        },
-    ))))
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.query_orders(
+            page,
+            per_page,
+            OrdersFilters {
+                side: params.side,
+                status: params.status,
+            },
+        ),
+    )))
 }
 
 async fn query_fills(
@@ -346,15 +378,17 @@ async fn query_fills_for_instance(
     Query(params): Query<FillsQueryParams>,
 ) -> Result<Json<HttpSuccessEnvelope<FillsQueryResult>>, ApiError> {
     let (page, per_page) = normalize_pagination(params.page, params.per_page);
-    Ok(Json(success(application_for_symbol(&registry, &symbol)?.query_fills(
-        page,
-        per_page,
-        FillsFilters {
-            side: params.side,
-            order_id: params.order_id,
-            client_order_id: params.client_order_id,
-        },
-    ))))
+    Ok(Json(success(
+        application_for_symbol(&registry, &symbol)?.query_fills(
+            page,
+            per_page,
+            FillsFilters {
+                side: params.side,
+                order_id: params.order_id,
+                client_order_id: params.client_order_id,
+            },
+        ),
+    )))
 }
 
 async fn query_alerts(
@@ -434,7 +468,9 @@ async fn query_commands_for_instance(
 async fn control_plane_capabilities(
     State(registry): State<ApplicationRegistry>,
 ) -> Json<HttpSuccessEnvelope<ControlPlaneCapabilities>> {
-    Json(success(default_application(&registry).control_plane_capabilities()))
+    Json(success(
+        default_application(&registry).control_plane_capabilities(),
+    ))
 }
 
 async fn control_plane_capabilities_for_instance(
@@ -442,7 +478,7 @@ async fn control_plane_capabilities_for_instance(
     State(registry): State<ApplicationRegistry>,
 ) -> Result<Json<HttpSuccessEnvelope<ControlPlaneCapabilities>>, ApiError> {
     Ok(Json(success(
-        application_for_symbol(&registry, &symbol)?.control_plane_capabilities(),
+        application_for_symbol(&registry, &symbol)?.instance_scoped_control_plane_capabilities(),
     )))
 }
 
@@ -458,7 +494,12 @@ async fn pause_for_instance(
     State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application_for_symbol(&registry, &symbol)?, CommandType::Pause, request).await
+    issue_command(
+        application_for_symbol(&registry, &symbol)?,
+        CommandType::Pause,
+        request,
+    )
+    .await
 }
 
 async fn resume(
@@ -473,14 +514,24 @@ async fn resume_for_instance(
     State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(application_for_symbol(&registry, &symbol)?, CommandType::Resume, request).await
+    issue_command(
+        application_for_symbol(&registry, &symbol)?,
+        CommandType::Resume,
+        request,
+    )
+    .await
 }
 
 async fn cancel_all(
     State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(default_application(&registry), CommandType::CancelAll, request).await
+    issue_command(
+        default_application(&registry),
+        CommandType::CancelAll,
+        request,
+    )
+    .await
 }
 
 async fn cancel_all_for_instance(
@@ -500,7 +551,12 @@ async fn flatten_now(
     State(registry): State<ApplicationRegistry>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<HttpSuccessEnvelope<CommandAccepted>>, ApiError> {
-    issue_command(default_application(&registry), CommandType::FlattenNow, request).await
+    issue_command(
+        default_application(&registry),
+        CommandType::FlattenNow,
+        request,
+    )
+    .await
 }
 
 async fn flatten_now_for_instance(

@@ -21,6 +21,8 @@ pub fn map_key_event(event: KeyEvent) -> Option<KeyAction> {
         KeyCode::Char('3') => Some(KeyAction::ViewMarket),
         KeyCode::Char('4') => Some(KeyAction::ViewEvents),
         KeyCode::Char('?') => Some(KeyAction::ToggleHelp),
+        KeyCode::Char('[') => Some(KeyAction::PrevInstance),
+        KeyCode::Char(']') => Some(KeyAction::NextInstance),
         KeyCode::Tab => Some(KeyAction::NextFocus),
         KeyCode::BackTab => Some(KeyAction::PrevFocus),
         KeyCode::Char('p') => Some(KeyAction::Pause),
@@ -76,5 +78,19 @@ mod tests {
         let action = map_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
 
         assert_eq!(action, Some(KeyAction::ToggleLocale));
+    }
+
+    #[test]
+    fn plain_right_bracket_cycles_to_next_instance() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+
+        assert_eq!(action, Some(KeyAction::NextInstance));
+    }
+
+    #[test]
+    fn plain_left_bracket_cycles_to_previous_instance() {
+        let action = map_key_event(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+
+        assert_eq!(action, Some(KeyAction::PrevInstance));
     }
 }

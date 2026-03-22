@@ -1236,7 +1236,10 @@ async fn price_reentering_range_places_orders_automatically() -> Result<()> {
         spawn_engine_with_runtime_and_adapter(runtime, None, adapter.clone());
 
     let initial_snapshot = read_model.read().expect("read model").snapshot();
-    assert_eq!(initial_snapshot.strategy.status, StrategyStatus::WaitingRangeEntry);
+    assert_eq!(
+        initial_snapshot.strategy.status,
+        StrategyStatus::WaitingRangeEntry
+    );
     assert!(initial_snapshot.execution.open_orders.is_empty());
 
     engine.emit_price_tick().await?;

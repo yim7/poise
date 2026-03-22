@@ -1,6 +1,6 @@
 ---
 source: tui/src/render.rs
-assertion_line: 2334
+assertion_line: 2506
 expression: snapshot
 ---
  GRID PLATFORM  XAUUSDT testnet running  HEALTHY  stale 0ms  Focus Strategy Orders  Pending 0                           
@@ -20,4 +20,4 @@ expression: snapshot
 │                                                                           ││Breaker  OFF                             │
 └───────────────────────────────────────────────────────────────────────────┘└─────────────────────────────────────────┘
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- Focus Strategy Orders | 1-4 pages ? help | Tab/Shift-Tab panels | p/r runtime | c/f/s danger ops | Enter/Esc modal
+ Focus Strategy Orders | 1-4 pages ? help | [/] inst | Tab panels | p/r run | c/f/s danger | Enter/Esc

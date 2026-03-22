@@ -48,6 +48,53 @@ pub fn dashboard(state: &AppState) -> DashboardViewModel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceItemViewModel {
+    pub symbol: String,
+    pub environment: String,
+    pub is_default: bool,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstancesViewModel {
+    pub environment: String,
+    pub default_symbol: Option<String>,
+    pub current_symbol: Option<String>,
+    pub items: Vec<InstanceItemViewModel>,
+}
+
+pub fn instances(state: &AppState) -> InstancesViewModel {
+    let current_symbol = state.instances.current_symbol.clone();
+    let default_symbol = state.instances.default_symbol.clone();
+    let mut items: Vec<_> = state
+        .instances
+        .items
+        .iter()
+        .map(|item| InstanceItemViewModel {
+            symbol: item.symbol.clone(),
+            environment: item.environment.clone(),
+            is_default: item.is_default,
+            is_current: current_symbol
+                .as_deref()
+                .is_some_and(|symbol| symbol == item.symbol),
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        b.is_current
+            .cmp(&a.is_current)
+            .then(b.is_default.cmp(&a.is_default))
+            .then(a.symbol.cmp(&b.symbol))
+    });
+
+    InstancesViewModel {
+        environment: state.instances.environment.clone(),
+        default_symbol,
+        current_symbol,
+        items,
+    }
+}
+
 pub fn dashboard_health_detail(state: &AppState) -> String {
     let selector_copy = locale::copy(state.ui.locale).selector();
     let health = connection_health(state);
@@ -535,6 +582,7 @@ fn grid_level_state_label(locale: Locale, state: GridLevelState) -> &'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::InstanceSummary;
     use crate::{protocol::CommandLinks, state::AppState};
 
     #[test]
@@ -717,6 +765,40 @@ mod tests {
             fill_items[0].command_ref.as_deref(),
             Some("取消全部 cmd_cancel_01")
         );
+    }
+
+    #[test]
+    fn instances_selector_marks_current_item_first() {
+        let mut state = AppState::sample();
+        state.instances.environment = "testnet".into();
+        state.instances.default_symbol = Some("BTCUSDT".into());
+        state.instances.current_symbol = Some("ETHUSDT".into());
+        state.instances.items = vec![
+            InstanceSummary {
+                symbol: "BTCUSDT".into(),
+                environment: "testnet".into(),
+                is_default: true,
+            },
+            InstanceSummary {
+                symbol: "ETHUSDT".into(),
+                environment: "testnet".into(),
+                is_default: false,
+            },
+            InstanceSummary {
+                symbol: "SOLUSDT".into(),
+                environment: "testnet".into(),
+                is_default: false,
+            },
+        ];
+
+        let vm = instances(&state);
+
+        assert_eq!(vm.environment, "testnet");
+        assert_eq!(vm.current_symbol.as_deref(), Some("ETHUSDT"));
+        assert_eq!(vm.default_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(vm.items[0].symbol, "ETHUSDT");
+        assert!(vm.items[0].is_current);
+        assert!(vm.items[1].is_default);
     }
 
     #[test]

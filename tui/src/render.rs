@@ -1152,7 +1152,9 @@ fn draw_market(
     viewport: Viewport,
 ) {
     let copy = locale::copy(state.ui.locale);
+    let common = copy.common();
     let vm = selectors::market(state);
+    let instances = selectors::instances(state);
     let health = selectors::connection_health(state);
     let layout = if viewport.compact() {
         Layout::default()
@@ -1244,20 +1246,31 @@ fn draw_market(
     .wrap(Wrap { trim: true });
     frame.render_widget(connectivity, layout[1]);
 
-    let runtime = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(copy.market().session_label(), theme.muted()),
-            Span::styled(vm.session_state, theme.panel()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.market().heartbeat_label(), theme.muted()),
-            Span::styled(vm.heartbeat, theme.panel()),
-        ]),
-        Line::from(vec![
-            Span::styled(copy.market().strategy_label(), theme.muted()),
-            Span::styled(state.runtime.strategy_state.clone(), theme.warning()),
-        ]),
-    ])
+    let runtime = Paragraph::new(
+        vec![
+            Line::from(vec![
+                Span::styled(copy.market().session_label(), theme.muted()),
+                Span::styled(vm.session_state, theme.panel()),
+            ]),
+            Line::from(vec![
+                Span::styled(copy.market().heartbeat_label(), theme.muted()),
+                Span::styled(vm.heartbeat, theme.panel()),
+            ]),
+            Line::from(vec![
+                Span::styled(copy.market().strategy_label(), theme.muted()),
+                Span::styled(state.runtime.strategy_state.clone(), theme.warning()),
+            ]),
+        ]
+        .into_iter()
+        .chain(instance_list_lines(
+            &copy,
+            &common,
+            theme,
+            &instances,
+            layout[2].height,
+        ))
+        .collect::<Vec<_>>(),
+    )
     .block(panel_block(
         theme,
         copy.market().runtime_title(),
@@ -1266,6 +1279,90 @@ fn draw_market(
     ))
     .wrap(Wrap { trim: true });
     frame.render_widget(runtime, layout[2]);
+}
+
+fn instance_list_lines(
+    copy: &crate::locale::UiCopy,
+    common: &crate::locale::CommonCopy,
+    theme: &Theme,
+    instances: &selectors::InstancesViewModel,
+    available_height: u16,
+) -> Vec<Line<'static>> {
+    if instances.items.is_empty() {
+        return vec![Line::from(vec![Span::styled(
+            copy.instances().empty(),
+            theme.muted(),
+        )])];
+    }
+
+    let default_symbol = instances
+        .default_symbol
+        .as_deref()
+        .unwrap_or(common.none_value());
+    let current_symbol = instances
+        .current_symbol
+        .as_deref()
+        .unwrap_or(common.none_value());
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(copy.instances().title(), theme.emphasis()),
+            Span::styled(" ", theme.muted()),
+            Span::styled(copy.instances().summary_label(), theme.muted()),
+            Span::styled(" ", theme.muted()),
+            Span::styled(instances.environment.clone(), theme.panel()),
+            Span::styled(" · ", theme.muted()),
+            Span::styled(copy.instances().default_label(), theme.muted()),
+            Span::styled(format!(" {}", default_symbol), theme.warning()),
+            Span::styled(" · ", theme.muted()),
+            Span::styled(copy.instances().current_label(), theme.muted()),
+            Span::styled(format!(" {}", current_symbol), theme.emphasis()),
+        ]),
+    ];
+
+    let header_lines = lines.len() as u16;
+    let available_items = available_height.saturating_sub(header_lines) as usize;
+    for item in instances.items.iter().take(available_items) {
+        let marker_style = if item.is_current {
+            theme.emphasis()
+        } else if item.is_default {
+            theme.warning()
+        } else {
+            theme.muted()
+        };
+        let symbol_style = if item.is_current {
+            theme.emphasis()
+        } else if item.is_default {
+            theme.panel()
+        } else {
+            theme.panel()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                if item.is_current {
+                    "> "
+                } else if item.is_default {
+                    "* "
+                } else {
+                    "  "
+                },
+                marker_style,
+            ),
+            Span::styled(item.symbol.clone(), symbol_style),
+            Span::styled(" · ", theme.muted()),
+            Span::styled(item.environment.clone(), theme.muted()),
+        ]));
+    }
+
+    if available_items < instances.items.len() {
+        lines.push(Line::from(vec![Span::styled(
+            copy.instances()
+                .more(instances.items.len() - available_items),
+            theme.muted(),
+        )]));
+    }
+
+    lines
 }
 
 fn draw_events(
@@ -1931,6 +2028,75 @@ mod tests {
     }
 
     #[test]
+    fn market_renders_instances_list_100x16() {
+        let rendered = normalized_page_string(Page::Market, 100, 16, |state| {
+            state.instances.environment = "testnet".into();
+            state.instances.default_symbol = Some("BTCUSDT".into());
+            state.instances.current_symbol = Some("ETHUSDT".into());
+            state.instances.items = vec![
+                crate::protocol::InstanceSummary {
+                    symbol: "BTCUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: true,
+                },
+                crate::protocol::InstanceSummary {
+                    symbol: "ETHUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+                crate::protocol::InstanceSummary {
+                    symbol: "SOLUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+            ];
+        });
+
+        assert!(rendered.contains("Instances"));
+        assert!(rendered.contains("Env"));
+        assert!(rendered.contains("Current"));
+        assert!(rendered.contains("ETHUSDT"));
+        assert!(rendered.contains("BTCUSDT"));
+        assert!(rendered.contains("SOLUSDT"));
+        assert!(rendered.contains(">ETHUSDT"));
+    }
+
+    #[test]
+    fn market_renders_instances_list_zh_cn_100x16() {
+        let rendered = normalized_page_string(Page::Market, 100, 16, |state| {
+            state.ui.locale = Locale::ZhCn;
+            state.instances.environment = "testnet".into();
+            state.instances.default_symbol = Some("BTCUSDT".into());
+            state.instances.current_symbol = Some("ETHUSDT".into());
+            state.instances.items = vec![
+                crate::protocol::InstanceSummary {
+                    symbol: "BTCUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: true,
+                },
+                crate::protocol::InstanceSummary {
+                    symbol: "ETHUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+                crate::protocol::InstanceSummary {
+                    symbol: "SOLUSDT".into(),
+                    environment: "testnet".into(),
+                    is_default: false,
+                },
+            ];
+        });
+
+        assert!(rendered.contains("实例列表"));
+        assert!(rendered.contains("环境"));
+        assert!(rendered.contains("当前"));
+        assert!(rendered.contains("ETHUSDT"));
+        assert!(rendered.contains("BTCUSDT"));
+        assert!(rendered.contains("SOLUSDT"));
+        assert!(rendered.contains(">ETHUSDT"));
+    }
+
+    #[test]
     fn events_render_snapshot_120x18() {
         assert_page_snapshot(
             Page::Events,
@@ -2032,11 +2198,15 @@ mod tests {
             "market_render_snapshot_snapshot_retrying_100x16",
             |state| {
                 *state = AppState::waiting_first_snapshot();
+                state.instances.current_symbol = Some("XAUUSDT".into());
+                state.instances.generation = 1;
                 reduce(
                     state,
-                    AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
-                        "upstream timeout".into(),
-                    )),
+                    AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                        symbol: "XAUUSDT".into(),
+                        generation: 1,
+                        error: "upstream timeout".into(),
+                    }),
                 );
             },
         );
@@ -2053,11 +2223,15 @@ mod tests {
             |state| {
                 *state = AppState::waiting_first_snapshot_with_locale(Locale::ZhCn);
                 state.ui.page = Page::Market;
+                state.instances.current_symbol = Some("XAUUSDT".into());
+                state.instances.generation = 1;
                 reduce(
                     state,
-                    AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
-                        "upstream timeout".into(),
-                    )),
+                    AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                        symbol: "XAUUSDT".into(),
+                        generation: 1,
+                        error: "upstream timeout".into(),
+                    }),
                 );
             },
         );
@@ -2109,11 +2283,15 @@ mod tests {
     fn snapshot_retrying_hides_sample_business_data() {
         let rendered = render_page_to_string_after_mutate(Page::Events, 80, 24, |state| {
             *state = AppState::waiting_first_snapshot();
+            state.instances.current_symbol = Some("XAUUSDT".into());
+            state.instances.generation = 1;
             reduce(
                 state,
-                AppEvent::EffectResult(EffectResultEvent::SnapshotFailed(
-                    "upstream timeout".into(),
-                )),
+                AppEvent::EffectResult(EffectResultEvent::SnapshotFailed {
+                    symbol: "XAUUSDT".into(),
+                    generation: 1,
+                    error: "upstream timeout".into(),
+                }),
             );
         });
 

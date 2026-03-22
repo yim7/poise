@@ -1,5 +1,6 @@
 ---
 source: tui/src/render.rs
+assertion_line: 2512
 expression: snapshot
 ---
  GRID PLATFORM  WAITING SNAPSHOT  Waiting for first snapshot                                        
@@ -7,11 +8,11 @@ expression: snapshot
                                                                                                     
 ┌ Execution Focus ─────────────────────────────────────┐┌ Risk + Alerts ───────────────────────────┐
 │Initial snapshot pending                              ││Initial snapshot pending                  │
-│Waiting for /runtime/snapshot before showing live     ││Waiting for /runtime/snapshot before      │
+│Waiting for /instances and                            ││Waiting for /instances and                │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Open Orders ─────────────────────────────────────────┐┌ Market + Health ─────────────────────────┐
 │Initial snapshot pending                              ││Initial snapshot pending                  │
-│Waiting for /runtime/snapshot before showing live     ││Waiting for /runtime/snapshot before      │
+│Waiting for /instances and                            ││Waiting for /instances and                │
 └──────────────────────────────────────────────────────┘└──────────────────────────────────────────┘
 ┌ Recent Fills ────────────────────────────────────────┐┌ Command Timeline ────────────────────────┐
 │Initial snapshot pending                              ││Initial snapshot pending                  │

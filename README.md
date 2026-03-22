@@ -35,6 +35,44 @@ cargo run -p grid-platform-service
 - 使用内存运行态
 - 不连接真实 Binance
 
+如果要按配置文件一次启动多个固定区间网格实例，先按下面示例创建 `configs/testnet.toml`，再传入 `--config`：
+
+```bash
+cargo run -p grid-platform-service -- --config configs/testnet.toml
+```
+
+配置文件示例：
+
+```toml
+environment = "testnet"
+default_symbol = "BTCUSDT"
+
+[[instances]]
+symbol = "BTCUSDT"
+
+[instances.range]
+lower_price = 90000
+upper_price = 110000
+grid_levels = 6
+max_position_notional = 3000
+
+[[instances]]
+symbol = "ETHUSDT"
+
+[instances.range]
+lower_price = 2200
+upper_price = 2800
+grid_levels = 8
+max_position_notional = 4000
+```
+
+配置文件模式下：
+
+- `service` 会读取 `[[instances]]` 中的所有标的
+- `default_symbol` 决定旧单实例兼容路由和 TUI 默认选中的标的
+- 每个实例的 SQLite 会自动落到 `.data/<environment>/<symbol-lowercase>.db`
+- 网格使用固定区间梯子模型：价格在区间内才挂单，区间外空仓时进入等待态
+
 ### 2. 另开终端启动 TUI
 
 ```bash
@@ -46,15 +84,26 @@ cargo run -p grid-platform-tui
 - HTTP：`http://127.0.0.1:8000`
 - WebSocket：`ws://127.0.0.1:8000/ws`
 
+TUI 启动后会先拉取 `/instances`，选择 `default_symbol`，再连接该标的的实例作用域快照和 WebSocket。运行中可以在实例列表里切换当前查看的标的，其余详情页保持单实例视角。快捷键：
+
+- `[`：切到上一个实例
+- `]`：切到下一个实例
+
 ### 3. 快速确认服务可用
 
-如果只想先确认服务端已经起来，可以直接请求快照接口：
+如果只想先确认服务端已经起来，可以先看实例目录：
 
 ```bash
-curl http://127.0.0.1:8000/runtime/snapshot
+curl http://127.0.0.1:8000/instances
 ```
 
-如果想走完整链路，启动 `tui` 后应能拉到启动快照，并继续接收服务端 WebSocket 增量事件。
+再按具体标的查看快照：
+
+```bash
+curl http://127.0.0.1:8000/instances/BTCUSDT/runtime/snapshot
+```
+
+如果想走完整链路，启动 `tui` 后应能先拉到实例目录，再拉当前实例快照，并继续接收实例作用域 WebSocket 增量事件。
 
 ## 常用运行方式
 
@@ -127,5 +176,5 @@ cargo test -p grid-platform-service --test control_plane -- --nocapture
 
 - 当前仓库是一个 Rust workspace，包含 `service` 和 `tui` 两个 crate
 - `service` 是唯一的服务端状态中心，未来 Web UI 也会复用同一套控制面
-- `tui` 通过 `snapshot + incremental events` 模型消费服务端能力
+- `tui` 通过 `instances + snapshot + incremental events` 模型消费服务端能力
 - 对外协议约束同时以 Rust 类型定义和线协议语义文档为准
