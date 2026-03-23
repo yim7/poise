@@ -486,6 +486,7 @@ async fn sqlite_binance_sync_persists_latest_runtime_for_recovery() -> Result<()
                 realized_pnl: 7.1,
             }],
             order_updates: vec![],
+            recent_fills: vec![],
         })
         .await
         .context("failed to send persisted user event")?;
@@ -654,6 +655,7 @@ async fn sqlite_binance_stream_sync_retries_after_temporary_persist_failure() ->
                 realized_pnl: 4.8,
             }],
             order_updates: vec![],
+            recent_fills: vec![],
         })
         .await
         .context("failed to send user stream event during persistence outage")?;
@@ -754,6 +756,7 @@ async fn fake_binance_user_stream_updates_position_snapshot() -> Result<()> {
                 },
             ],
             order_updates: vec![],
+            recent_fills: vec![],
         })
         .await
         .context("failed to send user stream event")?;
@@ -848,6 +851,7 @@ async fn fake_binance_bootstrap_and_user_stream_sync_real_exchange_open_orders()
                 },
                 is_terminal: true,
             }],
+            recent_fills: vec![],
         })
         .await
         .context("failed to send order update event")?;
@@ -858,6 +862,137 @@ async fn fake_binance_bootstrap_and_user_stream_sync_real_exchange_open_orders()
             && snapshot.execution.exchange_open_orders.is_empty()
     })
     .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_binance_user_stream_persists_passive_fill_for_recovery() -> Result<()> {
+    let temp = tempdir()?;
+    let db_path = temp.path().join("service.db");
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+            order_rules: None,
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_listen_key("listen-key-passive-fill")
+    .with_open_orders(vec![OpenOrder {
+        order_id: "42".into(),
+        client_order_id: "grid_buy_01".into(),
+        side: "buy".into(),
+        price: 4510.25,
+        qty: 0.2,
+        filled_qty: 0.0,
+        status: "NEW".into(),
+        created_at: "2025-01-01T00:00:00Z".into(),
+        updated_at: "2025-01-01T00:00:00Z".into(),
+    }]);
+    let (_market_tx, market_rx) = mpsc::channel(16);
+    let (user_tx, user_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+    transport.push_user_stream(user_rx).await;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.user_stream_keepalive_interval = Duration::from_millis(30);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_sqlite_and_binance(
+        &db_path,
+        config,
+        Arc::new(transport.clone()),
+    )?;
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.user_stream_connected == Some(true)
+            && snapshot.execution.exchange_open_orders_source == OpenOrdersSource::ExchangeLive
+            && snapshot.execution.exchange_open_orders.len() == 1
+    })
+    .await?;
+
+    user_tx
+        .send(UserStreamEvent {
+            event_time_ms: now_ms + 2_000,
+            positions: vec![PositionSnapshot {
+                symbol: "XAUUSDT".into(),
+                qty: 0.1,
+                avg_price: 4509.8,
+                unrealized_pnl: 3.2,
+                realized_pnl: 1.4,
+            }],
+            order_updates: vec![UserStreamOrderUpdate {
+                symbol: "XAUUSDT".into(),
+                order: OpenOrder {
+                    order_id: "42".into(),
+                    client_order_id: "grid_buy_01".into(),
+                    side: "buy".into(),
+                    price: 4510.25,
+                    qty: 0.2,
+                    filled_qty: 0.1,
+                    status: "PARTIALLY_FILLED".into(),
+                    created_at: "2025-01-01T00:00:00Z".into(),
+                    updated_at: "2025-01-01T00:00:02Z".into(),
+                },
+                is_terminal: false,
+            }],
+            recent_fills: vec![RecentFill {
+                trade_id: "binance_9001".into(),
+                order_id: "42".into(),
+                client_order_id: Some("grid_buy_01".into()),
+                side: "buy".into(),
+                price: 4509.8,
+                qty: 0.1,
+                fee: 0.001,
+                realized_pnl: 1.4,
+                event_time: "2025-01-01T00:00:02Z".into(),
+            }],
+        })
+        .await
+        .context("failed to send passive fill user stream event")?;
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.runtime.position_qty == 0.1
+            && snapshot.execution.recent_fills.len() == 1
+            && snapshot.execution.recent_fills[0].trade_id == "binance_9001"
+            && snapshot.execution.exchange_open_orders.len() == 1
+            && snapshot.execution.exchange_open_orders[0].filled_qty == 0.1
+    })
+    .await
+    .context("passive fill did not reach runtime snapshot")?;
+
+    wait_until(Duration::from_secs(2), || {
+        SqliteStorage::open(&db_path)
+            .ok()
+            .and_then(|storage| storage.load_runtime().ok().flatten())
+            .is_some_and(|runtime| {
+                runtime.snapshot.execution.recent_fills.len() == 1
+                    && runtime.snapshot.execution.recent_fills[0].trade_id == "binance_9001"
+                    && runtime.snapshot.runtime.position_qty == 0.1
+            })
+    })
+    .await
+    .context("passive fill did not persist to sqlite recovery snapshot")?;
 
     Ok(())
 }

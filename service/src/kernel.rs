@@ -93,6 +93,10 @@ pub enum EngineCommand {
         source: OpenOrdersSource,
         reply_to: oneshot::Sender<Result<()>>,
     },
+    SyncRecentFills {
+        fills: Vec<RecentFill>,
+        reply_to: oneshot::Sender<Result<()>>,
+    },
     SyncMarketPrices {
         last_price: Option<f64>,
         mark_price: Option<f64>,
@@ -217,6 +221,18 @@ impl EngineHandle {
         let result = reply_rx
             .await
             .context("engine loop dropped before syncing exchange open orders")?;
+        result
+    }
+
+    pub(crate) async fn sync_recent_fills(&self, fills: Vec<RecentFill>) -> Result<()> {
+        let (reply_to, reply_rx) = oneshot::channel();
+        self.commands_tx
+            .send(EngineCommand::SyncRecentFills { fills, reply_to })
+            .await
+            .context("failed to enqueue recent fills sync")?;
+        let result = reply_rx
+            .await
+            .context("engine loop dropped before syncing recent fills")?;
         result
     }
 
@@ -555,6 +571,25 @@ async fn run_engine(
                 let _ = reply_to.send(Ok(()));
                 publish_events(&events_tx, events).await;
             }
+            EngineCommand::SyncRecentFills { fills, reply_to } => {
+                let previous = aggregate.clone();
+                let events = aggregate.sync_recent_fills(fills);
+                if !events.is_empty()
+                    && let Err(error) = persist_runtime_state(storage.as_ref(), &aggregate)
+                {
+                    aggregate = previous;
+                    let error = error.context("failed to persist recent fills sync");
+                    warn!(
+                        ?error,
+                        "failed to persist runtime state to sqlite; reverting recent fills sync"
+                    );
+                    let _ = reply_to.send(Err(error));
+                    continue;
+                }
+                replace_read_model(&read_model, &aggregate);
+                let _ = reply_to.send(Ok(()));
+                publish_events(&events_tx, events).await;
+            }
             EngineCommand::SyncMarketPrices {
                 last_price,
                 mark_price,
@@ -863,8 +898,8 @@ async fn execute_flatten(
     outcome.runtime_patch.position_avg_price = Some(0.0);
     outcome.runtime_patch.unrealized_pnl = Some(0.0);
     if let Some(realized_pnl) = flatten_realized_pnl {
-        outcome.runtime_patch.realized_pnl =
-            Some(working_snapshot.runtime.realized_pnl + realized_pnl);
+        let _ = realized_pnl;
+        outcome.runtime_patch.realized_pnl = Some(working_snapshot.runtime.realized_pnl);
     }
     Ok(outcome)
 }
@@ -1038,7 +1073,7 @@ fn apply_submit_result(
         if realized_pnl.abs() > f64::EPSILON {
             fill.realized_pnl = realized_pnl;
         }
-        snapshot.execution.recent_fills.insert(0, fill);
+        insert_recent_fill(&mut snapshot.execution.recent_fills, fill);
     }
 }
 
@@ -1370,6 +1405,21 @@ impl RuntimeAggregate {
         self.snapshot.execution.exchange_open_orders = orders;
         self.snapshot.execution.exchange_open_orders_source = source;
         vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone()))]
+    }
+
+    fn sync_recent_fills(&mut self, fills: Vec<RecentFill>) -> Vec<SequencedEngineEvent> {
+        let mut changed = false;
+        for fill in fills {
+            changed |= insert_recent_fill(&mut self.snapshot.execution.recent_fills, fill);
+        }
+
+        if !changed {
+            return Vec::new();
+        }
+
+        vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(
+            self.snapshot.clone(),
+        ))]
     }
 
     fn sync_market_prices(
@@ -1851,7 +1901,7 @@ impl RuntimeAggregate {
 
         if !patch.recent_fills.is_empty() {
             for fill in patch.recent_fills.iter().rev() {
-                self.snapshot.execution.recent_fills.insert(0, fill.clone());
+                insert_recent_fill(&mut self.snapshot.execution.recent_fills, fill.clone());
             }
             changed = true;
         }
@@ -1871,6 +1921,21 @@ impl RuntimeAggregate {
             event,
         }
     }
+}
+
+fn insert_recent_fill(recent_fills: &mut Vec<RecentFill>, fill: RecentFill) -> bool {
+    if recent_fills.iter().any(|existing| {
+        existing.trade_id == fill.trade_id
+            || (existing.order_id == fill.order_id
+                && existing.client_order_id == fill.client_order_id
+                && existing.event_time == fill.event_time
+                && (existing.qty - fill.qty).abs() <= f64::EPSILON)
+    }) {
+        return false;
+    }
+
+    recent_fills.insert(0, fill);
+    true
 }
 
 fn persist_runtime_state(

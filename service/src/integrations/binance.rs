@@ -164,6 +164,7 @@ pub struct UserStreamEvent {
     pub event_time_ms: i64,
     pub positions: Vec<PositionSnapshot>,
     pub order_updates: Vec<UserStreamOrderUpdate>,
+    pub recent_fills: Vec<RecentFill>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1059,8 +1060,14 @@ async fn run_user_stream_loop(
                             let Some(event) = maybe_event else {
                                 break;
                             };
-                            if !event.order_updates.is_empty() && config.api_secret.is_some() {
-                                for update in event.order_updates {
+                            let UserStreamEvent {
+                                positions,
+                                order_updates,
+                                recent_fills,
+                                ..
+                            } = event;
+                            if !order_updates.is_empty() && config.api_secret.is_some() {
+                                for update in order_updates {
                                     if update.symbol != config.symbol {
                                         continue;
                                     }
@@ -1075,8 +1082,16 @@ async fn run_user_stream_loop(
                                 )
                                 .await;
                             }
-                            if let Some(position) = event
-                                .positions
+                            if !recent_fills.is_empty() {
+                                sync_recent_fills_until_applied(
+                                    &engine,
+                                    recent_fills,
+                                    config.reconnect_base_delay,
+                                    "binance user stream fill sync",
+                                )
+                                .await;
+                            }
+                            if let Some(position) = positions
                                 .into_iter()
                                 .find(|position| position.symbol == config.symbol)
                             {
@@ -1270,12 +1285,14 @@ fn decode_user_stream(payload: &str) -> Result<Option<UserStreamEvent>> {
                 event_time_ms: event.event_time,
                 positions,
                 order_updates: vec![],
+                recent_fills: vec![],
             }))
         }
         "ORDER_TRADE_UPDATE" => {
             let Some(order_trade_update) = event.order_trade_update else {
                 return Ok(None);
             };
+            let recent_fill = translate_recent_fill(&order_trade_update.order);
             Ok(Some(UserStreamEvent {
                 event_time_ms: event.event_time,
                 positions: vec![],
@@ -1283,6 +1300,7 @@ fn decode_user_stream(payload: &str) -> Result<Option<UserStreamEvent>> {
                     order_trade_update.order,
                     event.event_time,
                 )],
+                recent_fills: recent_fill.into_iter().collect(),
             }))
         }
         _ => Ok(None),
@@ -1310,6 +1328,36 @@ fn translate_order_update(
             updated_at,
         },
     }
+}
+
+fn translate_recent_fill(order: &OrderTradeUpdateOrder) -> Option<RecentFill> {
+    let fill_qty = order.last_filled_qty.unwrap_or(0.0);
+    if fill_qty <= f64::EPSILON {
+        return None;
+    }
+
+    let fill_price = order
+        .last_filled_price
+        .filter(|price| *price > f64::EPSILON)
+        .or(order.avg_price.filter(|price| *price > f64::EPSILON))
+        .unwrap_or(order.price);
+    let fill_time_ms = order.trade_time_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
+    let trade_id = order
+        .trade_id
+        .map(|trade_id| format!("binance_{trade_id}"))
+        .unwrap_or_else(|| format!("binance_{}_{}", order.order_id, fill_time_ms));
+
+    Some(RecentFill {
+        trade_id,
+        order_id: order.order_id.to_string(),
+        client_order_id: Some(order.client_order_id.clone()),
+        side: order.side.to_ascii_lowercase(),
+        price: fill_price,
+        qty: fill_qty,
+        fee: order.commission.unwrap_or(0.0),
+        realized_pnl: order.realized_pnl.unwrap_or(0.0),
+        event_time: timestamp_millis_to_rfc3339(fill_time_ms),
+    })
 }
 
 fn apply_order_update(open_orders: &mut Vec<OpenOrder>, update: UserStreamOrderUpdate) {
@@ -1505,6 +1553,23 @@ async fn sync_exchange_open_orders_until_applied(
                     %context,
                     "failed to persist exchange open orders; retrying"
                 );
+                sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+async fn sync_recent_fills_until_applied(
+    engine: &EngineHandle,
+    fills: Vec<RecentFill>,
+    retry_delay: Duration,
+    context: &'static str,
+) {
+    loop {
+        match engine.sync_recent_fills(fills.clone()).await {
+            Ok(()) => return,
+            Err(error) => {
+                warn!(?error, %context, "failed to persist recent fills; retrying");
                 sleep(retry_delay).await;
             }
         }
@@ -1728,6 +1793,40 @@ struct OrderTradeUpdateOrder {
     order_id: i64,
     #[serde(rename = "z", deserialize_with = "deserialize_string_number")]
     accumulated_filled_qty: f64,
+    #[serde(
+        rename = "ap",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    avg_price: Option<f64>,
+    #[serde(
+        rename = "l",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    last_filled_qty: Option<f64>,
+    #[serde(
+        rename = "L",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    last_filled_price: Option<f64>,
+    #[serde(rename = "t", default)]
+    trade_id: Option<i64>,
+    #[serde(rename = "T", default)]
+    trade_time_ms: Option<i64>,
+    #[serde(
+        rename = "n",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    commission: Option<f64>,
+    #[serde(
+        rename = "rp",
+        default,
+        deserialize_with = "deserialize_optional_string_number"
+    )]
+    realized_pnl: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2068,6 +2167,52 @@ mod tests {
         assert_eq!(positions[0].avg_price, 100.0);
         assert_eq!(positions[0].unrealized_pnl, 8.0);
         assert_eq!(positions[0].realized_pnl, 4.0);
+    }
+
+    #[test]
+    fn decode_user_stream_trade_update_emits_fill_fact() {
+        let payload = serde_json::json!({
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1_710_000_000_000_i64,
+            "o": {
+                "s": "XAUUSDT",
+                "c": "grid_buy_01",
+                "S": "BUY",
+                "q": "0.250",
+                "p": "2350.0",
+                "X": "PARTIALLY_FILLED",
+                "i": 42,
+                "z": "0.100",
+                "x": "TRADE",
+                "l": "0.100",
+                "L": "2349.5",
+                "ap": "2349.5",
+                "t": 9001,
+                "T": 1_710_000_000_123_i64,
+                "n": "0.001",
+                "rp": "1.25"
+            }
+        })
+        .to_string();
+
+        let event = decode_user_stream(&payload)
+            .expect("decode should succeed")
+            .expect("trade update should emit event");
+
+        assert_eq!(event.order_updates.len(), 1);
+        assert_eq!(event.recent_fills.len(), 1);
+        assert_eq!(event.recent_fills[0].trade_id, "binance_9001");
+        assert_eq!(event.recent_fills[0].order_id, "42");
+        assert_eq!(
+            event.recent_fills[0].client_order_id.as_deref(),
+            Some("grid_buy_01")
+        );
+        assert_eq!(event.recent_fills[0].side, "buy");
+        assert_eq!(event.recent_fills[0].price, 2349.5);
+        assert_eq!(event.recent_fills[0].qty, 0.1);
+        assert_eq!(event.recent_fills[0].fee, 0.001);
+        assert_eq!(event.recent_fills[0].realized_pnl, 1.25);
+        assert_eq!(event.recent_fills[0].event_time, "2024-03-09T16:00:00Z");
     }
 
     #[derive(Clone, Default)]
