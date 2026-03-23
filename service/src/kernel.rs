@@ -33,6 +33,7 @@ const STRATEGY_SYNC_BASE_TIMEOUT: Duration = Duration::from_millis(250);
 const STRATEGY_SYNC_TIMEOUT_PER_ORDER_MS: u64 = 250;
 const STRATEGY_SYNC_MAX_TIMEOUT: Duration = Duration::from_secs(15);
 const STRATEGY_SYNC_FAILURE_THRESHOLD: usize = 3;
+const BINANCE_REST_FILL_MATCH_WINDOW_MS: i64 = 5_000;
 
 pub type SharedReadModel = Arc<RwLock<ReadModel>>;
 
@@ -1417,9 +1418,7 @@ impl RuntimeAggregate {
             return Vec::new();
         }
 
-        vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(
-            self.snapshot.clone(),
-        ))]
+        vec![self.sequenced_event(EngineEvent::RuntimeSnapshot(self.snapshot.clone()))]
     }
 
     fn sync_market_prices(
@@ -1880,7 +1879,7 @@ impl RuntimeAggregate {
             self.snapshot.execution.open_orders = open_orders.clone();
         }
         if let Some(recent_fills) = &outcome.recent_fills {
-            self.snapshot.execution.recent_fills = recent_fills.clone();
+            merge_recent_fills(&mut self.snapshot.execution.recent_fills, recent_fills);
         }
         apply_execution_runtime_patch(&mut self.snapshot, &outcome.runtime_patch);
     }
@@ -1899,12 +1898,10 @@ impl RuntimeAggregate {
             changed = true;
         }
 
-        if !patch.recent_fills.is_empty() {
-            for fill in patch.recent_fills.iter().rev() {
-                insert_recent_fill(&mut self.snapshot.execution.recent_fills, fill.clone());
-            }
-            changed = true;
-        }
+        changed |= merge_recent_fills(
+            &mut self.snapshot.execution.recent_fills,
+            &patch.recent_fills,
+        );
 
         changed |= apply_execution_runtime_patch(&mut self.snapshot, &patch.runtime_patch);
         changed
@@ -1924,18 +1921,120 @@ impl RuntimeAggregate {
 }
 
 fn insert_recent_fill(recent_fills: &mut Vec<RecentFill>, fill: RecentFill) -> bool {
-    if recent_fills.iter().any(|existing| {
-        existing.trade_id == fill.trade_id
-            || (existing.order_id == fill.order_id
-                && existing.client_order_id == fill.client_order_id
-                && existing.event_time == fill.event_time
-                && (existing.qty - fill.qty).abs() <= f64::EPSILON)
-    }) {
+    if recent_fills
+        .iter()
+        .any(|existing| recent_fill_is_duplicate(existing, &fill))
+    {
         return false;
+    }
+
+    if real_binance_trades_cover_rest_placeholder(recent_fills, &fill) {
+        return false;
+    }
+
+    let replacements = matching_binance_rest_placeholder_indexes(recent_fills, &fill);
+    for index in replacements.into_iter().rev() {
+        recent_fills.remove(index);
     }
 
     recent_fills.insert(0, fill);
     true
+}
+
+fn merge_recent_fills(recent_fills: &mut Vec<RecentFill>, incoming: &[RecentFill]) -> bool {
+    let mut changed = false;
+    for fill in incoming.iter().rev() {
+        changed |= insert_recent_fill(recent_fills, fill.clone());
+    }
+    changed
+}
+
+fn recent_fill_is_duplicate(existing: &RecentFill, incoming: &RecentFill) -> bool {
+    existing.trade_id == incoming.trade_id
+        || (!is_binance_rest_placeholder(existing) || !is_real_binance_trade(incoming))
+            && existing.order_id == incoming.order_id
+            && existing.client_order_id == incoming.client_order_id
+            && existing.event_time == incoming.event_time
+            && (existing.qty - incoming.qty).abs() <= f64::EPSILON
+}
+
+fn matching_binance_rest_placeholder_indexes(
+    recent_fills: &[RecentFill],
+    incoming: &RecentFill,
+) -> Vec<usize> {
+    if !is_real_binance_trade(incoming) {
+        return Vec::new();
+    }
+
+    recent_fills
+        .iter()
+        .enumerate()
+        .filter_map(|(index, existing)| {
+            if !is_binance_rest_placeholder(existing)
+                || existing.order_id != incoming.order_id
+                || existing.client_order_id != incoming.client_order_id
+                || existing.side != incoming.side
+                || !recent_fill_times_close(existing, incoming)
+            {
+                return None;
+            }
+
+            let matched_qty =
+                matching_real_binance_trade_qty(recent_fills, existing) + incoming.qty;
+
+            (matched_qty + f64::EPSILON >= existing.qty).then_some(index)
+        })
+        .collect()
+}
+
+fn real_binance_trades_cover_rest_placeholder(
+    recent_fills: &[RecentFill],
+    incoming: &RecentFill,
+) -> bool {
+    is_binance_rest_placeholder(incoming)
+        && matching_real_binance_trade_qty(recent_fills, incoming) + f64::EPSILON >= incoming.qty
+}
+
+fn matching_real_binance_trade_qty(recent_fills: &[RecentFill], fill: &RecentFill) -> f64 {
+    recent_fills
+        .iter()
+        .filter(|candidate| matching_real_binance_trade(candidate, fill))
+        .map(|candidate| candidate.qty)
+        .sum::<f64>()
+}
+
+fn matching_real_binance_trade(candidate: &RecentFill, fill: &RecentFill) -> bool {
+    is_real_binance_trade(candidate)
+        && candidate.order_id == fill.order_id
+        && candidate.client_order_id == fill.client_order_id
+        && candidate.side == fill.side
+        && recent_fill_times_close(candidate, fill)
+}
+
+fn is_binance_rest_placeholder(fill: &RecentFill) -> bool {
+    fill.trade_id.starts_with("binance_rest_")
+}
+
+fn is_real_binance_trade(fill: &RecentFill) -> bool {
+    fill.trade_id.starts_with("binance_") && !is_binance_rest_placeholder(fill)
+}
+
+fn recent_fill_times_close(left: &RecentFill, right: &RecentFill) -> bool {
+    match (
+        recent_fill_timestamp_millis(left),
+        recent_fill_timestamp_millis(right),
+    ) {
+        (Some(left_ms), Some(right_ms)) => {
+            (left_ms - right_ms).abs() <= BINANCE_REST_FILL_MATCH_WINDOW_MS
+        }
+        _ => left.event_time == right.event_time,
+    }
+}
+
+fn recent_fill_timestamp_millis(fill: &RecentFill) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(&fill.event_time)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
 }
 
 fn persist_runtime_state(
@@ -2045,5 +2144,167 @@ fn status_level(status: CommandStatus) -> &'static str {
         CommandStatus::Pending | CommandStatus::Accepted | CommandStatus::Completed => "info",
         CommandStatus::TimedOut => "warn",
         CommandStatus::Failed => "error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuntimeAggregate, insert_recent_fill};
+    use crate::{execution::ExecutionOutcome, protocol::RecentFill, storage::PersistedRuntime};
+
+    #[test]
+    fn insert_recent_fill_keeps_real_binance_trade_over_rest_placeholder() {
+        let mut recent_fills = vec![RecentFill {
+            trade_id: "binance_rest_42_1735689600000".into(),
+            order_id: "42".into(),
+            client_order_id: Some("grid_buy_01".into()),
+            side: "buy".into(),
+            price: 4509.8,
+            qty: 0.1,
+            fee: 0.0,
+            realized_pnl: 0.0,
+            event_time: "2025-01-01T00:00:00Z".into(),
+        }];
+
+        let inserted = insert_recent_fill(
+            &mut recent_fills,
+            RecentFill {
+                trade_id: "binance_9001".into(),
+                order_id: "42".into(),
+                client_order_id: Some("grid_buy_01".into()),
+                side: "buy".into(),
+                price: 4509.8,
+                qty: 0.1,
+                fee: 0.001,
+                realized_pnl: 1.4,
+                event_time: "2025-01-01T00:00:00Z".into(),
+            },
+        );
+
+        assert!(inserted);
+        assert_eq!(recent_fills.len(), 1);
+        assert_eq!(recent_fills[0].trade_id, "binance_9001");
+    }
+
+    #[test]
+    fn insert_recent_fill_replaces_rest_placeholder_after_split_real_trades_cover_qty() {
+        let mut recent_fills = vec![RecentFill {
+            trade_id: "binance_rest_42_1735689600000".into(),
+            order_id: "42".into(),
+            client_order_id: Some("grid_buy_01".into()),
+            side: "buy".into(),
+            price: 4509.8,
+            qty: 0.1,
+            fee: 0.0,
+            realized_pnl: 0.0,
+            event_time: "2025-01-01T00:00:00Z".into(),
+        }];
+
+        assert!(insert_recent_fill(
+            &mut recent_fills,
+            RecentFill {
+                trade_id: "binance_9001".into(),
+                order_id: "42".into(),
+                client_order_id: Some("grid_buy_01".into()),
+                side: "buy".into(),
+                price: 4509.8,
+                qty: 0.04,
+                fee: 0.001,
+                realized_pnl: 0.56,
+                event_time: "2025-01-01T00:00:00Z".into(),
+            },
+        ));
+        assert_eq!(recent_fills.len(), 2);
+
+        assert!(insert_recent_fill(
+            &mut recent_fills,
+            RecentFill {
+                trade_id: "binance_9002".into(),
+                order_id: "42".into(),
+                client_order_id: Some("grid_buy_01".into()),
+                side: "buy".into(),
+                price: 4509.8,
+                qty: 0.06,
+                fee: 0.001,
+                realized_pnl: 0.84,
+                event_time: "2025-01-01T00:00:01Z".into(),
+            },
+        ));
+
+        assert_eq!(recent_fills.len(), 2);
+        assert_eq!(recent_fills[0].trade_id, "binance_9002");
+        assert_eq!(recent_fills[1].trade_id, "binance_9001");
+    }
+
+    #[test]
+    fn insert_recent_fill_ignores_rest_placeholder_when_matching_real_trade_already_present() {
+        let mut recent_fills = vec![RecentFill {
+            trade_id: "binance_9001".into(),
+            order_id: "42".into(),
+            client_order_id: Some("grid_buy_01".into()),
+            side: "buy".into(),
+            price: 4509.8,
+            qty: 0.1,
+            fee: 0.001,
+            realized_pnl: 1.4,
+            event_time: "2025-01-01T00:00:01Z".into(),
+        }];
+
+        let inserted = insert_recent_fill(
+            &mut recent_fills,
+            RecentFill {
+                trade_id: "binance_rest_42_1735689600000".into(),
+                order_id: "42".into(),
+                client_order_id: Some("grid_buy_01".into()),
+                side: "buy".into(),
+                price: 4509.8,
+                qty: 0.1,
+                fee: 0.0,
+                realized_pnl: 0.0,
+                event_time: "2025-01-01T00:00:00Z".into(),
+            },
+        );
+
+        assert!(!inserted);
+        assert_eq!(recent_fills.len(), 1);
+        assert_eq!(recent_fills[0].trade_id, "binance_9001");
+    }
+
+    #[test]
+    fn apply_execution_outcome_merges_recent_fills_without_overwriting_user_stream_trade() {
+        let mut aggregate =
+            RuntimeAggregate::from_persisted(PersistedRuntime::in_memory_bootstrap());
+        aggregate.snapshot.execution.recent_fills = vec![RecentFill {
+            trade_id: "binance_9001".into(),
+            order_id: "42".into(),
+            client_order_id: Some("grid_buy_01".into()),
+            side: "buy".into(),
+            price: 4509.8,
+            qty: 0.1,
+            fee: 0.001,
+            realized_pnl: 1.4,
+            event_time: "2025-01-01T00:00:01Z".into(),
+        }];
+
+        let mut outcome = ExecutionOutcome::completed("flattened");
+        outcome.recent_fills = Some(vec![RecentFill {
+            trade_id: "binance_rest_42_1735689600000".into(),
+            order_id: "42".into(),
+            client_order_id: Some("grid_buy_01".into()),
+            side: "buy".into(),
+            price: 4509.8,
+            qty: 0.1,
+            fee: 0.0,
+            realized_pnl: 0.0,
+            event_time: "2025-01-01T00:00:00Z".into(),
+        }]);
+
+        aggregate.apply_execution_outcome(&outcome);
+
+        assert_eq!(aggregate.snapshot.execution.recent_fills.len(), 1);
+        assert_eq!(
+            aggregate.snapshot.execution.recent_fills[0].trade_id,
+            "binance_9001"
+        );
     }
 }

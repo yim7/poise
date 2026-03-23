@@ -164,7 +164,7 @@ pub struct UserStreamEvent {
     pub event_time_ms: i64,
     pub positions: Vec<PositionSnapshot>,
     pub order_updates: Vec<UserStreamOrderUpdate>,
-    pub recent_fills: Vec<RecentFill>,
+    pub recent_fills: Vec<UserStreamFill>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,6 +208,12 @@ pub struct UserStreamOrderUpdate {
     pub symbol: String,
     pub order: OpenOrder,
     pub is_terminal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserStreamFill {
+    pub symbol: String,
+    pub fill: RecentFill,
 }
 
 #[async_trait]
@@ -1083,13 +1089,20 @@ async fn run_user_stream_loop(
                                 .await;
                             }
                             if !recent_fills.is_empty() {
-                                sync_recent_fills_until_applied(
-                                    &engine,
-                                    recent_fills,
-                                    config.reconnect_base_delay,
-                                    "binance user stream fill sync",
-                                )
-                                .await;
+                                let recent_fills = recent_fills
+                                    .into_iter()
+                                    .filter(|item| item.symbol == config.symbol)
+                                    .map(|item| item.fill)
+                                    .collect::<Vec<_>>();
+                                if !recent_fills.is_empty() {
+                                    sync_recent_fills_until_applied(
+                                        &engine,
+                                        recent_fills,
+                                        config.reconnect_base_delay,
+                                        "binance user stream fill sync",
+                                    )
+                                    .await;
+                                }
                             }
                             if let Some(position) = positions
                                 .into_iter()
@@ -1330,7 +1343,7 @@ fn translate_order_update(
     }
 }
 
-fn translate_recent_fill(order: &OrderTradeUpdateOrder) -> Option<RecentFill> {
+fn translate_recent_fill(order: &OrderTradeUpdateOrder) -> Option<UserStreamFill> {
     let fill_qty = order.last_filled_qty.unwrap_or(0.0);
     if fill_qty <= f64::EPSILON {
         return None;
@@ -1341,22 +1354,27 @@ fn translate_recent_fill(order: &OrderTradeUpdateOrder) -> Option<RecentFill> {
         .filter(|price| *price > f64::EPSILON)
         .or(order.avg_price.filter(|price| *price > f64::EPSILON))
         .unwrap_or(order.price);
-    let fill_time_ms = order.trade_time_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
+    let fill_time_ms = order
+        .trade_time_ms
+        .unwrap_or_else(|| Utc::now().timestamp_millis());
     let trade_id = order
         .trade_id
         .map(|trade_id| format!("binance_{trade_id}"))
         .unwrap_or_else(|| format!("binance_{}_{}", order.order_id, fill_time_ms));
 
-    Some(RecentFill {
-        trade_id,
-        order_id: order.order_id.to_string(),
-        client_order_id: Some(order.client_order_id.clone()),
-        side: order.side.to_ascii_lowercase(),
-        price: fill_price,
-        qty: fill_qty,
-        fee: order.commission.unwrap_or(0.0),
-        realized_pnl: order.realized_pnl.unwrap_or(0.0),
-        event_time: timestamp_millis_to_rfc3339(fill_time_ms),
+    Some(UserStreamFill {
+        symbol: order.symbol.clone(),
+        fill: RecentFill {
+            trade_id,
+            order_id: order.order_id.to_string(),
+            client_order_id: Some(order.client_order_id.clone()),
+            side: order.side.to_ascii_lowercase(),
+            price: fill_price,
+            qty: fill_qty,
+            fee: order.commission.unwrap_or(0.0),
+            realized_pnl: order.realized_pnl.unwrap_or(0.0),
+            event_time: timestamp_millis_to_rfc3339(fill_time_ms),
+        },
     })
 }
 
@@ -1943,7 +1961,7 @@ impl SubmitOrderResponse {
             updated_at: updated_at.clone(),
         });
         let fill = (self.executed_qty > f64::EPSILON).then(|| RecentFill {
-            trade_id: format!("binance_{}_{}", self.order_id, updated_at_ms),
+            trade_id: format!("binance_rest_{}_{}", self.order_id, updated_at_ms),
             order_id: self.order_id.to_string(),
             client_order_id: Some(self.client_order_id.clone()),
             side: self.side.to_ascii_lowercase(),
@@ -2201,18 +2219,22 @@ mod tests {
 
         assert_eq!(event.order_updates.len(), 1);
         assert_eq!(event.recent_fills.len(), 1);
-        assert_eq!(event.recent_fills[0].trade_id, "binance_9001");
-        assert_eq!(event.recent_fills[0].order_id, "42");
+        assert_eq!(event.recent_fills[0].symbol, "XAUUSDT");
+        assert_eq!(event.recent_fills[0].fill.trade_id, "binance_9001");
+        assert_eq!(event.recent_fills[0].fill.order_id, "42");
         assert_eq!(
-            event.recent_fills[0].client_order_id.as_deref(),
+            event.recent_fills[0].fill.client_order_id.as_deref(),
             Some("grid_buy_01")
         );
-        assert_eq!(event.recent_fills[0].side, "buy");
-        assert_eq!(event.recent_fills[0].price, 2349.5);
-        assert_eq!(event.recent_fills[0].qty, 0.1);
-        assert_eq!(event.recent_fills[0].fee, 0.001);
-        assert_eq!(event.recent_fills[0].realized_pnl, 1.25);
-        assert_eq!(event.recent_fills[0].event_time, "2024-03-09T16:00:00Z");
+        assert_eq!(event.recent_fills[0].fill.side, "buy");
+        assert_eq!(event.recent_fills[0].fill.price, 2349.5);
+        assert_eq!(event.recent_fills[0].fill.qty, 0.1);
+        assert_eq!(event.recent_fills[0].fill.fee, 0.001);
+        assert_eq!(event.recent_fills[0].fill.realized_pnl, 1.25);
+        assert_eq!(
+            event.recent_fills[0].fill.event_time,
+            "2024-03-09T16:00:00Z"
+        );
     }
 
     #[derive(Clone, Default)]

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread::sleep,
     time::{Duration, Instant},
@@ -150,7 +150,7 @@ fn run_cli_and_wait(args: &[&str]) -> Result<Output> {
 
 fn run_cli_and_wait_with_env(args: &[&str], envs: &[(&str, &str)]) -> Result<Output> {
     let cwd = TempDir::new()?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_grid-platform-service"))
+    let mut child = Command::new(cli_binary_path())
         .args(args)
         .current_dir(cwd.path())
         .env_clear()
@@ -183,7 +183,7 @@ fn run_cli_and_wait_in_dir_with_env(
     envs: &[(&str, &str)],
     cwd: &Path,
 ) -> Result<Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_grid-platform-service"))
+    let mut child = Command::new(cli_binary_path())
         .args(args)
         .current_dir(cwd)
         .env_clear()
@@ -214,4 +214,15 @@ fn run_cli_and_wait_in_dir_with_env(
 fn write_dotenv(dir: &Path, content: &str) -> Result<()> {
     fs::write(dir.join(".env"), content.trim_start())?;
     Ok(())
+}
+
+fn cli_binary_path() -> PathBuf {
+    let cargo_bin = PathBuf::from(env!("CARGO_BIN_EXE_grid-platform-service"));
+    let direct_bin = cargo_bin
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join("grid-platform-service"));
+    direct_bin
+        .filter(|path| path.is_file())
+        .unwrap_or(cargo_bin)
 }

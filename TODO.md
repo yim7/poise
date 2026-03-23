@@ -8,7 +8,7 @@
 - 当前主线：`K10` 单实例 `7x24` 值守硬化
 - 并行线程：多实例固定区间网格已实现并并入主线，后续只维护实例边界与运行安全配套
 - 最近完成：`K10` TUI 值守体验优化已实现并验收通过；`K9` 主网运行安全底座已实现并验收通过；多实例固定区间网格已实现并验收通过；`K8` TUI 中英文切换；`K7` Web UI 查询模型与能力边界预备；`K6` replay / paper / testnet 验证；`K5` 网格策略与风控；`K4` 执行闭环与命令语义做实
-- 最近验证：`2026-03-23` 已通过 `cargo fmt`、`cargo build -p grid-platform-service`、`cargo test -p grid-platform-tui -- --nocapture` 与 `cargo test -p grid-platform-service --test binance_integration -- --nocapture`
+- 最近验证：`2026-03-23` 已通过 `cargo fmt` 与 `cargo test -p grid-platform-service`
 
 ## K9 主网运行安全底座
 
@@ -72,7 +72,7 @@
 - [ ] 收敛更贴近实盘长期运行的风险规则和风险动作语义
 - [x] 为 Binance 用户流补统一执行事件翻译，覆盖异步挂单成交与部分成交
 - [x] 让异步 `buy / sell fill` 一致写入 `recent_fills`、查询接口与 SQLite 审计链路
-- [ ] 为用户流驱动的成交、挂单、仓位更新补去重与顺序处理，避免读模型脱节
+- [x] 为用户流驱动的成交、挂单、仓位更新补去重与顺序处理，避免读模型脱节
 - [ ] 让策略状态与最近关键变化进入查询模型、事件流和界面展示
 - [ ] 让命令、成交、风险与策略状态变化形成统一复盘链路
 

@@ -25,6 +25,7 @@ struct FakeBinanceTransport {
     position_mode: PositionMode,
     position: PositionSnapshotState,
     open_orders: Option<Vec<OpenOrder>>,
+    fail_exchange_info: bool,
 }
 
 impl FakeBinanceTransport {
@@ -43,6 +44,7 @@ impl FakeBinanceTransport {
             position_mode: PositionMode::OneWay,
             position: PositionSnapshotState::Flat,
             open_orders: Some(Vec::new()),
+            fail_exchange_info: false,
         }
     }
 
@@ -62,11 +64,18 @@ impl FakeBinanceTransport {
         self
     }
 
+    fn with_exchange_info_forbidden(mut self) -> Self {
+        self.fail_exchange_info = true;
+        self
+    }
 }
 
 #[async_trait]
 impl BinanceTransport for FakeBinanceTransport {
     async fn fetch_exchange_info(&self, symbol: &str) -> Result<ExchangeSymbol> {
+        if self.fail_exchange_info {
+            return Err(anyhow!("exchange info should not be requested"));
+        }
         if self.exchange_info.symbol != symbol {
             return Err(anyhow!("unexpected symbol {symbol}"));
         }
@@ -283,6 +292,29 @@ async fn bootstrap_refuses_mainnet_when_signed_exchange_state_is_unavailable() -
             .to_string()
             .contains("STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE")
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_collect_refuses_mainnet_without_public_exchange_probe_when_signed_state_is_missing()
+-> Result<()> {
+    let report = StartupReport::collect(
+        RuntimeMode::Mainnet,
+        "XAUUSDT",
+        &PersistedRuntime::sqlite_bootstrap(),
+        Arc::new(
+            FakeBinanceTransport::new()
+                .with_unavailable_signed_state()
+                .with_exchange_info_forbidden(),
+        ),
+    )
+    .await?;
+
+    assert!(matches!(
+        report.decision,
+        StartupDecision::Refuse { code, .. }
+            if code == "STARTUP_MAINNET_SIGNED_STATE_UNAVAILABLE"
+    ));
     Ok(())
 }
 

@@ -138,7 +138,12 @@ impl StartupReport {
         persisted: &PersistedRuntime,
         transport: Arc<dyn BinanceTransport>,
     ) -> Result<Self> {
-        let exchange = collect_startup_exchange_state(symbol, transport).await?;
+        let mut exchange = collect_startup_signed_exchange_state(symbol, transport.clone()).await?;
+        if !runtime_mode.is_mainnet()
+            || (exchange.position.is_available() && exchange.open_orders.is_some())
+        {
+            exchange.order_rules = transport.fetch_exchange_info(symbol).await?.order_rules;
+        }
         let decision = reconcile_startup(runtime_mode, persisted, &exchange)?;
         Ok(Self { exchange, decision })
     }
@@ -218,12 +223,20 @@ pub async fn collect_startup_exchange_state(
     symbol: &str,
     transport: Arc<dyn BinanceTransport>,
 ) -> Result<StartupExchangeState> {
-    let exchange_info = transport.fetch_exchange_info(symbol).await?;
+    let mut exchange = collect_startup_signed_exchange_state(symbol, transport.clone()).await?;
+    exchange.order_rules = transport.fetch_exchange_info(symbol).await?.order_rules;
+    Ok(exchange)
+}
+
+async fn collect_startup_signed_exchange_state(
+    symbol: &str,
+    transport: Arc<dyn BinanceTransport>,
+) -> Result<StartupExchangeState> {
     Ok(StartupExchangeState {
         position_mode: transport.fetch_position_mode().await?,
         position: transport.fetch_position_snapshot(symbol).await?,
         open_orders: transport.fetch_open_orders(symbol).await?,
-        order_rules: exchange_info.order_rules,
+        order_rules: None,
     })
 }
 

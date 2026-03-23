@@ -16,7 +16,7 @@ use grid_platform_service::{
     execution::{CancelOrdersRequest, SubmitOrderRequest, SubmitOrderResult},
     integrations::binance::{
         BinanceConfig, BinanceTransport, ExchangeSymbol, MarketStreamEvent, PositionSnapshot,
-        TradingSchedule, TradingSession, UserStreamEvent, UserStreamOrderUpdate,
+        TradingSchedule, TradingSession, UserStreamEvent, UserStreamFill, UserStreamOrderUpdate,
     },
     protocol::{
         CommandRequest, CommandStatus, CommandType, ExchangeOrderRules, GridConfig, OpenOrder,
@@ -26,7 +26,7 @@ use grid_platform_service::{
 };
 use tempfile::tempdir;
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Notify, mpsc},
     time::sleep,
 };
 
@@ -46,6 +46,8 @@ struct FakeBinanceTransport {
     execution_enabled: bool,
     listen_key: Option<String>,
     open_orders: Option<Vec<OpenOrder>>,
+    reduce_only_submit_gate: Option<Arc<Notify>>,
+    reduce_only_submit_blocked: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeBinanceTransport {
@@ -65,6 +67,8 @@ impl FakeBinanceTransport {
             execution_enabled: false,
             listen_key: None,
             open_orders: None,
+            reduce_only_submit_gate: None,
+            reduce_only_submit_blocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -91,6 +95,11 @@ impl FakeBinanceTransport {
         self
     }
 
+    fn with_reduce_only_submit_gate(mut self, gate: Arc<Notify>) -> Self {
+        self.reduce_only_submit_gate = Some(gate);
+        self
+    }
+
     fn market_connects(&self) -> usize {
         self.market_connects.load(Ordering::SeqCst)
     }
@@ -109,6 +118,10 @@ impl FakeBinanceTransport {
 
     fn cancel_calls(&self) -> usize {
         self.cancel_calls.load(Ordering::SeqCst)
+    }
+
+    fn reduce_only_submit_blocked(&self) -> bool {
+        self.reduce_only_submit_blocked.load(Ordering::SeqCst)
     }
 
     async fn set_cancel_result(&self, orders: Vec<OpenOrder>) {
@@ -178,10 +191,17 @@ impl BinanceTransport for FakeBinanceTransport {
         self.submit_calls.fetch_add(1, Ordering::SeqCst);
         self.submit_requests.lock().await.push(request.clone());
         if request.reduce_only {
+            if let Some(gate) = &self.reduce_only_submit_gate {
+                self.reduce_only_submit_blocked
+                    .store(true, Ordering::SeqCst);
+                gate.notified().await;
+                self.reduce_only_submit_blocked
+                    .store(false, Ordering::SeqCst);
+            }
             return Ok(SubmitOrderResult {
                 open_order: None,
                 fill: Some(RecentFill {
-                    trade_id: format!("trade_{}", request.client_order_id),
+                    trade_id: format!("binance_rest_{}_1735689600000", request.order_id),
                     order_id: request.order_id,
                     client_order_id: Some(request.client_order_id),
                     side: request.side,
@@ -955,16 +975,19 @@ async fn sqlite_binance_user_stream_persists_passive_fill_for_recovery() -> Resu
                 },
                 is_terminal: false,
             }],
-            recent_fills: vec![RecentFill {
-                trade_id: "binance_9001".into(),
-                order_id: "42".into(),
-                client_order_id: Some("grid_buy_01".into()),
-                side: "buy".into(),
-                price: 4509.8,
-                qty: 0.1,
-                fee: 0.001,
-                realized_pnl: 1.4,
-                event_time: "2025-01-01T00:00:02Z".into(),
+            recent_fills: vec![UserStreamFill {
+                symbol: "XAUUSDT".into(),
+                fill: RecentFill {
+                    trade_id: "binance_9001".into(),
+                    order_id: "42".into(),
+                    client_order_id: Some("grid_buy_01".into()),
+                    side: "buy".into(),
+                    price: 4509.8,
+                    qty: 0.1,
+                    fee: 0.001,
+                    realized_pnl: 1.4,
+                    event_time: "2025-01-01T00:00:02Z".into(),
+                },
             }],
         })
         .await
@@ -993,6 +1016,372 @@ async fn sqlite_binance_user_stream_persists_passive_fill_for_recovery() -> Resu
     })
     .await
     .context("passive fill did not persist to sqlite recovery snapshot")?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_binance_user_stream_ignores_fill_for_other_symbol() -> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+            order_rules: None,
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_listen_key("listen-key-other-symbol");
+    let (_market_tx, market_rx) = mpsc::channel(16);
+    let (user_tx, user_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+    transport.push_user_stream(user_rx).await;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.user_stream_keepalive_interval = Duration::from_millis(30);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_binance(config, Arc::new(transport.clone()));
+
+    wait_until(Duration::from_secs(2), || {
+        app.snapshot().connection.user_stream_connected == Some(true)
+    })
+    .await?;
+
+    user_tx
+        .send(UserStreamEvent {
+            event_time_ms: now_ms + 2_000,
+            positions: vec![PositionSnapshot {
+                symbol: "XAUUSDT".into(),
+                qty: 1.25,
+                avg_price: 2348.7,
+                unrealized_pnl: 14.2,
+                realized_pnl: 6.4,
+            }],
+            order_updates: vec![UserStreamOrderUpdate {
+                symbol: "BTCUSDT".into(),
+                order: OpenOrder {
+                    order_id: "btc_ord_01".into(),
+                    client_order_id: "grid_buy_01".into(),
+                    side: "buy".into(),
+                    price: 80_000.0,
+                    qty: 0.1,
+                    filled_qty: 0.1,
+                    status: "FILLED".into(),
+                    created_at: "2025-01-01T00:00:00Z".into(),
+                    updated_at: "2025-01-01T00:00:02Z".into(),
+                },
+                is_terminal: true,
+            }],
+            recent_fills: vec![UserStreamFill {
+                symbol: "BTCUSDT".into(),
+                fill: RecentFill {
+                    trade_id: "binance_9002".into(),
+                    order_id: "btc_ord_01".into(),
+                    client_order_id: Some("grid_buy_01".into()),
+                    side: "buy".into(),
+                    price: 80_000.0,
+                    qty: 0.1,
+                    fee: 0.001,
+                    realized_pnl: 3.2,
+                    event_time: "2025-01-01T00:00:02Z".into(),
+                },
+            }],
+        })
+        .await
+        .context("failed to send cross-symbol user stream event")?;
+
+    wait_until(Duration::from_secs(2), || {
+        let runtime = app.snapshot().runtime;
+        runtime.position_qty == 1.25
+            && runtime.position_avg_price == 2348.7
+            && runtime.unrealized_pnl == 14.2
+            && runtime.realized_pnl == 6.4
+    })
+    .await?;
+
+    let snapshot = app.snapshot();
+    assert!(snapshot.execution.recent_fills.is_empty());
+    assert!(snapshot.execution.exchange_open_orders.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binance_immediate_fill_dedupes_rest_placeholder_when_user_stream_trade_arrives_later()
+-> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+            order_rules: None,
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_execution_enabled()
+    .with_listen_key("listen-key-rest-first");
+    let (_market_tx, market_rx) = mpsc::channel(16);
+    let (user_tx, user_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+    transport.push_user_stream(user_rx).await;
+
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot.runtime.symbol = "XAUUSDT".into();
+    runtime.snapshot.runtime.env = "testnet".into();
+    runtime.snapshot.runtime.strategy_state = "paused".into();
+    runtime.snapshot.runtime.position_qty = 0.1;
+    runtime.snapshot.runtime.position_avg_price = 4500.0;
+    runtime.snapshot.runtime.last_price = 4510.0;
+    runtime.snapshot.runtime.mark_price = 4510.0;
+    runtime.last_sequence = 1;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.user_stream_keepalive_interval = Duration::from_millis(30);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_runtime_and_binance(
+        runtime,
+        config,
+        Arc::new(transport.clone()),
+    );
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.http_available
+            && snapshot.connection.user_stream_connected == Some(true)
+    })
+    .await?;
+
+    let accepted = app
+        .submit_command(
+            CommandType::FlattenNow,
+            CommandRequest {
+                command_id: "cmd_flatten_rest_first".into(),
+            },
+        )
+        .await?;
+    assert_eq!(accepted.status, CommandStatus::Accepted);
+
+    wait_until(Duration::from_secs(2), || {
+        app.snapshot()
+            .execution
+            .recent_fills
+            .iter()
+            .any(|fill| fill.trade_id == "binance_rest_order_cmd_flatten_rest_first_1735689600000")
+    })
+    .await
+    .context("rest placeholder fill did not reach runtime snapshot")?;
+
+    user_tx
+        .send(UserStreamEvent {
+            event_time_ms: now_ms + 2_000,
+            positions: vec![],
+            order_updates: vec![],
+            recent_fills: vec![UserStreamFill {
+                symbol: "XAUUSDT".into(),
+                fill: RecentFill {
+                    trade_id: "binance_9001".into(),
+                    order_id: "order_cmd_flatten_rest_first".into(),
+                    client_order_id: Some("reduce_only_cmd_flatten_rest_first".into()),
+                    side: "sell".into(),
+                    price: 4510.0,
+                    qty: 0.1,
+                    fee: 0.001,
+                    realized_pnl: 1.0,
+                    event_time: "2025-01-01T00:00:01Z".into(),
+                },
+            }],
+        })
+        .await
+        .context("failed to send rest-first real fill event")?;
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.execution.recent_fills.len() == 1
+            && snapshot.execution.recent_fills[0].trade_id == "binance_9001"
+    })
+    .await
+    .context("real fill did not replace rest placeholder")?;
+
+    assert!(
+        app.snapshot()
+            .execution
+            .recent_fills
+            .iter()
+            .all(|fill| !fill.trade_id.starts_with("binance_rest_"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binance_immediate_fill_dedupes_rest_placeholder_when_user_stream_trade_arrives_first()
+-> Result<()> {
+    let now_ms = Utc::now().timestamp_millis();
+    let submit_gate = Arc::new(Notify::new());
+    let transport = FakeBinanceTransport::new(
+        ExchangeSymbol {
+            symbol: "XAUUSDT".into(),
+            status: "TRADING".into(),
+            underlying_type: "COMMODITY".into(),
+            order_rules: None,
+        },
+        TradingSchedule {
+            update_time_ms: now_ms,
+            market_schedules: HashMap::from([(
+                "COMMODITY".into(),
+                vec![TradingSession {
+                    start_time_ms: now_ms - 60_000,
+                    end_time_ms: now_ms + 60_000,
+                    session_type: "REGULAR".into(),
+                }],
+            )]),
+        },
+    )
+    .with_execution_enabled()
+    .with_listen_key("listen-key-user-first")
+    .with_reduce_only_submit_gate(submit_gate.clone());
+    let (_market_tx, market_rx) = mpsc::channel(16);
+    let (user_tx, user_rx) = mpsc::channel(16);
+    transport.push_market_stream(market_rx).await;
+    transport.push_user_stream(user_rx).await;
+
+    let mut runtime = PersistedRuntime::in_memory_bootstrap();
+    runtime.snapshot.runtime.symbol = "XAUUSDT".into();
+    runtime.snapshot.runtime.env = "testnet".into();
+    runtime.snapshot.runtime.strategy_state = "paused".into();
+    runtime.snapshot.runtime.position_qty = 0.1;
+    runtime.snapshot.runtime.position_avg_price = 4500.0;
+    runtime.snapshot.runtime.last_price = 4510.0;
+    runtime.snapshot.runtime.mark_price = 4510.0;
+    runtime.last_sequence = 1;
+
+    let mut config = BinanceConfig::testnet("XAUUSDT");
+    config.api_key = Some("demo-key".into());
+    config.api_secret = Some("demo-secret".into());
+    config.metadata_refresh_interval = Duration::from_millis(250);
+    config.health_tick_interval = Duration::from_millis(25);
+    config.user_stream_keepalive_interval = Duration::from_millis(30);
+    config.reconnect_base_delay = Duration::from_millis(40);
+    config.reconnect_max_delay = Duration::from_millis(80);
+
+    let app = Application::bootstrap_with_runtime_and_binance(
+        runtime,
+        config,
+        Arc::new(transport.clone()),
+    );
+
+    wait_until(Duration::from_secs(2), || {
+        let snapshot = app.snapshot();
+        snapshot.connection.http_available
+            && snapshot.connection.user_stream_connected == Some(true)
+    })
+    .await?;
+
+    let accepted = app
+        .submit_command(
+            CommandType::FlattenNow,
+            CommandRequest {
+                command_id: "cmd_flatten_user_first".into(),
+            },
+        )
+        .await?;
+    assert_eq!(accepted.status, CommandStatus::Accepted);
+
+    wait_until(Duration::from_secs(2), || {
+        transport.reduce_only_submit_blocked()
+    })
+    .await
+    .context("reduce-only submit did not block before user stream fill")?;
+
+    user_tx
+        .send(UserStreamEvent {
+            event_time_ms: now_ms + 2_000,
+            positions: vec![],
+            order_updates: vec![],
+            recent_fills: vec![UserStreamFill {
+                symbol: "XAUUSDT".into(),
+                fill: RecentFill {
+                    trade_id: "binance_9002".into(),
+                    order_id: "order_cmd_flatten_user_first".into(),
+                    client_order_id: Some("reduce_only_cmd_flatten_user_first".into()),
+                    side: "sell".into(),
+                    price: 4510.0,
+                    qty: 0.1,
+                    fee: 0.001,
+                    realized_pnl: 1.0,
+                    event_time: "2025-01-01T00:00:01Z".into(),
+                },
+            }],
+        })
+        .await
+        .context("failed to send user-first real fill event")?;
+
+    wait_until(Duration::from_millis(150), || {
+        let snapshot = app.snapshot();
+        snapshot.execution.recent_fills.len() == 1
+            && snapshot.execution.recent_fills[0].trade_id == "binance_9002"
+    })
+    .await
+    .context("real fill did not reach runtime snapshot before submit response")?;
+
+    submit_gate.notify_waiters();
+
+    wait_until(Duration::from_secs(2), || {
+        app.snapshot()
+            .execution
+            .last_command_ack_event
+            .as_ref()
+            .is_some_and(|ack| {
+                ack.command_id == "cmd_flatten_user_first" && ack.status == CommandStatus::Completed
+            })
+    })
+    .await
+    .context("flatten command did not complete after releasing delayed submit")?;
+
+    let snapshot = app.snapshot();
+    assert_eq!(snapshot.execution.recent_fills.len(), 1);
+    assert_eq!(snapshot.execution.recent_fills[0].trade_id, "binance_9002");
+    assert!(
+        snapshot
+            .execution
+            .recent_fills
+            .iter()
+            .all(|fill| !fill.trade_id.starts_with("binance_rest_"))
+    );
 
     Ok(())
 }
