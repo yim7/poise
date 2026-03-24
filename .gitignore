@@ -4,3 +4,4 @@
 /.env
 /.data/
 /service/.data/
+/.worktrees/
