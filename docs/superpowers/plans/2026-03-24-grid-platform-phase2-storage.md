@@ -182,7 +182,7 @@ git add -A && git commit -m "feat(storage): add database schema with instance_sn
 **Files:**
 - Create: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 ```rust
 #[cfg(test)]
@@ -250,12 +250,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p grid-storage -- sqlite`
 Expected: FAIL
 
-- [ ] **Step 3: 实现 SqliteStorage**
+- [x] **Step 3: 实现 SqliteStorage**
 
 实现 `SqliteStorage` struct 和 `PersistencePort` trait：
 - `new(path)` 打开文件数据库并初始化 schema
@@ -263,12 +263,12 @@ Expected: FAIL
 - `save_instance_state` 用 `INSERT OR REPLACE` 写入
 - `load_instance_state` 用 `SELECT` 读取并反序列化
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test -p grid-storage`
 Expected: 全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat(storage): implement SqliteStorage with PersistencePort trait"
