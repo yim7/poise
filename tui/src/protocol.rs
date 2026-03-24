@@ -23,6 +23,7 @@ pub struct InstanceSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Client-side snapshot mirror of the HTTP DTO.
 pub struct InstanceSnapshot {
     pub id: String,
     pub symbol: String,
@@ -141,24 +142,7 @@ impl InstanceSnapshot {
     }
 
     pub fn target_exposure(&self) -> Option<f64> {
-        self.target_exposure.or_else(|| {
-            self.last_price
-                .map(|last_price| self.config.target_exposure(last_price))
-        })
-    }
-}
-
-impl GridConfig {
-    pub fn target_exposure(&self, price: f64) -> f64 {
-        let normalized =
-            ((price - self.lower_price) / (self.upper_price - self.lower_price)).clamp(0.0, 1.0);
-        let curve = match self.shape_family {
-            ShapeFamily::Linear => 1.0 - normalized,
-            ShapeFamily::Convex => 1.0 - normalized.powi(2),
-            ShapeFamily::Concave => 1.0 - normalized.sqrt(),
-        };
-
-        -self.short_capacity + (self.long_capacity + self.short_capacity) * curve
+        self.target_exposure
     }
 }
 
@@ -390,6 +374,30 @@ mod tests {
         };
 
         assert_eq!(snapshot.target_exposure(), Some(1.5));
+    }
+
+    #[test]
+    fn target_exposure_none_stays_none() {
+        let snapshot = InstanceSnapshot {
+            id: "BTCUSDT".into(),
+            symbol: "BTCUSDT".into(),
+            status: InstanceStatus::Paused,
+            current_exposure: 0.0,
+            target_exposure: None,
+            last_price: Some(85.0),
+            pending_order: None,
+            config: GridConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_capacity: 8.0,
+                short_capacity: 8.0,
+                capacity_notional: 375.0,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+        };
+
+        assert_eq!(snapshot.target_exposure(), None);
     }
 
     #[test]

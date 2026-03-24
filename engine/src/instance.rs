@@ -41,6 +41,7 @@ pub struct StrategyInstance {
     pub config: GridConfig,
     pub status: InstanceStatus,
     pub current_exposure: Exposure,
+    // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
     pub risk_state: RiskState,

@@ -65,6 +65,7 @@ pub enum UserDataEvent {
 // ── Snapshot type (for persistence) ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Internal persistence snapshot: keeps full engine state, including fields not exposed over HTTP.
 pub struct InstanceSnapshot {
     pub id: String,
     pub symbol: String,

@@ -3,6 +3,7 @@
   "symbol": "BTCUSDT",
   "status": "holding",
   "current_exposure": 3.5,
+  "target_exposure": -4.0,
   "last_price": 112.0,
   "config": {
     "lower_price": 90.0,

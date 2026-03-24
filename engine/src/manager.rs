@@ -71,6 +71,7 @@ impl InstanceManager {
             if matches!(self.instances[&id].status, InstanceStatus::Paused) {
                 let instance = self.instances.get_mut(&id).unwrap();
                 instance.last_price = Some(tick.last_price);
+                instance.target_exposure = None;
                 continue;
             }
 
@@ -104,7 +105,9 @@ impl InstanceManager {
             .instances
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
+        // Pause disables strategy targeting, but does not rewrite observed exchange state.
         instance.status = InstanceStatus::Paused;
+        instance.target_exposure = None;
         Ok(())
     }
 
@@ -466,6 +469,7 @@ mod tests {
         let instance = manager.instances.get_mut("btc1").unwrap();
         instance.status = InstanceStatus::Paused;
         instance.current_exposure = grid_core::types::Exposure(2.0);
+        instance.target_exposure = Some(grid_core::types::Exposure(4.0));
 
         let tick = PriceTick {
             symbol: "BTCUSDT".into(),
@@ -480,6 +484,7 @@ mod tests {
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::Paused);
         assert_eq!(instance.current_exposure.0, 2.0);
+        assert_eq!(instance.target_exposure, None);
         assert_eq!(instance.last_price, Some(95.0));
     }
 

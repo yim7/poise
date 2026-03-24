@@ -17,6 +17,7 @@ pub struct InstanceSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// HTTP DTO: exposes client-facing snapshot fields, but not internal risk bookkeeping.
 pub struct InstanceSnapshot {
     pub id: String,
     pub symbol: String,
@@ -514,6 +515,7 @@ mod tests {
         let body = to_bytes(snapshot.into_body(), usize::MAX).await.unwrap();
         let payload: InstanceSnapshot = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload.status, InstanceStatus::Paused);
+        assert_eq!(payload.target_exposure, None);
     }
 
     #[tokio::test]
