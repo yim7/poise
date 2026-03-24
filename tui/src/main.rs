@@ -961,6 +961,18 @@ mod tests {
         }
     }
 
+    async fn wait_for_pane_text(session: &TmuxSession, needle: &str) -> String {
+        for _ in 0..40 {
+            let pane = session.capture_pane();
+            if pane.contains(needle) {
+                return pane;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        session.capture_pane()
+    }
+
     impl Drop for TmuxSession {
         fn drop(&mut self) {
             let _ = Command::new("tmux")
@@ -1150,28 +1162,24 @@ out_of_band_policy = "Hold"
             tui_binary.display()
         ));
 
-        sleep(Duration::from_millis(500)).await;
-        let dashboard = session.capture_pane();
+        let dashboard = wait_for_pane_text(&session, "BTCUSDT").await;
         assert!(dashboard.contains("BTCUSDT"), "dashboard:\n{dashboard}");
         assert!(dashboard.contains("ETHUSDT"), "dashboard:\n{dashboard}");
 
         session.send_keys(&["Enter"]);
-        sleep(Duration::from_millis(200)).await;
-        let btc_view = session.capture_pane();
+        let btc_view = wait_for_pane_text(&session, "Overview").await;
         assert!(btc_view.contains("Overview"), "btc view:\n{btc_view}");
         assert!(btc_view.contains("BTCUSDT"), "btc view:\n{btc_view}");
 
         session.send_keys(&["]"]);
-        sleep(Duration::from_millis(300)).await;
-        let eth_view = session.capture_pane();
+        let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
             eth_view.contains("capacity notional: 2000.0000"),
             "eth view:\n{eth_view}"
         );
 
-        sleep(Duration::from_millis(700)).await;
-        let event_view = session.capture_pane();
+        let event_view = wait_for_pane_text(&session, "Recent Events").await;
         assert!(
             event_view.contains("Recent Events"),
             "event view:\n{event_view}"
