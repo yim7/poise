@@ -357,6 +357,7 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"[{
+                    "symbol": "BTCUSDT",
                     "orderId": 1001,
                     "clientOrderId": "grid-open-003",
                     "side": "BUY",
@@ -397,6 +398,7 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"[{
+                    "symbol": "BTCUSDT",
                     "orderId": 1002,
                     "clientOrderId": "grid-open-004",
                     "side": "SELL",
@@ -429,6 +431,7 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"[{
+                    "symbol": "BTCUSDT",
                     "orderId": 1003,
                     "clientOrderId": "grid-open-005",
                     "side": "BUY",

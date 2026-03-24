@@ -203,6 +203,7 @@ mod tests {
     use chrono::Utc;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use grid_core::types::{ExchangeRules, Exposure};
     use grid_engine::instance::{InstanceStatus, PendingOrder};
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
@@ -216,6 +217,15 @@ mod tests {
     use crate::websocket::WsEvent;
 
     use super::{CommandResponse, InstanceSnapshot, InstanceSummary, router};
+
+    fn test_exchange_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.0,
+            quantity_step: 0.0,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        }
+    }
 
     struct FakeExchange;
 
@@ -297,6 +307,7 @@ mod tests {
                     daily_loss_limit: -100.0,
                     stop_loss_pct: 10.0,
                 },
+                test_exchange_rules(),
             )
             .unwrap();
         let tick = grid_engine::ports::PriceTick {
@@ -318,6 +329,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
+            target_exposure: Exposure(4.0),
             status: "NEW".into(),
         };
         manager

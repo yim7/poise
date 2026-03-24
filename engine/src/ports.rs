@@ -34,11 +34,13 @@ pub struct Position {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenOrder {
+    pub symbol: String,
     pub order_id: String,
     pub client_order_id: String,
     pub side: Side,
     pub price: f64,
     pub qty: f64,
+    pub realized_pnl: f64,
     pub status: String,
 }
 

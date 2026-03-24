@@ -238,11 +238,13 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
 
             Ok(UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(
                 grid_engine::ports::OpenOrder {
+                    symbol: order.symbol,
                     order_id: order.order_id.to_string(),
                     client_order_id: order.client_order_id,
                     side: parse_side(&order.side)?,
                     price: parse_decimal("o.p", &order.price)?,
                     qty: parse_decimal("o.q", &order.quantity)?,
+                    realized_pnl: parse_decimal("o.rp", &order.realized_pnl)?,
                     status: order.status,
                 },
             )]))
@@ -315,6 +317,8 @@ struct UserEventEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct OrderTradeUpdate {
+    #[serde(rename = "s")]
+    symbol: String,
     #[serde(rename = "i")]
     order_id: u64,
     #[serde(rename = "c")]
@@ -325,6 +329,8 @@ struct OrderTradeUpdate {
     price: String,
     #[serde(rename = "q")]
     quantity: String,
+    #[serde(rename = "rp")]
+    realized_pnl: String,
     #[serde(rename = "X")]
     status: String,
 }
@@ -406,6 +412,7 @@ mod tests {
                 "S": "SELL",
                 "p": "65000.5",
                 "q": "0.020",
+                "rp": "12.34",
                 "X": "FILLED"
             }
         }"#;
@@ -415,11 +422,13 @@ mod tests {
         assert_eq!(
             events,
             UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(OpenOrder {
+                symbol: "BTCUSDT".to_string(),
                 order_id: "12345".to_string(),
                 client_order_id: "grid-order-004".to_string(),
                 side: Side::Sell,
                 price: 65000.5,
                 qty: 0.02,
+                realized_pnl: 12.34,
                 status: "FILLED".to_string(),
             })])
         );

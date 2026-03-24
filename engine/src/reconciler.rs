@@ -1,10 +1,11 @@
 use grid_core::events::DomainEvent;
 use grid_core::risk::{self, CapacityBudget, ExposureIntent, RiskDecision};
 use grid_core::strategy::{self, BandStatus, OutOfBandPolicy};
-use grid_core::types::Exposure;
+use grid_core::types::{Exposure, Side};
 
-use crate::execution_plan::{ExecutionAction, ExecutionPlan};
+use crate::execution_plan::{ExecutionAction, ExecutionPlan, is_meetable_minimum, round_to_step};
 use crate::instance::{InstanceStatus, StrategyInstance};
+use crate::ports::OrderRequest;
 
 pub struct ReconcileResult {
     pub plan: ExecutionPlan,
@@ -26,9 +27,9 @@ pub fn reconcile(
 ) -> ReconcileResult {
     let band = strategy::band_status(price, &instance.config);
 
-    let (target, new_status) = match band {
-        BandStatus::InBand { target } => (target, resolve_in_band_status(instance)),
-        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(instance, policy),
+    let (target, new_status) = match &band {
+        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(instance)),
+        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(instance, *policy),
     };
 
     let intent = ExposureIntent {
@@ -59,6 +60,45 @@ pub fn reconcile(
         }
     };
 
+    // 带外 Freeze/Hold：保留离开带之前最后一个 target_exposure，并避免为了追赶 frozen target 而继续加风险。
+    let would_increase_risk_out_of_band = matches!(
+        band,
+        BandStatus::OutOfBand {
+            policy: OutOfBandPolicy::Freeze | OutOfBandPolicy::Hold,
+            ..
+        }
+    ) && approved_target.0.abs()
+        > instance.current_exposure.0.abs();
+
+    if would_increase_risk_out_of_band {
+        return ReconcileResult {
+            plan: ExecutionPlan {
+                actions: vec![ExecutionAction::NoOp],
+                events,
+            },
+            target_exposure: approved_target,
+            new_status,
+        };
+    }
+
+    // 如果已有匹配的 pending_order（目标一致），避免重复下单。
+    let pending_matches_target = instance
+        .pending_order
+        .as_ref()
+        .map(|pending| (pending.target_exposure.0 - approved_target.0).abs() < f64::EPSILON)
+        .unwrap_or(false);
+
+    if pending_matches_target {
+        return ReconcileResult {
+            plan: ExecutionPlan {
+                actions: vec![ExecutionAction::NoOp],
+                events,
+            },
+            target_exposure: approved_target,
+            new_status,
+        };
+    }
+
     let delta = instance.current_exposure.delta(&approved_target);
     if delta.is_zero() {
         return ReconcileResult {
@@ -76,11 +116,48 @@ pub fn reconcile(
         to: approved_target.clone(),
     });
 
-    // 执行计划中暂时只标记 NoOp，具体订单生成在后续阶段完善
-    let plan = ExecutionPlan {
-        actions: vec![ExecutionAction::NoOp],
-        events,
+    let side = Side::from_exposure(&delta).expect("non-zero delta must have side");
+    let rules = &instance.exchange_rules;
+    let price = round_to_step(price, rules.price_tick);
+    let quantity = round_to_step(
+        delta.0.abs() * instance.config.capacity_unit_qty(),
+        rules.quantity_step,
+    );
+
+    let should_cancel_all = instance.pending_order.is_some();
+    if !is_meetable_minimum(price, quantity, rules) {
+        return ReconcileResult {
+            plan: ExecutionPlan {
+                actions: if should_cancel_all {
+                    vec![ExecutionAction::CancelAll]
+                } else {
+                    vec![ExecutionAction::NoOp]
+                },
+                events,
+            },
+            target_exposure: approved_target,
+            new_status,
+        };
+    }
+
+    let request = OrderRequest {
+        symbol: instance.symbol.clone(),
+        side,
+        price,
+        quantity,
+        client_order_id: format!("{}-reconcile", instance.id),
     };
+
+    let actions = if should_cancel_all {
+        vec![
+            ExecutionAction::CancelAll,
+            ExecutionAction::SubmitOrder(request),
+        ]
+    } else {
+        vec![ExecutionAction::SubmitOrder(request)]
+    };
+
+    let plan = ExecutionPlan { actions, events };
 
     ReconcileResult {
         plan,
@@ -101,15 +178,14 @@ fn apply_out_of_band(
     instance: &StrategyInstance,
     policy: OutOfBandPolicy,
 ) -> (Exposure, Option<InstanceStatus>) {
+    let frozen_target = instance
+        .target_exposure
+        .clone()
+        .unwrap_or_else(|| instance.current_exposure.clone());
+
     match policy {
-        OutOfBandPolicy::Freeze => (
-            instance.current_exposure.clone(),
-            Some(InstanceStatus::Frozen),
-        ),
-        OutOfBandPolicy::Hold => (
-            instance.current_exposure.clone(),
-            Some(InstanceStatus::Holding),
-        ),
+        OutOfBandPolicy::Freeze => (frozen_target, Some(InstanceStatus::Frozen)),
+        OutOfBandPolicy::Hold => (frozen_target, Some(InstanceStatus::Holding)),
         OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(InstanceStatus::ReducingOnly)),
         OutOfBandPolicy::Terminate => (Exposure(0.0), Some(InstanceStatus::Terminated)),
     }
@@ -133,7 +209,26 @@ mod tests {
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
+            grid_core::types::ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.1,
+                min_qty: 0.0,
+                min_notional: 0.0,
+            },
         )
+    }
+
+    fn test_pending_order(target: Exposure) -> crate::instance::PendingOrder {
+        crate::instance::PendingOrder {
+            symbol: "BTCUSDT".to_string(),
+            order_id: Some("order-1".to_string()),
+            client_order_id: "client-1".to_string(),
+            side: grid_core::types::Side::Buy,
+            price: 90.0,
+            quantity: 0.01,
+            target_exposure: target,
+            status: "NEW".to_string(),
+        }
     }
 
     fn test_budget() -> CapacityBudget {
@@ -239,19 +334,13 @@ mod tests {
         let result = reconcile(&instance, 90.0, &budget);
 
         assert_eq!(result.target_exposure, Exposure(4.0));
-        assert!(
-            result
-                .plan
-                .events
-                .iter()
-                .any(|event| matches!(
-                    event,
-                    DomainEvent::RiskCapApplied {
-                        intended,
-                        capped,
-                    } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
-                ))
-        );
+        assert!(result.plan.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::RiskCapApplied {
+                intended,
+                capped,
+            } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+        )));
     }
 
     #[test]
@@ -269,19 +358,13 @@ mod tests {
 
         assert!(!result.plan.has_actions());
         assert_eq!(result.target_exposure, Exposure(4.0));
-        assert!(
-            result
-                .plan
-                .events
-                .iter()
-                .any(|event| matches!(
-                    event,
-                    DomainEvent::RiskCapApplied {
-                        intended,
-                        capped,
-                    } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
-                ))
-        );
+        assert!(result.plan.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::RiskCapApplied {
+                intended,
+                capped,
+            } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+        )));
         assert!(
             !result
                 .plan
@@ -302,18 +385,109 @@ mod tests {
         let result = reconcile(&instance, 90.0, &test_budget());
 
         assert_eq!(result.target_exposure, Exposure(0.0));
-        assert!(
-            result
-                .plan
-                .events
-                .iter()
-                .any(|event| matches!(
-                    event,
-                    DomainEvent::RiskCapApplied {
-                        intended,
-                        capped,
-                    } if *intended == Exposure(8.0) && *capped == Exposure(0.0)
-                ))
-        );
+        assert!(result.plan.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::RiskCapApplied {
+                intended,
+                capped,
+            } if *intended == Exposure(8.0) && *capped == Exposure(0.0)
+        )));
+    }
+
+    #[test]
+    fn reconcile_generates_submit_order_for_delta() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.current_exposure = Exposure(0.0);
+        instance.last_price = Some(90.0);
+
+        let result = reconcile(&instance, 90.0, &test_budget());
+
+        assert!(matches!(
+            result.plan.actions.as_slice(),
+            [ExecutionAction::SubmitOrder(_)]
+        ));
+    }
+
+    #[test]
+    fn reconcile_does_not_resubmit_when_pending_order_already_matches_target() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.pending_order = Some(test_pending_order(Exposure(8.0)));
+
+        let result = reconcile(&instance, 90.0, &test_budget());
+        assert!(!result.plan.has_actions());
+    }
+
+    #[test]
+    fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.current_exposure = Exposure(4.0);
+        instance.target_exposure = Some(Exposure(6.0));
+        instance.config.out_of_band_policy = OutOfBandPolicy::Freeze;
+
+        let result = reconcile(&instance, 85.0, &test_budget());
+
+        assert_eq!(result.target_exposure.0, 6.0);
+        assert!(!result.plan.has_actions());
+    }
+
+    #[test]
+    fn reconcile_cancels_all_then_submits_when_pending_order_differs_from_target() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.current_exposure = Exposure(0.0);
+        instance.pending_order = Some(test_pending_order(Exposure(4.0)));
+
+        let result = reconcile(&instance, 90.0, &test_budget());
+
+        assert!(matches!(
+            result.plan.actions.as_slice(),
+            [ExecutionAction::CancelAll, ExecutionAction::SubmitOrder(_)]
+        ));
+    }
+
+    #[test]
+    fn reconcile_rounds_price_and_quantity_by_exchange_rules() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+
+        let target = grid_core::strategy::target_exposure(99.09, &instance.config);
+        instance.current_exposure = Exposure(target.0 - 0.8);
+        instance.exchange_rules = grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.7,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
+
+        let result = reconcile(&instance, 99.09, &test_budget());
+
+        match result.plan.actions.as_slice() {
+            [ExecutionAction::SubmitOrder(req)] => {
+                assert!((req.price - 99.0).abs() < 1e-9);
+                assert!((req.quantity - 2.8).abs() < 1e-9);
+            }
+            other => panic!("unexpected actions: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_does_not_submit_when_below_exchange_minimums() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+
+        let target = grid_core::strategy::target_exposure(99.09, &instance.config);
+        instance.current_exposure = Exposure(target.0 - 0.8);
+        instance.exchange_rules = grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.7,
+            min_qty: 10.0,
+            min_notional: 999999.0,
+        };
+
+        let result = reconcile(&instance, 99.09, &test_budget());
+        assert!(!result.plan.has_actions());
     }
 }

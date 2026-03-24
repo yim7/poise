@@ -246,6 +246,7 @@ mod tests {
                 side: Side::Buy,
                 price: 94.5,
                 quantity: 0.25,
+                target_exposure: Exposure(6.0),
                 status: "NEW".into(),
             }),
             risk_state: RiskState {

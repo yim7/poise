@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use grid_binance::BinanceAdapter;
+use grid_core::types::ExchangeRules;
 use grid_engine::instance::StrategyInstance;
 use grid_engine::manager::InstanceManager;
 use grid_engine::ports::{
@@ -15,6 +16,15 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 
 use crate::config::Config;
 use crate::websocket::WsEvent;
+
+fn placeholder_exchange_rules() -> ExchangeRules {
+    ExchangeRules {
+        price_tick: 0.0,
+        quantity_step: 0.0,
+        min_qty: 0.0,
+        min_notional: 0.0,
+    }
+}
 
 pub type SharedManager = Arc<RwLock<InstanceManager>>;
 
@@ -102,6 +112,7 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
             instance.symbol.clone(),
             instance.grid_config(),
             instance.budget(),
+            placeholder_exchange_rules(),
         )?;
         if let Some(snapshot) = persistence.load_instance_state(&instance_id).await? {
             manager.restore_instance_state(&snapshot)?;
@@ -610,6 +621,7 @@ mod tests {
                     daily_loss_limit: -100.0,
                     stop_loss_pct: 10.0,
                 },
+                super::placeholder_exchange_rules(),
             )
             .unwrap();
         let (events, _) = broadcast::channel(16);

@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use grid_core::strategy::GridConfig;
-use grid_core::types::{Exposure, Side};
+use grid_core::types::{ExchangeRules, Exposure, Side};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +24,7 @@ pub struct PendingOrder {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
+    pub target_exposure: Exposure,
     pub status: String,
 }
 
@@ -39,6 +40,7 @@ pub struct StrategyInstance {
     pub id: String,
     pub symbol: String,
     pub config: GridConfig,
+    pub exchange_rules: ExchangeRules,
     pub status: InstanceStatus,
     pub current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
@@ -50,11 +52,17 @@ pub struct StrategyInstance {
 }
 
 impl StrategyInstance {
-    pub fn new(id: String, symbol: String, config: GridConfig) -> Self {
+    pub fn new(
+        id: String,
+        symbol: String,
+        config: GridConfig,
+        exchange_rules: ExchangeRules,
+    ) -> Self {
         Self {
             id,
             symbol,
             config,
+            exchange_rules,
             status: InstanceStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
