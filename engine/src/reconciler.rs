@@ -34,6 +34,9 @@ pub fn reconcile(
     let intent = ExposureIntent {
         current: instance.current_exposure.clone(),
         target: target.clone(),
+        unit_notional: instance.config.capacity_notional,
+        realized_pnl_today: instance.risk_state.realized_pnl_today,
+        unrealized_pnl: instance.risk_state.unrealized_pnl,
     };
 
     let decision = risk::evaluate_risk(&intent, budget);
@@ -217,5 +220,34 @@ mod tests {
         let result = reconcile(&instance, 85.0, &test_budget());
         assert_eq!(result.new_status, Some(InstanceStatus::Terminated));
         assert!((result.target_exposure.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn reconcile_emits_risk_cap_event_when_budget_caps_target() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.current_exposure = Exposure(0.0);
+
+        let budget = CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        };
+
+        let result = reconcile(&instance, 90.0, &budget);
+
+        assert_eq!(result.target_exposure, Exposure(4.0));
+        assert!(
+            result
+                .plan
+                .events
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    DomainEvent::RiskCapApplied {
+                        intended,
+                        capped,
+                    } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+                ))
+        );
     }
 }
