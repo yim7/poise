@@ -133,7 +133,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<()> {
             unreachable!()
         }
 
@@ -155,6 +155,10 @@ mod tests {
             &self,
             _symbol: &str,
         ) -> anyhow::Result<grid_engine::ports::ExchangeInfo> {
+            unreachable!()
+        }
+
+        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
             unreachable!()
         }
     }

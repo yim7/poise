@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use grid_core::types::Side;
+use grid_core::types::{Exposure, Side};
 
 // ── Exchange types ──
 
@@ -34,11 +34,13 @@ pub struct Position {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenOrder {
+    pub symbol: String,
     pub order_id: String,
     pub client_order_id: String,
     pub side: Side,
     pub price: f64,
     pub qty: f64,
+    pub realized_pnl: f64,
     pub status: String,
 }
 
@@ -57,21 +59,41 @@ pub struct ExchangeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum UserDataEvent {
+pub enum UserDataPayload {
     OrderUpdate(OpenOrder),
     PositionUpdate(Position),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserDataEvent {
+    pub event_time: DateTime<Utc>,
+    pub payload: UserDataPayload,
+}
+
+impl UserDataEvent {
+    pub fn symbol(&self) -> &str {
+        match &self.payload {
+            UserDataPayload::OrderUpdate(order) => &order.symbol,
+            UserDataPayload::PositionUpdate(position) => &position.symbol,
+        }
+    }
 }
 
 // ── Snapshot type (for persistence) ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Internal persistence snapshot: keeps full engine state, including fields not exposed over HTTP.
 pub struct InstanceSnapshot {
     pub id: String,
     pub symbol: String,
     pub config: grid_core::strategy::GridConfig,
     pub status: super::instance::InstanceStatus,
-    pub current_exposure: grid_core::types::Exposure,
+    pub current_exposure: Exposure,
+    pub target_exposure: Option<Exposure>,
+    pub pending_order: Option<super::instance::PendingOrder>,
+    pub risk_state: super::instance::RiskState,
     pub last_price: Option<f64>,
+    pub out_of_band_since: Option<DateTime<Utc>>,
 }
 
 // ── Port traits ──
@@ -80,10 +102,11 @@ pub struct InstanceSnapshot {
 pub trait ExchangePort: Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
-    async fn cancel_all(&self, symbol: &str) -> Result<Vec<String>>;
+    async fn cancel_all(&self, symbol: &str) -> Result<()>;
     async fn get_position(&self, symbol: &str) -> Result<Position>;
     async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>>;
     async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo>;
+    async fn get_server_time(&self) -> Result<DateTime<Utc>>;
 }
 
 #[async_trait]

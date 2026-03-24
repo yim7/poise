@@ -1,9 +1,13 @@
+use std::net::IpAddr;
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use url::{Host, Url};
 
 use crate::protocol::{
     CommandRequest, CommandResponse, InstanceSnapshot, InstanceSummary, WsEvent,
@@ -17,9 +21,17 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5));
+        if should_bypass_proxy(&base_url) {
+            builder = builder.no_proxy();
+        }
+
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            base_url,
+            http: builder.build().expect("failed to build reqwest client"),
         }
     }
 
@@ -61,6 +73,19 @@ impl ApiClient {
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+}
+
+fn should_bypass_proxy(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(host)) => IpAddr::V4(host).is_loopback(),
+        Some(Host::Ipv6(host)) => IpAddr::V6(host).is_loopback(),
+        None => false,
     }
 }
 
@@ -138,7 +163,7 @@ mod tests {
         InstanceSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
     };
 
-    use super::{ApiClient, connect_ws};
+    use super::{ApiClient, connect_ws, should_bypass_proxy};
 
     #[derive(Clone)]
     struct StubState {
@@ -212,7 +237,9 @@ mod tests {
                     symbol: "BTCUSDT".into(),
                     status: InstanceStatus::Active,
                     current_exposure: 2.5,
+                    target_exposure: None,
                     last_price: Some(100.0),
+                    pending_order: None,
                     config: GridConfig {
                         lower_price: 90.0,
                         upper_price: 110.0,
@@ -271,6 +298,14 @@ mod tests {
 
         assert!(response.accepted);
         assert_eq!(snapshot.status, InstanceStatus::Paused);
+    }
+
+    #[test]
+    fn bypasses_proxy_for_loopback_hosts() {
+        assert!(should_bypass_proxy("http://127.0.0.1:8000"));
+        assert!(should_bypass_proxy("http://localhost:8000"));
+        assert!(should_bypass_proxy("https://[::1]:9443"));
+        assert!(!should_bypass_proxy("https://example.com"));
     }
 
     #[tokio::test]

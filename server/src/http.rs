@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use grid_engine::instance::{InstanceStatus, StrategyInstance};
+use grid_engine::instance::{InstanceStatus, PendingOrder, StrategyInstance};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
@@ -17,12 +17,15 @@ pub struct InstanceSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// HTTP DTO: exposes client-facing snapshot fields, but not internal risk bookkeeping.
 pub struct InstanceSnapshot {
     pub id: String,
     pub symbol: String,
     pub status: InstanceStatus,
     pub current_exposure: f64,
+    pub target_exposure: Option<f64>,
     pub last_price: Option<f64>,
+    pub pending_order: Option<PendingOrder>,
     pub config: grid_core::strategy::GridConfig,
 }
 
@@ -168,7 +171,9 @@ impl From<&StrategyInstance> for InstanceSnapshot {
             symbol: value.symbol.clone(),
             status: value.status.clone(),
             current_exposure: value.current_exposure.0,
+            target_exposure: value.target_exposure.as_ref().map(|exposure| exposure.0),
             last_price: value.last_price,
+            pending_order: value.pending_order.clone(),
             config: value.config.clone(),
         }
     }
@@ -198,7 +203,8 @@ mod tests {
     use chrono::Utc;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_engine::instance::InstanceStatus;
+    use grid_core::types::{ExchangeRules, Exposure};
+    use grid_engine::instance::{InstanceStatus, PendingOrder};
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangePort, OpenOrder, OrderReceipt, OrderRequest,
@@ -212,6 +218,15 @@ mod tests {
 
     use super::{CommandResponse, InstanceSnapshot, InstanceSummary, router};
 
+    fn test_exchange_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.0,
+            quantity_step: 0.0,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        }
+    }
+
     struct FakeExchange;
 
     #[async_trait::async_trait]
@@ -222,7 +237,7 @@ mod tests {
         async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> anyhow::Result<()> {
             unreachable!()
         }
-        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<()> {
             unreachable!()
         }
         async fn get_position(&self, _symbol: &str) -> anyhow::Result<Position> {
@@ -232,6 +247,10 @@ mod tests {
             unreachable!()
         }
         async fn get_exchange_info(&self, _symbol: &str) -> anyhow::Result<ExchangeInfo> {
+            unreachable!()
+        }
+
+        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
             unreachable!()
         }
     }
@@ -288,10 +307,11 @@ mod tests {
                     out_of_band_policy: OutOfBandPolicy::Freeze,
                 },
                 CapacityBudget {
-                    max_notional: 375.0,
+                    max_notional: 3000.0,
                     daily_loss_limit: -100.0,
                     stop_loss_pct: 10.0,
                 },
+                test_exchange_rules(),
             )
             .unwrap();
         let tick = grid_engine::ports::PriceTick {
@@ -300,7 +320,36 @@ mod tests {
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
-        let _ = manager.on_price_tick(&tick);
+        manager.on_price_tick(&tick).unwrap();
+        let instance = manager.get_instance("BTCUSDT").unwrap().id.clone();
+        let strategy = manager.get_instance(&instance).unwrap();
+        let strategy = manager
+            .get_instance(&strategy.id)
+            .expect("instance should still exist");
+        let pending_order = PendingOrder {
+            symbol: "BTCUSDT".into(),
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 94.5,
+            quantity: 0.25,
+            target_exposure: Exposure(4.0),
+            status: "NEW".into(),
+        };
+        manager
+            .restore_instance_state(&grid_engine::ports::InstanceSnapshot {
+                id: strategy.id.clone(),
+                symbol: strategy.symbol.clone(),
+                config: strategy.config.clone(),
+                status: strategy.status.clone(),
+                current_exposure: strategy.current_exposure.clone(),
+                target_exposure: strategy.target_exposure.clone(),
+                pending_order: Some(pending_order),
+                risk_state: strategy.risk_state.clone(),
+                last_price: strategy.last_price,
+                out_of_band_since: strategy.out_of_band_since,
+            })
+            .unwrap();
         let (events, _) = tokio::sync::broadcast::channel::<WsEvent>(16);
 
         AppState {
@@ -349,6 +398,27 @@ mod tests {
 
         assert_eq!(payload.id, "BTCUSDT");
         assert_eq!(payload.last_price, Some(95.0));
+        assert_eq!(payload.target_exposure, Some(4.0));
+        assert!(payload.pending_order.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_serializes_pending_order_side_as_snake_case() {
+        let response = router(app_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/instances/BTCUSDT/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["pending_order"]["side"], "buy");
     }
 
     #[tokio::test]
@@ -481,6 +551,7 @@ mod tests {
         let body = to_bytes(snapshot.into_body(), usize::MAX).await.unwrap();
         let payload: InstanceSnapshot = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload.status, InstanceStatus::Paused);
+        assert_eq!(payload.target_exposure, None);
     }
 
     #[tokio::test]

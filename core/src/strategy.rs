@@ -14,6 +14,7 @@ pub struct GridConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShapeFamily {
     Linear,
     Convex,
@@ -21,6 +22,7 @@ pub enum ShapeFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutOfBandPolicy {
     Freeze,
     ReduceOnly,
@@ -40,6 +42,7 @@ pub enum BandStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BandBoundary {
     Below,
     Above,

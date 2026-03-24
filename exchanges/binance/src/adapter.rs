@@ -43,16 +43,9 @@ impl ExchangePort for BinanceAdapter {
         Ok(())
     }
 
-    async fn cancel_all(&self, symbol: &str) -> Result<Vec<String>> {
-        let open_orders = self.rest.get_open_orders(symbol).await?;
-        let cancelled_order_ids = open_orders
-            .into_iter()
-            .map(|order| order.order_id)
-            .collect::<Vec<_>>();
-
+    async fn cancel_all(&self, symbol: &str) -> Result<()> {
         self.rest.cancel_all_orders(symbol).await?;
-
-        Ok(cancelled_order_ids)
+        Ok(())
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -65,6 +58,10 @@ impl ExchangePort for BinanceAdapter {
 
     async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
         self.rest.get_exchange_info(symbol).await
+    }
+
+    async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+        self.rest.get_server_time().await
     }
 }
 
@@ -203,7 +200,6 @@ mod tests {
                     Message::Text(
                         r#"{"e":"markPriceUpdate","E":1700000000000,"s":"BTCUSDT","p":"64000.10","i":"63999.90"}"#
                             .to_string()
-                            .into(),
                     ),
                 )
                 .await

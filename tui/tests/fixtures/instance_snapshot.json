@@ -1,8 +1,9 @@
 {
   "id": "BTCUSDT",
   "symbol": "BTCUSDT",
-  "status": "Holding",
+  "status": "holding",
   "current_exposure": 3.5,
+  "target_exposure": -4.0,
   "last_price": 112.0,
   "config": {
     "lower_price": 90.0,
@@ -10,7 +11,7 @@
     "long_capacity": 8.0,
     "short_capacity": 4.0,
     "capacity_notional": 375.0,
-    "shape_family": "Linear",
-    "out_of_band_policy": "Freeze"
+    "shape_family": "linear",
+    "out_of_band_policy": "freeze"
   }
 }

@@ -87,7 +87,9 @@ mod tests {
             symbol: "BTCUSDT".into(),
             status: InstanceStatus::Active,
             current_exposure: 1.25,
+            target_exposure: None,
             last_price: Some(100.0),
+            pending_order: None,
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,

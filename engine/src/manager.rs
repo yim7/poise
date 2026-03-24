@@ -5,10 +5,19 @@ use anyhow::{Result, bail};
 use grid_core::events::DomainEvent;
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
+use grid_core::types::ExchangeRules;
 
-use crate::instance::{InstanceStatus, StrategyInstance};
-use crate::ports::{ClockPort, ExchangePort, InstanceSnapshot, PersistencePort, PriceTick};
+use crate::execution_plan::ExecutionPlan;
+use crate::instance::{InstanceStatus, PendingOrder, StrategyInstance};
+use crate::ports::{
+    ClockPort, ExchangePort, InstanceSnapshot, OpenOrder, PersistencePort, Position, PriceTick,
+};
 use crate::reconciler;
+
+pub struct TickOutcome {
+    pub plan: ExecutionPlan,
+    pub events: Vec<DomainEvent>,
+}
 
 pub struct InstanceManager {
     instances: HashMap<String, StrategyInstance>,
@@ -39,19 +48,22 @@ impl InstanceManager {
         symbol: String,
         config: GridConfig,
         budget: CapacityBudget,
+        exchange_rules: ExchangeRules,
     ) -> Result<()> {
         if self.instances.contains_key(&id) {
             bail!("duplicate instance id `{id}`");
         }
         grid_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
-        let instance = StrategyInstance::new(id.clone(), symbol, config);
+        let instance = StrategyInstance::new(id.clone(), symbol, config, exchange_rules);
         self.instances.insert(id.clone(), instance);
         self.budgets.insert(id, budget);
         Ok(())
     }
 
-    pub fn on_price_tick(&mut self, tick: &PriceTick) -> Vec<DomainEvent> {
+    pub fn on_price_tick(&mut self, tick: &PriceTick) -> Result<TickOutcome> {
         let mut all_events = vec![];
+        let mut actions = vec![];
+        let mut plan_events = vec![];
         let ids: Vec<String> = self
             .instances
             .keys()
@@ -63,6 +75,7 @@ impl InstanceManager {
             if matches!(self.instances[&id].status, InstanceStatus::Paused) {
                 let instance = self.instances.get_mut(&id).unwrap();
                 instance.last_price = Some(tick.last_price);
+                instance.target_exposure = None;
                 continue;
             }
 
@@ -74,12 +87,21 @@ impl InstanceManager {
             if let Some(new_status) = result.new_status {
                 instance.status = new_status;
             }
-            instance.current_exposure = result.target_exposure;
+            instance.target_exposure = Some(result.target_exposure);
             instance.last_price = Some(tick.last_price);
 
-            all_events.extend(result.plan.events);
+            actions.extend(result.plan.actions);
+            all_events.extend(result.plan.events.clone());
+            plan_events.extend(result.plan.events);
         }
-        all_events
+
+        Ok(TickOutcome {
+            plan: ExecutionPlan {
+                actions,
+                events: plan_events,
+            },
+            events: all_events,
+        })
     }
 
     pub fn pause_instance(&mut self, id: &str) -> Result<()> {
@@ -87,7 +109,9 @@ impl InstanceManager {
             .instances
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
+        // Pause disables strategy targeting, but does not rewrite observed exchange state.
         instance.status = InstanceStatus::Paused;
+        instance.target_exposure = None;
         Ok(())
     }
 
@@ -130,10 +154,11 @@ impl InstanceManager {
         match resumed_state {
             Some((status, exposure)) => {
                 instance.status = status;
-                instance.current_exposure = exposure;
+                instance.target_exposure = Some(exposure);
             }
             None => {
                 instance.status = InstanceStatus::WaitingMarketData;
+                instance.target_exposure = None;
             }
         }
 
@@ -156,7 +181,92 @@ impl InstanceManager {
 
         instance.status = snapshot.status.clone();
         instance.current_exposure = snapshot.current_exposure.clone();
+        instance.target_exposure = snapshot.target_exposure.clone();
+        instance.pending_order = snapshot.pending_order.clone();
+        instance.risk_state = snapshot.risk_state.clone();
         instance.last_price = snapshot.last_price;
+        instance.out_of_band_since = snapshot.out_of_band_since;
+        Ok(())
+    }
+
+    pub fn record_submitted_order(&mut self, id: &str, pending: PendingOrder) -> Result<()> {
+        let instance = self
+            .instances
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
+        instance.pending_order = Some(pending);
+        Ok(())
+    }
+
+    pub fn clear_pending_order(&mut self, symbol: &str) -> Result<()> {
+        let instance = self.instance_by_symbol_mut(symbol)?;
+        instance.pending_order = None;
+        Ok(())
+    }
+
+    pub fn apply_position_update(&mut self, position: &Position) -> Result<()> {
+        let instance = self.instance_by_symbol_mut(&position.symbol)?;
+        let unit_qty = instance.config.capacity_unit_qty();
+        instance.current_exposure = if unit_qty <= f64::EPSILON {
+            grid_core::types::Exposure(0.0)
+        } else {
+            grid_core::types::Exposure(position.qty / unit_qty)
+        };
+        instance.risk_state.unrealized_pnl = position.unrealized_pnl;
+        Ok(())
+    }
+
+    pub fn apply_order_update(&mut self, order: &OpenOrder) -> Result<()> {
+        let today = self.clock.now().date_naive();
+        let instance = self.instance_by_symbol_mut(&order.symbol)?;
+
+        if instance.risk_state.realized_pnl_day != Some(today) {
+            instance.risk_state.realized_pnl_day = Some(today);
+            instance.risk_state.realized_pnl_today = 0.0;
+        }
+        if order.realized_pnl.abs() > f64::EPSILON {
+            instance.risk_state.realized_pnl_today += order.realized_pnl;
+        }
+
+        if matches!(order.status.as_str(), "NEW" | "PARTIALLY_FILLED") {
+            let target_exposure = instance
+                .pending_order
+                .as_ref()
+                .map(|pending| pending.target_exposure.clone())
+                .or_else(|| instance.target_exposure.clone())
+                .unwrap_or_else(|| instance.current_exposure.clone());
+
+            instance.pending_order = Some(PendingOrder {
+                symbol: order.symbol.clone(),
+                order_id: Some(order.order_id.clone()),
+                client_order_id: order.client_order_id.clone(),
+                side: order.side,
+                price: order.price,
+                quantity: order.qty,
+                target_exposure,
+                status: order.status.clone(),
+            });
+            return Ok(());
+        }
+
+        if matches!(
+            order.status.as_str(),
+            "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
+        ) {
+            let should_clear = instance
+                .pending_order
+                .as_ref()
+                .map(|pending| {
+                    pending.order_id.as_deref() == Some(order.order_id.as_str())
+                        || pending.client_order_id == order.client_order_id
+                })
+                .unwrap_or(false);
+
+            if should_clear {
+                instance.pending_order = None;
+            }
+        }
+
         Ok(())
     }
 
@@ -179,6 +289,13 @@ impl InstanceManager {
     pub fn clock(&self) -> &dyn ClockPort {
         self.clock.as_ref()
     }
+
+    fn instance_by_symbol_mut(&mut self, symbol: &str) -> Result<&mut StrategyInstance> {
+        self.instances
+            .values_mut()
+            .find(|instance| instance.symbol == symbol)
+            .ok_or_else(|| anyhow::anyhow!("instance for symbol `{symbol}` not found"))
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +303,7 @@ mod tests {
     use super::*;
     use crate::instance::InstanceStatus;
     use crate::ports::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use grid_core::strategy::*;
 
     // ── Fake adapters for testing ──
@@ -201,7 +318,7 @@ mod tests {
         async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
             unimplemented!()
         }
-        async fn cancel_all(&self, _symbol: &str) -> Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
             unimplemented!()
         }
         async fn get_position(&self, _symbol: &str) -> Result<Position> {
@@ -212,6 +329,10 @@ mod tests {
         }
         async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
             unimplemented!()
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+            Ok(Utc::now())
         }
     }
 
@@ -235,12 +356,24 @@ mod tests {
         }
     }
 
+    struct FixedClock(chrono::DateTime<Utc>);
+
+    impl ClockPort for FixedClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.0
+        }
+    }
+
     fn test_manager() -> InstanceManager {
         InstanceManager::new(
             Arc::new(FakeExchange),
             Arc::new(FakePersistence),
             Arc::new(FakeClock),
         )
+    }
+
+    fn test_manager_with_clock(clock: Arc<dyn ClockPort>) -> InstanceManager {
+        InstanceManager::new(Arc::new(FakeExchange), Arc::new(FakePersistence), clock)
     }
 
     fn test_config() -> GridConfig {
@@ -263,6 +396,15 @@ mod tests {
         }
     }
 
+    fn test_exchange_rules() -> grid_core::types::ExchangeRules {
+        grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.1,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        }
+    }
+
     #[test]
     fn add_instance_validates_config() {
         let mut manager = test_manager();
@@ -273,7 +415,13 @@ mod tests {
         };
         assert!(
             manager
-                .add_instance("test".into(), "BTCUSDT".into(), bad_config, test_budget())
+                .add_instance(
+                    "test".into(),
+                    "BTCUSDT".into(),
+                    bad_config,
+                    test_budget(),
+                    test_exchange_rules(),
+                )
                 .is_err()
         );
     }
@@ -287,6 +435,7 @@ mod tests {
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
         manager
@@ -295,6 +444,7 @@ mod tests {
                 "ETHUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
 
@@ -308,11 +458,23 @@ mod tests {
     fn add_instance_rejects_duplicate_ids() {
         let mut manager = test_manager();
         manager
-            .add_instance("dup".into(), "BTCUSDT".into(), test_config(), test_budget())
+            .add_instance(
+                "dup".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
             .unwrap();
 
         let error = manager
-            .add_instance("dup".into(), "ETHUSDT".into(), test_config(), test_budget())
+            .add_instance(
+                "dup".into(),
+                "ETHUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
             .unwrap_err();
 
         assert!(error.to_string().contains("duplicate instance id"));
@@ -327,6 +489,7 @@ mod tests {
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
 
@@ -337,13 +500,73 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let events = manager.on_price_tick(&tick);
-        assert!(!events.is_empty());
+        let outcome = manager.on_price_tick(&tick).unwrap();
+        assert!(!outcome.events.is_empty());
 
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::Active);
         assert_eq!(instance.last_price, Some(95.0));
-        assert!(instance.current_exposure.0 > 0.0); // should be long below center
+        assert_eq!(instance.current_exposure.0, 0.0);
+        assert!(instance.target_exposure.as_ref().unwrap().0 > 0.0); // should be long below center
+    }
+
+    #[test]
+    fn on_price_tick_returns_tick_outcome_with_plan_and_events() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        let tick = PriceTick {
+            symbol: "BTCUSDT".into(),
+            last_price: 95.0,
+            mark_price: 95.0,
+            timestamp: Utc::now(),
+        };
+
+        let outcome = manager.on_price_tick(&tick).unwrap();
+
+        assert!(!outcome.plan.actions.is_empty());
+        assert!(!outcome.events.is_empty());
+    }
+
+    #[test]
+    fn on_price_tick_updates_target_without_faking_current_exposure() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        let instance = manager.instances.get_mut("btc1").unwrap();
+        instance.current_exposure = grid_core::types::Exposure(2.0);
+
+        let tick = PriceTick {
+            symbol: "BTCUSDT".into(),
+            last_price: 95.0,
+            mark_price: 95.0,
+            timestamp: Utc::now(),
+        };
+
+        let outcome = manager.on_price_tick(&tick).unwrap();
+
+        assert!(!outcome.events.is_empty());
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.current_exposure.0, 2.0);
+        assert_eq!(instance.target_exposure.as_ref().unwrap().0, 4.0);
+        assert_eq!(instance.last_price, Some(95.0));
     }
 
     #[test]
@@ -355,6 +578,7 @@ mod tests {
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
 
@@ -365,8 +589,9 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let events = manager.on_price_tick(&tick);
-        assert!(events.is_empty());
+        let outcome = manager.on_price_tick(&tick).unwrap();
+        assert!(outcome.events.is_empty());
+        assert!(outcome.plan.actions.is_empty());
 
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::WaitingMarketData);
@@ -381,11 +606,13 @@ mod tests {
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
         let instance = manager.instances.get_mut("btc1").unwrap();
         instance.status = InstanceStatus::Paused;
         instance.current_exposure = grid_core::types::Exposure(2.0);
+        instance.target_exposure = Some(grid_core::types::Exposure(4.0));
 
         let tick = PriceTick {
             symbol: "BTCUSDT".into(),
@@ -394,12 +621,13 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let events = manager.on_price_tick(&tick);
+        let outcome = manager.on_price_tick(&tick).unwrap();
 
-        assert!(events.is_empty());
+        assert!(outcome.events.is_empty());
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::Paused);
         assert_eq!(instance.current_exposure.0, 2.0);
+        assert_eq!(instance.target_exposure, None);
         assert_eq!(instance.last_price, Some(95.0));
     }
 
@@ -412,6 +640,7 @@ mod tests {
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
 
@@ -429,6 +658,7 @@ mod tests {
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
+                test_exchange_rules(),
             )
             .unwrap();
 
@@ -442,5 +672,271 @@ mod tests {
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::Frozen);
         assert_eq!(instance.current_exposure.0, 8.0);
+    }
+
+    #[test]
+    fn record_submitted_order_stores_pending_order() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        let pending = crate::instance::PendingOrder {
+            symbol: "BTCUSDT".into(),
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 95.0,
+            quantity: 0.4,
+            target_exposure: grid_core::types::Exposure(4.0),
+            status: "NEW".into(),
+        };
+
+        manager
+            .record_submitted_order("btc1", pending.clone())
+            .unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.pending_order, Some(pending));
+    }
+
+    #[test]
+    fn clear_pending_order_clears_by_symbol() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+        manager.instances.get_mut("btc1").unwrap().pending_order = Some(PendingOrder {
+            symbol: "BTCUSDT".into(),
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 94.5,
+            quantity: 0.25,
+            target_exposure: grid_core::types::Exposure(4.0),
+            status: "NEW".into(),
+        });
+
+        manager.clear_pending_order("BTCUSDT").unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.pending_order, None);
+    }
+
+    #[test]
+    fn apply_position_update_converts_qty_to_exposure_and_updates_unrealized_pnl() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        manager
+            .apply_position_update(&Position {
+                symbol: "BTCUSDT".into(),
+                qty: 15.0,
+                avg_price: 100.0,
+                unrealized_pnl: 12.5,
+            })
+            .unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.current_exposure, grid_core::types::Exposure(4.0));
+        assert!((instance.risk_state.unrealized_pnl - 12.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_order_update_rebuilds_pending_order_for_open_status() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        manager.instances.get_mut("btc1").unwrap().target_exposure =
+            Some(grid_core::types::Exposure(6.0));
+
+        manager
+            .apply_order_update(&OpenOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: grid_core::types::Side::Buy,
+                price: 94.5,
+                qty: 0.25,
+                realized_pnl: 0.0,
+                status: "NEW".into(),
+            })
+            .unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(
+            instance.pending_order,
+            Some(crate::instance::PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("order-1".into()),
+                client_order_id: "client-1".into(),
+                side: grid_core::types::Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                target_exposure: grid_core::types::Exposure(6.0),
+                status: "NEW".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_order_update_clears_matching_pending_order_on_terminal_status() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        manager.instances.get_mut("btc1").unwrap().pending_order =
+            Some(crate::instance::PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("order-1".into()),
+                client_order_id: "client-1".into(),
+                side: grid_core::types::Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                target_exposure: grid_core::types::Exposure(4.0),
+                status: "NEW".into(),
+            });
+
+        manager
+            .apply_order_update(&OpenOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: grid_core::types::Side::Buy,
+                price: 94.5,
+                qty: 0.25,
+                realized_pnl: 0.0,
+                status: "FILLED".into(),
+            })
+            .unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.pending_order, None);
+    }
+
+    #[test]
+    fn apply_order_update_accumulates_realized_pnl_by_utc_day() {
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+        let mut manager = test_manager_with_clock(clock);
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+
+        manager
+            .apply_order_update(&OpenOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: grid_core::types::Side::Buy,
+                price: 94.5,
+                qty: 0.25,
+                realized_pnl: -12.5,
+                status: "PARTIALLY_FILLED".into(),
+            })
+            .unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(
+            instance.risk_state.realized_pnl_day,
+            Some(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
+                    .unwrap()
+                    .date_naive()
+            )
+        );
+        assert!((instance.risk_state.realized_pnl_today + 12.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_order_update_resets_realized_pnl_when_utc_day_changes() {
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 25, 1, 0, 0).unwrap(),
+        ));
+        let mut manager = test_manager_with_clock(clock);
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                test_exchange_rules(),
+            )
+            .unwrap();
+        manager.instances.get_mut("btc1").unwrap().risk_state = crate::instance::RiskState {
+            realized_pnl_day: Some(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
+                    .unwrap()
+                    .date_naive(),
+            ),
+            realized_pnl_today: 20.0,
+            unrealized_pnl: 0.0,
+        };
+
+        manager
+            .apply_order_update(&OpenOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: grid_core::types::Side::Buy,
+                price: 94.5,
+                qty: 0.25,
+                realized_pnl: -5.0,
+                status: "PARTIALLY_FILLED".into(),
+            })
+            .unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(
+            instance.risk_state.realized_pnl_day,
+            Some(
+                Utc.with_ymd_and_hms(2026, 3, 25, 1, 0, 0)
+                    .unwrap()
+                    .date_naive()
+            )
+        );
+        assert!((instance.risk_state.realized_pnl_today + 5.0).abs() < f64::EPSILON);
     }
 }

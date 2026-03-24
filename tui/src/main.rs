@@ -378,7 +378,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
-    use axum::extract::{Path, State};
+    use axum::extract::{Path, Query, State};
     use axum::response::Response;
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -410,7 +410,9 @@ mod tests {
             symbol: "BTCUSDT".into(),
             status,
             current_exposure: exposure,
+            target_exposure: None,
             last_price: Some(100.0),
+            pending_order: None,
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -429,7 +431,9 @@ mod tests {
             symbol: "ETHUSDT".into(),
             status: InstanceStatus::Paused,
             current_exposure: -1.0,
+            target_exposure: None,
             last_price: Some(2200.0),
+            pending_order: None,
             config: GridConfig {
                 lower_price: 2000.0,
                 upper_price: 2600.0,
@@ -497,11 +501,16 @@ mod tests {
         socket.send(AxumMessage::Text(payload)).await.unwrap();
     }
 
-    async fn market_ws_handler(Path(stream): Path<String>, ws: WebSocketUpgrade) -> Response {
-        ws.on_upgrade(move |socket| handle_market_socket(socket, stream))
+    async fn exchange_ws_handler(Path(stream): Path<String>, ws: WebSocketUpgrade) -> Response {
+        ws.on_upgrade(move |socket| handle_exchange_socket(socket, stream))
     }
 
-    async fn handle_market_socket(mut socket: WebSocket, stream: String) {
+    async fn handle_exchange_socket(mut socket: WebSocket, stream: String) {
+        if !stream.contains('@') {
+            while socket.recv().await.is_some() {}
+            return;
+        }
+
         let symbol = stream
             .split('@')
             .next()
@@ -522,6 +531,111 @@ mod tests {
             }
             sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    async fn exchange_info() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "symbols": [
+                exchange_info_symbol("BTCUSDT"),
+                exchange_info_symbol("ETHUSDT")
+            ]
+        }))
+    }
+
+    async fn server_time() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "serverTime": 1_700_000_000_000_i64
+        }))
+    }
+
+    fn exchange_info_symbol(symbol: &str) -> serde_json::Value {
+        serde_json::json!({
+            "symbol": symbol,
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "tickSize": "0.1"
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "stepSize": "0.001"
+                },
+                {
+                    "filterType": "MIN_NOTIONAL",
+                    "notional": "5.0"
+                }
+            ]
+        })
+    }
+
+    async fn position_risk(
+        Query(params): Query<HashMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        let symbol = params
+            .get("symbol")
+            .cloned()
+            .unwrap_or_else(|| "BTCUSDT".to_string());
+
+        Json(serde_json::json!([
+            {
+                "symbol": symbol,
+                "positionAmt": "0.0",
+                "entryPrice": "0.0",
+                "unRealizedProfit": "0.0"
+            }
+        ]))
+    }
+
+    async fn open_orders() -> Json<serde_json::Value> {
+        Json(serde_json::json!([]))
+    }
+
+    async fn create_order(
+        Query(params): Query<HashMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        let client_order_id = params
+            .get("newClientOrderId")
+            .cloned()
+            .unwrap_or_else(|| "grid-order-test".to_string());
+
+        Json(serde_json::json!({
+            "orderId": 1001,
+            "clientOrderId": client_order_id,
+            "status": "NEW"
+        }))
+    }
+
+    async fn cancel_order(
+        Query(params): Query<HashMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        let order_id = params
+            .get("orderId")
+            .cloned()
+            .unwrap_or_else(|| "1001".to_string());
+
+        Json(serde_json::json!({
+            "orderId": order_id.parse::<u64>().unwrap_or(1001),
+            "clientOrderId": "grid-order-test",
+            "status": "CANCELED"
+        }))
+    }
+
+    async fn cancel_all_orders() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "code": 200,
+            "msg": "cancel all open orders accepted"
+        }))
+    }
+
+    async fn create_listen_key() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "listenKey": "listen-key-1"
+        }))
+    }
+
+    async fn keepalive_listen_key() -> Json<serde_json::Value> {
+        Json(serde_json::json!({}))
     }
 
     async fn spawn_stub_server() -> (ApiClient, String, StubState) {
@@ -818,16 +932,46 @@ mod tests {
         let _ = ws_server.await;
     }
 
-    async fn spawn_fake_market_ws_server() -> String {
+    struct FakeExchangeServer {
+        rest_base_url: String,
+        ws_base_url: String,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for FakeExchangeServer {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
+
+    async fn spawn_fake_exchange_server() -> FakeExchangeServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app = Router::new().route("/ws/:stream", get(market_ws_handler));
+        let app = Router::new()
+            .route("/ws/:stream", get(exchange_ws_handler))
+            .route("/fapi/v1/time", get(server_time))
+            .route("/fapi/v1/exchangeInfo", get(exchange_info))
+            .route("/fapi/v2/positionRisk", get(position_risk))
+            .route("/fapi/v1/openOrders", get(open_orders))
+            .route("/fapi/v1/order", post(create_order).delete(cancel_order))
+            .route(
+                "/fapi/v1/allOpenOrders",
+                axum::routing::delete(cancel_all_orders),
+            )
+            .route(
+                "/fapi/v1/listenKey",
+                post(create_listen_key).put(keepalive_listen_key),
+            );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
-        format!("ws://{address}")
+        FakeExchangeServer {
+            rest_base_url: format!("http://{address}"),
+            ws_base_url: format!("ws://{address}"),
+            handle,
+        }
     }
 
     async fn spawn_ws_server_on(address: std::net::SocketAddr) -> tokio::task::JoinHandle<()> {
@@ -868,10 +1012,6 @@ mod tests {
 
     fn ensure_grid_server_binary() -> PathBuf {
         let path = grid_server_binary_path();
-        if path.exists() {
-            return path;
-        }
-
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -885,10 +1025,6 @@ mod tests {
 
     fn ensure_grid_tui_binary() -> PathBuf {
         let path = grid_tui_binary_path();
-        if path.exists() {
-            return path;
-        }
-
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -982,7 +1118,12 @@ mod tests {
     }
 
     async fn wait_for_http_ready(base_url: &str) {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+            .unwrap();
         for _ in 0..50 {
             let Ok(response) = client.get(format!("{base_url}/instances")).send().await else {
                 sleep(Duration::from_millis(100)).await;
@@ -1011,7 +1152,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_server_protocol_integration_covers_list_switch_and_ws_updates() {
-        let ws_base_url = spawn_fake_market_ws_server().await;
+        let exchange = spawn_fake_exchange_server().await;
         let server_binary = ensure_grid_server_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1026,7 +1167,7 @@ environment = "tui-e2e"
 bind_address = "{bind_address}"
 
 [exchange]
-rest_base_url = "http://127.0.0.1:1"
+rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
 [[instances]]
@@ -1044,9 +1185,11 @@ upper_price = 2600.0
 long_capacity = 5.0
 short_capacity = 4.0
 capacity_notional = 2000.0
-shape_family = "Concave"
-out_of_band_policy = "Hold"
-"#
+shape_family = "concave"
+out_of_band_policy = "hold"
+"#,
+                rest_base_url = exchange.rest_base_url,
+                ws_base_url = exchange.ws_base_url
             ),
         )
         .unwrap();
@@ -1104,7 +1247,7 @@ out_of_band_policy = "Hold"
 
     #[tokio::test]
     async fn real_server_and_tui_binary_end_to_end_renders_and_exits() {
-        let ws_base_url = spawn_fake_market_ws_server().await;
+        let exchange = spawn_fake_exchange_server().await;
         let server_binary = ensure_grid_server_binary();
         let tui_binary = ensure_grid_tui_binary();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1120,7 +1263,7 @@ environment = "tui-binary-e2e"
 bind_address = "{bind_address}"
 
 [exchange]
-rest_base_url = "http://127.0.0.1:1"
+rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
 [[instances]]
@@ -1138,9 +1281,11 @@ upper_price = 2600.0
 long_capacity = 5.0
 short_capacity = 4.0
 capacity_notional = 2000.0
-shape_family = "Concave"
-out_of_band_policy = "Hold"
-"#
+shape_family = "concave"
+out_of_band_policy = "hold"
+"#,
+                rest_base_url = exchange.rest_base_url,
+                ws_base_url = exchange.ws_base_url
             ),
         )
         .unwrap();
@@ -1179,7 +1324,7 @@ out_of_band_policy = "Hold"
             "eth view:\n{eth_view}"
         );
 
-        let event_view = wait_for_pane_text(&session, "Recent Events").await;
+        let event_view = wait_for_pane_text(&session, "->").await;
         assert!(
             event_view.contains("Recent Events"),
             "event view:\n{event_view}"

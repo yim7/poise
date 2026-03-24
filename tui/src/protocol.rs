@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
     WaitingMarketData,
     Active,
@@ -22,13 +23,29 @@ pub struct InstanceSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Client-side snapshot mirror of the HTTP DTO.
 pub struct InstanceSnapshot {
     pub id: String,
     pub symbol: String,
     pub status: InstanceStatus,
     pub current_exposure: f64,
+    #[serde(default)]
+    pub target_exposure: Option<f64>,
     pub last_price: Option<f64>,
+    #[serde(default)]
+    pub pending_order: Option<PendingOrder>,
     pub config: GridConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingOrder {
+    pub symbol: String,
+    pub order_id: Option<String>,
+    pub client_order_id: String,
+    pub side: Side,
+    pub price: f64,
+    pub quantity: f64,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +72,7 @@ pub struct GridConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShapeFamily {
     Linear,
     Convex,
@@ -62,6 +80,7 @@ pub enum ShapeFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutOfBandPolicy {
     Freeze,
     ReduceOnly,
@@ -70,12 +89,21 @@ pub enum OutOfBandPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BandBoundary {
     Below,
     Above,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DomainEvent {
     ExposureTargetChanged { from: f64, to: f64 },
     BandBreached { boundary: BandBoundary, price: f64 },
@@ -115,22 +143,7 @@ impl InstanceSnapshot {
     }
 
     pub fn target_exposure(&self) -> Option<f64> {
-        self.last_price
-            .map(|last_price| self.config.target_exposure(last_price))
-    }
-}
-
-impl GridConfig {
-    pub fn target_exposure(&self, price: f64) -> f64 {
-        let normalized =
-            ((price - self.lower_price) / (self.upper_price - self.lower_price)).clamp(0.0, 1.0);
-        let curve = match self.shape_family {
-            ShapeFamily::Linear => 1.0 - normalized,
-            ShapeFamily::Convex => 1.0 - normalized.powi(2),
-            ShapeFamily::Concave => 1.0 - normalized.sqrt(),
-        };
-
-        -self.short_capacity + (self.long_capacity + self.short_capacity) * curve
+        self.target_exposure
     }
 }
 
@@ -175,6 +188,17 @@ impl fmt::Display for OutOfBandPolicy {
     }
 }
 
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Buy => "buy",
+            Self::Sell => "sell",
+        };
+
+        f.write_str(value)
+    }
+}
+
 impl fmt::Display for BandState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
@@ -211,7 +235,7 @@ impl fmt::Display for DomainEvent {
 mod tests {
     use super::{
         BandBoundary, BandState, CommandResponse, DomainEvent, GridConfig, InstanceSnapshot,
-        InstanceStatus, InstanceSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
+        InstanceStatus, InstanceSummary, OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
     #[test]
@@ -236,6 +260,73 @@ mod tests {
         assert_eq!(snapshot.config.shape_family, ShapeFamily::Linear);
         assert_eq!(snapshot.band_state(), BandState::AboveBand);
         assert_eq!(snapshot.target_exposure(), Some(-4.0));
+        assert!(snapshot.pending_order.is_none());
+    }
+
+    #[test]
+    fn deserializes_snake_case_snapshot() {
+        let snapshot: InstanceSnapshot = serde_json::from_str(
+            r#"
+            {
+              "id": "BTCUSDT",
+              "symbol": "BTCUSDT",
+              "status": "holding",
+              "current_exposure": 3.5,
+              "last_price": 112.0,
+              "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_capacity": 8.0,
+                "short_capacity": 4.0,
+                "capacity_notional": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.status, InstanceStatus::Holding);
+        assert_eq!(snapshot.config.shape_family, ShapeFamily::Linear);
+        assert_eq!(snapshot.config.out_of_band_policy, OutOfBandPolicy::Freeze);
+    }
+
+    #[test]
+    fn deserializes_pending_order_side_from_snake_case_snapshot() {
+        let snapshot: InstanceSnapshot = serde_json::from_str(
+            r#"
+            {
+              "id": "BTCUSDT",
+              "symbol": "BTCUSDT",
+              "status": "active",
+              "current_exposure": 0.0,
+              "target_exposure": 4.0,
+              "last_price": 95.0,
+              "pending_order": {
+                "symbol": "BTCUSDT",
+                "order_id": "order-1",
+                "client_order_id": "client-1",
+                "side": "buy",
+                "price": 94.5,
+                "quantity": 0.25,
+                "status": "NEW"
+              },
+              "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_capacity": 8.0,
+                "short_capacity": 8.0,
+                "capacity_notional": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.pending_order.unwrap().side, Side::Buy);
     }
 
     #[test]
@@ -268,7 +359,17 @@ mod tests {
             symbol: "BTCUSDT".into(),
             status: InstanceStatus::Active,
             current_exposure: 0.0,
+            target_exposure: Some(4.0),
             last_price: Some(85.0),
+            pending_order: Some(PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("order-1".into()),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 90.0,
+                quantity: 0.5,
+                status: "NEW".into(),
+            }),
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -287,6 +388,54 @@ mod tests {
             ..snapshot
         };
         assert_eq!(reentered.band_state(), BandState::InBand);
+    }
+
+    #[test]
+    fn target_exposure_prefers_server_value() {
+        let snapshot = InstanceSnapshot {
+            id: "BTCUSDT".into(),
+            symbol: "BTCUSDT".into(),
+            status: InstanceStatus::Active,
+            current_exposure: 0.0,
+            target_exposure: Some(1.5),
+            last_price: Some(85.0),
+            pending_order: None,
+            config: GridConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_capacity: 8.0,
+                short_capacity: 8.0,
+                capacity_notional: 375.0,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+        };
+
+        assert_eq!(snapshot.target_exposure(), Some(1.5));
+    }
+
+    #[test]
+    fn target_exposure_none_stays_none() {
+        let snapshot = InstanceSnapshot {
+            id: "BTCUSDT".into(),
+            symbol: "BTCUSDT".into(),
+            status: InstanceStatus::Paused,
+            current_exposure: 0.0,
+            target_exposure: None,
+            last_price: Some(85.0),
+            pending_order: None,
+            config: GridConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_capacity: 8.0,
+                short_capacity: 8.0,
+                capacity_notional: 375.0,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+        };
+
+        assert_eq!(snapshot.target_exposure(), None);
     }
 
     #[test]

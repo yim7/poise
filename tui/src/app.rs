@@ -192,7 +192,7 @@ impl App {
 mod tests {
     use crate::protocol::{
         DomainEvent, GridConfig, InstanceSnapshot, InstanceStatus, InstanceSummary,
-        OutOfBandPolicy, ShapeFamily, WsEvent,
+        OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
     use super::{App, View};
@@ -212,7 +212,17 @@ mod tests {
             symbol: id.into(),
             status: InstanceStatus::Active,
             current_exposure: exposure,
+            target_exposure: Some(exposure + 1.0),
             last_price: Some(100.0),
+            pending_order: Some(PendingOrder {
+                symbol: id.into(),
+                order_id: Some(format!("{id}-order")),
+                client_order_id: format!("{id}-client"),
+                side: Side::Buy,
+                price: 99.0,
+                quantity: 0.25,
+                status: "NEW".into(),
+            }),
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,

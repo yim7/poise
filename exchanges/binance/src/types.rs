@@ -25,6 +25,7 @@ pub struct BinancePositionRisk {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceOpenOrder {
+    pub symbol: String,
     #[serde(rename = "orderId")]
     pub order_id: u64,
     #[serde(rename = "clientOrderId")]
@@ -90,11 +91,13 @@ impl TryFrom<BinanceOpenOrder> for OpenOrder {
 
     fn try_from(value: BinanceOpenOrder) -> Result<Self, Self::Error> {
         Ok(Self {
+            symbol: value.symbol,
             order_id: value.order_id.to_string(),
             client_order_id: value.client_order_id,
             side: parse_side(&value.side)?,
             price: parse_decimal("price", &value.price)?,
             qty: parse_decimal("origQty", &value.orig_qty)?,
+            realized_pnl: 0.0,
             status: value.status,
         })
     }
@@ -215,6 +218,7 @@ mod tests {
     fn converts_open_order_into_engine_order() {
         let payload = r#"
         {
+            "symbol": "BTCUSDT",
             "orderId": 987654321,
             "clientOrderId": "grid-open-002",
             "side": "SELL",
@@ -230,11 +234,13 @@ mod tests {
         assert_eq!(
             converted,
             OpenOrder {
+                symbol: "BTCUSDT".to_string(),
                 order_id: "987654321".to_string(),
                 client_order_id: "grid-open-002".to_string(),
                 side: Side::Sell,
                 price: 65123.4,
                 qty: 0.01,
+                realized_pnl: 0.0,
                 status: "PARTIALLY_FILLED".to_string(),
             }
         );

@@ -13,6 +13,9 @@ pub struct CapacityBudget {
 pub struct ExposureIntent {
     pub current: Exposure,
     pub target: Exposure,
+    pub unit_notional: f64,
+    pub realized_pnl_today: f64,
+    pub unrealized_pnl: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,12 +26,26 @@ pub enum RiskDecision {
 }
 
 /// 纯函数：评估风控。
-///
-/// 第一版实现：减仓或不变总是允许，加仓在预算范围内允许。
-pub fn evaluate_risk(intent: &ExposureIntent, _budget: &CapacityBudget) -> RiskDecision {
-    if intent.target.0.abs() <= intent.current.0.abs() {
-        return RiskDecision::Allow(intent.target.clone());
+pub fn evaluate_risk(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskDecision {
+    let total_pnl = intent.realized_pnl_today + intent.unrealized_pnl;
+
+    if total_pnl <= budget.daily_loss_limit {
+        return RiskDecision::Cap(Exposure(0.0));
     }
+
+    if budget.max_notional > 0.0
+        && ((-total_pnl / budget.max_notional) * 100.0) >= budget.stop_loss_pct
+    {
+        return RiskDecision::Cap(Exposure(0.0));
+    }
+
+    if budget.max_notional > 0.0 && intent.unit_notional > 0.0 {
+        let max_abs_exposure = budget.max_notional / intent.unit_notional;
+        if intent.target.0.abs() > max_abs_exposure {
+            return RiskDecision::Cap(Exposure(intent.target.0.signum() * max_abs_exposure));
+        }
+    }
+
     RiskDecision::Allow(intent.target.clone())
 }
 
@@ -49,6 +66,9 @@ mod tests {
         let intent = ExposureIntent {
             current: Exposure(0.0),
             target: Exposure(4.0),
+            unit_notional: 375.0,
+            realized_pnl_today: 0.0,
+            unrealized_pnl: 0.0,
         };
         let decision = evaluate_risk(&intent, &budget());
         assert!(matches!(decision, RiskDecision::Allow(_)));
@@ -59,6 +79,9 @@ mod tests {
         let intent = ExposureIntent {
             current: Exposure(8.0),
             target: Exposure(4.0),
+            unit_notional: 375.0,
+            realized_pnl_today: 0.0,
+            unrealized_pnl: 0.0,
         };
         let decision = evaluate_risk(&intent, &budget());
         assert!(matches!(decision, RiskDecision::Allow(_)));
@@ -69,8 +92,60 @@ mod tests {
         let intent = ExposureIntent {
             current: Exposure(4.0),
             target: Exposure(4.0),
+            unit_notional: 375.0,
+            realized_pnl_today: 0.0,
+            unrealized_pnl: 0.0,
         };
         let decision = evaluate_risk(&intent, &budget());
         assert!(matches!(decision, RiskDecision::Allow(_)));
+    }
+
+    #[test]
+    fn caps_target_when_max_notional_is_exceeded() {
+        let intent = ExposureIntent {
+            current: Exposure(0.0),
+            target: Exposure(10.0),
+            unit_notional: 375.0,
+            realized_pnl_today: 0.0,
+            unrealized_pnl: 0.0,
+        };
+
+        let decision = evaluate_risk(&intent, &budget());
+
+        assert_eq!(decision, RiskDecision::Cap(Exposure(8.0)));
+    }
+
+    #[test]
+    fn caps_to_zero_when_daily_loss_limit_is_breached() {
+        let intent = ExposureIntent {
+            current: Exposure(4.0),
+            target: Exposure(8.0),
+            unit_notional: 375.0,
+            realized_pnl_today: -100.0,
+            unrealized_pnl: -25.0,
+        };
+
+        let decision = evaluate_risk(&intent, &budget());
+
+        assert_eq!(decision, RiskDecision::Cap(Exposure(0.0)));
+    }
+
+    #[test]
+    fn caps_to_zero_when_stop_loss_pct_is_breached() {
+        let intent = ExposureIntent {
+            current: Exposure(4.0),
+            target: Exposure(8.0),
+            unit_notional: 375.0,
+            realized_pnl_today: -50.0,
+            unrealized_pnl: -70.0,
+        };
+        let budget = CapacityBudget {
+            daily_loss_limit: -200.0,
+            ..budget()
+        };
+
+        let decision = evaluate_risk(&intent, &budget);
+
+        assert_eq!(decision, RiskDecision::Cap(Exposure(0.0)));
     }
 }

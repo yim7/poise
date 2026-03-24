@@ -72,7 +72,7 @@ impl InstanceConfig {
 
     pub fn budget(&self) -> CapacityBudget {
         CapacityBudget {
-            max_notional: self.capacity_notional,
+            max_notional: self.long_capacity.max(self.short_capacity) * self.capacity_notional,
             daily_loss_limit: f64::NEG_INFINITY,
             stop_loss_pct: 100.0,
         }
@@ -93,6 +93,8 @@ fn default_out_of_band_policy() -> OutOfBandPolicy {
 
 #[cfg(test)]
 mod tests {
+    use grid_core::strategy::{OutOfBandPolicy, ShapeFamily};
+
     use super::{Config, default_bind_address, parse_config};
 
     #[test]
@@ -123,8 +125,8 @@ upper_price = 2600.0
 long_capacity = 5.0
 short_capacity = 4.0
 capacity_notional = 2000.0
-shape_family = "Concave"
-out_of_band_policy = "Hold"
+shape_family = "concave"
+out_of_band_policy = "hold"
 "#,
         )
         .unwrap();
@@ -176,6 +178,31 @@ capacity_notional = 375.0
             config.instances[0].grid_config().out_of_band_policy,
             grid_core::strategy::OutOfBandPolicy::Freeze
         );
+    }
+
+    #[test]
+    fn parses_snake_case_strategy_enums() {
+        let config = parse_config(
+            r#"
+environment = "paper"
+
+[[instances]]
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_capacity = 8.0
+short_capacity = 4.0
+capacity_notional = 375.0
+shape_family = "concave"
+out_of_band_policy = "reduce_only"
+"#,
+        )
+        .unwrap();
+
+        let instance = &config.instances[0];
+        assert_eq!(instance.shape_family, ShapeFamily::Concave);
+        assert_eq!(instance.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
+        assert_eq!(instance.budget().max_notional, 3000.0);
     }
 
     #[test]
