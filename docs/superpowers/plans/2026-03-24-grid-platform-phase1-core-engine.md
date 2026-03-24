@@ -10,6 +10,27 @@
 
 **Scope:** 本计划只覆盖 grid-core 和 grid-engine。适配器（binance/storage）、服务端（server）和客户端（tui）各自有独立的后续计划。
 
+## 当前状态
+
+- [x] Task 1: 初始化 Workspace
+- [x] Task 2: grid-core 领域类型
+- [x] Task 3: grid-core 策略模型
+- [x] Task 4: grid-core 风控规则
+- [x] Task 5: grid-core 领域事件
+- [x] Task 6: grid-engine 端口 trait 定义
+- [x] Task 7: grid-engine 实例模型
+- [x] Task 8: grid-engine 执行计划类型
+- [x] Task 9: grid-engine 协调器
+- [x] Task 10: grid-engine 多实例管理器
+
+当前实现已合入 Git 历史，核心提交如下：
+
+- `960db66` `feat: initialize grid-core and grid-engine workspace`
+- `2a225fa` `feat(core): add domain types, strategy model, risk rules and domain events`
+- `664b4b1` `feat(engine): add ports, instance model, execution plan, reconciler and manager`
+
+说明：下方明细步骤里的 checkbox 保留为执行模板，不回填历史过程型动作；当前状态以本节和验收记录为准。
+
 ---
 
 ## File Structure
@@ -1155,6 +1176,21 @@ git add -A && git commit -m "feat(engine): add InstanceManager - multi-instance 
 4. grid-core 的 Cargo.toml 不含 tokio/async 依赖 — 纯函数约束成立
 5. grid-engine 的 reconcile 是纯函数 — 无 IO 调用
 6. 端口 trait 定义完整 — ExchangePort, MarketDataPort, PersistencePort, ClockPort
+
+## 验收记录
+
+验收时间：2026-03-24
+
+- `cargo test -p grid-core`：20 个测试通过
+- `cargo test -p grid-engine`：11 个测试通过
+- `cargo check`：通过
+- `cargo test`：当前 workspace 全部通过
+
+补充核对：
+
+- `core/Cargo.toml` 仅依赖 `serde`
+- `engine/src/reconciler.rs` 的 `reconcile` 为纯函数，不做 IO
+- `engine/src/ports.rs` 已定义 `ExchangePort`、`MarketDataPort`、`PersistencePort`、`ClockPort`
 
 ## 后续计划
 
