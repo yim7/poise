@@ -222,6 +222,7 @@ cargo test -p grid-platform-service --test control_plane -- --nocapture
 - [`docs/protocol-contract.md`](docs/protocol-contract.md)：`service` 与 `tui` 当前共享的 HTTP / WebSocket 协议
 - [`docs/binance-integration.md`](docs/binance-integration.md)：真实 Binance 接入说明
 - [`docs/k6-validation.md`](docs/k6-validation.md)：replay / paper / testnet 验证手册
+- [`docs/grid-strategy-product-theory-research.md`](docs/grid-strategy-product-theory-research.md)：业界成熟网格产品与学术理论调研
 - [`docs/roadmap.md`](docs/roadmap.md)：阶段目标与里程碑
 - [`docs/plan.md`](docs/plan.md)：近期计划与验收标准
 - [`TODO.md`](TODO.md)：当前任务清单与最近验证结果
