@@ -46,24 +46,24 @@ tui/
 - Create: `tui/Cargo.toml`
 - Create: `tui/src/main.rs`
 
-- [ ] **Step 1: 添加 ratatui 到 workspace 依赖**
+- [x] **Step 1: 添加 ratatui 到 workspace 依赖**
 
 ```toml
 ratatui = "0.29"
 crossterm = "0.28"
 ```
 
-- [ ] **Step 2: 创建 tui/Cargo.toml**
+- [x] **Step 2: 创建 tui/Cargo.toml**
 
 依赖 ratatui、crossterm、reqwest、tokio-tungstenite、serde、tokio。
 
 注意：不依赖 grid-core 或 grid-engine。
 
-- [ ] **Step 3: 创建 main.rs 骨架**
+- [x] **Step 3: 创建 main.rs 骨架**
 
 能启动 TUI alternate screen 并正常退出。
 
-- [ ] **Step 4: 验证编译和运行**
+- [x] **Step 4: 验证编译和运行**
 
 Run: `cargo run -p grid-tui`
 Expected: 进入 alternate screen，按 q 退出
@@ -81,7 +81,7 @@ git add -A && git commit -m "feat: initialize grid-tui crate with basic terminal
 **Files:**
 - Create: `tui/src/protocol.rs`
 
-- [ ] **Step 1: 定义客户端侧协议类型**
+- [x] **Step 1: 定义客户端侧协议类型**
 
 与 grid-server HTTP/WS 响应对应的 serde struct：
 - `InstanceSummary`（来自 `GET /instances`）
@@ -89,11 +89,11 @@ git add -A && git commit -m "feat: initialize grid-tui crate with basic terminal
 - `CommandResponse`（来自 `POST /instances/{id}/commands`）
 - `WsEvent`（来自 WebSocket 推送）
 
-- [ ] **Step 2: 写反序列化测试**
+- [x] **Step 2: 写反序列化测试**
 
 用 JSON fixture 测试反序列化。
 
-- [ ] **Step 3: 运行测试确认通过**
+- [x] **Step 3: 运行测试确认通过**
 
 - [ ] **Step 4: 提交**
 
@@ -108,7 +108,7 @@ git add -A && git commit -m "feat(tui): add wire protocol types"
 **Files:**
 - Create: `tui/src/api_client.rs`
 
-- [ ] **Step 1: 实现 HTTP 客户端**
+- [x] **Step 1: 实现 HTTP 客户端**
 
 ```rust
 pub struct ApiClient {
@@ -123,13 +123,13 @@ impl ApiClient {
 }
 ```
 
-- [ ] **Step 2: 实现 WebSocket 客户端**
+- [x] **Step 2: 实现 WebSocket 客户端**
 
 ```rust
 pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<WsEvent>>;
 ```
 
-- [ ] **Step 3: 验证编译通过**
+- [x] **Step 3: 验证编译通过**
 
 - [ ] **Step 4: 提交**
 
@@ -145,7 +145,7 @@ git add -A && git commit -m "feat(tui): add HTTP/WS API client"
 - Create: `tui/src/app.rs`
 - Create: `tui/src/input.rs`
 
-- [ ] **Step 1: 实现 App struct**
+- [x] **Step 1: 实现 App struct**
 
 ```rust
 pub struct App {
@@ -159,7 +159,7 @@ pub struct App {
 pub enum View { Dashboard, Instance, Help }
 ```
 
-- [ ] **Step 2: 实现输入处理**
+- [x] **Step 2: 实现输入处理**
 
 - `q` — 退出
 - `↑/↓` 或 `k/j` — 选择实例
@@ -168,7 +168,7 @@ pub enum View { Dashboard, Instance, Help }
 - `?` — 帮助
 - `[/]` — 切换实例
 
-- [ ] **Step 3: 写输入处理测试**
+- [x] **Step 3: 写输入处理测试**
 
 - [ ] **Step 4: 提交**
 
@@ -187,23 +187,23 @@ git add -A && git commit -m "feat(tui): add app state and input handling"
 - Create: `tui/src/views/help.rs`
 - Create: `tui/src/theme.rs`
 
-- [ ] **Step 1: 实现 Dashboard 视图**
+- [x] **Step 1: 实现 Dashboard 视图**
 
 显示所有实例的摘要表格：ID、Symbol、Status、Exposure、Last Price。
 
-- [ ] **Step 2: 实现 Instance 详情视图**
+- [x] **Step 2: 实现 Instance 详情视图**
 
 显示单实例详情：配置、状态、目标占用、带内/带外、最近事件。
 
-- [ ] **Step 3: 实现 Help 视图**
+- [x] **Step 3: 实现 Help 视图**
 
 显示快捷键说明。
 
-- [ ] **Step 4: 实现 Theme**
+- [x] **Step 4: 实现 Theme**
 
 颜色和样式定义。
 
-- [ ] **Step 5: 验证编译通过**
+- [x] **Step 5: 验证编译通过**
 
 - [ ] **Step 6: 提交**
 
@@ -218,7 +218,7 @@ git add -A && git commit -m "feat(tui): add dashboard, instance and help views"
 **Files:**
 - Modify: `tui/src/main.rs`
 
-- [ ] **Step 1: 串联完整 TUI 主循环**
+- [x] **Step 1: 串联完整 TUI 主循环**
 
 ```rust
 #[tokio::main]
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 2: 端到端测试**
+- [x] **Step 2: 端到端测试**
 
 启动 server + tui，验证：
 - TUI 显示实例列表
