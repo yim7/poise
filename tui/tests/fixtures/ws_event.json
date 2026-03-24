@@ -1,0 +1,9 @@
+{
+  "instance_id": "BTCUSDT",
+  "event": {
+    "ExposureTargetChanged": {
+      "from": 0.0,
+      "to": 4.0
+    }
+  }
+}
