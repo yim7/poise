@@ -1,0 +1,22 @@
+[package]
+name = "grid-binance"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+grid-engine = { path = "../../engine" }
+grid-core = { path = "../../core" }
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+futures-util = "0.3"
+tracing = "0.1"

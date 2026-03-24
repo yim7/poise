@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **执行结果：** 已在 `codex/phase3-binance` 分支完成实现并通过验收。原计划中的分步提交改为本次开发结束后的集中提交。
+
 **Goal:** 实现 Binance USDⓈ-M Futures 交易所适配器，完成 `ExchangePort` 和 `MarketDataPort` trait 的具体实现。
 
 **Architecture:** 六边形架构适配器层。grid-binance 实现 grid-engine 中定义的两个端口 trait，封装 Binance 特有的 REST/WS 协议、签名、限速和重连逻辑。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
@@ -40,12 +42,12 @@ exchanges/binance/
 - Create: `exchanges/binance/Cargo.toml`
 - Create: `exchanges/binance/src/lib.rs`
 
-- [ ] **Step 1: 添加依赖到 workspace**
+- [x] **Step 1: 添加依赖到 workspace**
 
 在 `Cargo.toml` 的 `[workspace.dependencies]` 中添加：
 
 ```toml
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11.27", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -55,7 +57,7 @@ url = "2"
 
 在 `[workspace].members` 中添加 `"exchanges/binance"`。
 
-- [ ] **Step 2: 创建 exchanges/binance/Cargo.toml**
+- [x] **Step 2: 创建 exchanges/binance/Cargo.toml**
 
 ```toml
 [package]
@@ -78,16 +80,17 @@ hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
 url.workspace = true
+futures-util = "0.3"
 tracing = "0.1"
 ```
 
-- [ ] **Step 3: 创建占位模块**
+- [x] **Step 3: 创建占位模块**
 
-- [ ] **Step 4: 验证编译**
+- [x] **Step 4: 验证编译**
 
 Run: `cargo check -p grid-binance`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat: initialize grid-binance crate"
@@ -100,7 +103,7 @@ git add -A && git commit -m "feat: initialize grid-binance crate"
 **Files:**
 - Create: `exchanges/binance/src/types.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 测试 Binance JSON 响应反序列化和到 engine 类型的转换：
 - `BinanceOrderResponse` → `OrderReceipt`
@@ -108,17 +111,17 @@ git add -A && git commit -m "feat: initialize grid-binance crate"
 - `BinanceOpenOrder` → `OpenOrder`
 - `BinanceExchangeInfo` → `ExchangeInfo`
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p grid-binance -- types`
 
-- [ ] **Step 3: 实现类型定义和转换**
+- [x] **Step 3: 实现类型定义和转换**
 
 定义 Binance 特有的 serde 结构体，实现 `From`/`Into` 转换到 engine 端口类型。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat(binance): add Binance types and conversion to engine port types"
@@ -131,22 +134,22 @@ git add -A && git commit -m "feat(binance): add Binance types and conversion to 
 **Files:**
 - Create: `exchanges/binance/src/rest.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 测试签名生成：给定 API key、secret 和查询参数，验证 HMAC-SHA256 签名正确。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
-- [ ] **Step 3: 实现 REST 客户端**
+- [x] **Step 3: 实现 REST 客户端**
 
 - `BinanceRestClient` struct：持有 reqwest::Client、api_key、api_secret、base_url
 - 签名方法：HMAC-SHA256
 - 公开方法：`get_exchange_info`、`get_position`、`get_open_orders`、`new_order`、`cancel_order`、`cancel_all_orders`
 - 内置重试（最多 3 次，指数退避）
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat(binance): add REST API client with HMAC signing and retry"
@@ -159,7 +162,7 @@ git add -A && git commit -m "feat(binance): add REST API client with HMAC signin
 **Files:**
 - Create: `exchanges/binance/src/websocket.rs`
 
-- [ ] **Step 1: 实现 WebSocket 客户端**
+- [x] **Step 1: 实现 WebSocket 客户端**
 
 - `BinanceWsClient` struct
 - 市场数据流：连接 `wss://fstream.binance.com/ws/<symbol>@markPrice`，解析为 `PriceTick`
@@ -167,11 +170,11 @@ git add -A && git commit -m "feat(binance): add REST API client with HMAC signin
 - 自动重连：断线后指数退避重连
 - 通过 `mpsc::Sender` 向外推送事件
 
-- [ ] **Step 2: 验证编译通过**
+- [x] **Step 2: 验证编译通过**
 
 Run: `cargo check -p grid-binance`
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat(binance): add WebSocket client with auto-reconnect"
@@ -184,7 +187,7 @@ git add -A && git commit -m "feat(binance): add WebSocket client with auto-recon
 **Files:**
 - Create: `exchanges/binance/src/adapter.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 使用 mock HTTP server（如 wiremock）测试 adapter 的端口方法：
 - `submit_order` 调用 REST `new_order` 并返回 `OrderReceipt`
@@ -192,9 +195,9 @@ git add -A && git commit -m "feat(binance): add WebSocket client with auto-recon
 - `get_position` 调用 REST 并转换类型
 - `subscribe_prices` 返回 `mpsc::Receiver<PriceTick>`
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
-- [ ] **Step 3: 实现 BinanceAdapter**
+- [x] **Step 3: 实现 BinanceAdapter**
 
 ```rust
 pub struct BinanceAdapter {
@@ -209,13 +212,13 @@ impl ExchangePort for BinanceAdapter { ... }
 impl MarketDataPort for BinanceAdapter { ... }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
-- [ ] **Step 5: 验证全部测试通过**
+- [x] **Step 5: 验证全部测试通过**
 
 Run: `cargo test -p grid-binance`
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add -A && git commit -m "feat(binance): implement ExchangePort and MarketDataPort adapter"
