@@ -67,6 +67,8 @@ mod tests {
                     std::sync::Arc::new(FakeClock),
                 ),
             )),
+            persistence: std::sync::Arc::new(FakePersistence),
+            mutation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             events: events.clone(),
         };
         let app = Router::new()

@@ -6,7 +6,7 @@ use grid_engine::instance::{InstanceStatus, StrategyInstance};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
-use crate::assembly::AppState;
+use crate::assembly::{AppState, MutateAndPersistError, mutate_instance_and_persist};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceSummary {
@@ -101,13 +101,25 @@ async fn submit_command(
         )
     })?;
 
-    let mut manager = state.manager.write().await;
-    let result = match command {
+    let manager = state.manager.read().await;
+    if manager.get_instance(&id).is_none() {
+        return Err(not_found(format!("instance `{id}` not found")));
+    }
+    drop(manager);
+
+    match mutate_instance_and_persist(&state, &id, |manager| match command {
         SupportedCommand::Pause => manager.pause_instance(&id),
         SupportedCommand::Resume => manager.resume_instance(&id),
-    };
-    if let Err(error) = result {
-        return Err(not_found(error.to_string()));
+    })
+    .await
+    {
+        Ok(()) => {}
+        Err(MutateAndPersistError::Mutation(error)) => {
+            return Err(bad_request(error.to_string()));
+        }
+        Err(MutateAndPersistError::Persistence(error)) => {
+            return Err(internal_error(error.to_string()));
+        }
     }
 
     Ok(Json(CommandResponse {
@@ -117,9 +129,23 @@ async fn submit_command(
     }))
 }
 
+fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: message }),
+    )
+}
+
 fn not_found(message: String) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_FOUND,
+        Json(ErrorResponse { error: message }),
+    )
+}
+
+fn internal_error(message: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse { error: message }),
     )
 }
@@ -166,6 +192,7 @@ impl TryFrom<&str> for SupportedCommand {
 mod tests {
     use std::sync::Arc;
 
+    use anyhow::anyhow;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use chrono::Utc;
@@ -238,9 +265,13 @@ mod tests {
     }
 
     fn app_state() -> AppState {
+        app_state_with_persistence(Arc::new(FakePersistence))
+    }
+
+    fn app_state_with_persistence(persistence: Arc<dyn PersistencePort>) -> AppState {
         let mut manager = InstanceManager::new(
             Arc::new(FakeExchange),
-            Arc::new(FakePersistence),
+            Arc::clone(&persistence),
             Arc::new(FakeClock),
         );
         manager
@@ -274,6 +305,8 @@ mod tests {
 
         AppState {
             manager: Arc::new(tokio::sync::RwLock::new(manager)),
+            persistence,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             events,
         }
     }
@@ -359,6 +392,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn resume_command_rejects_non_paused_instance() {
+        let response = router(app_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "command": "resume" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn submit_command_rolls_back_state_when_persistence_fails() {
+        let app = router(app_state_with_persistence(Arc::new(FailingPersistence)));
+
+        let pause = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pause.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let snapshot = app
+            .oneshot(
+                Request::builder()
+                    .uri("/instances/BTCUSDT/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = to_bytes(snapshot.into_body(), usize::MAX).await.unwrap();
+        let payload: InstanceSnapshot = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.status, InstanceStatus::Active);
     }
 
     #[tokio::test]
@@ -460,5 +547,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    struct FailingPersistence;
+
+    #[async_trait::async_trait]
+    impl PersistencePort for FailingPersistence {
+        async fn save_instance_state(
+            &self,
+            _id: &str,
+            _state: &grid_engine::ports::InstanceSnapshot,
+        ) -> anyhow::Result<()> {
+            Err(anyhow!("persistence unavailable"))
+        }
+
+        async fn load_instance_state(
+            &self,
+            _id: &str,
+        ) -> anyhow::Result<Option<grid_engine::ports::InstanceSnapshot>> {
+            Ok(None)
+        }
     }
 }

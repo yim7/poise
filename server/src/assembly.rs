@@ -2,13 +2,16 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use grid_binance::BinanceAdapter;
+use grid_engine::instance::StrategyInstance;
 use grid_engine::manager::InstanceManager;
-use grid_engine::ports::{ClockPort, ExchangePort, MarketDataPort};
+use grid_engine::ports::{
+    ClockPort, ExchangePort, InstanceSnapshot, MarketDataPort, PersistencePort,
+};
 use grid_storage::sqlite::SqliteStorage;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 use crate::config::Config;
 use crate::websocket::WsEvent;
@@ -18,6 +21,8 @@ pub type SharedManager = Arc<RwLock<InstanceManager>>;
 #[derive(Clone)]
 pub struct AppState {
     pub manager: SharedManager,
+    pub persistence: Arc<dyn PersistencePort>,
+    pub mutation_lock: Arc<Mutex<()>>,
     pub events: broadcast::Sender<WsEvent>,
 }
 
@@ -46,10 +51,10 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
 
     let db_path = config.default_db_path();
     ensure_parent_dir(&db_path)?;
-    let persistence = Arc::new(SqliteStorage::new(&db_path)?);
+    let persistence: Arc<dyn PersistencePort> = Arc::new(SqliteStorage::new(&db_path)?);
     let clock = Arc::new(SystemClock);
 
-    let mut manager = InstanceManager::new(exchange, persistence, clock);
+    let mut manager = InstanceManager::new(exchange, Arc::clone(&persistence), clock);
     let mut instance_ids = HashSet::new();
     for instance in &config.instances {
         let instance_id = instance.instance_id();
@@ -57,11 +62,14 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
             return Err(anyhow::anyhow!("duplicate instance id `{instance_id}`"));
         }
         manager.add_instance(
-            instance_id,
+            instance_id.clone(),
             instance.symbol.clone(),
             instance.grid_config(),
             instance.budget(),
         )?;
+        if let Some(snapshot) = persistence.load_instance_state(&instance_id).await? {
+            manager.restore_instance_state(&snapshot)?;
+        }
     }
 
     let (events, _) = broadcast::channel(256);
@@ -69,6 +77,8 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
     Ok(Platform {
         state: AppState {
             manager: Arc::new(RwLock::new(manager)),
+            persistence,
+            mutation_lock: Arc::new(Mutex::new(())),
             events,
         },
         market_data,
@@ -91,24 +101,32 @@ impl Platform {
         };
 
         for symbol in symbols {
-            let manager = Arc::clone(&self.state.manager);
-            let events = self.state.events.clone();
+            let state = self.state.clone();
             let market_data = Arc::clone(&self.market_data);
 
             tokio::spawn(async move {
                 match market_data.subscribe_prices(&symbol).await {
                     Ok(mut receiver) => {
                         while let Some(tick) = receiver.recv().await {
-                            let emitted_events = {
-                                let mut manager = manager.write().await;
-                                manager.on_price_tick(&tick)
-                            };
-
-                            for event in emitted_events {
-                                let _ = events.send(WsEvent {
-                                    instance_id: symbol.clone(),
-                                    event,
-                                });
+                            match mutate_instance_and_persist(&state, &symbol, |manager| {
+                                Ok(manager.on_price_tick(&tick))
+                            })
+                            .await
+                            {
+                                Ok(emitted_events) => {
+                                    for event in emitted_events {
+                                        let _ = state.events.send(WsEvent {
+                                            instance_id: symbol.clone(),
+                                            event,
+                                        });
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "failed to apply market data update for {symbol}: {}",
+                                        error.message()
+                                    );
+                                }
                             }
                         }
                     }
@@ -137,9 +155,80 @@ impl ClockPort for SystemClock {
     }
 }
 
+pub(crate) fn snapshot_from_instance(instance: &StrategyInstance) -> InstanceSnapshot {
+    InstanceSnapshot {
+        id: instance.id.clone(),
+        symbol: instance.symbol.clone(),
+        config: instance.config.clone(),
+        status: instance.status.clone(),
+        current_exposure: instance.current_exposure.clone(),
+        last_price: instance.last_price,
+    }
+}
+
+fn snapshot_for_id(manager: &InstanceManager, id: &str) -> Result<InstanceSnapshot> {
+    let instance = manager
+        .get_instance(id)
+        .ok_or_else(|| anyhow!("instance `{id}` not found"))?;
+    Ok(snapshot_from_instance(instance))
+}
+
+pub(crate) enum MutateAndPersistError {
+    Mutation(anyhow::Error),
+    Persistence(anyhow::Error),
+}
+
+impl MutateAndPersistError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Mutation(error) | Self::Persistence(error) => error.to_string(),
+        }
+    }
+}
+
+pub(crate) async fn mutate_instance_and_persist<R, F>(
+    state: &AppState,
+    id: &str,
+    mutate: F,
+) -> std::result::Result<R, MutateAndPersistError>
+where
+    F: FnOnce(&mut InstanceManager) -> Result<R>,
+{
+    let _mutation_guard = state.mutation_lock.lock().await;
+    let (previous_snapshot, result, next_snapshot) = {
+        let mut manager = state.manager.write().await;
+        let previous_snapshot =
+            snapshot_for_id(&manager, id).map_err(MutateAndPersistError::Mutation)?;
+        let result = mutate(&mut manager).map_err(MutateAndPersistError::Mutation)?;
+        let next_snapshot =
+            snapshot_for_id(&manager, id).map_err(MutateAndPersistError::Mutation)?;
+        (previous_snapshot, result, next_snapshot)
+    };
+
+    if let Err(error) = state
+        .persistence
+        .save_instance_state(id, &next_snapshot)
+        .await
+    {
+        let rollback_result = {
+            let mut manager = state.manager.write().await;
+            manager.restore_instance_state(&previous_snapshot)
+        };
+        if let Err(rollback_error) = rollback_result {
+            return Err(MutateAndPersistError::Persistence(anyhow!(
+                "failed to persist instance `{id}`: {error}; rollback failed: {rollback_error}"
+            )));
+        }
+        return Err(MutateAndPersistError::Persistence(error));
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -148,11 +237,11 @@ mod tests {
     use grid_core::events::DomainEvent;
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
-        ExchangeInfo, ExchangePort, OpenOrder, OrderReceipt, OrderRequest, PersistencePort,
-        Position, PriceTick, UserDataEvent,
+        ExchangeInfo, ExchangePort, InstanceSnapshot, OpenOrder, OrderReceipt, OrderRequest,
+        PersistencePort, Position, PriceTick, UserDataEvent,
     };
     use tokio::net::TcpListener;
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{Notify, broadcast, mpsc};
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, InstanceConfig};
@@ -306,14 +395,154 @@ mod tests {
         let _ = server.await;
     }
 
+    #[tokio::test]
+    async fn pause_command_persists_across_reassembly() {
+        let suffix = format!(
+            "test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let config = Config {
+            environment: suffix.clone(),
+            bind_address: "127.0.0.1:0".into(),
+            instances: vec![InstanceConfig {
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_capacity: 8.0,
+                short_capacity: 8.0,
+                capacity_notional: 375.0,
+                shape_family: grid_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+            }],
+            exchange: ExchangeConfig {
+                rest_base_url: Some("http://127.0.0.1:1".into()),
+                ws_base_url: Some("ws://127.0.0.1:1".into()),
+                ..Default::default()
+            },
+        };
+
+        let first = assemble(&config).await.unwrap();
+        let app = router(first.app_state());
+        let pause = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/instances/BTCUSDT/commands")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "command": "pause" })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pause.status(), axum::http::StatusCode::OK);
+
+        let second = assemble(&config).await.unwrap();
+        let state = second.app_state();
+        let manager = state.manager.read().await;
+        let instance = manager.get_instance("BTCUSDT").unwrap();
+
+        assert_eq!(
+            instance.status,
+            grid_engine::instance::InstanceStatus::Paused
+        );
+
+        let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
+    }
+
+    #[tokio::test]
+    async fn newer_tick_snapshot_is_not_overwritten_by_older_command_snapshot() {
+        let persistence = Arc::new(BlockingPersistence::default());
+        let (platform, btc_sender) = test_platform_with_persistence(persistence.clone());
+        let app = router(platform.app_state());
+
+        {
+            let mut manager = platform.state.manager.write().await;
+            let tick = PriceTick {
+                symbol: "BTCUSDT".into(),
+                last_price: 95.0,
+                mark_price: 95.0,
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = manager.on_price_tick(&tick);
+            manager.pause_instance("BTCUSDT").unwrap();
+        }
+
+        platform.start_market_data_tasks().await;
+
+        let resume_request = tokio::spawn(async move {
+            tower::ServiceExt::oneshot(
+                app,
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "command": "resume" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+
+        persistence.wait_for_first_save_start().await;
+
+        btc_sender
+            .send(PriceTick {
+                symbol: "BTCUSDT".into(),
+                last_price: 85.0,
+                mark_price: 85.0,
+                timestamp: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let second_save_started = tokio::time::timeout(
+            Duration::from_millis(100),
+            persistence.wait_for_started_saves(2),
+        )
+        .await;
+        persistence.release_first_save();
+
+        let response = resume_request.await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        persistence.wait_for_completed_saves(2).await;
+        assert!(
+            second_save_started.is_err(),
+            "tick save should wait for command save to finish"
+        );
+
+        let snapshot = persistence
+            .load_instance_state("BTCUSDT")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.status,
+            grid_engine::instance::InstanceStatus::Frozen
+        );
+        assert_eq!(snapshot.last_price, Some(85.0));
+    }
+
     fn test_platform() -> (Platform, mpsc::Sender<PriceTick>) {
+        test_platform_with_persistence(Arc::new(FakePersistence))
+    }
+
+    fn test_platform_with_persistence(
+        persistence: Arc<dyn PersistencePort>,
+    ) -> (Platform, mpsc::Sender<PriceTick>) {
         let (btc_sender, btc_receiver) = mpsc::channel(8);
         let mut receivers = HashMap::new();
         receivers.insert("BTCUSDT".to_string(), btc_receiver);
 
         let mut manager = InstanceManager::new(
             Arc::new(FakeExchange),
-            Arc::new(FakePersistence),
+            Arc::clone(&persistence),
             Arc::new(SystemClock),
         );
         manager
@@ -342,6 +571,8 @@ mod tests {
             Platform {
                 state: AppState {
                     manager: Arc::new(tokio::sync::RwLock::new(manager)) as SharedManager,
+                    persistence,
+                    mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
                     events,
                 },
                 market_data: Arc::new(FakeMarketData {
@@ -398,6 +629,63 @@ mod tests {
             _id: &str,
         ) -> Result<Option<grid_engine::ports::InstanceSnapshot>> {
             Ok(None)
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingPersistence {
+        snapshots: Mutex<HashMap<String, InstanceSnapshot>>,
+        started_saves: AtomicUsize,
+        completed_saves: AtomicUsize,
+        first_save_started: Notify,
+        first_save_release: Notify,
+        completed_save: Notify,
+    }
+
+    impl BlockingPersistence {
+        async fn wait_for_first_save_start(&self) {
+            while self.started_saves.load(Ordering::SeqCst) == 0 {
+                self.first_save_started.notified().await;
+            }
+        }
+
+        async fn wait_for_started_saves(&self, expected: usize) {
+            while self.started_saves.load(Ordering::SeqCst) < expected {
+                self.first_save_started.notified().await;
+            }
+        }
+
+        fn release_first_save(&self) {
+            self.first_save_release.notify_waiters();
+        }
+
+        async fn wait_for_completed_saves(&self, expected: usize) {
+            while self.completed_saves.load(Ordering::SeqCst) < expected {
+                self.completed_save.notified().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PersistencePort for BlockingPersistence {
+        async fn save_instance_state(&self, id: &str, state: &InstanceSnapshot) -> Result<()> {
+            let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
+            self.first_save_started.notify_waiters();
+            if save_index == 0 {
+                self.first_save_release.notified().await;
+            }
+
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), state.clone());
+            self.completed_saves.fetch_add(1, Ordering::SeqCst);
+            self.completed_save.notify_waiters();
+            Ok(())
+        }
+
+        async fn load_instance_state(&self, id: &str) -> Result<Option<InstanceSnapshot>> {
+            Ok(self.snapshots.lock().unwrap().get(id).cloned())
         }
     }
 

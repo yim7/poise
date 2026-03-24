@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use grid_core::events::DomainEvent;
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 
 use crate::instance::{InstanceStatus, StrategyInstance};
-use crate::ports::{ClockPort, ExchangePort, PersistencePort, PriceTick};
+use crate::ports::{ClockPort, ExchangePort, InstanceSnapshot, PersistencePort, PriceTick};
 use crate::reconciler;
 
 pub struct InstanceManager {
@@ -40,6 +40,9 @@ impl InstanceManager {
         config: GridConfig,
         budget: CapacityBudget,
     ) -> Result<()> {
+        if self.instances.contains_key(&id) {
+            bail!("duplicate instance id `{id}`");
+        }
         grid_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
         let instance = StrategyInstance::new(id.clone(), symbol, config);
         self.instances.insert(id.clone(), instance);
@@ -89,15 +92,71 @@ impl InstanceManager {
     }
 
     pub fn resume_instance(&mut self, id: &str) -> Result<()> {
+        let resumed_state = {
+            let instance = self
+                .instances
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
+
+            if !matches!(instance.status, InstanceStatus::Paused) {
+                bail!(
+                    "cannot resume instance `{id}` from status {:?}",
+                    instance.status
+                );
+            }
+
+            match instance.last_price {
+                Some(last_price) => {
+                    let budget = self
+                        .budgets
+                        .get(id)
+                        .ok_or_else(|| anyhow::anyhow!("budget for instance `{id}` not found"))?;
+                    let mut resumed = instance.clone();
+                    resumed.status = InstanceStatus::WaitingMarketData;
+                    let result = reconciler::reconcile(&resumed, last_price, budget);
+                    Some((
+                        result.new_status.unwrap_or(InstanceStatus::Active),
+                        result.target_exposure,
+                    ))
+                }
+                None => None,
+            }
+        };
+
         let instance = self
             .instances
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
-        instance.status = if instance.last_price.is_some() {
-            InstanceStatus::Active
-        } else {
-            InstanceStatus::WaitingMarketData
-        };
+        match resumed_state {
+            Some((status, exposure)) => {
+                instance.status = status;
+                instance.current_exposure = exposure;
+            }
+            None => {
+                instance.status = InstanceStatus::WaitingMarketData;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn restore_instance_state(&mut self, snapshot: &InstanceSnapshot) -> Result<()> {
+        let instance = self
+            .instances
+            .get_mut(&snapshot.id)
+            .ok_or_else(|| anyhow::anyhow!("instance `{}` not found", snapshot.id))?;
+        if instance.symbol != snapshot.symbol {
+            bail!(
+                "snapshot symbol mismatch for `{}`: expected `{}`, got `{}`",
+                snapshot.id,
+                instance.symbol,
+                snapshot.symbol
+            );
+        }
+
+        instance.status = snapshot.status.clone();
+        instance.current_exposure = snapshot.current_exposure.clone();
+        instance.last_price = snapshot.last_price;
         Ok(())
     }
 
@@ -246,6 +305,20 @@ mod tests {
     }
 
     #[test]
+    fn add_instance_rejects_duplicate_ids() {
+        let mut manager = test_manager();
+        manager
+            .add_instance("dup".into(), "BTCUSDT".into(), test_config(), test_budget())
+            .unwrap();
+
+        let error = manager
+            .add_instance("dup".into(), "ETHUSDT".into(), test_config(), test_budget())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate instance id"));
+    }
+
+    #[test]
     fn on_price_tick_updates_instance() {
         let mut manager = test_manager();
         manager
@@ -328,5 +401,46 @@ mod tests {
         assert_eq!(instance.status, InstanceStatus::Paused);
         assert_eq!(instance.current_exposure.0, 2.0);
         assert_eq!(instance.last_price, Some(95.0));
+    }
+
+    #[test]
+    fn resume_instance_rejects_non_paused_status() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
+            .unwrap();
+
+        let error = manager.resume_instance("btc1").unwrap_err();
+
+        assert!(error.to_string().contains("cannot resume"));
+    }
+
+    #[test]
+    fn resume_instance_recomputes_status_from_last_price() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
+            .unwrap();
+
+        let instance = manager.instances.get_mut("btc1").unwrap();
+        instance.status = InstanceStatus::Paused;
+        instance.current_exposure = grid_core::types::Exposure(8.0);
+        instance.last_price = Some(85.0);
+
+        manager.resume_instance("btc1").unwrap();
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.status, InstanceStatus::Frozen);
+        assert_eq!(instance.current_exposure.0, 8.0);
     }
 }
