@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use grid_core::types::Side;
+use grid_core::types::{Exposure, Side};
 
 // ── Exchange types ──
 
@@ -70,7 +70,10 @@ pub struct InstanceSnapshot {
     pub symbol: String,
     pub config: grid_core::strategy::GridConfig,
     pub status: super::instance::InstanceStatus,
-    pub current_exposure: grid_core::types::Exposure,
+    pub current_exposure: Exposure,
+    pub target_exposure: Option<Exposure>,
+    pub pending_order: Option<super::instance::PendingOrder>,
+    pub risk_state: super::instance::RiskState,
     pub last_price: Option<f64>,
 }
 

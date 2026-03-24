@@ -6,9 +6,15 @@ use grid_core::events::DomainEvent;
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 
+use crate::execution_plan::ExecutionPlan;
 use crate::instance::{InstanceStatus, StrategyInstance};
 use crate::ports::{ClockPort, ExchangePort, InstanceSnapshot, PersistencePort, PriceTick};
 use crate::reconciler;
+
+pub struct TickOutcome {
+    pub plan: ExecutionPlan,
+    pub events: Vec<DomainEvent>,
+}
 
 pub struct InstanceManager {
     instances: HashMap<String, StrategyInstance>,
@@ -50,8 +56,10 @@ impl InstanceManager {
         Ok(())
     }
 
-    pub fn on_price_tick(&mut self, tick: &PriceTick) -> Vec<DomainEvent> {
+    pub fn on_price_tick(&mut self, tick: &PriceTick) -> Result<TickOutcome> {
         let mut all_events = vec![];
+        let mut actions = vec![];
+        let mut plan_events = vec![];
         let ids: Vec<String> = self
             .instances
             .keys()
@@ -74,12 +82,21 @@ impl InstanceManager {
             if let Some(new_status) = result.new_status {
                 instance.status = new_status;
             }
-            instance.current_exposure = result.target_exposure;
+            instance.target_exposure = Some(result.target_exposure);
             instance.last_price = Some(tick.last_price);
 
-            all_events.extend(result.plan.events);
+            actions.extend(result.plan.actions);
+            all_events.extend(result.plan.events.clone());
+            plan_events.extend(result.plan.events);
         }
-        all_events
+
+        Ok(TickOutcome {
+            plan: ExecutionPlan {
+                actions,
+                events: plan_events,
+            },
+            events: all_events,
+        })
     }
 
     pub fn pause_instance(&mut self, id: &str) -> Result<()> {
@@ -130,10 +147,11 @@ impl InstanceManager {
         match resumed_state {
             Some((status, exposure)) => {
                 instance.status = status;
-                instance.current_exposure = exposure;
+                instance.target_exposure = Some(exposure);
             }
             None => {
                 instance.status = InstanceStatus::WaitingMarketData;
+                instance.target_exposure = None;
             }
         }
 
@@ -156,6 +174,9 @@ impl InstanceManager {
 
         instance.status = snapshot.status.clone();
         instance.current_exposure = snapshot.current_exposure.clone();
+        instance.target_exposure = snapshot.target_exposure.clone();
+        instance.pending_order = snapshot.pending_order.clone();
+        instance.risk_state = snapshot.risk_state.clone();
         instance.last_price = snapshot.last_price;
         Ok(())
     }
@@ -337,13 +358,71 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let events = manager.on_price_tick(&tick);
-        assert!(!events.is_empty());
+        let outcome = manager.on_price_tick(&tick).unwrap();
+        assert!(!outcome.events.is_empty());
 
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::Active);
         assert_eq!(instance.last_price, Some(95.0));
-        assert!(instance.current_exposure.0 > 0.0); // should be long below center
+        assert_eq!(instance.current_exposure.0, 0.0);
+        assert!(instance.target_exposure.as_ref().unwrap().0 > 0.0); // should be long below center
+    }
+
+    #[test]
+    fn on_price_tick_returns_tick_outcome_with_plan_and_events() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
+            .unwrap();
+
+        let tick = PriceTick {
+            symbol: "BTCUSDT".into(),
+            last_price: 95.0,
+            mark_price: 95.0,
+            timestamp: Utc::now(),
+        };
+
+        let outcome = manager.on_price_tick(&tick).unwrap();
+
+        assert!(!outcome.plan.actions.is_empty());
+        assert!(!outcome.events.is_empty());
+    }
+
+    #[test]
+    fn on_price_tick_updates_target_without_faking_current_exposure() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
+            .unwrap();
+
+        let instance = manager.instances.get_mut("btc1").unwrap();
+        instance.current_exposure = grid_core::types::Exposure(2.0);
+
+        let tick = PriceTick {
+            symbol: "BTCUSDT".into(),
+            last_price: 95.0,
+            mark_price: 95.0,
+            timestamp: Utc::now(),
+        };
+
+        let outcome = manager.on_price_tick(&tick).unwrap();
+
+        assert!(!outcome.events.is_empty());
+
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.current_exposure.0, 2.0);
+        assert_eq!(instance.target_exposure.as_ref().unwrap().0, 4.0);
+        assert_eq!(instance.last_price, Some(95.0));
     }
 
     #[test]
@@ -365,8 +444,9 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let events = manager.on_price_tick(&tick);
-        assert!(events.is_empty());
+        let outcome = manager.on_price_tick(&tick).unwrap();
+        assert!(outcome.events.is_empty());
+        assert!(outcome.plan.actions.is_empty());
 
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::WaitingMarketData);
@@ -394,9 +474,9 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let events = manager.on_price_tick(&tick);
+        let outcome = manager.on_price_tick(&tick).unwrap();
 
-        assert!(events.is_empty());
+        assert!(outcome.events.is_empty());
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::Paused);
         assert_eq!(instance.current_exposure.0, 2.0);

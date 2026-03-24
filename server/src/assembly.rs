@@ -145,12 +145,12 @@ impl Platform {
                     Ok(mut receiver) => {
                         while let Some(tick) = receiver.recv().await {
                             match mutate_instance_and_persist(&state, &symbol, |manager| {
-                                Ok(manager.on_price_tick(&tick))
+                                manager.on_price_tick(&tick)
                             })
                             .await
                             {
-                                Ok(emitted_events) => {
-                                    for event in emitted_events {
+                                Ok(outcome) => {
+                                    for event in outcome.events {
                                         let _ = state.events.send(WsEvent {
                                             instance_id: symbol.clone(),
                                             event,
@@ -198,6 +198,9 @@ pub(crate) fn snapshot_from_instance(instance: &StrategyInstance) -> InstanceSna
         config: instance.config.clone(),
         status: instance.status.clone(),
         current_exposure: instance.current_exposure.clone(),
+        target_exposure: instance.target_exposure.clone(),
+        pending_order: instance.pending_order.clone(),
+        risk_state: instance.risk_state.clone(),
         last_price: instance.last_price,
     }
 }

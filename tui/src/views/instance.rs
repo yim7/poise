@@ -9,7 +9,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
+            Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Min(0),
         ])
@@ -30,16 +30,24 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::from(format!("id: {}", snapshot.id)),
         Line::from(format!("symbol: {}", snapshot.symbol)),
         Line::from(format!("status: {}", snapshot.status)),
-        Line::from(format!(
-            "current exposure: {:.4}",
-            snapshot.current_exposure
-        )),
+        Line::from(format!("actual exposure: {:.4}", snapshot.current_exposure)),
         Line::from(format!(
             "target exposure: {}",
             snapshot
                 .target_exposure()
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "-".to_string())
+        )),
+        Line::from(format!(
+            "pending order: {}",
+            snapshot
+                .pending_order
+                .as_ref()
+                .map(|order| format!(
+                    "{} {:.4} @ {:.4} ({})",
+                    order.side, order.quantity, order.price, order.client_order_id
+                ))
+                .unwrap_or_else(|| "none".to_string())
         )),
         Line::from(format!("band state: {}", snapshot.band_state())),
     ];
@@ -92,7 +100,7 @@ mod tests {
     use crate::app::{App, View};
     use crate::protocol::{
         DomainEvent, GridConfig, InstanceSnapshot, InstanceStatus, InstanceSummary,
-        OutOfBandPolicy, ShapeFamily, WsEvent,
+        OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
     use super::render;
@@ -123,7 +131,17 @@ mod tests {
             symbol: "BTCUSDT".into(),
             status: InstanceStatus::Active,
             current_exposure: 1.0,
+            target_exposure: Some(4.0),
             last_price: Some(100.0),
+            pending_order: Some(PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("12345".into()),
+                client_order_id: "btc-grid-1".into(),
+                side: Side::Buy,
+                price: 90.0,
+                quantity: 0.5,
+                status: "NEW".into(),
+            }),
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -146,8 +164,9 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Overview"));
-        assert!(text.contains("current exposure"));
+        assert!(text.contains("actual exposure"));
         assert!(text.contains("target exposure"));
+        assert!(text.contains("pending order"));
         assert!(text.contains("band state"));
         assert!(text.contains("capacity notional"));
         assert!(text.contains("band reentered"));

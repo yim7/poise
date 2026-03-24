@@ -410,7 +410,9 @@ mod tests {
             symbol: "BTCUSDT".into(),
             status,
             current_exposure: exposure,
+            target_exposure: None,
             last_price: Some(100.0),
+            pending_order: None,
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -429,7 +431,9 @@ mod tests {
             symbol: "ETHUSDT".into(),
             status: InstanceStatus::Paused,
             current_exposure: -1.0,
+            target_exposure: None,
             last_price: Some(2200.0),
+            pending_order: None,
             config: GridConfig {
                 lower_price: 2000.0,
                 upper_price: 2600.0,

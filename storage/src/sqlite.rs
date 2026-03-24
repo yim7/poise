@@ -3,11 +3,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use grid_core::types::Exposure;
+use grid_engine::instance::RiskState;
 use grid_engine::ports::{InstanceSnapshot, PersistencePort};
 
 pub struct SqliteStorage {
@@ -47,6 +48,16 @@ impl SqliteStorage {
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
         let status_json =
             serde_json::to_string(&state.status).context("failed to serialize instance status")?;
+        let pending_order_json = state
+            .pending_order
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("failed to serialize pending order")?;
+        let realized_pnl_day = state
+            .risk_state
+            .realized_pnl_day
+            .map(|day| day.format("%F").to_string());
         let updated_at = Utc::now().to_rfc3339();
 
         let conn = Self::lock_connection(&conn)?;
@@ -57,15 +68,25 @@ impl SqliteStorage {
                 config_json,
                 status,
                 current_exposure,
+                target_exposure,
+                pending_order_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                unrealized_pnl,
                 last_price,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 state.symbol,
                 config_json,
                 status_json,
                 state.current_exposure.0,
+                state.target_exposure.as_ref().map(|exposure| exposure.0),
+                pending_order_json,
+                realized_pnl_day,
+                state.risk_state.realized_pnl_today,
+                state.risk_state.unrealized_pnl,
                 state.last_price,
                 updated_at
             ],
@@ -82,13 +103,17 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT id, symbol, config_json, status, current_exposure, last_price
+                "SELECT id, symbol, config_json, status, current_exposure, target_exposure,
+                        pending_order_json, realized_pnl_day, realized_pnl_today,
+                        unrealized_pnl, last_price
                  FROM instance_snapshots
                  WHERE id = ?1",
                 params![id],
                 |row| {
                     let config_json: String = row.get(2)?;
                     let status_json: String = row.get(3)?;
+                    let pending_order_json: Option<String> = row.get(6)?;
+                    let realized_pnl_day: Option<String> = row.get(7)?;
                     let config = serde_json::from_str(&config_json).map_err(|err| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
@@ -103,6 +128,29 @@ impl SqliteStorage {
                             Box::new(err),
                         )
                     })?;
+                    let pending_order = pending_order_json
+                        .map(|json| {
+                            serde_json::from_str(&json).map_err(|err| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    6,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(err),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    let realized_pnl_day = realized_pnl_day
+                        .map(|value| {
+                            NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    7,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(err),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    let target_exposure = row.get::<_, Option<f64>>(5)?.map(Exposure);
 
                     Ok(InstanceSnapshot {
                         id: row.get(0)?,
@@ -110,7 +158,14 @@ impl SqliteStorage {
                         config,
                         status,
                         current_exposure: Exposure(row.get(4)?),
-                        last_price: row.get(5)?,
+                        target_exposure,
+                        pending_order,
+                        risk_state: RiskState {
+                            realized_pnl_day,
+                            realized_pnl_today: row.get(8)?,
+                            unrealized_pnl: row.get(9)?,
+                        },
+                        last_price: row.get(10)?,
                     })
                 },
             )
@@ -163,8 +218,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::Exposure;
-    use grid_engine::instance::InstanceStatus;
+    use grid_core::types::{Exposure, Side};
+    use grid_engine::instance::{InstanceStatus, PendingOrder, RiskState};
     use grid_engine::ports::{InstanceSnapshot, PersistencePort};
     use rusqlite::Connection;
 
@@ -183,6 +238,21 @@ mod tests {
             },
             status: InstanceStatus::Active,
             current_exposure: Exposure(4.0),
+            target_exposure: Some(Exposure(6.0)),
+            pending_order: Some(PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("order-1".into()),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                status: "NEW".into(),
+            }),
+            risk_state: RiskState {
+                realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
+                realized_pnl_today: 12.5,
+                unrealized_pnl: -3.0,
+            },
             last_price: Some(95.0),
         }
     }
@@ -217,6 +287,14 @@ mod tests {
         assert_eq!(loaded.status, InstanceStatus::Active);
         assert_eq!(loaded.config, snapshot.config);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
+        assert_eq!(loaded.target_exposure, Some(Exposure(6.0)));
+        assert!(loaded.pending_order.is_some());
+        assert_eq!(
+            loaded.risk_state.realized_pnl_day,
+            Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap())
+        );
+        assert!((loaded.risk_state.realized_pnl_today - 12.5).abs() < f64::EPSILON);
+        assert!((loaded.risk_state.unrealized_pnl + 3.0).abs() < f64::EPSILON);
         assert_eq!(loaded.last_price, Some(95.0));
     }
 

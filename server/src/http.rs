@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use grid_engine::instance::{InstanceStatus, StrategyInstance};
+use grid_engine::instance::{InstanceStatus, PendingOrder, StrategyInstance};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
@@ -22,7 +22,9 @@ pub struct InstanceSnapshot {
     pub symbol: String,
     pub status: InstanceStatus,
     pub current_exposure: f64,
+    pub target_exposure: Option<f64>,
     pub last_price: Option<f64>,
+    pub pending_order: Option<PendingOrder>,
     pub config: grid_core::strategy::GridConfig,
 }
 
@@ -168,7 +170,9 @@ impl From<&StrategyInstance> for InstanceSnapshot {
             symbol: value.symbol.clone(),
             status: value.status.clone(),
             current_exposure: value.current_exposure.0,
+            target_exposure: value.target_exposure.as_ref().map(|exposure| exposure.0),
             last_price: value.last_price,
+            pending_order: value.pending_order.clone(),
             config: value.config.clone(),
         }
     }
@@ -198,7 +202,7 @@ mod tests {
     use chrono::Utc;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_engine::instance::InstanceStatus;
+    use grid_engine::instance::{InstanceStatus, PendingOrder};
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangePort, OpenOrder, OrderReceipt, OrderRequest,
@@ -300,7 +304,34 @@ mod tests {
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
-        let _ = manager.on_price_tick(&tick);
+        manager.on_price_tick(&tick).unwrap();
+        let instance = manager.get_instance("BTCUSDT").unwrap().id.clone();
+        let strategy = manager.get_instance(&instance).unwrap();
+        let strategy = manager
+            .get_instance(&strategy.id)
+            .expect("instance should still exist");
+        let pending_order = PendingOrder {
+            symbol: "BTCUSDT".into(),
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 94.5,
+            quantity: 0.25,
+            status: "NEW".into(),
+        };
+        manager
+            .restore_instance_state(&grid_engine::ports::InstanceSnapshot {
+                id: strategy.id.clone(),
+                symbol: strategy.symbol.clone(),
+                config: strategy.config.clone(),
+                status: strategy.status.clone(),
+                current_exposure: strategy.current_exposure.clone(),
+                target_exposure: strategy.target_exposure.clone(),
+                pending_order: Some(pending_order),
+                risk_state: strategy.risk_state.clone(),
+                last_price: strategy.last_price,
+            })
+            .unwrap();
         let (events, _) = tokio::sync::broadcast::channel::<WsEvent>(16);
 
         AppState {
@@ -349,6 +380,8 @@ mod tests {
 
         assert_eq!(payload.id, "BTCUSDT");
         assert_eq!(payload.last_price, Some(95.0));
+        assert_eq!(payload.target_exposure, Some(4.0));
+        assert!(payload.pending_order.is_some());
     }
 
     #[tokio::test]
