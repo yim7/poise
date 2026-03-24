@@ -5,14 +5,17 @@ use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::{
+    net::TcpStream,
     sync::mpsc,
     time::{Duration, Instant, interval_at, sleep},
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 use grid_engine::ports::{PriceTick, UserDataEvent};
 
 use crate::rest::BinanceRestClient;
+
+type UserWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct BinanceWsClient {
     #[allow(dead_code)]
@@ -67,12 +70,14 @@ impl BinanceWsClient {
         let rest = Arc::clone(&self.rest);
         let reconnect_delay = self.reconnect_delay;
         let initial_listen_key = rest.start_user_stream().await?;
+        let initial_websocket = connect_user_stream(&ws_base_url, &initial_listen_key).await?;
 
         tokio::spawn(async move {
             run_user_stream(
                 ws_base_url,
                 rest,
                 initial_listen_key,
+                Some(initial_websocket),
                 sender,
                 reconnect_delay,
             )
@@ -135,6 +140,7 @@ async fn run_user_stream(
     ws_base_url: String,
     rest: Arc<BinanceRestClient>,
     initial_listen_key: String,
+    mut initial_websocket: Option<UserWebSocket>,
     sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
 ) {
@@ -142,10 +148,13 @@ async fn run_user_stream(
     let mut listen_key = initial_listen_key;
 
     loop {
-        let url = format!("{}/ws/{}", ws_base_url, listen_key);
+        let connection = match initial_websocket.take() {
+            Some(websocket) => Ok(websocket),
+            None => connect_user_stream(&ws_base_url, &listen_key).await,
+        };
 
-        match connect_async(&url).await {
-            Ok((mut websocket, _)) => {
+        match connection {
+            Ok(mut websocket) => {
                 attempt = 0;
                 let mut keepalive = interval_at(
                     Instant::now() + Duration::from_secs(30 * 60),
@@ -189,7 +198,7 @@ async fn run_user_stream(
                 }
             }
             Err(error) => {
-                tracing::warn!("failed to connect user data websocket: {error}");
+                tracing::warn!("{error}");
             }
         }
 
@@ -209,6 +218,14 @@ async fn run_user_stream(
             }
         }
     }
+}
+
+async fn connect_user_stream(ws_base_url: &str, listen_key: &str) -> Result<UserWebSocket> {
+    let url = format!("{ws_base_url}/ws/{listen_key}");
+    let (websocket, _) = connect_async(&url)
+        .await
+        .with_context(|| format!("failed to connect user data websocket `{url}`"))?;
+    Ok(websocket)
 }
 
 fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
@@ -368,7 +385,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
-        sync::Mutex,
+        sync::{Mutex, Notify},
         time::timeout,
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -591,6 +608,76 @@ mod tests {
                 .filter(|request| request.path == "/fapi/v1/listenKey" && request.method == "POST")
                 .count(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_user_data_waits_for_initial_connection_before_returning() {
+        let rest_server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"listenKey":"listen-key-1"}"#,
+        )])
+        .await;
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_address = ws_listener.local_addr().unwrap();
+        let accept_gate = Arc::new(Notify::new());
+        let server_gate = Arc::clone(&accept_gate);
+
+        tokio::spawn(async move {
+            server_gate.notified().await;
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            websocket
+                .send(
+                    Message::Text(
+                        r#"{"e":"ACCOUNT_UPDATE","a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                            .to_string(),
+                    ),
+                )
+                .await
+                .unwrap();
+            websocket.close(None).await.unwrap();
+        });
+
+        let rest = Arc::new(BinanceRestClient::new(
+            rest_server.base_url(),
+            "api-key",
+            "secret-key",
+        ));
+        let client = BinanceWsClient::with_reconnect_delay(
+            rest,
+            format!("ws://{}", ws_address),
+            Duration::from_millis(10),
+        );
+
+        let mut subscription = tokio::spawn(async move { client.subscribe_user_data().await });
+
+        assert!(
+            timeout(Duration::from_millis(50), &mut subscription)
+                .await
+                .is_err()
+        );
+
+        accept_gate.notify_one();
+
+        let mut receiver = timeout(Duration::from_secs(1), &mut subscription)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            event,
+            UserDataEvent::PositionUpdate(Position {
+                symbol: "BTCUSDT".to_string(),
+                qty: 0.015,
+                avg_price: 64200.0,
+                unrealized_pnl: 12.3,
+            })
         );
     }
 

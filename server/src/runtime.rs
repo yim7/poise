@@ -40,8 +40,9 @@ impl Runtime {
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
+        let mut user_receiver = self.market_data.subscribe_user_data().await?;
         self.startup_sync().await?;
-        let user_receiver = self.market_data.subscribe_user_data().await?;
+        self.drain_buffered_user_events(&mut user_receiver).await?;
 
         let market_task = self.spawn_market_task();
         let user_task = self.spawn_user_task(user_receiver);
@@ -66,6 +67,19 @@ impl Runtime {
             })
             .await
             .map_err(mutate_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn drain_buffered_user_events(
+        &self,
+        receiver: &mut mpsc::Receiver<UserDataEvent>,
+    ) -> Result<()> {
+        while let Ok(event) = receiver.try_recv() {
+            apply_user_data_event(&self.state, event)
+                .await
+                .map_err(mutate_error)?;
         }
 
         Ok(())
@@ -151,32 +165,8 @@ impl Runtime {
 
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                let symbol = match &event {
-                    UserDataEvent::PositionUpdate(position) => position.symbol.clone(),
-                    UserDataEvent::OrderUpdate(order) => order.symbol.clone(),
-                };
-
-                let Some(instance_id) = instance_id_for_symbol(&state, &symbol).await else {
-                    tracing::warn!("received user data for unknown symbol {symbol}");
-                    continue;
-                };
-
-                let result = match event {
-                    UserDataEvent::PositionUpdate(position) => {
-                        mutate_instance_and_persist(&state, &instance_id, |manager| {
-                            manager.apply_position_update(&position)
-                        })
-                        .await
-                    }
-                    UserDataEvent::OrderUpdate(order) => {
-                        mutate_instance_and_persist(&state, &instance_id, |manager| {
-                            manager.apply_order_update(&order)
-                        })
-                        .await
-                    }
-                };
-
-                if let Err(error) = result {
+                let symbol = event_symbol(&event);
+                if let Err(error) = apply_user_data_event(&state, event).await {
                     tracing::warn!(
                         "failed to apply user data update for {symbol}: {}",
                         error.message()
@@ -225,6 +215,42 @@ async fn execute_action(
             record_submitted_order(state, instance_id, &request, &receipt, target_exposure).await?;
         }
         ExecutionAction::NoOp => {}
+    }
+
+    Ok(())
+}
+
+fn event_symbol(event: &UserDataEvent) -> String {
+    match event {
+        UserDataEvent::PositionUpdate(position) => position.symbol.clone(),
+        UserDataEvent::OrderUpdate(order) => order.symbol.clone(),
+    }
+}
+
+async fn apply_user_data_event(
+    state: &AppState,
+    event: UserDataEvent,
+) -> std::result::Result<(), MutateAndPersistError> {
+    let symbol = event_symbol(&event);
+
+    let Some(instance_id) = instance_id_for_symbol(state, &symbol).await else {
+        tracing::warn!("received user data for unknown symbol {symbol}");
+        return Ok(());
+    };
+
+    match event {
+        UserDataEvent::PositionUpdate(position) => {
+            mutate_instance_and_persist(state, &instance_id, |manager| {
+                manager.apply_position_update(&position)
+            })
+            .await?;
+        }
+        UserDataEvent::OrderUpdate(order) => {
+            mutate_instance_and_persist(state, &instance_id, |manager| {
+                manager.apply_order_update(&order)
+            })
+            .await?;
+        }
     }
 
     Ok(())
@@ -624,6 +650,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_sync_replays_buffered_user_event_before_first_tick() {
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        drop(price_sender);
+        let market_data = Arc::new(BufferedUserDataMarket::new(price_receiver));
+        let exchange = Arc::new(StartupInjectingExchange::new(
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            market_data.user_sender_handle(),
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+
+        let mut manager = InstanceManager::new(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn PersistencePort>,
+            clock,
+        );
+        manager
+            .add_instance(
+                "BTCUSDT".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                exchange.exchange_info.rules.clone(),
+            )
+            .unwrap();
+
+        let (events, _) = broadcast::channel(16);
+        let state = AppState {
+            manager: Arc::new(RwLock::new(manager)),
+            persistence,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            events,
+        };
+        let runtime = Runtime::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        let handles = runtime.start().await.unwrap();
+
+        wait_until_instance(&state, |instance| {
+            (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
+        })
+        .await;
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn filled_order_updates_realized_pnl_and_trips_daily_loss_cap() {
         let fixture = runtime_fixture(
             None,
@@ -931,6 +1014,35 @@ mod tests {
         }
     }
 
+    struct StartupInjectingExchange {
+        exchange_info: ExchangeInfo,
+        position: Mutex<Position>,
+        user_sender: Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>>,
+        injected_update: AtomicUsize,
+    }
+
+    impl StartupInjectingExchange {
+        fn new(
+            position: Position,
+            user_sender: Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>>,
+        ) -> Self {
+            Self {
+                exchange_info: ExchangeInfo {
+                    symbol: "BTCUSDT".into(),
+                    rules: ExchangeRules {
+                        price_tick: 0.1,
+                        quantity_step: 0.1,
+                        min_qty: 0.0,
+                        min_notional: 0.0,
+                    },
+                },
+                position: Mutex::new(position),
+                user_sender,
+                injected_update: AtomicUsize::new(0),
+            }
+        }
+    }
+
     #[async_trait::async_trait]
     impl ExchangePort for FakeExchange {
         async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
@@ -961,6 +1073,48 @@ mod tests {
 
         async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OpenOrder>> {
             Ok(self.open_orders.lock().unwrap().clone())
+        }
+
+        async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
+            Ok(self.exchange_info.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangePort for StartupInjectingExchange {
+        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+            unreachable!()
+        }
+
+        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn get_position(&self, _symbol: &str) -> Result<Position> {
+            Ok(self.position.lock().unwrap().clone())
+        }
+
+        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OpenOrder>> {
+            if self.injected_update.fetch_add(1, Ordering::SeqCst) == 0 {
+                let sender = self.user_sender.lock().unwrap().clone();
+                if let Some(sender) = sender {
+                    sender
+                        .send(UserDataEvent::PositionUpdate(Position {
+                            symbol: "BTCUSDT".into(),
+                            qty: 7.5,
+                            avg_price: 100.0,
+                            unrealized_pnl: 5.0,
+                        }))
+                        .await
+                        .unwrap();
+                }
+            }
+
+            Ok(Vec::new())
         }
 
         async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
@@ -1016,6 +1170,26 @@ mod tests {
         }
     }
 
+    struct BufferedUserDataMarket {
+        price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
+        user_sender: Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>>,
+    }
+
+    impl BufferedUserDataMarket {
+        fn new(price_receiver: mpsc::Receiver<PriceTick>) -> Self {
+            let mut price_receivers = HashMap::new();
+            price_receivers.insert("BTCUSDT".to_string(), price_receiver);
+            Self {
+                price_receivers: Mutex::new(price_receivers),
+                user_sender: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn user_sender_handle(&self) -> Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>> {
+            Arc::clone(&self.user_sender)
+        }
+    }
+
     #[async_trait::async_trait]
     impl MarketDataPort for FakeMarketData {
         async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
@@ -1032,6 +1206,23 @@ mod tests {
                 .unwrap()
                 .take()
                 .ok_or_else(|| anyhow!("missing test user receiver"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MarketDataPort for BufferedUserDataMarket {
+        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
+            self.price_receivers
+                .lock()
+                .unwrap()
+                .remove(symbol)
+                .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
+        }
+
+        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+            let (sender, receiver) = mpsc::channel(8);
+            *self.user_sender.lock().unwrap() = Some(sender);
+            Ok(receiver)
         }
     }
 }
