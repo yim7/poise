@@ -94,7 +94,7 @@ git add -A && git commit -m "feat: initialize grid-storage crate"
 **Files:**
 - Create: `storage/src/schema.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 ```rust
 #[cfg(test)]
@@ -127,12 +127,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p grid-storage -- schema`
 Expected: FAIL
 
-- [ ] **Step 3: 实现 schema**
+- [x] **Step 3: 实现 schema**
 
 ```rust
 use anyhow::Result;
@@ -164,12 +164,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test -p grid-storage -- schema`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat(storage): add database schema with instance_snapshots and domain_events"
