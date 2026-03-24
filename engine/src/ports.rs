@@ -78,6 +78,7 @@ pub struct InstanceSnapshot {
     pub pending_order: Option<super::instance::PendingOrder>,
     pub risk_state: super::instance::RiskState,
     pub last_price: Option<f64>,
+    pub out_of_band_since: Option<DateTime<Utc>>,
 }
 
 // ── Port traits ──
@@ -86,7 +87,7 @@ pub struct InstanceSnapshot {
 pub trait ExchangePort: Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
-    async fn cancel_all(&self, symbol: &str) -> Result<Vec<String>>;
+    async fn cancel_all(&self, symbol: &str) -> Result<()>;
     async fn get_position(&self, symbol: &str) -> Result<Position>;
     async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>>;
     async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo>;

@@ -1,5 +1,5 @@
 use grid_core::events::DomainEvent;
-use grid_core::types::ExchangeRules;
+use grid_core::types::{ExchangeRules, Exposure};
 
 use crate::ports::OrderRequest;
 
@@ -11,8 +11,13 @@ pub struct ExecutionPlan {
 
 #[derive(Debug, Clone)]
 pub enum ExecutionAction {
-    SubmitOrder(OrderRequest),
-    CancelOrder { order_id: String },
+    SubmitOrder {
+        request: OrderRequest,
+        target_exposure: Exposure,
+    },
+    CancelOrder {
+        order_id: String,
+    },
     CancelAll,
     NoOp,
 }

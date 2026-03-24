@@ -14,6 +14,7 @@ impl Exposure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Side {
     Buy,
     Sell,
@@ -55,6 +56,15 @@ mod tests {
         assert_eq!(Side::from_exposure(&Exposure(1.0)), Some(Side::Buy));
         assert_eq!(Side::from_exposure(&Exposure(-1.0)), Some(Side::Sell));
         assert_eq!(Side::from_exposure(&Exposure(0.0)), None);
+    }
+
+    #[test]
+    fn side_serializes_as_snake_case() {
+        assert_eq!(serde_json::to_string(&Side::Buy).unwrap(), "\"buy\"");
+        assert_eq!(
+            serde_json::from_str::<Side>("\"sell\"").unwrap(),
+            Side::Sell
+        );
     }
 
     #[test]

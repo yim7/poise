@@ -5,7 +5,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use grid_binance::BinanceAdapter;
-use grid_core::types::ExchangeRules;
 use grid_engine::instance::StrategyInstance;
 use grid_engine::manager::InstanceManager;
 use grid_engine::ports::{
@@ -15,16 +14,8 @@ use grid_storage::sqlite::SqliteStorage;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 use crate::config::Config;
+use crate::runtime::{Runtime, RuntimeHandles};
 use crate::websocket::WsEvent;
-
-fn placeholder_exchange_rules() -> ExchangeRules {
-    ExchangeRules {
-        price_tick: 0.0,
-        quantity_step: 0.0,
-        min_qty: 0.0,
-        min_notional: 0.0,
-    }
-}
 
 pub type SharedManager = Arc<RwLock<InstanceManager>>;
 
@@ -38,7 +29,7 @@ pub struct AppState {
 
 pub struct Platform {
     state: AppState,
-    market_data: Arc<dyn MarketDataPort>,
+    pub runtime: Runtime,
 }
 
 fn validate_unique_symbols<'a>(
@@ -102,17 +93,44 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
     let db_path = config.default_db_path();
     ensure_parent_dir(&db_path)?;
     let persistence: Arc<dyn PersistencePort> = Arc::new(SqliteStorage::new(&db_path)?);
-    let clock = Arc::new(SystemClock);
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    let mut manager = InstanceManager::new(exchange, Arc::clone(&persistence), clock);
+    assemble_with_components(config, exchange, market_data, persistence, clock).await
+}
+
+pub(crate) async fn assemble_with_components(
+    config: &Config,
+    exchange: Arc<dyn ExchangePort>,
+    market_data: Arc<dyn MarketDataPort>,
+    persistence: Arc<dyn PersistencePort>,
+    clock: Arc<dyn ClockPort>,
+) -> Result<Platform> {
+    validate_unique_symbols(
+        config
+            .instances
+            .iter()
+            .map(|instance| instance.symbol.as_str()),
+    )?;
+    validate_unique_instance_ids(
+        config
+            .instances
+            .iter()
+            .map(|instance| instance.instance_id())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(String::as_str),
+    )?;
+
+    let mut manager = InstanceManager::new(Arc::clone(&exchange), Arc::clone(&persistence), clock);
     for instance in &config.instances {
         let instance_id = instance.instance_id();
+        let info = exchange.get_exchange_info(&instance.symbol).await?;
         manager.add_instance(
             instance_id.clone(),
             instance.symbol.clone(),
             instance.grid_config(),
             instance.budget(),
-            placeholder_exchange_rules(),
+            info.rules,
         )?;
         if let Some(snapshot) = persistence.load_instance_state(&instance_id).await? {
             manager.restore_instance_state(&snapshot)?;
@@ -120,15 +138,11 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
     }
 
     let (events, _) = broadcast::channel(256);
+    let app_state = build_app_state(manager, persistence, events);
 
     Ok(Platform {
-        state: AppState {
-            manager: Arc::new(RwLock::new(manager)),
-            persistence,
-            mutation_lock: Arc::new(Mutex::new(())),
-            events,
-        },
-        market_data,
+        state: app_state.clone(),
+        runtime: Runtime::new(app_state, exchange, market_data),
     })
 }
 
@@ -137,52 +151,9 @@ impl Platform {
         self.state.clone()
     }
 
-    pub async fn start_market_data_tasks(&self) {
-        let symbols = {
-            let manager = self.state.manager.read().await;
-            manager
-                .list_instances()
-                .into_iter()
-                .map(|instance| instance.symbol.clone())
-                .collect::<HashSet<_>>()
-        };
-
-        for symbol in symbols {
-            let state = self.state.clone();
-            let market_data = Arc::clone(&self.market_data);
-
-            tokio::spawn(async move {
-                match market_data.subscribe_prices(&symbol).await {
-                    Ok(mut receiver) => {
-                        while let Some(tick) = receiver.recv().await {
-                            match mutate_instance_and_persist(&state, &symbol, |manager| {
-                                manager.on_price_tick(&tick)
-                            })
-                            .await
-                            {
-                                Ok(outcome) => {
-                                    for event in outcome.events {
-                                        let _ = state.events.send(WsEvent {
-                                            instance_id: symbol.clone(),
-                                            event,
-                                        });
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "failed to apply market data update for {symbol}: {}",
-                                        error.message()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!("failed to subscribe market data for {symbol}: {error}");
-                    }
-                }
-            });
-        }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn start_market_data_tasks(&self) -> Result<RuntimeHandles> {
+        self.runtime.start().await
     }
 }
 
@@ -213,6 +184,7 @@ pub(crate) fn snapshot_from_instance(instance: &StrategyInstance) -> InstanceSna
         pending_order: instance.pending_order.clone(),
         risk_state: instance.risk_state.clone(),
         last_price: instance.last_price,
+        out_of_band_since: instance.out_of_band_since,
     }
 }
 
@@ -223,6 +195,7 @@ fn snapshot_for_id(manager: &InstanceManager, id: &str) -> Result<InstanceSnapsh
     Ok(snapshot_from_instance(instance))
 }
 
+#[derive(Debug)]
 pub(crate) enum MutateAndPersistError {
     Mutation(anyhow::Error),
     Persistence(anyhow::Error),
@@ -275,6 +248,19 @@ where
     Ok(result)
 }
 
+fn build_app_state(
+    manager: InstanceManager,
+    persistence: Arc<dyn PersistencePort>,
+    events: broadcast::Sender<WsEvent>,
+) -> AppState {
+    AppState {
+        manager: Arc::new(RwLock::new(manager)),
+        persistence,
+        mutation_lock: Arc::new(Mutex::new(())),
+        events,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -290,6 +276,7 @@ mod tests {
         ExchangeInfo, ExchangePort, InstanceSnapshot, OpenOrder, OrderReceipt, OrderRequest,
         PersistencePort, Position, PriceTick, UserDataEvent,
     };
+    use grid_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Notify, broadcast, mpsc};
     use tokio_tungstenite::connect_async;
@@ -299,8 +286,18 @@ mod tests {
     use crate::websocket::WsEvent;
 
     use super::{
-        AppState, Platform, SharedManager, SystemClock, assemble, validate_unique_instance_ids,
+        AppState, Platform, Runtime, SharedManager, SystemClock, assemble,
+        mutate_instance_and_persist, validate_unique_instance_ids,
     };
+
+    fn test_exchange_rules() -> grid_core::types::ExchangeRules {
+        grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.1,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        }
+    }
 
     #[tokio::test]
     async fn assembles_platform_with_all_instances_registered() {
@@ -344,7 +341,7 @@ mod tests {
             },
         };
 
-        let platform = assemble(&config).await.unwrap();
+        let platform = assemble_with_fake_ports(&config).await.unwrap();
         let state = platform.app_state();
         let manager = state.manager.read().await;
 
@@ -418,7 +415,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let app = router(platform.app_state());
 
-        platform.start_market_data_tasks().await;
+        let handles = platform.start_market_data_tasks().await.unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -451,6 +448,10 @@ mod tests {
 
         server.abort();
         let _ = server.await;
+        handles.market_task.abort();
+        handles.user_task.abort();
+        let _ = handles.market_task.await;
+        let _ = handles.user_task.await;
     }
 
     #[tokio::test]
@@ -482,7 +483,7 @@ mod tests {
             },
         };
 
-        let first = assemble(&config).await.unwrap();
+        let first = assemble_with_fake_ports(&config).await.unwrap();
         let app = router(first.app_state());
         let pause = tower::ServiceExt::oneshot(
             app,
@@ -499,7 +500,7 @@ mod tests {
         .unwrap();
         assert_eq!(pause.status(), axum::http::StatusCode::OK);
 
-        let second = assemble(&config).await.unwrap();
+        let second = assemble_with_fake_ports(&config).await.unwrap();
         let state = second.app_state();
         let manager = state.manager.read().await;
         let instance = manager.get_instance("BTCUSDT").unwrap();
@@ -515,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn newer_tick_snapshot_is_not_overwritten_by_older_command_snapshot() {
         let persistence = Arc::new(BlockingPersistence::default());
-        let (platform, btc_sender) = test_platform_with_persistence(persistence.clone());
+        let (platform, _btc_sender) = test_platform_with_persistence(persistence.clone());
         let app = router(platform.app_state());
 
         {
@@ -529,8 +530,6 @@ mod tests {
             let _ = manager.on_price_tick(&tick);
             manager.pause_instance("BTCUSDT").unwrap();
         }
-
-        platform.start_market_data_tasks().await;
 
         let resume_request = tokio::spawn(async move {
             tower::ServiceExt::oneshot(
@@ -550,15 +549,19 @@ mod tests {
 
         persistence.wait_for_first_save_start().await;
 
-        btc_sender
-            .send(PriceTick {
+        let tick_state = platform.state.clone();
+        let tick_request = tokio::spawn(async move {
+            let tick = PriceTick {
                 symbol: "BTCUSDT".into(),
                 last_price: 85.0,
                 mark_price: 85.0,
                 timestamp: chrono::Utc::now(),
+            };
+            mutate_instance_and_persist(&tick_state, "BTCUSDT", |manager| {
+                manager.on_price_tick(&tick).map(|_| ())
             })
             .await
-            .unwrap();
+        });
 
         let second_save_started = tokio::time::timeout(
             Duration::from_millis(100),
@@ -570,6 +573,7 @@ mod tests {
         let response = resume_request.await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         persistence.wait_for_completed_saves(2).await;
+        let _ = tick_request.await.unwrap();
         assert!(
             second_save_started.is_err(),
             "tick save should wait for command save to finish"
@@ -591,15 +595,33 @@ mod tests {
         test_platform_with_persistence(Arc::new(FakePersistence))
     }
 
+    async fn assemble_with_fake_ports(config: &Config) -> Result<Platform> {
+        let db_path = config.default_db_path();
+        super::ensure_parent_dir(&db_path)?;
+        let persistence: Arc<dyn PersistencePort> = Arc::new(SqliteStorage::new(&db_path)?);
+        super::assemble_with_components(
+            config,
+            Arc::new(FakeExchange),
+            Arc::new(FakeMarketData::empty()),
+            persistence,
+            Arc::new(SystemClock),
+        )
+        .await
+    }
+
     fn test_platform_with_persistence(
         persistence: Arc<dyn PersistencePort>,
     ) -> (Platform, mpsc::Sender<PriceTick>) {
         let (btc_sender, btc_receiver) = mpsc::channel(8);
         let mut receivers = HashMap::new();
         receivers.insert("BTCUSDT".to_string(), btc_receiver);
+        let exchange = Arc::new(FakeExchange);
+        let market_data = Arc::new(FakeMarketData {
+            receivers: Mutex::new(receivers),
+        });
 
         let mut manager = InstanceManager::new(
-            Arc::new(FakeExchange),
+            exchange.clone(),
             Arc::clone(&persistence),
             Arc::new(SystemClock),
         );
@@ -621,22 +643,21 @@ mod tests {
                     daily_loss_limit: -100.0,
                     stop_loss_pct: 10.0,
                 },
-                super::placeholder_exchange_rules(),
+                test_exchange_rules(),
             )
             .unwrap();
         let (events, _) = broadcast::channel(16);
+        let state = AppState {
+            manager: Arc::new(tokio::sync::RwLock::new(manager)) as SharedManager,
+            persistence,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            events,
+        };
 
         (
             Platform {
-                state: AppState {
-                    manager: Arc::new(tokio::sync::RwLock::new(manager)) as SharedManager,
-                    persistence,
-                    mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
-                    events,
-                },
-                market_data: Arc::new(FakeMarketData {
-                    receivers: Mutex::new(receivers),
-                }),
+                state: state.clone(),
+                runtime: Runtime::new(state, exchange, market_data),
             },
             btc_sender,
         )
@@ -654,20 +675,28 @@ mod tests {
             Err(anyhow!("not used in tests"))
         }
 
-        async fn cancel_all(&self, _symbol: &str) -> Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
             Err(anyhow!("not used in tests"))
         }
 
         async fn get_position(&self, _symbol: &str) -> Result<Position> {
-            Err(anyhow!("not used in tests"))
+            Ok(Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            })
         }
 
         async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OpenOrder>> {
-            Err(anyhow!("not used in tests"))
+            Ok(Vec::new())
         }
 
         async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
-            Err(anyhow!("not used in tests"))
+            Ok(ExchangeInfo {
+                symbol: "BTCUSDT".into(),
+                rules: test_exchange_rules(),
+            })
         }
     }
 
@@ -750,6 +779,14 @@ mod tests {
 
     struct FakeMarketData {
         receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
+    }
+
+    impl FakeMarketData {
+        fn empty() -> Self {
+            Self {
+                receivers: Mutex::new(HashMap::new()),
+            }
+        }
     }
 
     #[async_trait::async_trait]

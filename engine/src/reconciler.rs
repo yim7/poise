@@ -151,10 +151,16 @@ pub fn reconcile(
     let actions = if should_cancel_all {
         vec![
             ExecutionAction::CancelAll,
-            ExecutionAction::SubmitOrder(request),
+            ExecutionAction::SubmitOrder {
+                request,
+                target_exposure: approved_target.clone(),
+            },
         ]
     } else {
-        vec![ExecutionAction::SubmitOrder(request)]
+        vec![ExecutionAction::SubmitOrder {
+            request,
+            target_exposure: approved_target.clone(),
+        }]
     };
 
     let plan = ExecutionPlan { actions, events };
@@ -405,7 +411,7 @@ mod tests {
 
         assert!(matches!(
             result.plan.actions.as_slice(),
-            [ExecutionAction::SubmitOrder(_)]
+            [ExecutionAction::SubmitOrder { .. }]
         ));
     }
 
@@ -444,7 +450,10 @@ mod tests {
 
         assert!(matches!(
             result.plan.actions.as_slice(),
-            [ExecutionAction::CancelAll, ExecutionAction::SubmitOrder(_)]
+            [
+                ExecutionAction::CancelAll,
+                ExecutionAction::SubmitOrder { .. }
+            ]
         ));
     }
 
@@ -465,9 +474,15 @@ mod tests {
         let result = reconcile(&instance, 99.09, &test_budget());
 
         match result.plan.actions.as_slice() {
-            [ExecutionAction::SubmitOrder(req)] => {
+            [
+                ExecutionAction::SubmitOrder {
+                    request: req,
+                    target_exposure,
+                },
+            ] => {
                 assert!((req.price - 99.0).abs() < 1e-9);
                 assert!((req.quantity - 2.8).abs() < 1e-9);
+                assert_eq!(target_exposure, &target);
             }
             other => panic!("unexpected actions: {other:?}"),
         }

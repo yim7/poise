@@ -89,6 +89,7 @@ pub enum OutOfBandPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Side {
     Buy,
     Sell,
@@ -289,6 +290,43 @@ mod tests {
         assert_eq!(snapshot.status, InstanceStatus::Holding);
         assert_eq!(snapshot.config.shape_family, ShapeFamily::Linear);
         assert_eq!(snapshot.config.out_of_band_policy, OutOfBandPolicy::Freeze);
+    }
+
+    #[test]
+    fn deserializes_pending_order_side_from_snake_case_snapshot() {
+        let snapshot: InstanceSnapshot = serde_json::from_str(
+            r#"
+            {
+              "id": "BTCUSDT",
+              "symbol": "BTCUSDT",
+              "status": "active",
+              "current_exposure": 0.0,
+              "target_exposure": 4.0,
+              "last_price": 95.0,
+              "pending_order": {
+                "symbol": "BTCUSDT",
+                "order_id": "order-1",
+                "client_order_id": "client-1",
+                "side": "buy",
+                "price": 94.5,
+                "quantity": 0.25,
+                "status": "NEW"
+              },
+              "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_capacity": 8.0,
+                "short_capacity": 8.0,
+                "capacity_notional": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.pending_order.unwrap().side, Side::Buy);
     }
 
     #[test]

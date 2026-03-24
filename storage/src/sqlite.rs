@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
@@ -58,6 +58,7 @@ impl SqliteStorage {
             .risk_state
             .realized_pnl_day
             .map(|day| day.format("%F").to_string());
+        let out_of_band_since = state.out_of_band_since.map(|value| value.to_rfc3339());
         let updated_at = Utc::now().to_rfc3339();
 
         let conn = Self::lock_connection(&conn)?;
@@ -74,8 +75,9 @@ impl SqliteStorage {
                 realized_pnl_today,
                 unrealized_pnl,
                 last_price,
+                out_of_band_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 id,
                 state.symbol,
@@ -88,6 +90,7 @@ impl SqliteStorage {
                 state.risk_state.realized_pnl_today,
                 state.risk_state.unrealized_pnl,
                 state.last_price,
+                out_of_band_since,
                 updated_at
             ],
         )
@@ -105,7 +108,7 @@ impl SqliteStorage {
             .query_row(
                 "SELECT id, symbol, config_json, status, current_exposure, target_exposure,
                         pending_order_json, realized_pnl_day, realized_pnl_today,
-                        unrealized_pnl, last_price
+                        unrealized_pnl, last_price, out_of_band_since
                  FROM instance_snapshots
                  WHERE id = ?1",
                 params![id],
@@ -114,6 +117,7 @@ impl SqliteStorage {
                     let status_json: String = row.get(3)?;
                     let pending_order_json: Option<String> = row.get(6)?;
                     let realized_pnl_day: Option<String> = row.get(7)?;
+                    let out_of_band_since: Option<String> = row.get(11)?;
                     let config = serde_json::from_str(&config_json).map_err(|err| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
@@ -151,6 +155,19 @@ impl SqliteStorage {
                         })
                         .transpose()?;
                     let target_exposure = row.get::<_, Option<f64>>(5)?.map(Exposure);
+                    let out_of_band_since = out_of_band_since
+                        .map(|value| {
+                            DateTime::parse_from_rfc3339(&value)
+                                .map(|parsed| parsed.with_timezone(&Utc))
+                                .map_err(|err| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        11,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(err),
+                                    )
+                                })
+                        })
+                        .transpose()?;
 
                     Ok(InstanceSnapshot {
                         id: row.get(0)?,
@@ -166,6 +183,7 @@ impl SqliteStorage {
                             unrealized_pnl: row.get(9)?,
                         },
                         last_price: row.get(10)?,
+                        out_of_band_since,
                     })
                 },
             )
@@ -255,6 +273,11 @@ mod tests {
                 unrealized_pnl: -3.0,
             },
             last_price: Some(95.0),
+            out_of_band_since: Some(
+                DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
         }
     }
 
@@ -297,6 +320,7 @@ mod tests {
         assert!((loaded.risk_state.realized_pnl_today - 12.5).abs() < f64::EPSILON);
         assert!((loaded.risk_state.unrealized_pnl + 3.0).abs() < f64::EPSILON);
         assert_eq!(loaded.last_price, Some(95.0));
+        assert_eq!(loaded.out_of_band_since, snapshot.out_of_band_since);
     }
 
     #[tokio::test]

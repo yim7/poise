@@ -43,16 +43,9 @@ impl ExchangePort for BinanceAdapter {
         Ok(())
     }
 
-    async fn cancel_all(&self, symbol: &str) -> Result<Vec<String>> {
-        let open_orders = self.rest.get_open_orders(symbol).await?;
-        let cancelled_order_ids = open_orders
-            .into_iter()
-            .map(|order| order.order_id)
-            .collect::<Vec<_>>();
-
+    async fn cancel_all(&self, symbol: &str) -> Result<()> {
         self.rest.cancel_all_orders(symbol).await?;
-
-        Ok(cancelled_order_ids)
+        Ok(())
     }
 
     async fn get_position(&self, symbol: &str) -> Result<Position> {

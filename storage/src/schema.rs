@@ -15,6 +15,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             realized_pnl_today REAL NOT NULL DEFAULT 0,
             unrealized_pnl REAL NOT NULL DEFAULT 0,
             last_price REAL,
+            out_of_band_since TEXT,
             updated_at TEXT NOT NULL
         );
 
@@ -44,6 +45,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "unrealized_pnl",
         "REAL NOT NULL DEFAULT 0",
     )?;
+    ensure_column(conn, "instance_snapshots", "out_of_band_since", "TEXT")?;
 
     Ok(())
 }
@@ -142,5 +144,6 @@ mod tests {
         assert!(columns.contains(&"realized_pnl_day".to_string()));
         assert!(columns.contains(&"realized_pnl_today".to_string()));
         assert!(columns.contains(&"unrealized_pnl".to_string()));
+        assert!(columns.contains(&"out_of_band_since".to_string()));
     }
 }

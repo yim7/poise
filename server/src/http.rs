@@ -237,7 +237,7 @@ mod tests {
         async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> anyhow::Result<()> {
             unreachable!()
         }
-        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<()> {
             unreachable!()
         }
         async fn get_position(&self, _symbol: &str) -> anyhow::Result<Position> {
@@ -343,6 +343,7 @@ mod tests {
                 pending_order: Some(pending_order),
                 risk_state: strategy.risk_state.clone(),
                 last_price: strategy.last_price,
+                out_of_band_since: strategy.out_of_band_since,
             })
             .unwrap();
         let (events, _) = tokio::sync::broadcast::channel::<WsEvent>(16);
@@ -395,6 +396,25 @@ mod tests {
         assert_eq!(payload.last_price, Some(95.0));
         assert_eq!(payload.target_exposure, Some(4.0));
         assert!(payload.pending_order.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_serializes_pending_order_side_as_snake_case() {
+        let response = router(app_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/instances/BTCUSDT/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["pending_order"]["side"], "buy");
     }
 
     #[tokio::test]

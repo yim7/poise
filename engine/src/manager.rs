@@ -185,6 +185,7 @@ impl InstanceManager {
         instance.pending_order = snapshot.pending_order.clone();
         instance.risk_state = snapshot.risk_state.clone();
         instance.last_price = snapshot.last_price;
+        instance.out_of_band_since = snapshot.out_of_band_since;
         Ok(())
     }
 
@@ -317,7 +318,7 @@ mod tests {
         async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
             unimplemented!()
         }
-        async fn cancel_all(&self, _symbol: &str) -> Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
             unimplemented!()
         }
         async fn get_position(&self, _symbol: &str) -> Result<Position> {

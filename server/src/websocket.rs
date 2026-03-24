@@ -133,7 +133,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<Vec<String>> {
+        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<()> {
             unreachable!()
         }
 
