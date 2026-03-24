@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,98 @@ pub enum UserDataEvent {
     PositionUpdate(Position),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserDataStreamItem {
+    Event(UserDataEvent),
+    ReplayBarrier,
+}
+
+pub struct UserDataSubscription {
+    receiver: mpsc::Receiver<UserDataStreamItem>,
+    replay_barrier_requests: mpsc::Sender<()>,
+}
+
+impl UserDataSubscription {
+    pub fn new(
+        receiver: mpsc::Receiver<UserDataStreamItem>,
+        replay_barrier_requests: mpsc::Sender<()>,
+    ) -> Self {
+        Self {
+            receiver,
+            replay_barrier_requests,
+        }
+    }
+
+    pub fn from_receiver(mut receiver: mpsc::Receiver<UserDataEvent>, buffer: usize) -> Self {
+        let (stream_sender, stream_receiver) = mpsc::channel(buffer);
+        let (barrier_sender, mut barrier_receiver) = mpsc::channel(buffer);
+
+        tokio::spawn(async move {
+            let mut event_stream_open = true;
+            let mut barrier_stream_open = true;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    maybe_event = async {
+                        if event_stream_open {
+                            receiver.recv().await
+                        } else {
+                            std::future::pending::<Option<UserDataEvent>>().await
+                        }
+                    } => {
+                        match maybe_event {
+                            Some(event) => {
+                                if stream_sender.send(UserDataStreamItem::Event(event)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            None => {
+                                event_stream_open = false;
+                            }
+                        }
+                    }
+                    maybe_barrier = async {
+                        if barrier_stream_open {
+                            barrier_receiver.recv().await
+                        } else {
+                            std::future::pending::<Option<()>>().await
+                        }
+                    } => {
+                        match maybe_barrier {
+                            Some(()) => {
+                                if stream_sender.send(UserDataStreamItem::ReplayBarrier).await.is_err() {
+                                    return;
+                                }
+                            }
+                            None => {
+                                barrier_stream_open = false;
+                            }
+                        }
+                    }
+                }
+
+                if !event_stream_open && !barrier_stream_open {
+                    return;
+                }
+            }
+        });
+
+        Self::new(stream_receiver, barrier_sender)
+    }
+
+    pub async fn request_replay_barrier(&self) -> Result<()> {
+        self.replay_barrier_requests
+            .send(())
+            .await
+            .map_err(|_| anyhow!("user data replay barrier request channel closed"))
+    }
+
+    pub fn into_receiver(self) -> mpsc::Receiver<UserDataStreamItem> {
+        self.receiver
+    }
+}
+
 // ── Snapshot type (for persistence) ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,7 +188,7 @@ pub trait ExchangePort: Send + Sync {
 #[async_trait]
 pub trait MarketDataPort: Send + Sync {
     async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>>;
-    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
+    async fn subscribe_user_data(&self) -> Result<UserDataSubscription>;
 }
 
 #[async_trait]

@@ -274,7 +274,7 @@ mod tests {
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
         ExchangeInfo, ExchangePort, InstanceSnapshot, OpenOrder, OrderReceipt, OrderRequest,
-        PersistencePort, Position, PriceTick, UserDataEvent,
+        PersistencePort, Position, PriceTick,
     };
     use grid_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
@@ -799,9 +799,11 @@ mod tests {
                 .ok_or_else(|| anyhow!("no test receiver for symbol `{symbol}`"))
         }
 
-        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+        async fn subscribe_user_data(&self) -> Result<grid_engine::ports::UserDataSubscription> {
             let (_sender, receiver) = mpsc::channel(1);
-            Ok(receiver)
+            Ok(grid_engine::ports::UserDataSubscription::from_receiver(
+                receiver, 1,
+            ))
         }
     }
 }

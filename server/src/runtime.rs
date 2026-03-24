@@ -4,8 +4,11 @@ use anyhow::{Result, anyhow};
 use grid_core::types::Exposure;
 use grid_engine::execution_plan::ExecutionAction;
 use grid_engine::instance::PendingOrder;
-use grid_engine::ports::{ExchangePort, MarketDataPort, OrderReceipt, UserDataEvent};
-use tokio::sync::{mpsc, oneshot};
+use grid_engine::ports::{
+    ExchangePort, MarketDataPort, OrderReceipt, UserDataEvent, UserDataStreamItem,
+    UserDataSubscription,
+};
+use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::assembly::{AppState, MutateAndPersistError, mutate_instance_and_persist};
@@ -40,12 +43,10 @@ impl Runtime {
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
-        let user_receiver = self.market_data.subscribe_user_data().await?;
+        let user_subscription = self.market_data.subscribe_user_data().await?;
         self.startup_sync().await?;
-        let (user_task, startup_ready) = self.spawn_user_task(user_receiver);
-        startup_ready
-            .await
-            .map_err(|_| anyhow!("user data startup barrier dropped before completion"))?;
+        let user_receiver = self.replay_startup_user_data(user_subscription).await?;
+        let user_task = self.spawn_user_task(user_receiver);
         let market_task = self.spawn_market_task();
 
         Ok(RuntimeHandles {
@@ -72,6 +73,31 @@ impl Runtime {
 
         Ok(())
     }
+
+    async fn replay_startup_user_data(
+        &self,
+        subscription: UserDataSubscription,
+    ) -> Result<mpsc::Receiver<UserDataStreamItem>> {
+        subscription.request_replay_barrier().await?;
+        let mut receiver = subscription.into_receiver();
+
+        loop {
+            match receiver.recv().await {
+                Some(UserDataStreamItem::Event(event)) => {
+                    apply_user_data_event(&self.state, event)
+                        .await
+                        .map_err(mutate_error)?;
+                }
+                Some(UserDataStreamItem::ReplayBarrier) => return Ok(receiver),
+                None => {
+                    return Err(anyhow!(
+                        "user data stream closed before startup replay barrier completed"
+                    ));
+                }
+            }
+        }
+    }
+
     fn spawn_market_task(&self) -> JoinHandle<()> {
         let state = self.state.clone();
         let exchange = Arc::clone(&self.exchange);
@@ -147,38 +173,29 @@ impl Runtime {
         })
     }
 
-    fn spawn_user_task(
-        &self,
-        mut receiver: mpsc::Receiver<UserDataEvent>,
-    ) -> (JoinHandle<()>, oneshot::Receiver<()>) {
+    fn spawn_user_task(&self, mut receiver: mpsc::Receiver<UserDataStreamItem>) -> JoinHandle<()> {
         let state = self.state.clone();
-        let (startup_ready_sender, startup_ready_receiver) = oneshot::channel();
 
-        let handle = tokio::spawn(async move {
-            while let Ok(event) = receiver.try_recv() {
-                let symbol = event_symbol(&event);
-                if let Err(error) = apply_user_data_event(&state, event).await {
-                    tracing::warn!(
-                        "failed to apply buffered user data update for {symbol}: {}",
-                        error.message()
-                    );
-                }
-            }
-
-            let _ = startup_ready_sender.send(());
-
+        tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                let symbol = event_symbol(&event);
-                if let Err(error) = apply_user_data_event(&state, event).await {
-                    tracing::warn!(
-                        "failed to apply user data update for {symbol}: {}",
-                        error.message()
-                    );
+                match event {
+                    UserDataStreamItem::Event(event) => {
+                        let symbol = event_symbol(&event);
+                        if let Err(error) = apply_user_data_event(&state, event).await {
+                            tracing::warn!(
+                                "failed to apply user data update for {symbol}: {}",
+                                error.message()
+                            );
+                        }
+                    }
+                    UserDataStreamItem::ReplayBarrier => {
+                        tracing::warn!(
+                            "received unexpected user data replay barrier after startup"
+                        );
+                    }
                 }
             }
-        });
-
-        (handle, startup_ready_receiver)
+        })
     }
 }
 
@@ -332,6 +349,7 @@ mod tests {
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangePort, InstanceSnapshot, MarketDataPort, OpenOrder,
         OrderReceipt, OrderRequest, PersistencePort, Position, PriceTick, UserDataEvent,
+        UserDataStreamItem, UserDataSubscription,
     };
     use tokio::sync::{Mutex as AsyncMutex, RwLock, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
@@ -707,6 +725,134 @@ mod tests {
             (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
         })
         .await;
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted() {
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        drop(price_sender);
+        let market_data = Arc::new(BufferedUserDataMarket::new(price_receiver));
+        let exchange = Arc::new(StartupInjectingExchange::new(
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            market_data.user_sender_handle(),
+        ));
+        let persistence = Arc::new(FailOnSavePersistence::new(2));
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+
+        let mut manager = InstanceManager::new(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn PersistencePort>,
+            clock,
+        );
+        manager
+            .add_instance(
+                "BTCUSDT".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                exchange.exchange_info.rules.clone(),
+            )
+            .unwrap();
+
+        let (events, _) = broadcast::channel(16);
+        let state = AppState {
+            manager: Arc::new(RwLock::new(manager)),
+            persistence,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            events,
+        };
+        let runtime = Runtime::new(
+            state,
+            exchange as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        let error = runtime.start().await.err().unwrap();
+        assert!(error.to_string().contains("injected save failure"));
+    }
+
+    #[tokio::test]
+    async fn startup_replay_barrier_applies_boundary_event_before_first_tick() {
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        price_sender
+            .send(PriceTick {
+                symbol: "BTCUSDT".into(),
+                last_price: 97.5,
+                mark_price: 97.5,
+                timestamp: Utc::now(),
+            })
+            .await
+            .unwrap();
+        drop(price_sender);
+
+        let market_data = Arc::new(BarrierInjectingMarketData::new(
+            price_receiver,
+            UserDataEvent::PositionUpdate(Position {
+                symbol: "BTCUSDT".into(),
+                qty: 7.5,
+                avg_price: 100.0,
+                unrealized_pnl: 5.0,
+            }),
+        ));
+        let exchange = Arc::new(FakeExchange::new(
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            vec![],
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+
+        let mut manager = InstanceManager::new(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn PersistencePort>,
+            clock,
+        );
+        manager
+            .add_instance(
+                "BTCUSDT".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+                exchange.exchange_info.rules.clone(),
+            )
+            .unwrap();
+
+        let (events, _) = broadcast::channel(16);
+        let state = AppState {
+            manager: Arc::new(RwLock::new(manager)),
+            persistence,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            events,
+        };
+        let runtime = Runtime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        let handles = runtime.start().await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+
+        assert!(exchange.submitted_orders.lock().unwrap().is_empty());
+        assert_eq!(
+            current_instance(&state).await.current_exposure,
+            Exposure(2.0)
+        );
 
         shutdown(handles).await;
     }
@@ -1147,6 +1293,42 @@ mod tests {
         }
     }
 
+    struct FailOnSavePersistence {
+        snapshots: AsyncMutex<HashMap<String, InstanceSnapshot>>,
+        save_count: AtomicUsize,
+        fail_on: usize,
+    }
+
+    impl FailOnSavePersistence {
+        fn new(fail_on: usize) -> Self {
+            Self {
+                snapshots: AsyncMutex::new(HashMap::new()),
+                save_count: AtomicUsize::new(0),
+                fail_on,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PersistencePort for FailOnSavePersistence {
+        async fn save_instance_state(&self, id: &str, state: &InstanceSnapshot) -> Result<()> {
+            let save_number = self.save_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if save_number == self.fail_on {
+                return Err(anyhow!("injected save failure"));
+            }
+
+            self.snapshots
+                .lock()
+                .await
+                .insert(id.to_string(), state.clone());
+            Ok(())
+        }
+
+        async fn load_instance_state(&self, id: &str) -> Result<Option<InstanceSnapshot>> {
+            Ok(self.snapshots.lock().await.get(id).cloned())
+        }
+    }
+
     struct FakeMarketData {
         price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
         user_receiver: Mutex<Option<mpsc::Receiver<UserDataEvent>>>,
@@ -1195,6 +1377,22 @@ mod tests {
         }
     }
 
+    struct BarrierInjectingMarketData {
+        price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
+        boundary_event: UserDataEvent,
+    }
+
+    impl BarrierInjectingMarketData {
+        fn new(price_receiver: mpsc::Receiver<PriceTick>, boundary_event: UserDataEvent) -> Self {
+            let mut price_receivers = HashMap::new();
+            price_receivers.insert("BTCUSDT".to_string(), price_receiver);
+            Self {
+                price_receivers: Mutex::new(price_receivers),
+                boundary_event,
+            }
+        }
+    }
+
     #[async_trait::async_trait]
     impl MarketDataPort for FakeMarketData {
         async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
@@ -1205,12 +1403,15 @@ mod tests {
                 .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
         }
 
-        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-            self.user_receiver
+        async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
+            let receiver = self
+                .user_receiver
                 .lock()
                 .unwrap()
                 .take()
-                .ok_or_else(|| anyhow!("missing test user receiver"))
+                .ok_or_else(|| anyhow!("missing test user receiver"))?;
+
+            Ok(UserDataSubscription::from_receiver(receiver, 8))
         }
     }
 
@@ -1224,10 +1425,48 @@ mod tests {
                 .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
         }
 
-        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+        async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
             let (sender, receiver) = mpsc::channel(8);
             *self.user_sender.lock().unwrap() = Some(sender);
-            Ok(receiver)
+            Ok(UserDataSubscription::from_receiver(receiver, 8))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MarketDataPort for BarrierInjectingMarketData {
+        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
+            self.price_receivers
+                .lock()
+                .unwrap()
+                .remove(symbol)
+                .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
+        }
+
+        async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
+            let (sender, receiver) = mpsc::channel(8);
+            let (barrier_sender, mut barrier_receiver) = mpsc::channel(8);
+            let boundary_event = self.boundary_event.clone();
+
+            tokio::spawn(async move {
+                while let Some(()) = barrier_receiver.recv().await {
+                    if sender
+                        .send(UserDataStreamItem::Event(boundary_event.clone()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if sender
+                        .send(UserDataStreamItem::ReplayBarrier)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+
+            Ok(UserDataSubscription::new(receiver, barrier_sender))
         }
     }
 }

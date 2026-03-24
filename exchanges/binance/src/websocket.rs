@@ -11,7 +11,7 @@ use tokio::{
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
-use grid_engine::ports::{PriceTick, UserDataEvent};
+use grid_engine::ports::{PriceTick, UserDataEvent, UserDataStreamItem, UserDataSubscription};
 
 use crate::rest::BinanceRestClient;
 
@@ -64,8 +64,9 @@ impl BinanceWsClient {
         Ok(receiver)
     }
 
-    pub async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+    pub async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
         let (sender, receiver) = mpsc::channel(128);
+        let (replay_barrier_sender, replay_barrier_receiver) = mpsc::channel(8);
         let ws_base_url = self.ws_base_url.clone();
         let rest = Arc::clone(&self.rest);
         let reconnect_delay = self.reconnect_delay;
@@ -78,13 +79,14 @@ impl BinanceWsClient {
                 rest,
                 initial_listen_key,
                 Some(initial_websocket),
+                replay_barrier_receiver,
                 sender,
                 reconnect_delay,
             )
             .await;
         });
 
-        Ok(receiver)
+        Ok(UserDataSubscription::new(receiver, replay_barrier_sender))
     }
 }
 
@@ -141,11 +143,13 @@ async fn run_user_stream(
     rest: Arc<BinanceRestClient>,
     initial_listen_key: String,
     mut initial_websocket: Option<UserWebSocket>,
-    sender: mpsc::Sender<UserDataEvent>,
+    mut replay_barrier_receiver: mpsc::Receiver<()>,
+    sender: mpsc::Sender<UserDataStreamItem>,
     reconnect_delay: Duration,
 ) {
     let mut attempt = 0_u32;
     let mut listen_key = initial_listen_key;
+    let mut barrier_stream_open = true;
 
     loop {
         let connection = match initial_websocket.take() {
@@ -163,19 +167,14 @@ async fn run_user_stream(
 
                 loop {
                     tokio::select! {
-                        _ = keepalive.tick() => {
-                            if let Err(error) = rest.keepalive_user_stream(&listen_key).await {
-                                tracing::warn!("failed to keepalive listen key: {error}");
-                                break;
-                            }
-                        }
+                        biased;
                         message = websocket.next() => {
                             match message {
                                 Some(Ok(Message::Text(text))) => {
                                     match parse_user_data_message(&text) {
                                         Ok(UserStreamMessage::Events(events)) => {
                                             for event in events {
-                                                if sender.send(event).await.is_err() {
+                                                if sender.send(UserDataStreamItem::Event(event)).await.is_err() {
                                                     return;
                                                 }
                                             }
@@ -192,6 +191,30 @@ async fn run_user_stream(
                                     tracing::warn!("user data websocket error: {error}");
                                     break;
                                 }
+                            }
+                        }
+                        barrier_request = async {
+                            if barrier_stream_open {
+                                replay_barrier_receiver.recv().await
+                            } else {
+                                std::future::pending::<Option<()>>().await
+                            }
+                        } => {
+                            match barrier_request {
+                                Some(()) => {
+                                    if sender.send(UserDataStreamItem::ReplayBarrier).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                None => {
+                                    barrier_stream_open = false;
+                                }
+                            }
+                        }
+                        _ = keepalive.tick() => {
+                            if let Err(error) = rest.keepalive_user_stream(&listen_key).await {
+                                tracing::warn!("failed to keepalive listen key: {error}");
+                                break;
                             }
                         }
                     }
@@ -586,7 +609,7 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let mut receiver = client.subscribe_user_data().await.unwrap();
+        let mut receiver = client.subscribe_user_data().await.unwrap().into_receiver();
         let event = timeout(Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
@@ -595,12 +618,12 @@ mod tests {
 
         assert_eq!(
             event,
-            UserDataEvent::PositionUpdate(Position {
+            UserDataStreamItem::Event(UserDataEvent::PositionUpdate(Position {
                 symbol: "BTCUSDT".to_string(),
                 qty: 0.015,
                 avg_price: 64200.0,
                 unrealized_pnl: 12.3,
-            })
+            }))
         );
         assert_eq!(
             requests
@@ -664,7 +687,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_receiver();
         let event = timeout(Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
@@ -672,12 +696,12 @@ mod tests {
 
         assert_eq!(
             event,
-            UserDataEvent::PositionUpdate(Position {
+            UserDataStreamItem::Event(UserDataEvent::PositionUpdate(Position {
                 symbol: "BTCUSDT".to_string(),
                 qty: 0.015,
                 avg_price: 64200.0,
                 unrealized_pnl: 12.3,
-            })
+            }))
         );
     }
 

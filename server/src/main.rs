@@ -56,7 +56,7 @@ mod tests {
     use grid_core::types::ExchangeRules;
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangePort, OpenOrder, OrderReceipt, OrderRequest,
-        PersistencePort, Position, PriceTick, UserDataEvent,
+        PersistencePort, Position, PriceTick,
     };
     use tokio::sync::mpsc;
 
@@ -226,9 +226,11 @@ capacity_notional = 375.0
                 .ok_or_else(|| anyhow!("missing price receiver for {symbol}"))
         }
 
-        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+        async fn subscribe_user_data(&self) -> Result<grid_engine::ports::UserDataSubscription> {
             let (_sender, receiver) = mpsc::channel(1);
-            Ok(receiver)
+            Ok(grid_engine::ports::UserDataSubscription::from_receiver(
+                receiver, 1,
+            ))
         }
     }
 
