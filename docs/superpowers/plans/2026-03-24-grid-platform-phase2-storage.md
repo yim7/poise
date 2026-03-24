@@ -38,7 +38,7 @@ storage/
 - Create: `storage/Cargo.toml`
 - Create: `storage/src/lib.rs`
 
-- [ ] **Step 1: 添加 rusqlite 到 workspace 依赖**
+- [x] **Step 1: 添加 rusqlite 到 workspace 依赖**
 
 在 `Cargo.toml` 的 `[workspace.dependencies]` 中添加：
 
@@ -49,7 +49,7 @@ serde_json = "1"
 
 在 `[workspace].members` 中添加 `"storage"`。
 
-- [ ] **Step 2: 创建 storage/Cargo.toml**
+- [x] **Step 2: 创建 storage/Cargo.toml**
 
 ```toml
 [package]
@@ -69,19 +69,19 @@ tokio.workspace = true
 chrono.workspace = true
 ```
 
-- [ ] **Step 3: 创建占位 lib.rs**
+- [x] **Step 3: 创建占位 lib.rs**
 
 ```rust
 pub mod schema;
 pub mod sqlite;
 ```
 
-- [ ] **Step 4: 验证编译**
+- [x] **Step 4: 验证编译**
 
 Run: `cargo check -p grid-storage`
 Expected: 编译成功
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat: initialize grid-storage crate"
