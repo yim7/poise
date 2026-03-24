@@ -32,6 +32,8 @@ impl ExecutionPlan {
     }
 
     pub fn has_actions(&self) -> bool {
-        self.actions.iter().any(|a| !matches!(a, ExecutionAction::NoOp))
+        self.actions
+            .iter()
+            .any(|a| !matches!(a, ExecutionAction::NoOp))
     }
 }

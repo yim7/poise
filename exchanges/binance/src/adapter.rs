@@ -128,7 +128,11 @@ mod tests {
 
         assert_eq!(receipt.order_id, "20072994037");
         assert_eq!(requests[0].method, "POST");
-        assert!(requests[0].path.starts_with("/fapi/v1/order?symbol=BTCUSDT"));
+        assert!(
+            requests[0]
+                .path
+                .starts_with("/fapi/v1/order?symbol=BTCUSDT")
+        );
     }
 
     #[tokio::test]
@@ -153,7 +157,11 @@ mod tests {
         let requests = server.requests().await;
 
         assert_eq!(requests[0].method, "DELETE");
-        assert!(requests[0].path.starts_with("/fapi/v1/order?symbol=BTCUSDT&orderId=12345"));
+        assert!(
+            requests[0]
+                .path
+                .starts_with("/fapi/v1/order?symbol=BTCUSDT&orderId=12345")
+        );
     }
 
     #[tokio::test]
@@ -294,7 +302,8 @@ mod tests {
                             break;
                         }
                         if let Some((name, value)) = line.split_once(':') {
-                            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                            headers
+                                .insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
                         }
                     }
 

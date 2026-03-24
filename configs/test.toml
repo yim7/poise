@@ -1,0 +1,22 @@
+environment = "test"
+bind_address = "127.0.0.1:18080"
+
+[exchange]
+rest_base_url = "http://127.0.0.1:1"
+ws_base_url = "ws://127.0.0.1:1"
+
+[[instances]]
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_capacity = 8.0
+short_capacity = 8.0
+capacity_notional = 375.0
+
+[[instances]]
+symbol = "ETHUSDT"
+lower_price = 2000.0
+upper_price = 2600.0
+long_capacity = 5.0
+short_capacity = 4.0
+capacity_notional = 1200.0

@@ -268,7 +268,8 @@ mod tests {
         "#;
 
         let response: BinanceExchangeInfoResponse = serde_json::from_str(payload).unwrap();
-        let converted = ExchangeInfo::try_from(response.symbols.into_iter().next().unwrap()).unwrap();
+        let converted =
+            ExchangeInfo::try_from(response.symbols.into_iter().next().unwrap()).unwrap();
 
         assert_eq!(
             converted,

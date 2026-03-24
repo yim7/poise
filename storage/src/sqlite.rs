@@ -21,7 +21,8 @@ impl SqliteStorage {
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("failed to open in-memory sqlite database")?;
+        let conn =
+            Connection::open_in_memory().context("failed to open in-memory sqlite database")?;
         Self::from_connection(conn)
     }
 
@@ -156,9 +157,10 @@ mod tests {
     use std::env;
     use std::fs;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use std::time::{Duration, Instant};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::Exposure;
@@ -186,11 +188,15 @@ mod tests {
     }
 
     fn temp_db_path() -> std::path::PathBuf {
-        let suffix = SystemTime::now()
+        static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        env::temp_dir().join(format!("grid-storage-{suffix}.db"))
+        let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        env::temp_dir().join(format!("grid-storage-{timestamp}-{counter}.db"))
     }
 
     #[tokio::test]
@@ -198,7 +204,10 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
 
-        storage.save_instance_state("test-1", &snapshot).await.unwrap();
+        storage
+            .save_instance_state("test-1", &snapshot)
+            .await
+            .unwrap();
         let loaded = storage.load_instance_state("test-1").await.unwrap();
 
         assert!(loaded.is_some());
@@ -223,13 +232,23 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let mut snapshot = test_snapshot();
 
-        storage.save_instance_state("test-1", &snapshot).await.unwrap();
+        storage
+            .save_instance_state("test-1", &snapshot)
+            .await
+            .unwrap();
 
         snapshot.current_exposure = Exposure(6.0);
         snapshot.last_price = Some(96.0);
-        storage.save_instance_state("test-1", &snapshot).await.unwrap();
+        storage
+            .save_instance_state("test-1", &snapshot)
+            .await
+            .unwrap();
 
-        let loaded = storage.load_instance_state("test-1").await.unwrap().unwrap();
+        let loaded = storage
+            .load_instance_state("test-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert!((loaded.current_exposure.0 - 6.0).abs() < f64::EPSILON);
         assert_eq!(loaded.last_price, Some(96.0));
     }
@@ -285,7 +304,10 @@ mod tests {
         lock_thread.join().unwrap();
         let _ = fs::remove_file(db_path);
 
-        assert!(elapsed < Duration::from_millis(80), "tokio scheduler was blocked for {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "tokio scheduler was blocked for {elapsed:?}"
+        );
     }
 
     #[tokio::test]
@@ -294,7 +316,10 @@ mod tests {
         let storage = SqliteStorage::new(&db_path).unwrap();
         let snapshot = test_snapshot();
 
-        storage.save_instance_state("test-1", &snapshot).await.unwrap();
+        storage
+            .save_instance_state("test-1", &snapshot)
+            .await
+            .unwrap();
 
         drop(storage);
 

@@ -33,7 +33,11 @@ pub struct BinanceRestClient {
 }
 
 impl BinanceRestClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, api_secret: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
@@ -68,7 +72,12 @@ impl BinanceRestClient {
 
     pub async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
         let response: BinanceExchangeInfoResponse = self
-            .send_request(Method::GET, "/fapi/v1/exchangeInfo", Vec::new(), AuthMode::None)
+            .send_request(
+                Method::GET,
+                "/fapi/v1/exchangeInfo",
+                Vec::new(),
+                AuthMode::None,
+            )
             .await?;
 
         let symbol_info = response
@@ -171,7 +180,12 @@ impl BinanceRestClient {
         }
 
         let response: ListenKeyResponse = self
-            .send_request(Method::POST, "/fapi/v1/listenKey", Vec::new(), AuthMode::ApiKey)
+            .send_request(
+                Method::POST,
+                "/fapi/v1/listenKey",
+                Vec::new(),
+                AuthMode::ApiKey,
+            )
             .await?;
 
         Ok(response.listen_key)
@@ -189,7 +203,13 @@ impl BinanceRestClient {
         Ok(())
     }
 
-    async fn send_request<T>(&self, method: Method, path: &str, params: Vec<(&str, String)>, auth_mode: AuthMode) -> Result<T>
+    async fn send_request<T>(
+        &self,
+        method: Method,
+        path: &str,
+        params: Vec<(&str, String)>,
+        auth_mode: AuthMode,
+    ) -> Result<T>
     where
         T: DeserializeOwned,
     {
@@ -230,7 +250,13 @@ impl BinanceRestClient {
                     let status = response.status();
                     let retry_after = retry_after_delay(response.headers());
                     let body = response.text().await.unwrap_or_default();
-                    let error = anyhow!("request {} {} failed with status {}: {}", method, path, status, body);
+                    let error = anyhow!(
+                        "request {} {} failed with status {}: {}",
+                        method,
+                        path,
+                        status,
+                        body
+                    );
 
                     if !is_retryable_status(status) || attempt + 1 == MAX_RETRIES {
                         return Err(error);
@@ -242,7 +268,8 @@ impl BinanceRestClient {
                 }
                 Err(error) => {
                     if attempt + 1 == MAX_RETRIES {
-                        return Err(error).with_context(|| format!("request {} {} failed", method, path));
+                        return Err(error)
+                            .with_context(|| format!("request {} {} failed", method, path));
                     }
                     last_error = Some(error.into());
                 }
@@ -291,7 +318,10 @@ mod tests {
     use std::{
         collections::HashMap,
         collections::VecDeque,
-        sync::{Arc, atomic::{AtomicI64, Ordering}},
+        sync::{
+            Arc,
+            atomic::{AtomicI64, Ordering},
+        },
     };
 
     use tokio::{
@@ -311,8 +341,7 @@ mod tests {
             Arc::new(|| 1_700_000_000_000),
         );
 
-        let signature =
-            client.sign_query("symbol=BTCUSDT&timestamp=1700000000000&recvWindow=5000");
+        let signature = client.sign_query("symbol=BTCUSDT&timestamp=1700000000000&recvWindow=5000");
 
         assert_eq!(
             signature,
@@ -512,7 +541,8 @@ mod tests {
                             break;
                         }
                         if let Some((name, value)) = line.split_once(':') {
-                            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                            headers
+                                .insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
                         }
                     }
 

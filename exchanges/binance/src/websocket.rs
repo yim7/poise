@@ -4,7 +4,10 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::{sync::mpsc, time::{Duration, Instant, interval_at, sleep}};
+use tokio::{
+    sync::mpsc,
+    time::{Duration, Instant, interval_at, sleep},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use grid_engine::ports::{PriceTick, UserDataEvent};
@@ -44,7 +47,11 @@ impl BinanceWsClient {
 
     pub async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
         let (sender, receiver) = mpsc::channel(128);
-        let url = format!("{}/ws/{}@markPrice", self.ws_base_url, symbol.to_lowercase());
+        let url = format!(
+            "{}/ws/{}@markPrice",
+            self.ws_base_url,
+            symbol.to_lowercase()
+        );
         let reconnect_delay = self.reconnect_delay;
 
         tokio::spawn(async move {
@@ -62,14 +69,25 @@ impl BinanceWsClient {
         let initial_listen_key = rest.start_user_stream().await?;
 
         tokio::spawn(async move {
-            run_user_stream(ws_base_url, rest, initial_listen_key, sender, reconnect_delay).await;
+            run_user_stream(
+                ws_base_url,
+                rest,
+                initial_listen_key,
+                sender,
+                reconnect_delay,
+            )
+            .await;
         });
 
         Ok(receiver)
     }
 }
 
-async fn run_market_stream(url: String, sender: mpsc::Sender<PriceTick>, reconnect_delay: Duration) {
+async fn run_market_stream(
+    url: String,
+    sender: mpsc::Sender<PriceTick>,
+    reconnect_delay: Duration,
+) {
     let mut attempt = 0_u32;
 
     loop {
@@ -218,14 +236,16 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 .order
                 .context("missing order payload for ORDER_TRADE_UPDATE")?;
 
-            Ok(UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(grid_engine::ports::OpenOrder {
-                order_id: order.order_id.to_string(),
-                client_order_id: order.client_order_id,
-                side: parse_side(&order.side)?,
-                price: parse_decimal("o.p", &order.price)?,
-                qty: parse_decimal("o.q", &order.quantity)?,
-                status: order.status,
-            })]))
+            Ok(UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(
+                grid_engine::ports::OpenOrder {
+                    order_id: order.order_id.to_string(),
+                    client_order_id: order.client_order_id,
+                    side: parse_side(&order.side)?,
+                    price: parse_decimal("o.p", &order.price)?,
+                    qty: parse_decimal("o.q", &order.quantity)?,
+                    status: order.status,
+                },
+            )]))
         }
         "ACCOUNT_UPDATE" => {
             let account = envelope
@@ -236,12 +256,14 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 .positions
                 .into_iter()
                 .map(|position| {
-                    Ok(UserDataEvent::PositionUpdate(grid_engine::ports::Position {
-                        symbol: position.symbol,
-                        qty: parse_decimal("a.P.pa", &position.position_amt)?,
-                        avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
-                        unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
-                    }))
+                    Ok(UserDataEvent::PositionUpdate(
+                        grid_engine::ports::Position {
+                            symbol: position.symbol,
+                            qty: parse_decimal("a.P.pa", &position.position_amt)?,
+                            avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
+                            unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
+                        },
+                    ))
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -463,7 +485,11 @@ mod tests {
             }
         });
 
-        let rest = Arc::new(BinanceRestClient::new("http://127.0.0.1:1", "api-key", "secret-key"));
+        let rest = Arc::new(BinanceRestClient::new(
+            "http://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+        ));
         let client = BinanceWsClient::with_reconnect_delay(
             rest,
             format!("ws://{}", address),
@@ -498,13 +524,11 @@ mod tests {
             let (first_stream, _) = ws_listener.accept().await.unwrap();
             let mut first_ws = accept_async(first_stream).await.unwrap();
             first_ws
-                .send(
-                    Message::Text(
-                        r#"{"e":"listenKeyExpired","E":1700000000000,"listenKey":"listen-key-1"}"#
-                            .to_string()
-                            .into(),
-                    ),
-                )
+                .send(Message::Text(
+                    r#"{"e":"listenKeyExpired","E":1700000000000,"listenKey":"listen-key-1"}"#
+                        .to_string()
+                        .into(),
+                ))
                 .await
                 .unwrap();
             tokio::spawn(async move {
@@ -637,7 +661,8 @@ mod tests {
                             break;
                         }
                         if let Some((name, value)) = line.split_once(':') {
-                            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                            headers
+                                .insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
                         }
                     }
 

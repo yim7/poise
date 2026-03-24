@@ -40,7 +40,7 @@ server/
 - Create: `server/Cargo.toml`
 - Create: `server/src/main.rs`
 
-- [ ] **Step 1: 添加 axum 到 workspace 依赖**
+- [x] **Step 1: 添加 axum 到 workspace 依赖**
 
 ```toml
 axum = "0.7"
@@ -50,11 +50,11 @@ toml_edit = "0.22"
 
 在 `[workspace].members` 中添加 `"server"`。
 
-- [ ] **Step 2: 创建 server/Cargo.toml**
+- [x] **Step 2: 创建 server/Cargo.toml**
 
 依赖 grid-engine、grid-core、grid-binance、grid-storage 以及 axum、tokio 等。
 
-- [ ] **Step 3: 创建 main.rs 骨架**
+- [x] **Step 3: 创建 main.rs 骨架**
 
 ```rust
 #[tokio::main]
@@ -65,12 +65,12 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 4: 验证编译和运行**
+- [x] **Step 4: 验证编译和运行**
 
 Run: `cargo run -p grid-server`
 Expected: 打印 "grid-server starting" 后正常退出
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat: initialize grid-server crate"
@@ -83,16 +83,16 @@ git add -A && git commit -m "feat: initialize grid-server crate"
 **Files:**
 - Create: `server/src/config.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 测试 TOML 配置文件解析：
 - 解析 environment、bind_address
 - 解析 `[[instances]]` 列表（symbol、price range、capacity）
 - 解析交易所凭证（api_key、api_secret，可选）
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
-- [ ] **Step 3: 实现 Config struct 和解析逻辑**
+- [x] **Step 3: 实现 Config struct 和解析逻辑**
 
 ```rust
 pub struct Config {
@@ -121,9 +121,9 @@ pub struct ExchangeConfig {
 pub fn load_config(path: &str) -> Result<Config>;
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat(server): add TOML config parsing"
@@ -136,7 +136,7 @@ git add -A && git commit -m "feat(server): add TOML config parsing"
 **Files:**
 - Create: `server/src/assembly.rs`
 
-- [ ] **Step 1: 实现组装逻辑**
+- [x] **Step 1: 实现组装逻辑**
 
 ```rust
 pub struct Platform {
@@ -162,9 +162,9 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
 }
 ```
 
-- [ ] **Step 2: 验证编译通过**
+- [x] **Step 2: 验证编译通过**
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat(server): add component assembly"
@@ -177,7 +177,7 @@ git add -A && git commit -m "feat(server): add component assembly"
 **Files:**
 - Create: `server/src/http.rs`
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 用 axum::test 测试：
 - `GET /instances` 返回实例列表
@@ -185,9 +185,9 @@ git add -A && git commit -m "feat(server): add component assembly"
 - `POST /instances/{id}/commands` 接受命令
 - 不存在的实例返回 404
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
-- [ ] **Step 3: 实现 HTTP handler**
+- [x] **Step 3: 实现 HTTP handler**
 
 ```rust
 pub fn router(state: AppState) -> Router {
@@ -199,9 +199,9 @@ pub fn router(state: AppState) -> Router {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A && git commit -m "feat(server): add HTTP routes - instances, snapshots, commands"
@@ -214,16 +214,16 @@ git add -A && git commit -m "feat(server): add HTTP routes - instances, snapshot
 **Files:**
 - Create: `server/src/websocket.rs`
 
-- [ ] **Step 1: 实现 WebSocket handler**
+- [x] **Step 1: 实现 WebSocket handler**
 
 - 接受 WS 连接
 - 订阅 engine 的 DomainEvent 广播
 - 将事件序列化为 JSON 推送给客户端
 - 支持多客户端并发连接
 
-- [ ] **Step 2: 验证编译通过**
+- [x] **Step 2: 验证编译通过**
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat(server): add WebSocket event broadcasting"
@@ -236,7 +236,7 @@ git add -A && git commit -m "feat(server): add WebSocket event broadcasting"
 **Files:**
 - Modify: `server/src/main.rs`
 
-- [ ] **Step 1: 串联完整启动流程**
+- [x] **Step 1: 串联完整启动流程**
 
 ```rust
 #[tokio::main]
@@ -251,13 +251,13 @@ async fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 2: 端到端测试**
+- [x] **Step 2: 端到端测试**
 
 启动 server，用 curl 验证：
 - `GET /instances` 返回配置的实例列表
 - `GET /instances/{id}/snapshot` 返回快照
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add -A && git commit -m "feat(server): integrate full startup flow"

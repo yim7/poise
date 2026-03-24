@@ -102,7 +102,6 @@ mod tests {
     use chrono::Utc;
     use grid_core::strategy::*;
 
-
     // ── Fake adapters for testing ──
 
     struct FakeExchange;
@@ -185,19 +184,31 @@ mod tests {
             upper_price: 90.0,
             ..test_config()
         };
-        assert!(manager
-            .add_instance("test".into(), "BTCUSDT".into(), bad_config, test_budget())
-            .is_err());
+        assert!(
+            manager
+                .add_instance("test".into(), "BTCUSDT".into(), bad_config, test_budget())
+                .is_err()
+        );
     }
 
     #[test]
     fn add_and_list_instances() {
         let mut manager = test_manager();
         manager
-            .add_instance("btc1".into(), "BTCUSDT".into(), test_config(), test_budget())
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
             .unwrap();
         manager
-            .add_instance("eth1".into(), "ETHUSDT".into(), test_config(), test_budget())
+            .add_instance(
+                "eth1".into(),
+                "ETHUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
             .unwrap();
 
         assert_eq!(manager.list_instances().len(), 2);
@@ -210,7 +221,12 @@ mod tests {
     fn on_price_tick_updates_instance() {
         let mut manager = test_manager();
         manager
-            .add_instance("btc1".into(), "BTCUSDT".into(), test_config(), test_budget())
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
             .unwrap();
 
         let tick = PriceTick {
@@ -233,7 +249,12 @@ mod tests {
     fn on_price_tick_ignores_unrelated_symbol() {
         let mut manager = test_manager();
         manager
-            .add_instance("btc1".into(), "BTCUSDT".into(), test_config(), test_budget())
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
             .unwrap();
 
         let tick = PriceTick {

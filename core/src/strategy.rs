@@ -30,8 +30,13 @@ pub enum OutOfBandPolicy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BandStatus {
-    InBand { target: Exposure },
-    OutOfBand { policy: OutOfBandPolicy, boundary: BandBoundary },
+    InBand {
+        target: Exposure,
+    },
+    OutOfBand {
+        policy: OutOfBandPolicy,
+        boundary: BandBoundary,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +70,8 @@ pub fn validate_config(config: &GridConfig) -> Result<(), String> {
 ///
 /// target = -short_capacity + (long_capacity + short_capacity) * g(x)
 pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
-    let x = ((price - config.lower_price) / (config.upper_price - config.lower_price)).clamp(0.0, 1.0);
+    let x =
+        ((price - config.lower_price) / (config.upper_price - config.lower_price)).clamp(0.0, 1.0);
     let g = match config.shape_family {
         ShapeFamily::Linear => 1.0 - x,
         ShapeFamily::Convex => 1.0 - x.powi(2),
@@ -99,7 +105,11 @@ impl GridConfig {
 
     pub fn capacity_unit_qty(&self) -> f64 {
         let center = self.band_center();
-        if center <= f64::EPSILON { 0.0 } else { self.capacity_notional / center }
+        if center <= f64::EPSILON {
+            0.0
+        } else {
+            self.capacity_notional / center
+        }
     }
 }
 
@@ -129,19 +139,30 @@ mod tests {
 
     #[test]
     fn validate_rejects_inverted_prices() {
-        let config = GridConfig { lower_price: 110.0, upper_price: 90.0, ..neutral_config() };
+        let config = GridConfig {
+            lower_price: 110.0,
+            upper_price: 90.0,
+            ..neutral_config()
+        };
         assert!(validate_config(&config).is_err());
     }
 
     #[test]
     fn validate_rejects_negative_capacity() {
-        let config = GridConfig { long_capacity: -1.0, ..neutral_config() };
+        let config = GridConfig {
+            long_capacity: -1.0,
+            ..neutral_config()
+        };
         assert!(validate_config(&config).is_err());
     }
 
     #[test]
     fn validate_rejects_both_zero_capacity() {
-        let config = GridConfig { long_capacity: 0.0, short_capacity: 0.0, ..neutral_config() };
+        let config = GridConfig {
+            long_capacity: 0.0,
+            short_capacity: 0.0,
+            ..neutral_config()
+        };
         assert!(validate_config(&config).is_err());
     }
 
@@ -190,18 +211,33 @@ mod tests {
     #[test]
     fn band_status_below() {
         let status = band_status(85.0, &neutral_config());
-        assert!(matches!(status, BandStatus::OutOfBand { boundary: BandBoundary::Below, .. }));
+        assert!(matches!(
+            status,
+            BandStatus::OutOfBand {
+                boundary: BandBoundary::Below,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn band_status_above() {
         let status = band_status(115.0, &neutral_config());
-        assert!(matches!(status, BandStatus::OutOfBand { boundary: BandBoundary::Above, .. }));
+        assert!(matches!(
+            status,
+            BandStatus::OutOfBand {
+                boundary: BandBoundary::Above,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn convex_shape_slower_departure() {
-        let config = GridConfig { shape_family: ShapeFamily::Convex, ..neutral_config() };
+        let config = GridConfig {
+            shape_family: ShapeFamily::Convex,
+            ..neutral_config()
+        };
         let linear_mid = target_exposure(95.0, &neutral_config());
         let convex_mid = target_exposure(95.0, &config);
         assert!(convex_mid.0 > linear_mid.0);

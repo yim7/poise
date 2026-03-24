@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "engine", "storage", "exchanges/binance"]
+members = ["core", "engine", "storage", "exchanges/binance", "server"]
 resolver = "3"
 
 [workspace.package]
@@ -16,7 +16,15 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.11.27", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 url = "2"
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+toml_edit = { version = "0.22", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"

@@ -96,8 +96,14 @@ fn apply_out_of_band(
     policy: OutOfBandPolicy,
 ) -> (Exposure, Option<InstanceStatus>) {
     match policy {
-        OutOfBandPolicy::Freeze => (instance.current_exposure.clone(), Some(InstanceStatus::Frozen)),
-        OutOfBandPolicy::Hold => (instance.current_exposure.clone(), Some(InstanceStatus::Holding)),
+        OutOfBandPolicy::Freeze => (
+            instance.current_exposure.clone(),
+            Some(InstanceStatus::Frozen),
+        ),
+        OutOfBandPolicy::Hold => (
+            instance.current_exposure.clone(),
+            Some(InstanceStatus::Holding),
+        ),
         OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(InstanceStatus::ReducingOnly)),
         OutOfBandPolicy::Terminate => (Exposure(0.0), Some(InstanceStatus::Terminated)),
     }
@@ -151,7 +157,13 @@ mod tests {
 
         let result = reconcile(&instance, 90.0, &test_budget());
         assert!((result.target_exposure.0 - 8.0).abs() < 0.001);
-        assert!(result.plan.events.iter().any(|e| matches!(e, DomainEvent::ExposureTargetChanged { .. })));
+        assert!(
+            result
+                .plan
+                .events
+                .iter()
+                .any(|e| matches!(e, DomainEvent::ExposureTargetChanged { .. }))
+        );
     }
 
     #[test]
