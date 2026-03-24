@@ -5,7 +5,7 @@ use grid_core::types::Exposure;
 use grid_engine::execution_plan::ExecutionAction;
 use grid_engine::instance::PendingOrder;
 use grid_engine::ports::{ExchangePort, MarketDataPort, OrderReceipt, UserDataEvent};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::assembly::{AppState, MutateAndPersistError, mutate_instance_and_persist};
@@ -40,12 +40,13 @@ impl Runtime {
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
-        let mut user_receiver = self.market_data.subscribe_user_data().await?;
+        let user_receiver = self.market_data.subscribe_user_data().await?;
         self.startup_sync().await?;
-        self.drain_buffered_user_events(&mut user_receiver).await?;
-
+        let (user_task, startup_ready) = self.spawn_user_task(user_receiver);
+        startup_ready
+            .await
+            .map_err(|_| anyhow!("user data startup barrier dropped before completion"))?;
         let market_task = self.spawn_market_task();
-        let user_task = self.spawn_user_task(user_receiver);
 
         Ok(RuntimeHandles {
             market_task,
@@ -71,20 +72,6 @@ impl Runtime {
 
         Ok(())
     }
-
-    async fn drain_buffered_user_events(
-        &self,
-        receiver: &mut mpsc::Receiver<UserDataEvent>,
-    ) -> Result<()> {
-        while let Ok(event) = receiver.try_recv() {
-            apply_user_data_event(&self.state, event)
-                .await
-                .map_err(mutate_error)?;
-        }
-
-        Ok(())
-    }
-
     fn spawn_market_task(&self) -> JoinHandle<()> {
         let state = self.state.clone();
         let exchange = Arc::clone(&self.exchange);
@@ -160,10 +147,26 @@ impl Runtime {
         })
     }
 
-    fn spawn_user_task(&self, mut receiver: mpsc::Receiver<UserDataEvent>) -> JoinHandle<()> {
+    fn spawn_user_task(
+        &self,
+        mut receiver: mpsc::Receiver<UserDataEvent>,
+    ) -> (JoinHandle<()>, oneshot::Receiver<()>) {
         let state = self.state.clone();
+        let (startup_ready_sender, startup_ready_receiver) = oneshot::channel();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            while let Ok(event) = receiver.try_recv() {
+                let symbol = event_symbol(&event);
+                if let Err(error) = apply_user_data_event(&state, event).await {
+                    tracing::warn!(
+                        "failed to apply buffered user data update for {symbol}: {}",
+                        error.message()
+                    );
+                }
+            }
+
+            let _ = startup_ready_sender.send(());
+
             while let Some(event) = receiver.recv().await {
                 let symbol = event_symbol(&event);
                 if let Err(error) = apply_user_data_event(&state, event).await {
@@ -173,7 +176,9 @@ impl Runtime {
                     );
                 }
             }
-        })
+        });
+
+        (handle, startup_ready_receiver)
     }
 }
 
