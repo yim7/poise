@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
     WaitingMarketData,
     Active,
@@ -55,6 +56,7 @@ pub struct GridConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShapeFamily {
     Linear,
     Convex,
@@ -62,6 +64,7 @@ pub enum ShapeFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutOfBandPolicy {
     Freeze,
     ReduceOnly,
@@ -70,12 +73,14 @@ pub enum OutOfBandPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BandBoundary {
     Below,
     Above,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DomainEvent {
     ExposureTargetChanged { from: f64, to: f64 },
     BandBreached { boundary: BandBoundary, price: f64 },
@@ -236,6 +241,35 @@ mod tests {
         assert_eq!(snapshot.config.shape_family, ShapeFamily::Linear);
         assert_eq!(snapshot.band_state(), BandState::AboveBand);
         assert_eq!(snapshot.target_exposure(), Some(-4.0));
+    }
+
+    #[test]
+    fn deserializes_snake_case_snapshot() {
+        let snapshot: InstanceSnapshot = serde_json::from_str(
+            r#"
+            {
+              "id": "BTCUSDT",
+              "symbol": "BTCUSDT",
+              "status": "holding",
+              "current_exposure": 3.5,
+              "last_price": 112.0,
+              "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_capacity": 8.0,
+                "short_capacity": 4.0,
+                "capacity_notional": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.status, InstanceStatus::Holding);
+        assert_eq!(snapshot.config.shape_family, ShapeFamily::Linear);
+        assert_eq!(snapshot.config.out_of_band_policy, OutOfBandPolicy::Freeze);
     }
 
     #[test]

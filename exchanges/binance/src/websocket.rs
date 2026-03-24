@@ -478,7 +478,7 @@ mod tests {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut websocket = accept_async(stream).await.unwrap();
                 websocket
-                    .send(Message::Text(payload.to_string().into()))
+                    .send(Message::Text(payload.to_string()))
                     .await
                     .unwrap();
                 websocket.close(None).await.unwrap();
@@ -526,8 +526,7 @@ mod tests {
             first_ws
                 .send(Message::Text(
                     r#"{"e":"listenKeyExpired","E":1700000000000,"listenKey":"listen-key-1"}"#
-                        .to_string()
-                        .into(),
+                        .to_string(),
                 ))
                 .await
                 .unwrap();
@@ -543,7 +542,6 @@ mod tests {
                     Message::Text(
                         r#"{"e":"ACCOUNT_UPDATE","a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
                             .to_string()
-                            .into(),
                     ),
                 )
                 .await

@@ -203,7 +203,6 @@ mod tests {
                     Message::Text(
                         r#"{"e":"markPriceUpdate","E":1700000000000,"s":"BTCUSDT","p":"64000.10","i":"63999.90"}"#
                             .to_string()
-                            .into(),
                     ),
                 )
                 .await

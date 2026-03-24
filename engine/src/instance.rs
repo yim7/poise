@@ -5,6 +5,7 @@ use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
     WaitingMarketData,
     Active,

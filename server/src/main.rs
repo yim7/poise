@@ -13,10 +13,6 @@ async fn main() -> Result<()> {
     tracing::info!("grid-server starting");
 
     let config_path = parse_config_path(env::args().skip(1))?;
-    let Some(config_path) = config_path else {
-        return Ok(());
-    };
-
     let config = config::load_config(&config_path)?;
     let platform = assembly::assemble(&config).await?;
     platform.start_market_data_tasks().await;
@@ -28,7 +24,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<Option<String>> {
+fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
     let mut config_path = None;
 
     while let Some(arg) = args.next() {
@@ -45,7 +41,7 @@ fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<Option<St
         }
     }
 
-    Ok(config_path)
+    config_path.ok_or_else(|| anyhow::anyhow!("missing required --config <path>"))
 }
 
 #[cfg(test)]
@@ -55,9 +51,9 @@ mod tests {
     use super::parse_config_path;
 
     #[test]
-    fn parse_config_path_accepts_missing_flag() {
-        let path = parse_config_path(Vec::<String>::new().into_iter()).unwrap();
-        assert!(path.is_none());
+    fn parse_config_path_requires_config_flag() {
+        let error = parse_config_path(Vec::<String>::new().into_iter()).unwrap_err();
+        assert!(error.to_string().contains("--config"));
     }
 
     #[test]
@@ -66,7 +62,7 @@ mod tests {
             vec!["--config".to_string(), "configs/test.toml".to_string()].into_iter(),
         )
         .unwrap();
-        assert_eq!(path.as_deref(), Some("configs/test.toml"));
+        assert_eq!(path, "configs/test.toml");
     }
 
     #[test]

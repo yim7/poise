@@ -2,7 +2,7 @@
   {
     "id": "BTCUSDT",
     "symbol": "BTCUSDT",
-    "status": "Active",
+    "status": "active",
     "last_price": 101.25
   }
 ]

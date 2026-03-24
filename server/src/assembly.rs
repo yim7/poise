@@ -31,7 +31,47 @@ pub struct Platform {
     market_data: Arc<dyn MarketDataPort>,
 }
 
+fn validate_unique_symbols<'a>(
+    symbols: impl IntoIterator<Item = &'a str>,
+) -> Result<(), anyhow::Error> {
+    let mut known_symbols = HashSet::new();
+    for symbol in symbols {
+        if !known_symbols.insert(symbol) {
+            return Err(anyhow!("duplicate symbol `{symbol}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_instance_ids<'a>(
+    instance_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), anyhow::Error> {
+    let mut known_instance_ids = HashSet::new();
+    for instance_id in instance_ids {
+        if !known_instance_ids.insert(instance_id) {
+            return Err(anyhow!("duplicate instance id `{instance_id}`"));
+        }
+    }
+    Ok(())
+}
+
 pub async fn assemble(config: &Config) -> Result<Platform> {
+    validate_unique_symbols(
+        config
+            .instances
+            .iter()
+            .map(|instance| instance.symbol.as_str()),
+    )?;
+    validate_unique_instance_ids(
+        config
+            .instances
+            .iter()
+            .map(|instance| instance.instance_id())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(String::as_str),
+    )?;
+
     let adapter = Arc::new(BinanceAdapter::new(
         config.exchange.api_key.clone().unwrap_or_default(),
         config.exchange.api_secret.clone().unwrap_or_default(),
@@ -55,12 +95,8 @@ pub async fn assemble(config: &Config) -> Result<Platform> {
     let clock = Arc::new(SystemClock);
 
     let mut manager = InstanceManager::new(exchange, Arc::clone(&persistence), clock);
-    let mut instance_ids = HashSet::new();
     for instance in &config.instances {
         let instance_id = instance.instance_id();
-        if !instance_ids.insert(instance_id.clone()) {
-            return Err(anyhow::anyhow!("duplicate instance id `{instance_id}`"));
-        }
         manager.add_instance(
             instance_id.clone(),
             instance.symbol.clone(),
@@ -248,7 +284,9 @@ mod tests {
     use crate::http::router;
     use crate::websocket::WsEvent;
 
-    use super::{AppState, Platform, SharedManager, SystemClock, assemble};
+    use super::{
+        AppState, Platform, SharedManager, SystemClock, assemble, validate_unique_instance_ids,
+    };
 
     #[tokio::test]
     async fn assembles_platform_with_all_instances_registered() {
@@ -307,8 +345,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 
+    #[test]
+    fn assemble_rejects_duplicate_instance_ids() {
+        let error = validate_unique_instance_ids(["alpha", "alpha"]).unwrap_err();
+        assert!(error.to_string().contains("duplicate instance id"));
+    }
+
     #[tokio::test]
-    async fn assemble_rejects_duplicate_instance_ids() {
+    async fn assemble_rejects_duplicate_symbols() {
         let suffix = format!(
             "test-{}",
             std::time::SystemTime::now()
@@ -350,7 +394,7 @@ mod tests {
         };
 
         let error = assemble(&config).await.err().unwrap();
-        assert!(error.to_string().contains("duplicate instance id"));
+        assert!(error.to_string().contains("duplicate symbol"));
     }
 
     #[tokio::test]
