@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use hmac::{Hmac, Mac};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
 use tokio::time::{Duration, sleep};
@@ -227,14 +227,17 @@ impl BinanceRestClient {
                 }
                 Ok(response) => {
                     let status = response.status();
+                    let retry_after = retry_after_delay(response.headers());
                     let body = response.text().await.unwrap_or_default();
                     let error = anyhow!("request {} {} failed with status {}: {}", method, path, status, body);
 
-                    if !status.is_server_error() || attempt + 1 == MAX_RETRIES {
+                    if !is_retryable_status(status) || attempt + 1 == MAX_RETRIES {
                         return Err(error);
                     }
 
                     last_error = Some(error);
+                    sleep(retry_delay(retry_after, attempt)).await;
+                    continue;
                 }
                 Err(error) => {
                     if attempt + 1 == MAX_RETRIES {
@@ -244,7 +247,7 @@ impl BinanceRestClient {
                 }
             }
 
-            sleep(Duration::from_millis(50 * (1_u64 << attempt))).await;
+            sleep(retry_delay(None, attempt)).await;
         }
 
         Err(last_error.unwrap_or_else(|| anyhow!("request {} {} failed", method, path)))
@@ -264,6 +267,22 @@ fn side_to_binance(side: grid_core::types::Side) -> &'static str {
         grid_core::types::Side::Buy => "BUY",
         grid_core::types::Side::Sell => "SELL",
     }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 418
+}
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn retry_delay(retry_after: Option<Duration>, attempt: usize) -> Duration {
+    retry_after.unwrap_or_else(|| Duration::from_millis(50 * (1_u64 << attempt)))
 }
 
 #[cfg(test)]
@@ -336,10 +355,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn retries_rate_limited_request_using_retry_after() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(429, r#"{"code":-1003,"msg":"too many requests"}"#)
+                .with_header("retry-after", "0"),
+            MockResponse::json(
+                200,
+                r#"[{
+                    "orderId": 1002,
+                    "clientOrderId": "grid-open-004",
+                    "side": "SELL",
+                    "price": "64010.1",
+                    "origQty": "0.025",
+                    "status": "NEW"
+                }]"#,
+            ),
+        ])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let orders = client.get_open_orders("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(orders.len(), 1);
+        assert_eq!(requests.len(), 2);
+    }
+
     #[derive(Debug, Clone)]
     struct MockResponse {
         status: u16,
         body: String,
+        headers: Vec<(String, String)>,
     }
 
     impl MockResponse {
@@ -347,7 +399,13 @@ mod tests {
             Self {
                 status,
                 body: body.to_string(),
+                headers: Vec::new(),
             }
+        }
+
+        fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.to_string(), value.to_string()));
+            self
         }
     }
 
@@ -420,11 +478,18 @@ mod tests {
                         headers,
                     });
 
+                    let extra_headers = response
+                        .headers
+                        .iter()
+                        .map(|(name, value)| format!("{name}: {value}\r\n"))
+                        .collect::<String>();
                     let reply = format!(
-                        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{}\
+\r\n{}",
                         response.status,
                         reason_phrase(response.status),
                         response.body.len(),
+                        extra_headers,
                         response.body
                     );
 
@@ -451,6 +516,7 @@ mod tests {
     fn reason_phrase(status: u16) -> &'static str {
         match status {
             200 => "OK",
+            429 => "Too Many Requests",
             500 => "Internal Server Error",
             _ => "Unknown",
         }

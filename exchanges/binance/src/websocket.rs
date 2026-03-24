@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::{sync::mpsc, time::{Duration, sleep}};
+use tokio::{sync::mpsc, time::{Duration, Instant, interval_at, sleep}};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use grid_engine::ports::{PriceTick, UserDataEvent};
@@ -129,7 +129,10 @@ async fn run_user_stream(
         match connect_async(&url).await {
             Ok((mut websocket, _)) => {
                 attempt = 0;
-                let mut keepalive = tokio::time::interval(Duration::from_secs(30 * 60));
+                let mut keepalive = interval_at(
+                    Instant::now() + Duration::from_secs(30 * 60),
+                    Duration::from_secs(30 * 60),
+                );
 
                 loop {
                     tokio::select! {
@@ -143,13 +146,14 @@ async fn run_user_stream(
                             match message {
                                 Some(Ok(Message::Text(text))) => {
                                     match parse_user_data_message(&text) {
-                                        Ok(events) => {
+                                        Ok(UserStreamMessage::Events(events)) => {
                                             for event in events {
                                                 if sender.send(event).await.is_err() {
                                                     return;
                                                 }
                                             }
                                         }
+                                        Ok(UserStreamMessage::ListenKeyExpired) => break,
                                         Err(error) => {
                                             tracing::warn!("failed to parse user data message: {error}");
                                         }
@@ -205,7 +209,7 @@ fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
     }))
 }
 
-fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent>> {
+fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
     let envelope: UserEventEnvelope = serde_json::from_str(payload)?;
 
     match envelope.event_type.as_str() {
@@ -214,21 +218,21 @@ fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent>> {
                 .order
                 .context("missing order payload for ORDER_TRADE_UPDATE")?;
 
-            Ok(vec![UserDataEvent::OrderUpdate(grid_engine::ports::OpenOrder {
+            Ok(UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(grid_engine::ports::OpenOrder {
                 order_id: order.order_id.to_string(),
                 client_order_id: order.client_order_id,
                 side: parse_side(&order.side)?,
                 price: parse_decimal("o.p", &order.price)?,
                 qty: parse_decimal("o.q", &order.quantity)?,
                 status: order.status,
-            })])
+            })]))
         }
         "ACCOUNT_UPDATE" => {
             let account = envelope
                 .account
                 .context("missing account payload for ACCOUNT_UPDATE")?;
 
-            account
+            let events = account
                 .positions
                 .into_iter()
                 .map(|position| {
@@ -239,9 +243,12 @@ fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent>> {
                         unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
                     }))
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(UserStreamMessage::Events(events))
         }
-        _ => Ok(Vec::new()),
+        "listenKeyExpired" => Ok(UserStreamMessage::ListenKeyExpired),
+        _ => Ok(UserStreamMessage::Events(Vec::new())),
     }
 }
 
@@ -318,13 +325,24 @@ struct AccountPositionUpdate {
     unrealized_profit: String,
 }
 
+#[derive(Debug, PartialEq)]
+enum UserStreamMessage {
+    Events(Vec<UserDataEvent>),
+    ListenKeyExpired,
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, collections::VecDeque, sync::Arc};
 
     use chrono::{TimeZone, Utc};
     use futures_util::SinkExt;
-    use tokio::{net::TcpListener, time::timeout};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::Mutex,
+        time::timeout,
+    };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use grid_core::types::Side;
@@ -374,14 +392,14 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![UserDataEvent::OrderUpdate(OpenOrder {
+            UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(OpenOrder {
                 order_id: "12345".to_string(),
                 client_order_id: "grid-order-004".to_string(),
                 side: Side::Sell,
                 price: 65000.5,
                 qty: 0.02,
                 status: "FILLED".to_string(),
-            })]
+            })])
         );
     }
 
@@ -403,13 +421,26 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![UserDataEvent::PositionUpdate(Position {
+            UserStreamMessage::Events(vec![UserDataEvent::PositionUpdate(Position {
                 symbol: "BTCUSDT".to_string(),
                 qty: 0.015,
                 avg_price: 64200.0,
                 unrealized_pnl: 12.3,
-            })]
+            })])
         );
+    }
+
+    #[test]
+    fn parses_listen_key_expired_message() {
+        let payload = r#"{
+            "e": "listenKeyExpired",
+            "E": 1700000000000,
+            "listenKey": "listen-key-1"
+        }"#;
+
+        let event = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(event, UserStreamMessage::ListenKeyExpired);
     }
 
     #[tokio::test]
@@ -451,5 +482,203 @@ mod tests {
 
         assert_eq!(first.mark_price, 64000.10);
         assert_eq!(second.mark_price, 64010.20);
+    }
+
+    #[tokio::test]
+    async fn reconnects_user_data_stream_after_listen_key_expired() {
+        let rest_server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#"{"listenKey":"listen-key-1"}"#),
+            MockResponse::json(200, r#"{"listenKey":"listen-key-2"}"#),
+        ])
+        .await;
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_address = ws_listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (first_stream, _) = ws_listener.accept().await.unwrap();
+            let mut first_ws = accept_async(first_stream).await.unwrap();
+            first_ws
+                .send(
+                    Message::Text(
+                        r#"{"e":"listenKeyExpired","E":1700000000000,"listenKey":"listen-key-1"}"#
+                            .to_string()
+                            .into(),
+                    ),
+                )
+                .await
+                .unwrap();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let _ = first_ws.close(None).await;
+            });
+
+            let (second_stream, _) = ws_listener.accept().await.unwrap();
+            let mut second_ws = accept_async(second_stream).await.unwrap();
+            second_ws
+                .send(
+                    Message::Text(
+                        r#"{"e":"ACCOUNT_UPDATE","a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                            .to_string()
+                            .into(),
+                    ),
+                )
+                .await
+                .unwrap();
+            second_ws.close(None).await.unwrap();
+        });
+
+        let rest = Arc::new(BinanceRestClient::new(
+            rest_server.base_url(),
+            "api-key",
+            "secret-key",
+        ));
+        let client = BinanceWsClient::with_reconnect_delay(
+            rest,
+            format!("ws://{}", ws_address),
+            Duration::from_millis(10),
+        );
+
+        let mut receiver = client.subscribe_user_data().await.unwrap();
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = rest_server.requests().await;
+
+        assert_eq!(
+            event,
+            UserDataEvent::PositionUpdate(Position {
+                symbol: "BTCUSDT".to_string(),
+                qty: 0.015,
+                avg_price: 64200.0,
+                unrealized_pnl: 12.3,
+            })
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path == "/fapi/v1/listenKey" && request.method == "POST")
+                .count(),
+            2
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockResponse {
+        status: u16,
+        body: String,
+    }
+
+    impl MockResponse {
+        fn json(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+    }
+
+    struct MockHttpServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    }
+
+    impl MockHttpServer {
+        async fn spawn(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let queued_responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+            let stored_requests = Arc::clone(&requests);
+
+            tokio::spawn(async move {
+                loop {
+                    let response = {
+                        let mut queue = queued_responses.lock().await;
+                        queue.pop_front()
+                    };
+
+                    let Some(response) = response else {
+                        break;
+                    };
+
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut buffer = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+
+                    loop {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        buffer.extend_from_slice(&chunk[..read]);
+                        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let request_text = String::from_utf8(buffer).unwrap();
+                    let mut lines = request_text.split("\r\n");
+                    let request_line = lines.next().unwrap();
+                    let mut request_line_parts = request_line.split_whitespace();
+                    let method = request_line_parts.next().unwrap().to_string();
+                    let path = request_line_parts.next().unwrap().to_string();
+                    let mut headers = HashMap::new();
+
+                    for line in lines.by_ref() {
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':') {
+                            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                        }
+                    }
+
+                    stored_requests.lock().await.push(RecordedRequest {
+                        method,
+                        path,
+                        headers,
+                    });
+
+                    let reply = format!(
+                        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response.status,
+                        reason_phrase(response.status),
+                        response.body.len(),
+                        response.body
+                    );
+
+                    stream.write_all(reply.as_bytes()).await.unwrap();
+                    stream.shutdown().await.unwrap();
+                }
+            });
+
+            Self {
+                base_url: format!("http://{}", address),
+                requests,
+            }
+        }
+
+        fn base_url(&self) -> String {
+            self.base_url.clone()
+        }
+
+        async fn requests(&self) -> Vec<RecordedRequest> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    fn reason_phrase(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            _ => "Unknown",
+        }
     }
 }
