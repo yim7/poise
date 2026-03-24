@@ -330,6 +330,10 @@ mod tests {
         async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
             unimplemented!()
         }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+            Ok(Utc::now())
+        }
     }
 
     struct FakePersistence;

@@ -542,6 +542,12 @@ mod tests {
         }))
     }
 
+    async fn server_time() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "serverTime": 1_700_000_000_000_i64
+        }))
+    }
+
     fn exchange_info_symbol(symbol: &str) -> serde_json::Value {
         serde_json::json!({
             "symbol": symbol,
@@ -943,6 +949,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let app = Router::new()
             .route("/ws/:stream", get(exchange_ws_handler))
+            .route("/fapi/v1/time", get(server_time))
             .route("/fapi/v1/exchangeInfo", get(exchange_info))
             .route("/fapi/v2/positionRisk", get(position_risk))
             .route("/fapi/v1/openOrders", get(open_orders))

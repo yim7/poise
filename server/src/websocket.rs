@@ -157,6 +157,10 @@ mod tests {
         ) -> anyhow::Result<grid_engine::ports::ExchangeInfo> {
             unreachable!()
         }
+
+        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+            unreachable!()
+        }
     }
 
     struct FakePersistence;

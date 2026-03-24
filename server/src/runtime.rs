@@ -4,9 +4,9 @@ use anyhow::{Result, anyhow};
 use grid_core::types::Exposure;
 use grid_engine::execution_plan::ExecutionAction;
 use grid_engine::instance::PendingOrder;
+use grid_engine::manager::TickOutcome;
 use grid_engine::ports::{
-    ExchangePort, MarketDataPort, OrderReceipt, UserDataEvent, UserDataStreamItem,
-    UserDataSubscription,
+    ExchangePort, MarketDataPort, OrderReceipt, PriceTick, UserDataEvent, UserDataPayload,
 };
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
@@ -43,10 +43,12 @@ impl Runtime {
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
-        let user_subscription = self.market_data.subscribe_user_data().await?;
+        let mut user_receiver = self.market_data.subscribe_user_data().await?;
+        let startup_cutoff = self.exchange.get_server_time().await?;
         self.startup_sync().await?;
-        let user_receiver = self.replay_startup_user_data(user_subscription).await?;
-        let user_task = self.spawn_user_task(user_receiver);
+        self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
+            .await?;
+        let user_task = self.spawn_user_task(user_receiver, startup_cutoff);
         let market_task = self.spawn_market_task();
 
         Ok(RuntimeHandles {
@@ -76,26 +78,30 @@ impl Runtime {
 
     async fn replay_startup_user_data(
         &self,
-        subscription: UserDataSubscription,
-    ) -> Result<mpsc::Receiver<UserDataStreamItem>> {
-        subscription.request_replay_barrier().await?;
-        let mut receiver = subscription.into_receiver();
+        receiver: &mut mpsc::Receiver<UserDataEvent>,
+        startup_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let mut buffered_events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            buffered_events.push(event);
+        }
 
-        loop {
-            match receiver.recv().await {
-                Some(UserDataStreamItem::Event(event)) => {
-                    apply_user_data_event(&self.state, event)
-                        .await
-                        .map_err(mutate_error)?;
-                }
-                Some(UserDataStreamItem::ReplayBarrier) => return Ok(receiver),
-                None => {
-                    return Err(anyhow!(
-                        "user data stream closed before startup replay barrier completed"
-                    ));
+        buffered_events.sort_by_key(|event| event.event_time);
+        for event in buffered_events {
+            if event.event_time > startup_cutoff {
+                let symbol = event_symbol(&event);
+                let should_reconcile = should_reconcile_after_user_data(&event);
+                apply_user_data_event(&self.state, event)
+                    .await
+                    .map_err(mutate_error)?;
+                if should_reconcile {
+                    reconcile_symbol_at_last_price(&self.state, self.exchange.as_ref(), &symbol)
+                        .await?;
                 }
             }
         }
+
+        Ok(())
     }
 
     fn spawn_market_task(&self) -> JoinHandle<()> {
@@ -120,29 +126,19 @@ impl Runtime {
                                 .await
                                 {
                                     Ok(outcome) => {
-                                        for action in outcome.plan.actions {
-                                            if let Err(error) = execute_action(
-                                                &state,
-                                                exchange.as_ref(),
-                                                &binding.id,
-                                                &binding.symbol,
-                                                action,
-                                            )
-                                            .await
-                                            {
-                                                tracing::warn!(
-                                                    "failed to execute plan action for {}: {error}",
-                                                    binding.symbol
-                                                );
-                                                break;
-                                            }
-                                        }
-
-                                        for event in outcome.events {
-                                            let _ = state.events.send(WsEvent {
-                                                instance_id: binding.id.clone(),
-                                                event,
-                                            });
+                                        if let Err(error) = handle_tick_outcome(
+                                            &state,
+                                            exchange.as_ref(),
+                                            &binding.id,
+                                            &binding.symbol,
+                                            outcome,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                "failed to execute plan action for {}: {error}",
+                                                binding.symbol
+                                            );
                                         }
                                     }
                                     Err(error) => {
@@ -173,26 +169,37 @@ impl Runtime {
         })
     }
 
-    fn spawn_user_task(&self, mut receiver: mpsc::Receiver<UserDataStreamItem>) -> JoinHandle<()> {
+    fn spawn_user_task(
+        &self,
+        mut receiver: mpsc::Receiver<UserDataEvent>,
+        startup_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> JoinHandle<()> {
         let state = self.state.clone();
+        let exchange = Arc::clone(&self.exchange);
 
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                match event {
-                    UserDataStreamItem::Event(event) => {
-                        let symbol = event_symbol(&event);
-                        if let Err(error) = apply_user_data_event(&state, event).await {
-                            tracing::warn!(
-                                "failed to apply user data update for {symbol}: {}",
-                                error.message()
-                            );
-                        }
-                    }
-                    UserDataStreamItem::ReplayBarrier => {
-                        tracing::warn!(
-                            "received unexpected user data replay barrier after startup"
-                        );
-                    }
+                if event.event_time <= startup_cutoff {
+                    continue;
+                }
+
+                let symbol = event_symbol(&event);
+                let should_reconcile = should_reconcile_after_user_data(&event);
+                if let Err(error) = apply_user_data_event(&state, event).await {
+                    tracing::warn!(
+                        "failed to apply user data update for {symbol}: {}",
+                        error.message()
+                    );
+                    continue;
+                }
+
+                if should_reconcile
+                    && let Err(error) =
+                        reconcile_symbol_at_last_price(&state, exchange.as_ref(), &symbol).await
+                {
+                    tracing::warn!(
+                        "failed to reconcile after user data update for {symbol}: {error}"
+                    );
                 }
             }
         })
@@ -242,10 +249,46 @@ async fn execute_action(
     Ok(())
 }
 
+async fn handle_tick_outcome(
+    state: &AppState,
+    exchange: &dyn ExchangePort,
+    instance_id: &str,
+    symbol: &str,
+    outcome: TickOutcome,
+) -> Result<()> {
+    let mut action_error = None;
+    for action in outcome.plan.actions {
+        if let Err(error) = execute_action(state, exchange, instance_id, symbol, action).await {
+            action_error = Some(error);
+            break;
+        }
+    }
+
+    for event in outcome.events {
+        let _ = state.events.send(WsEvent {
+            instance_id: instance_id.to_string(),
+            event,
+        });
+    }
+
+    match action_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn event_symbol(event: &UserDataEvent) -> String {
-    match event {
-        UserDataEvent::PositionUpdate(position) => position.symbol.clone(),
-        UserDataEvent::OrderUpdate(order) => order.symbol.clone(),
+    event.symbol().to_string()
+}
+
+fn should_reconcile_after_user_data(event: &UserDataEvent) -> bool {
+    match &event.payload {
+        UserDataPayload::PositionUpdate(_) => true,
+        UserDataPayload::OrderUpdate(order) => {
+            // FILLED / PARTIALLY_FILLED 需要等待随后到达的仓位更新提供真实 exposure，
+            // 否则会在旧仓位上提前补单。撤单/拒单/过期不会改仓位，可以立刻重算。
+            matches!(order.status.as_str(), "CANCELED" | "REJECTED" | "EXPIRED")
+        }
     }
 }
 
@@ -260,14 +303,14 @@ async fn apply_user_data_event(
         return Ok(());
     };
 
-    match event {
-        UserDataEvent::PositionUpdate(position) => {
+    match event.payload {
+        UserDataPayload::PositionUpdate(position) => {
             mutate_instance_and_persist(state, &instance_id, |manager| {
                 manager.apply_position_update(&position)
             })
             .await?;
         }
-        UserDataEvent::OrderUpdate(order) => {
+        UserDataPayload::OrderUpdate(order) => {
             mutate_instance_and_persist(state, &instance_id, |manager| {
                 manager.apply_order_update(&order)
             })
@@ -276,6 +319,29 @@ async fn apply_user_data_event(
     }
 
     Ok(())
+}
+
+async fn reconcile_symbol_at_last_price(
+    state: &AppState,
+    exchange: &dyn ExchangePort,
+    symbol: &str,
+) -> Result<()> {
+    let Some((instance_id, last_price)) = reconcile_context_for_symbol(state, symbol).await else {
+        return Ok(());
+    };
+
+    let tick = PriceTick {
+        symbol: symbol.to_string(),
+        last_price,
+        mark_price: last_price,
+        timestamp: chrono::Utc::now(),
+    };
+    let outcome =
+        mutate_instance_and_persist(state, &instance_id, |manager| manager.on_price_tick(&tick))
+            .await
+            .map_err(mutate_error)?;
+
+    handle_tick_outcome(state, exchange, &instance_id, symbol, outcome).await
 }
 
 async fn record_submitted_order(
@@ -327,6 +393,19 @@ async fn instance_id_for_symbol(state: &AppState, symbol: &str) -> Option<String
         .map(|instance| instance.id.clone())
 }
 
+async fn reconcile_context_for_symbol(state: &AppState, symbol: &str) -> Option<(String, f64)> {
+    let manager = state.manager.read().await;
+    manager
+        .list_instances()
+        .into_iter()
+        .find(|instance| instance.symbol == symbol)
+        .and_then(|instance| {
+            instance
+                .last_price
+                .map(|last_price| (instance.id.clone(), last_price))
+        })
+}
+
 fn mutate_error(error: MutateAndPersistError) -> anyhow::Error {
     anyhow!(error.message())
 }
@@ -349,7 +428,7 @@ mod tests {
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangePort, InstanceSnapshot, MarketDataPort, OpenOrder,
         OrderReceipt, OrderRequest, PersistencePort, Position, PriceTick, UserDataEvent,
-        UserDataStreamItem, UserDataSubscription,
+        UserDataPayload,
     };
     use tokio::sync::{Mutex as AsyncMutex, RwLock, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
@@ -500,12 +579,11 @@ mod tests {
 
         fixture
             .user_sender
-            .send(UserDataEvent::PositionUpdate(Position {
-                symbol: "BTCUSDT".into(),
-                qty: 7.5,
-                avg_price: 100.0,
-                unrealized_pnl: 11.0,
-            }))
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                7.5,
+                11.0,
+            ))
             .await
             .unwrap();
 
@@ -523,6 +601,55 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert!((instance.risk_state.unrealized_pnl - 11.0).abs() < f64::EPSILON);
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.pending_order = None;
+        snapshot.last_price = Some(95.0);
+
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            vec![],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+        fixture
+            .user_sender
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                7.5,
+                11.0,
+            ))
+            .await
+            .unwrap();
+
+        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
+        wait_until_instance(&fixture.state, |instance| {
+            instance
+                .pending_order
+                .as_ref()
+                .and_then(|pending| pending.order_id.as_deref())
+                == Some("order-1")
+        })
+        .await;
+
+        let submitted = fixture.exchange.submitted_orders.lock().unwrap().clone();
+        assert_eq!(submitted[0].side, Side::Buy);
+        assert_eq!(submitted[0].quantity, 7.5);
 
         shutdown(handles).await;
     }
@@ -562,20 +689,87 @@ mod tests {
 
         fixture
             .user_sender
-            .send(UserDataEvent::OrderUpdate(OpenOrder {
-                symbol: "BTCUSDT".into(),
-                order_id: pending.order_id.clone().unwrap(),
-                client_order_id: pending.client_order_id.clone(),
-                side: Side::Buy,
-                price: pending.price,
-                qty: pending.quantity,
-                realized_pnl: 0.0,
-                status: "FILLED".into(),
-            }))
+            .send(order_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                OpenOrder {
+                    symbol: "BTCUSDT".into(),
+                    order_id: pending.order_id.clone().unwrap(),
+                    client_order_id: pending.client_order_id.clone(),
+                    side: Side::Buy,
+                    price: pending.price,
+                    qty: pending.quantity,
+                    realized_pnl: 0.0,
+                    status: "FILLED".into(),
+                },
+            ))
             .await
             .unwrap();
 
         wait_until_instance(&fixture.state, |instance| instance.pending_order.is_none()).await;
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_order_update_reconciles_without_waiting_for_new_tick() {
+        let fixture = runtime_fixture(
+            None,
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            vec![],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+        fixture
+            .price_sender
+            .send(PriceTick {
+                symbol: "BTCUSDT".into(),
+                last_price: 95.0,
+                mark_price: 95.0,
+                timestamp: Utc::now(),
+            })
+            .await
+            .unwrap();
+        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
+
+        let pending = current_instance(&fixture.state)
+            .await
+            .pending_order
+            .unwrap();
+
+        fixture
+            .user_sender
+            .send(order_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                OpenOrder {
+                    symbol: "BTCUSDT".into(),
+                    order_id: pending.order_id.clone().unwrap(),
+                    client_order_id: pending.client_order_id.clone(),
+                    side: Side::Buy,
+                    price: pending.price,
+                    qty: pending.quantity,
+                    realized_pnl: 0.0,
+                    status: "CANCELED".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 2).await;
+        wait_until_instance(&fixture.state, |instance| {
+            instance
+                .pending_order
+                .as_ref()
+                .and_then(|pending| pending.order_id.as_deref())
+                == Some("order-2")
+        })
+        .await;
 
         shutdown(handles).await;
     }
@@ -674,54 +868,31 @@ mod tests {
 
     #[tokio::test]
     async fn startup_sync_replays_buffered_user_event_before_first_tick() {
-        let (price_sender, price_receiver) = mpsc::channel(8);
-        drop(price_sender);
-        let market_data = Arc::new(BufferedUserDataMarket::new(price_receiver));
-        let exchange = Arc::new(StartupInjectingExchange::new(
+        let fixture = runtime_fixture(
+            None,
             Position {
                 symbol: "BTCUSDT".into(),
                 qty: 0.0,
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
             },
-            market_data.user_sender_handle(),
-        ));
-        let persistence = Arc::new(MemoryPersistence::default());
-        let clock = Arc::new(FixedClock(
-            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-        ));
-
-        let mut manager = InstanceManager::new(
-            exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn PersistencePort>,
-            clock,
-        );
-        manager
-            .add_instance(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
-                test_config(),
-                test_budget(),
-                exchange.exchange_info.rules.clone(),
-            )
+            vec![],
+            test_budget(),
+        )
+        .await;
+        fixture
+            .user_sender
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                7.5,
+                5.0,
+            ))
+            .await
             .unwrap();
 
-        let (events, _) = broadcast::channel(16);
-        let state = AppState {
-            manager: Arc::new(RwLock::new(manager)),
-            persistence,
-            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
-            events,
-        };
-        let runtime = Runtime::new(
-            state.clone(),
-            exchange as Arc<dyn ExchangePort>,
-            market_data as Arc<dyn MarketDataPort>,
-        );
+        let handles = fixture.runtime.start().await.unwrap();
 
-        let handles = runtime.start().await.unwrap();
-
-        wait_until_instance(&state, |instance| {
+        wait_until_instance(&fixture.state, |instance| {
             (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
         })
         .await;
@@ -730,18 +901,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_sync_ignores_buffered_user_event_older_than_cutoff() {
+        let fixture = runtime_fixture(
+            None,
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 7.5,
+                avg_price: 100.0,
+                unrealized_pnl: 3.0,
+            },
+            vec![],
+            test_budget(),
+        )
+        .await;
+        fixture
+            .user_sender
+            .send(position_event_at(
+                test_server_time() - chrono::Duration::milliseconds(1),
+                3.75,
+                9.0,
+            ))
+            .await
+            .unwrap();
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(instance.current_exposure, Exposure(2.0));
+        assert!((instance.risk_state.unrealized_pnl - 3.0).abs() < f64::EPSILON);
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted() {
         let (price_sender, price_receiver) = mpsc::channel(8);
         drop(price_sender);
-        let market_data = Arc::new(BufferedUserDataMarket::new(price_receiver));
-        let exchange = Arc::new(StartupInjectingExchange::new(
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let exchange = Arc::new(FakeExchange::new(
             Position {
                 symbol: "BTCUSDT".into(),
                 qty: 0.0,
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
             },
-            market_data.user_sender_handle(),
+            vec![],
         ));
         let persistence = Arc::new(FailOnSavePersistence::new(2));
         let clock = Arc::new(FixedClock(
@@ -775,84 +980,49 @@ mod tests {
             exchange as Arc<dyn ExchangePort>,
             market_data as Arc<dyn MarketDataPort>,
         );
+        user_sender
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                7.5,
+                5.0,
+            ))
+            .await
+            .unwrap();
 
         let error = runtime.start().await.err().unwrap();
         assert!(error.to_string().contains("injected save failure"));
     }
 
     #[tokio::test]
-    async fn startup_replay_barrier_applies_boundary_event_before_first_tick() {
-        let (price_sender, price_receiver) = mpsc::channel(8);
-        price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                last_price: 97.5,
-                mark_price: 97.5,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
-        drop(price_sender);
-
-        let market_data = Arc::new(BarrierInjectingMarketData::new(
-            price_receiver,
-            UserDataEvent::PositionUpdate(Position {
+    async fn stale_live_user_event_does_not_rollback_state_after_start() {
+        let fixture = runtime_fixture(
+            None,
+            Position {
                 symbol: "BTCUSDT".into(),
                 qty: 7.5,
                 avg_price: 100.0,
-                unrealized_pnl: 5.0,
-            }),
-        ));
-        let exchange = Arc::new(FakeExchange::new(
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
+                unrealized_pnl: 3.0,
             },
             vec![],
-        ));
-        let persistence = Arc::new(MemoryPersistence::default());
-        let clock = Arc::new(FixedClock(
-            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-        ));
+            test_budget(),
+        )
+        .await;
 
-        let mut manager = InstanceManager::new(
-            exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn PersistencePort>,
-            clock,
-        );
-        manager
-            .add_instance(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
-                test_config(),
-                test_budget(),
-                exchange.exchange_info.rules.clone(),
-            )
+        let handles = fixture.runtime.start().await.unwrap();
+        fixture
+            .user_sender
+            .send(position_event_at(
+                test_server_time() - chrono::Duration::milliseconds(1),
+                3.75,
+                9.0,
+            ))
+            .await
             .unwrap();
-
-        let (events, _) = broadcast::channel(16);
-        let state = AppState {
-            manager: Arc::new(RwLock::new(manager)),
-            persistence,
-            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
-            events,
-        };
-        let runtime = Runtime::new(
-            state.clone(),
-            exchange.clone() as Arc<dyn ExchangePort>,
-            market_data as Arc<dyn MarketDataPort>,
-        );
-
-        let handles = runtime.start().await.unwrap();
         sleep(Duration::from_millis(100)).await;
 
-        assert!(exchange.submitted_orders.lock().unwrap().is_empty());
-        assert_eq!(
-            current_instance(&state).await.current_exposure,
-            Exposure(2.0)
-        );
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(instance.current_exposure, Exposure(2.0));
+        assert!((instance.risk_state.unrealized_pnl - 3.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
     }
@@ -879,16 +1049,19 @@ mod tests {
         let handles = fixture.runtime.start().await.unwrap();
         fixture
             .user_sender
-            .send(UserDataEvent::OrderUpdate(OpenOrder {
-                symbol: "BTCUSDT".into(),
-                order_id: "fill-1".into(),
-                client_order_id: "fill-1".into(),
-                side: Side::Sell,
-                price: 95.0,
-                qty: 7.5,
-                realized_pnl: -20.0,
-                status: "FILLED".into(),
-            }))
+            .send(order_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                OpenOrder {
+                    symbol: "BTCUSDT".into(),
+                    order_id: "fill-1".into(),
+                    client_order_id: "fill-1".into(),
+                    side: Side::Sell,
+                    price: 95.0,
+                    qty: 7.5,
+                    realized_pnl: -20.0,
+                    status: "FILLED".into(),
+                },
+            ))
             .await
             .unwrap();
 
@@ -1103,6 +1276,33 @@ mod tests {
         }
     }
 
+    fn test_server_time() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()
+    }
+
+    fn position_event_at(
+        event_time: chrono::DateTime<Utc>,
+        qty: f64,
+        unrealized_pnl: f64,
+    ) -> UserDataEvent {
+        UserDataEvent {
+            event_time,
+            payload: UserDataPayload::PositionUpdate(Position {
+                symbol: "BTCUSDT".into(),
+                qty,
+                avg_price: 100.0,
+                unrealized_pnl,
+            }),
+        }
+    }
+
+    fn order_event_at(event_time: chrono::DateTime<Utc>, order: OpenOrder) -> UserDataEvent {
+        UserDataEvent {
+            event_time,
+            payload: UserDataPayload::OrderUpdate(order),
+        }
+    }
+
     fn test_snapshot() -> InstanceSnapshot {
         InstanceSnapshot {
             id: "BTCUSDT".into(),
@@ -1141,6 +1341,7 @@ mod tests {
         open_orders: Mutex<Vec<OpenOrder>>,
         submitted_orders: Mutex<Vec<OrderRequest>>,
         cancel_all_symbols: Mutex<Vec<String>>,
+        server_time: chrono::DateTime<Utc>,
         sequence: AtomicUsize,
     }
 
@@ -1160,36 +1361,8 @@ mod tests {
                 open_orders: Mutex::new(open_orders),
                 submitted_orders: Mutex::new(Vec::new()),
                 cancel_all_symbols: Mutex::new(Vec::new()),
+                server_time: test_server_time(),
                 sequence: AtomicUsize::new(1),
-            }
-        }
-    }
-
-    struct StartupInjectingExchange {
-        exchange_info: ExchangeInfo,
-        position: Mutex<Position>,
-        user_sender: Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>>,
-        injected_update: AtomicUsize,
-    }
-
-    impl StartupInjectingExchange {
-        fn new(
-            position: Position,
-            user_sender: Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>>,
-        ) -> Self {
-            Self {
-                exchange_info: ExchangeInfo {
-                    symbol: "BTCUSDT".into(),
-                    rules: ExchangeRules {
-                        price_tick: 0.1,
-                        quantity_step: 0.1,
-                        min_qty: 0.0,
-                        min_notional: 0.0,
-                    },
-                },
-                position: Mutex::new(position),
-                user_sender,
-                injected_update: AtomicUsize::new(0),
             }
         }
     }
@@ -1229,47 +1402,9 @@ mod tests {
         async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
             Ok(self.exchange_info.clone())
         }
-    }
 
-    #[async_trait::async_trait]
-    impl ExchangePort for StartupInjectingExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            unreachable!()
-        }
-
-        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
-            unreachable!()
-        }
-
-        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
-            unreachable!()
-        }
-
-        async fn get_position(&self, _symbol: &str) -> Result<Position> {
-            Ok(self.position.lock().unwrap().clone())
-        }
-
-        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OpenOrder>> {
-            if self.injected_update.fetch_add(1, Ordering::SeqCst) == 0 {
-                let sender = self.user_sender.lock().unwrap().clone();
-                if let Some(sender) = sender {
-                    sender
-                        .send(UserDataEvent::PositionUpdate(Position {
-                            symbol: "BTCUSDT".into(),
-                            qty: 7.5,
-                            avg_price: 100.0,
-                            unrealized_pnl: 5.0,
-                        }))
-                        .await
-                        .unwrap();
-                }
-            }
-
-            Ok(Vec::new())
-        }
-
-        async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
-            Ok(self.exchange_info.clone())
+        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+            Ok(self.server_time)
         }
     }
 
@@ -1357,42 +1492,6 @@ mod tests {
         }
     }
 
-    struct BufferedUserDataMarket {
-        price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
-        user_sender: Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>>,
-    }
-
-    impl BufferedUserDataMarket {
-        fn new(price_receiver: mpsc::Receiver<PriceTick>) -> Self {
-            let mut price_receivers = HashMap::new();
-            price_receivers.insert("BTCUSDT".to_string(), price_receiver);
-            Self {
-                price_receivers: Mutex::new(price_receivers),
-                user_sender: Arc::new(Mutex::new(None)),
-            }
-        }
-
-        fn user_sender_handle(&self) -> Arc<Mutex<Option<mpsc::Sender<UserDataEvent>>>> {
-            Arc::clone(&self.user_sender)
-        }
-    }
-
-    struct BarrierInjectingMarketData {
-        price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
-        boundary_event: UserDataEvent,
-    }
-
-    impl BarrierInjectingMarketData {
-        fn new(price_receiver: mpsc::Receiver<PriceTick>, boundary_event: UserDataEvent) -> Self {
-            let mut price_receivers = HashMap::new();
-            price_receivers.insert("BTCUSDT".to_string(), price_receiver);
-            Self {
-                price_receivers: Mutex::new(price_receivers),
-                boundary_event,
-            }
-        }
-    }
-
     #[async_trait::async_trait]
     impl MarketDataPort for FakeMarketData {
         async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
@@ -1403,7 +1502,7 @@ mod tests {
                 .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
         }
 
-        async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
+        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
             let receiver = self
                 .user_receiver
                 .lock()
@@ -1411,62 +1510,7 @@ mod tests {
                 .take()
                 .ok_or_else(|| anyhow!("missing test user receiver"))?;
 
-            Ok(UserDataSubscription::from_receiver(receiver, 8))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl MarketDataPort for BufferedUserDataMarket {
-        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
-            self.price_receivers
-                .lock()
-                .unwrap()
-                .remove(symbol)
-                .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
-        }
-
-        async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
-            let (sender, receiver) = mpsc::channel(8);
-            *self.user_sender.lock().unwrap() = Some(sender);
-            Ok(UserDataSubscription::from_receiver(receiver, 8))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl MarketDataPort for BarrierInjectingMarketData {
-        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
-            self.price_receivers
-                .lock()
-                .unwrap()
-                .remove(symbol)
-                .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
-        }
-
-        async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
-            let (sender, receiver) = mpsc::channel(8);
-            let (barrier_sender, mut barrier_receiver) = mpsc::channel(8);
-            let boundary_event = self.boundary_event.clone();
-
-            tokio::spawn(async move {
-                while let Some(()) = barrier_receiver.recv().await {
-                    if sender
-                        .send(UserDataStreamItem::Event(boundary_event.clone()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if sender
-                        .send(UserDataStreamItem::ReplayBarrier)
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-            });
-
-            Ok(UserDataSubscription::new(receiver, barrier_sender))
+            Ok(receiver)
         }
     }
 }

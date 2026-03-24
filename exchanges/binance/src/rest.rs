@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{TimeZone, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -87,6 +88,22 @@ impl BinanceRestClient {
             .with_context(|| format!("symbol not found in exchange info: {symbol}"))?;
 
         symbol_info.try_into()
+    }
+
+    pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+        #[derive(serde::Deserialize)]
+        struct ServerTimeResponse {
+            #[serde(rename = "serverTime")]
+            server_time: i64,
+        }
+
+        let response: ServerTimeResponse = self
+            .send_request(Method::GET, "/fapi/v1/time", Vec::new(), AuthMode::None)
+            .await?;
+
+        Utc.timestamp_millis_opt(response.server_time)
+            .single()
+            .context("invalid server time timestamp")
     }
 
     pub async fn get_position(&self, symbol: &str) -> Result<Position> {

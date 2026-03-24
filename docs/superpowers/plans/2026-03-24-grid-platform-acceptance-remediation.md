@@ -17,6 +17,9 @@
 - [x] Task 5 已完成：server runtime 补齐 startup sync、tick 执行、user data 回写闭环
 - [x] Task 6 已完成：TUI 展示真实仓位/目标仓位/挂单状态，并通过整仓验收
 - [x] 2026-03-24 重新验收通过：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace -- --nocapture`
+- [x] 2026-03-25 Task 5 启动语义修正完成：改为 `user stream -> server time cutoff -> startup sync -> buffered replay -> live apply`，并验证旧 user-data 事件不会回滚 `current_exposure`、`pending_order`、`risk_state`
+- [x] 2026-03-25 Task 5 运行期闭环补齐：`PositionUpdate` 与 `CANCELED/REJECTED/EXPIRED` 订单事件会在无新行情时触发一次 `reconcile`，补齐挂单恢复窗口
+- [x] 2026-03-25 复验通过：启动流程改为 `user stream -> server time cutoff -> startup sync -> buffered replay -> live apply`，并补齐 runtime/TUI 回归测试
 
 ---
 

@@ -209,6 +209,10 @@ capacity_notional = 375.0
                 },
             })
         }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+            Ok(Utc::now())
+        }
     }
 
     #[derive(Default)]
@@ -226,11 +230,11 @@ capacity_notional = 375.0
                 .ok_or_else(|| anyhow!("missing price receiver for {symbol}"))
         }
 
-        async fn subscribe_user_data(&self) -> Result<grid_engine::ports::UserDataSubscription> {
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<grid_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
-            Ok(grid_engine::ports::UserDataSubscription::from_receiver(
-                receiver, 1,
-            ))
+            Ok(receiver)
         }
     }
 

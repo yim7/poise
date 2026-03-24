@@ -11,7 +11,7 @@ use tokio::{
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
-use grid_engine::ports::{PriceTick, UserDataEvent, UserDataStreamItem, UserDataSubscription};
+use grid_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
 
 use crate::rest::BinanceRestClient;
 
@@ -64,9 +64,8 @@ impl BinanceWsClient {
         Ok(receiver)
     }
 
-    pub async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
+    pub async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         let (sender, receiver) = mpsc::channel(128);
-        let (replay_barrier_sender, replay_barrier_receiver) = mpsc::channel(8);
         let ws_base_url = self.ws_base_url.clone();
         let rest = Arc::clone(&self.rest);
         let reconnect_delay = self.reconnect_delay;
@@ -79,14 +78,13 @@ impl BinanceWsClient {
                 rest,
                 initial_listen_key,
                 Some(initial_websocket),
-                replay_barrier_receiver,
                 sender,
                 reconnect_delay,
             )
             .await;
         });
 
-        Ok(UserDataSubscription::new(receiver, replay_barrier_sender))
+        Ok(receiver)
     }
 }
 
@@ -143,13 +141,11 @@ async fn run_user_stream(
     rest: Arc<BinanceRestClient>,
     initial_listen_key: String,
     mut initial_websocket: Option<UserWebSocket>,
-    mut replay_barrier_receiver: mpsc::Receiver<()>,
-    sender: mpsc::Sender<UserDataStreamItem>,
+    sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
 ) {
     let mut attempt = 0_u32;
     let mut listen_key = initial_listen_key;
-    let mut barrier_stream_open = true;
 
     loop {
         let connection = match initial_websocket.take() {
@@ -167,14 +163,13 @@ async fn run_user_stream(
 
                 loop {
                     tokio::select! {
-                        biased;
                         message = websocket.next() => {
                             match message {
                                 Some(Ok(Message::Text(text))) => {
                                     match parse_user_data_message(&text) {
                                         Ok(UserStreamMessage::Events(events)) => {
                                             for event in events {
-                                                if sender.send(UserDataStreamItem::Event(event)).await.is_err() {
+                                                if sender.send(event).await.is_err() {
                                                     return;
                                                 }
                                             }
@@ -190,24 +185,6 @@ async fn run_user_stream(
                                 Some(Err(error)) => {
                                     tracing::warn!("user data websocket error: {error}");
                                     break;
-                                }
-                            }
-                        }
-                        barrier_request = async {
-                            if barrier_stream_open {
-                                replay_barrier_receiver.recv().await
-                            } else {
-                                std::future::pending::<Option<()>>().await
-                            }
-                        } => {
-                            match barrier_request {
-                                Some(()) => {
-                                    if sender.send(UserDataStreamItem::ReplayBarrier).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                None => {
-                                    barrier_stream_open = false;
                                 }
                             }
                         }
@@ -269,6 +246,10 @@ fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
 
 fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
     let envelope: UserEventEnvelope = serde_json::from_str(payload)?;
+    let event_time = Utc
+        .timestamp_millis_opt(envelope.event_time)
+        .single()
+        .context("invalid user event timestamp")?;
 
     match envelope.event_type.as_str() {
         "ORDER_TRADE_UPDATE" => {
@@ -276,8 +257,9 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 .order
                 .context("missing order payload for ORDER_TRADE_UPDATE")?;
 
-            Ok(UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(
-                grid_engine::ports::OpenOrder {
+            Ok(UserStreamMessage::Events(vec![UserDataEvent {
+                event_time,
+                payload: UserDataPayload::OrderUpdate(grid_engine::ports::OpenOrder {
                     symbol: order.symbol,
                     order_id: order.order_id.to_string(),
                     client_order_id: order.client_order_id,
@@ -286,8 +268,8 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                     qty: parse_decimal("o.q", &order.quantity)?,
                     realized_pnl: parse_decimal("o.rp", &order.realized_pnl)?,
                     status: order.status,
-                },
-            )]))
+                }),
+            }]))
         }
         "ACCOUNT_UPDATE" => {
             let account = envelope
@@ -298,14 +280,15 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 .positions
                 .into_iter()
                 .map(|position| {
-                    Ok(UserDataEvent::PositionUpdate(
-                        grid_engine::ports::Position {
+                    Ok(UserDataEvent {
+                        event_time,
+                        payload: UserDataPayload::PositionUpdate(grid_engine::ports::Position {
                             symbol: position.symbol,
                             qty: parse_decimal("a.P.pa", &position.position_amt)?,
                             avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
                             unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
-                        },
-                    ))
+                        }),
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -349,6 +332,8 @@ struct MarkPriceMessage {
 struct UserEventEnvelope {
     #[serde(rename = "e")]
     event_type: String,
+    #[serde(rename = "E")]
+    event_time: i64,
     #[serde(rename = "o")]
     order: Option<OrderTradeUpdate>,
     #[serde(rename = "a")]
@@ -414,7 +399,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use grid_core::types::Side;
-    use grid_engine::ports::{OpenOrder, Position};
+    use grid_engine::ports::{OpenOrder, Position, UserDataPayload};
 
     use super::*;
 
@@ -445,6 +430,7 @@ mod tests {
     fn parses_order_trade_update_message() {
         let payload = r#"{
             "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
             "o": {
                 "s": "BTCUSDT",
                 "i": 12345,
@@ -461,16 +447,19 @@ mod tests {
 
         assert_eq!(
             events,
-            UserStreamMessage::Events(vec![UserDataEvent::OrderUpdate(OpenOrder {
-                symbol: "BTCUSDT".to_string(),
-                order_id: "12345".to_string(),
-                client_order_id: "grid-order-004".to_string(),
-                side: Side::Sell,
-                price: 65000.5,
-                qty: 0.02,
-                realized_pnl: 12.34,
-                status: "FILLED".to_string(),
-            })])
+            UserStreamMessage::Events(vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::OrderUpdate(OpenOrder {
+                    symbol: "BTCUSDT".to_string(),
+                    order_id: "12345".to_string(),
+                    client_order_id: "grid-order-004".to_string(),
+                    side: Side::Sell,
+                    price: 65000.5,
+                    qty: 0.02,
+                    realized_pnl: 12.34,
+                    status: "FILLED".to_string(),
+                }),
+            }])
         );
     }
 
@@ -478,6 +467,7 @@ mod tests {
     fn parses_account_update_message() {
         let payload = r#"{
             "e": "ACCOUNT_UPDATE",
+            "E": 1700000000000,
             "a": {
                 "P": [{
                     "s": "BTCUSDT",
@@ -492,12 +482,15 @@ mod tests {
 
         assert_eq!(
             events,
-            UserStreamMessage::Events(vec![UserDataEvent::PositionUpdate(Position {
-                symbol: "BTCUSDT".to_string(),
-                qty: 0.015,
-                avg_price: 64200.0,
-                unrealized_pnl: 12.3,
-            })])
+            UserStreamMessage::Events(vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::PositionUpdate(Position {
+                    symbol: "BTCUSDT".to_string(),
+                    qty: 0.015,
+                    avg_price: 64200.0,
+                    unrealized_pnl: 12.3,
+                }),
+            }])
         );
     }
 
@@ -589,7 +582,7 @@ mod tests {
             second_ws
                 .send(
                     Message::Text(
-                        r#"{"e":"ACCOUNT_UPDATE","a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
                             .to_string()
                     ),
                 )
@@ -609,7 +602,7 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let mut receiver = client.subscribe_user_data().await.unwrap().into_receiver();
+        let mut receiver = client.subscribe_user_data().await.unwrap();
         let event = timeout(Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
@@ -618,12 +611,15 @@ mod tests {
 
         assert_eq!(
             event,
-            UserDataStreamItem::Event(UserDataEvent::PositionUpdate(Position {
-                symbol: "BTCUSDT".to_string(),
-                qty: 0.015,
-                avg_price: 64200.0,
-                unrealized_pnl: 12.3,
-            }))
+            UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::PositionUpdate(Position {
+                    symbol: "BTCUSDT".to_string(),
+                    qty: 0.015,
+                    avg_price: 64200.0,
+                    unrealized_pnl: 12.3,
+                }),
+            }
         );
         assert_eq!(
             requests
@@ -653,7 +649,7 @@ mod tests {
             websocket
                 .send(
                     Message::Text(
-                        r#"{"e":"ACCOUNT_UPDATE","a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
                             .to_string(),
                     ),
                 )
@@ -687,8 +683,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-            .unwrap()
-            .into_receiver();
+            .unwrap();
         let event = timeout(Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
@@ -696,12 +691,15 @@ mod tests {
 
         assert_eq!(
             event,
-            UserDataStreamItem::Event(UserDataEvent::PositionUpdate(Position {
-                symbol: "BTCUSDT".to_string(),
-                qty: 0.015,
-                avg_price: 64200.0,
-                unrealized_pnl: 12.3,
-            }))
+            UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::PositionUpdate(Position {
+                    symbol: "BTCUSDT".to_string(),
+                    qty: 0.015,
+                    avg_price: 64200.0,
+                    unrealized_pnl: 12.3,
+                }),
+            }
         );
     }
 

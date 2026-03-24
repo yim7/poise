@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use grid_engine::ports::{
     ExchangeInfo, ExchangePort, MarketDataPort, OpenOrder, OrderReceipt, OrderRequest, Position,
-    PriceTick, UserDataSubscription,
+    PriceTick, UserDataEvent,
 };
 
 use crate::{rest::BinanceRestClient, websocket::BinanceWsClient};
@@ -59,6 +59,10 @@ impl ExchangePort for BinanceAdapter {
     async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
         self.rest.get_exchange_info(symbol).await
     }
+
+    async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+        self.rest.get_server_time().await
+    }
 }
 
 #[async_trait]
@@ -67,7 +71,7 @@ impl MarketDataPort for BinanceAdapter {
         self.ws.subscribe_prices(symbol).await
     }
 
-    async fn subscribe_user_data(&self) -> Result<UserDataSubscription> {
+    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         self.ws.subscribe_user_data().await
     }
 }

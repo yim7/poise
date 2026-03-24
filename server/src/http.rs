@@ -249,6 +249,10 @@ mod tests {
         async fn get_exchange_info(&self, _symbol: &str) -> anyhow::Result<ExchangeInfo> {
             unreachable!()
         }
+
+        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
+            unreachable!()
+        }
     }
 
     struct FakePersistence;
