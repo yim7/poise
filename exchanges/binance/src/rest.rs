@@ -189,30 +189,31 @@ impl BinanceRestClient {
         Ok(())
     }
 
-    async fn send_request<T>(&self, method: Method, path: &str, mut params: Vec<(&str, String)>, auth_mode: AuthMode) -> Result<T>
+    async fn send_request<T>(&self, method: Method, path: &str, params: Vec<(&str, String)>, auth_mode: AuthMode) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        if matches!(auth_mode, AuthMode::Signed) {
-            params.push(("timestamp", (self.timestamp_provider)().to_string()));
-            params.push(("recvWindow", DEFAULT_RECV_WINDOW_MS.to_string()));
-        }
-
-        let query = encode_query(&params);
-        let signed_query = if matches!(auth_mode, AuthMode::Signed) {
-            format!("{query}&signature={}", self.sign_query(&query))
-        } else {
-            query
-        };
-        let url = if signed_query.is_empty() {
-            format!("{}{}", self.base_url, path)
-        } else {
-            format!("{}{}?{}", self.base_url, path, signed_query)
-        };
-
         let mut last_error = None;
 
         for attempt in 0..MAX_RETRIES {
+            let mut request_params = params.clone();
+            if matches!(auth_mode, AuthMode::Signed) {
+                request_params.push(("timestamp", (self.timestamp_provider)().to_string()));
+                request_params.push(("recvWindow", DEFAULT_RECV_WINDOW_MS.to_string()));
+            }
+
+            let query = encode_query(&request_params);
+            let signed_query = if matches!(auth_mode, AuthMode::Signed) {
+                format!("{query}&signature={}", self.sign_query(&query))
+            } else {
+                query
+            };
+            let url = if signed_query.is_empty() {
+                format!("{}{}", self.base_url, path)
+            } else {
+                format!("{}{}?{}", self.base_url, path, signed_query)
+            };
+
             let mut request = self.http.request(method.clone(), &url);
             if matches!(auth_mode, AuthMode::ApiKey | AuthMode::Signed) {
                 request = request.header("X-MBX-APIKEY", &self.api_key);
@@ -287,7 +288,11 @@ fn retry_delay(retry_after: Option<Duration>, attempt: usize) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, collections::VecDeque, sync::Arc};
+    use std::{
+        collections::HashMap,
+        collections::VecDeque,
+        sync::{Arc, atomic::{AtomicI64, Ordering}},
+    };
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -385,6 +390,45 @@ mod tests {
 
         assert_eq!(orders.len(), 1);
         assert_eq!(requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn re_signs_signed_request_for_each_retry_attempt() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(429, r#"{"code":-1003,"msg":"too many requests"}"#)
+                .with_header("retry-after", "0"),
+            MockResponse::json(
+                200,
+                r#"[{
+                    "orderId": 1003,
+                    "clientOrderId": "grid-open-005",
+                    "side": "BUY",
+                    "price": "64020.1",
+                    "origQty": "0.035",
+                    "status": "NEW"
+                }]"#,
+            ),
+        ])
+        .await;
+        let next_timestamp = Arc::new(AtomicI64::new(1_700_000_000_000));
+        let timestamp_provider = {
+            let next_timestamp = Arc::clone(&next_timestamp);
+            Arc::new(move || next_timestamp.fetch_add(6_000, Ordering::SeqCst))
+        };
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            timestamp_provider,
+        );
+
+        let _ = client.get_open_orders("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].path.contains("timestamp=1700000000000"));
+        assert!(requests[1].path.contains("timestamp=1700000006000"));
+        assert_ne!(requests[0].path, requests[1].path);
     }
 
     #[derive(Debug, Clone)]
