@@ -293,7 +293,7 @@ mod tests {
                     out_of_band_policy: OutOfBandPolicy::Freeze,
                 },
                 CapacityBudget {
-                    max_notional: 375.0,
+                    max_notional: 3000.0,
                     daily_loss_limit: -100.0,
                     stop_loss_pct: 10.0,
                 },

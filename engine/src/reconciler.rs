@@ -62,7 +62,10 @@ pub fn reconcile(
     let delta = instance.current_exposure.delta(&approved_target);
     if delta.is_zero() {
         return ReconcileResult {
-            plan: ExecutionPlan::noop(),
+            plan: ExecutionPlan {
+                actions: vec![ExecutionAction::NoOp],
+                events,
+            },
             target_exposure: approved_target,
             new_status,
         };
@@ -247,6 +250,69 @@ mod tests {
                         intended,
                         capped,
                     } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+                ))
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_risk_cap_event_when_cap_matches_current_exposure() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.current_exposure = Exposure(4.0);
+
+        let budget = CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        };
+
+        let result = reconcile(&instance, 90.0, &budget);
+
+        assert!(!result.plan.has_actions());
+        assert_eq!(result.target_exposure, Exposure(4.0));
+        assert!(
+            result
+                .plan
+                .events
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    DomainEvent::RiskCapApplied {
+                        intended,
+                        capped,
+                    } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+                ))
+        );
+        assert!(
+            !result
+                .plan
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn reconcile_uses_risk_state_pnl_to_cap_target() {
+        let mut instance = test_instance();
+        instance.status = InstanceStatus::Active;
+        instance.current_exposure = Exposure(2.0);
+        instance.risk_state.realized_pnl_today = -100.0;
+        instance.risk_state.unrealized_pnl = -25.0;
+
+        let result = reconcile(&instance, 90.0, &test_budget());
+
+        assert_eq!(result.target_exposure, Exposure(0.0));
+        assert!(
+            result
+                .plan
+                .events
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    DomainEvent::RiskCapApplied {
+                        intended,
+                        capped,
+                    } if *intended == Exposure(8.0) && *capped == Exposure(0.0)
                 ))
         );
     }
