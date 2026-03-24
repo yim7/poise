@@ -31,6 +31,12 @@ pub struct CommandRequest {
     pub command: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportedCommand {
+    Pause,
+    Resume,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandResponse {
     pub instance_id: String,
@@ -88,9 +94,20 @@ async fn submit_command(
         ));
     }
 
-    let manager = state.manager.read().await;
-    if manager.get_instance(&id).is_none() {
-        return Err(not_found(format!("instance `{id}` not found")));
+    let command = SupportedCommand::try_from(request.command.as_str()).map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: message }),
+        )
+    })?;
+
+    let mut manager = state.manager.write().await;
+    let result = match command {
+        SupportedCommand::Pause => manager.pause_instance(&id),
+        SupportedCommand::Resume => manager.resume_instance(&id),
+    };
+    if let Err(error) = result {
+        return Err(not_found(error.to_string()));
     }
 
     Ok(Json(CommandResponse {
@@ -131,6 +148,20 @@ impl From<&StrategyInstance> for InstanceSnapshot {
     }
 }
 
+impl TryFrom<&str> for SupportedCommand {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pause" => Ok(Self::Pause),
+            "resume" => Ok(Self::Resume),
+            other => Err(format!(
+                "unsupported command `{other}`; supported commands: pause, resume"
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -140,6 +171,7 @@ mod tests {
     use chrono::Utc;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use grid_engine::instance::InstanceStatus;
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangePort, OpenOrder, OrderReceipt, OrderRequest,
@@ -308,6 +340,111 @@ mod tests {
 
         assert!(payload.accepted);
         assert_eq!(payload.command, "pause");
+    }
+
+    #[tokio::test]
+    async fn submit_command_rejects_unknown_command() {
+        let response = router(app_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "command": "flatten-now" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn pause_command_updates_snapshot_status() {
+        let app = router(app_state());
+
+        let pause = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pause.status(), StatusCode::OK);
+
+        let snapshot = app
+            .oneshot(
+                Request::builder()
+                    .uri("/instances/BTCUSDT/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = to_bytes(snapshot.into_body(), usize::MAX).await.unwrap();
+        let payload: InstanceSnapshot = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.status, InstanceStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn resume_command_reactivates_paused_instance() {
+        let app = router(app_state());
+
+        let pause = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pause.status(), StatusCode::OK);
+
+        let resume = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/instances/BTCUSDT/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "command": "resume" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resume.status(), StatusCode::OK);
+
+        let snapshot = app
+            .oneshot(
+                Request::builder()
+                    .uri("/instances/BTCUSDT/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = to_bytes(snapshot.into_body(), usize::MAX).await.unwrap();
+        let payload: InstanceSnapshot = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.status, InstanceStatus::Active);
     }
 
     #[tokio::test]

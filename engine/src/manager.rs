@@ -6,7 +6,7 @@ use grid_core::events::DomainEvent;
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 
-use crate::instance::StrategyInstance;
+use crate::instance::{InstanceStatus, StrategyInstance};
 use crate::ports::{ClockPort, ExchangePort, PersistencePort, PriceTick};
 use crate::reconciler;
 
@@ -57,6 +57,12 @@ impl InstanceManager {
             .collect();
 
         for id in ids {
+            if matches!(self.instances[&id].status, InstanceStatus::Paused) {
+                let instance = self.instances.get_mut(&id).unwrap();
+                instance.last_price = Some(tick.last_price);
+                continue;
+            }
+
             let instance = self.instances.get(&id).unwrap();
             let budget = self.budgets.get(&id).unwrap();
             let result = reconciler::reconcile(instance, tick.last_price, budget);
@@ -71,6 +77,28 @@ impl InstanceManager {
             all_events.extend(result.plan.events);
         }
         all_events
+    }
+
+    pub fn pause_instance(&mut self, id: &str) -> Result<()> {
+        let instance = self
+            .instances
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
+        instance.status = InstanceStatus::Paused;
+        Ok(())
+    }
+
+    pub fn resume_instance(&mut self, id: &str) -> Result<()> {
+        let instance = self
+            .instances
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
+        instance.status = if instance.last_price.is_some() {
+            InstanceStatus::Active
+        } else {
+            InstanceStatus::WaitingMarketData
+        };
+        Ok(())
     }
 
     pub fn list_instances(&self) -> Vec<&StrategyInstance> {
@@ -269,5 +297,36 @@ mod tests {
 
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.status, InstanceStatus::WaitingMarketData);
+    }
+
+    #[test]
+    fn paused_instance_ignores_reconcile_updates() {
+        let mut manager = test_manager();
+        manager
+            .add_instance(
+                "btc1".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                test_budget(),
+            )
+            .unwrap();
+        let instance = manager.instances.get_mut("btc1").unwrap();
+        instance.status = InstanceStatus::Paused;
+        instance.current_exposure = grid_core::types::Exposure(2.0);
+
+        let tick = PriceTick {
+            symbol: "BTCUSDT".into(),
+            last_price: 95.0,
+            mark_price: 95.0,
+            timestamp: Utc::now(),
+        };
+
+        let events = manager.on_price_tick(&tick);
+
+        assert!(events.is_empty());
+        let instance = manager.get_instance("btc1").unwrap();
+        assert_eq!(instance.status, InstanceStatus::Paused);
+        assert_eq!(instance.current_exposure.0, 2.0);
+        assert_eq!(instance.last_price, Some(95.0));
     }
 }
