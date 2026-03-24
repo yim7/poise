@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -34,6 +34,12 @@ impl SqliteStorage {
 #[async_trait]
 impl PersistencePort for SqliteStorage {
     async fn save_instance_state(&self, id: &str, state: &InstanceSnapshot) -> Result<()> {
+        ensure!(
+            id == state.id,
+            "snapshot id mismatch: key `{id}` does not match state.id `{}`",
+            state.id
+        );
+
         let config_json =
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
         let status_json =
@@ -187,6 +193,16 @@ mod tests {
         let loaded = storage.load_instance_state("test-1").await.unwrap().unwrap();
         assert!((loaded.current_exposure.0 - 6.0).abs() < f64::EPSILON);
         assert_eq!(loaded.last_price, Some(96.0));
+    }
+
+    #[tokio::test]
+    async fn save_rejects_mismatched_snapshot_id() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        let result = storage.save_instance_state("different-id", &snapshot).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
