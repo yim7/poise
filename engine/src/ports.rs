@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use grid_core::events::DomainEvent;
-use grid_core::types::{Exposure, Side};
+use grid_core::types::Side;
+
+use crate::grid::Instrument;
+use crate::snapshot::GridRuntimeSnapshot;
+
+pub use crate::snapshot::GridRuntimeSnapshot as GridSnapshot;
 
 // ── Exchange types ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderRequest {
-    pub symbol: String,
+    pub instrument: Instrument,
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
@@ -27,7 +32,7 @@ pub struct OrderReceipt {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Position {
-    pub symbol: String,
+    pub instrument: Instrument,
     pub qty: f64,
     pub avg_price: f64,
     pub unrealized_pnl: f64,
@@ -35,7 +40,7 @@ pub struct Position {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeOrder {
-    pub symbol: String,
+    pub instrument: Instrument,
     pub order_id: String,
     pub client_order_id: String,
     pub side: Side,
@@ -80,7 +85,7 @@ impl OrderStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceTick {
-    pub symbol: String,
+    pub instrument: Instrument,
     pub reference_price: f64,
     pub mark_price: f64,
     pub timestamp: DateTime<Utc>,
@@ -88,7 +93,7 @@ pub struct PriceTick {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeInfo {
-    pub symbol: String,
+    pub instrument: Instrument,
     pub rules: grid_core::types::ExchangeRules,
 }
 
@@ -105,35 +110,12 @@ pub struct UserDataEvent {
 }
 
 impl UserDataEvent {
-    pub fn symbol(&self) -> &str {
+    pub fn instrument(&self) -> &Instrument {
         match &self.payload {
-            UserDataPayload::OrderUpdate(order) => &order.symbol,
-            UserDataPayload::PositionUpdate(position) => &position.symbol,
+            UserDataPayload::OrderUpdate(order) => &order.instrument,
+            UserDataPayload::PositionUpdate(position) => &position.instrument,
         }
     }
-}
-
-// ── Snapshot type (for persistence) ──
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-// Internal persistence snapshot: keeps full engine state, including fields not exposed over HTTP.
-pub struct GridSnapshot {
-    pub id: String,
-    pub symbol: String,
-    pub config: grid_core::strategy::GridConfig,
-    pub status: super::instance::GridStatus,
-    pub current_exposure: Exposure,
-    pub target_exposure: Option<Exposure>,
-    pub pending_order: Option<super::instance::PendingOrder>,
-    pub risk_state: super::instance::RiskState,
-    pub reference_price: Option<f64>,
-    pub out_of_band_since: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PersistedGridState {
-    pub snapshot: GridSnapshot,
-    pub events: Vec<DomainEvent>,
 }
 
 // ── Port traits ──
@@ -141,17 +123,17 @@ pub struct PersistedGridState {
 #[async_trait]
 pub trait ExchangePort: Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
-    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
-    async fn cancel_all(&self, symbol: &str) -> Result<()>;
-    async fn get_position(&self, symbol: &str) -> Result<Position>;
-    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>>;
-    async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo>;
+    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()>;
+    async fn cancel_all(&self, instrument: &Instrument) -> Result<()>;
+    async fn get_position(&self, instrument: &Instrument) -> Result<Position>;
+    async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>>;
+    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
 }
 
 #[async_trait]
 pub trait MarketDataPort: Send + Sync {
-    async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>>;
+    async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>>;
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
 }
 
@@ -160,10 +142,10 @@ pub trait StateRepositoryPort: Send + Sync {
     async fn save_transition(
         &self,
         id: &str,
-        state: &GridSnapshot,
+        state: &GridRuntimeSnapshot,
         events: &[DomainEvent],
     ) -> Result<()>;
-    async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>>;
+    async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>>;
     async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
 }
 

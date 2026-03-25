@@ -60,6 +60,8 @@
 
 说明：
 
+- `id` / `grid_id` 是控制面稳定身份，例如 `btc-core`。
+- `symbol` 是交易所市场标识，例如 `BTCUSDT`。
 - `reference_price` 是当前策略使用的参考价；当前 Binance 适配层把 mark price 作为参考价输入。
 - `pending_order` 为空表示当前没有待跟踪委托。
 - `config` 里的容量字段已经统一为 `long_exposure_units`、`short_exposure_units`、`notional_per_unit`。
@@ -74,7 +76,7 @@
 
 ```json
 {
-  "grid_id": "BTCUSDT",
+  "grid_id": "btc-core",
   "event": {
     "band_reentered": {
       "price": 99.0
@@ -85,7 +87,7 @@
 
 说明：
 
-- `grid_id` 是当前一等业务标识。
+- `grid_id` 是当前一等业务标识，不等于 `symbol`。
 - `event` 使用 `DomainEvent` 的 `snake_case` 序列化形式。
 - WebSocket 事件只做增量通知；完整状态以 `GET /grids/:id/snapshot` 为准。
 

@@ -400,6 +400,11 @@ mod tests {
         GridSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
     };
 
+    const BTC_GRID_ID: &str = "btc-core";
+    const BTC_SYMBOL: &str = "BTCUSDT";
+    const ETH_GRID_ID: &str = "eth-core";
+    const ETH_SYMBOL: &str = "ETHUSDT";
+
     #[derive(Clone)]
     struct StubState {
         snapshots: Arc<Mutex<HashMap<String, GridSnapshot>>>,
@@ -407,8 +412,8 @@ mod tests {
 
     fn btc_snapshot(exposure: f64, status: GridStatus) -> GridSnapshot {
         GridSnapshot {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
+            id: BTC_GRID_ID.into(),
+            symbol: BTC_SYMBOL.into(),
             status,
             current_exposure: exposure,
             target_exposure: None,
@@ -428,8 +433,8 @@ mod tests {
 
     fn eth_snapshot() -> GridSnapshot {
         GridSnapshot {
-            id: "ETHUSDT".into(),
-            symbol: "ETHUSDT".into(),
+            id: ETH_GRID_ID.into(),
+            symbol: ETH_SYMBOL.into(),
             status: GridStatus::Paused,
             current_exposure: -1.0,
             target_exposure: None,
@@ -495,7 +500,7 @@ mod tests {
 
     async fn handle_ws_socket(mut socket: WebSocket) {
         let payload = serde_json::to_string(&WsEvent {
-            grid_id: "BTCUSDT".into(),
+            grid_id: BTC_GRID_ID.into(),
             event: DomainEvent::BandReentered { price: 101.0 },
         })
         .unwrap();
@@ -642,8 +647,11 @@ mod tests {
     async fn spawn_stub_server() -> (ApiClient, String, StubState) {
         let state = StubState {
             snapshots: Arc::new(Mutex::new(HashMap::from([
-                ("BTCUSDT".to_string(), btc_snapshot(2.0, GridStatus::Active)),
-                ("ETHUSDT".to_string(), eth_snapshot()),
+                (
+                    BTC_GRID_ID.to_string(),
+                    btc_snapshot(2.0, GridStatus::Active),
+                ),
+                (ETH_GRID_ID.to_string(), eth_snapshot()),
             ]))),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -671,8 +679,11 @@ mod tests {
     ) -> (ApiClient, String, StubState, tokio::task::JoinHandle<()>) {
         let state = StubState {
             snapshots: Arc::new(Mutex::new(HashMap::from([
-                ("BTCUSDT".to_string(), btc_snapshot(2.0, GridStatus::Active)),
-                ("ETHUSDT".to_string(), eth_snapshot()),
+                (
+                    BTC_GRID_ID.to_string(),
+                    btc_snapshot(2.0, GridStatus::Active),
+                ),
+                (ETH_GRID_ID.to_string(), eth_snapshot()),
             ]))),
         };
         let listener = TcpListener::bind(address).await.unwrap();
@@ -719,12 +730,12 @@ mod tests {
     #[test]
     fn formats_command_response_message() {
         let text = format_command_response(&CommandResponse {
-            grid_id: "BTCUSDT".into(),
+            grid_id: BTC_GRID_ID.into(),
             command: "pause".into(),
             accepted: true,
         });
 
-        assert_eq!(text, "command `pause` accepted for `BTCUSDT`");
+        assert_eq!(text, "command `pause` accepted for `btc-core`");
     }
 
     #[tokio::test]
@@ -735,11 +746,11 @@ mod tests {
 
         assert_eq!(app.instances.len(), 2);
         assert_eq!(
-            app.cached_snapshot("BTCUSDT").unwrap().current_exposure,
+            app.cached_snapshot(BTC_GRID_ID).unwrap().current_exposure,
             2.0
         );
         assert_eq!(
-            app.cached_snapshot("ETHUSDT").unwrap().status,
+            app.cached_snapshot(ETH_GRID_ID).unwrap().status,
             GridStatus::Paused
         );
     }
@@ -755,13 +766,13 @@ mod tests {
             .snapshots
             .lock()
             .await
-            .insert("BTCUSDT".into(), btc_snapshot(4.0, GridStatus::Frozen));
+            .insert(BTC_GRID_ID.into(), btc_snapshot(4.0, GridStatus::Frozen));
 
         handle_ws_event(
             &client,
             &mut app,
             WsEvent {
-                grid_id: "BTCUSDT".into(),
+                grid_id: BTC_GRID_ID.into(),
                 event: DomainEvent::BandBreached {
                     boundary: crate::protocol::BandBoundary::Above,
                     price: 120.0,
@@ -772,7 +783,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            app.cached_snapshot("BTCUSDT").unwrap().current_exposure,
+            app.cached_snapshot(BTC_GRID_ID).unwrap().current_exposure,
             4.0
         );
         assert_eq!(
@@ -794,7 +805,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.cached_snapshot("BTCUSDT").unwrap().status,
+            app.cached_snapshot(BTC_GRID_ID).unwrap().status,
             GridStatus::Paused
         );
         assert!(
@@ -832,15 +843,15 @@ mod tests {
         for _ in 0..20 {
             maybe_load_initial_state(&client, &mut app).await;
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if app.instances.len() == 2 && app.cached_snapshot("BTCUSDT").is_some() {
+            if app.instances.len() == 2 && app.cached_snapshot(BTC_GRID_ID).is_some() {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
         assert_eq!(app.instances.len(), 2);
-        assert!(app.cached_snapshot("BTCUSDT").is_some());
-        assert!(app.cached_snapshot("ETHUSDT").is_some());
+        assert!(app.cached_snapshot(BTC_GRID_ID).is_some());
+        assert!(app.cached_snapshot(ETH_GRID_ID).is_some());
 
         server.abort();
         let _ = server.await;
@@ -886,7 +897,7 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         let event = ws_receiver.as_mut().unwrap().recv().await.unwrap();
-        assert_eq!(event.grid_id, "BTCUSDT");
+        assert_eq!(event.grid_id, BTC_GRID_ID);
         assert_eq!(app.status_message(), Some("websocket reconnected"));
     }
 
@@ -1166,6 +1177,8 @@ rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -1174,6 +1187,8 @@ short_exposure_units = 8.0
 notional_per_unit = 375.0
 
 [[grids]]
+grid_id = "eth-core"
+venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
@@ -1204,19 +1219,19 @@ out_of_band_policy = "hold"
         let mut ws_receiver = Some(connect_ws(&ws_url).await.unwrap());
 
         let client = ApiClient::new(base_url);
-        wait_for_snapshot_price(&client, "BTCUSDT").await;
-        wait_for_snapshot_price(&client, "ETHUSDT").await;
+        wait_for_snapshot_price(&client, BTC_GRID_ID).await;
+        wait_for_snapshot_price(&client, ETH_GRID_ID).await;
 
         let mut app = load_initial_state(&client).await.unwrap();
         assert_eq!(app.instances.len(), 2);
         assert!(
-            app.cached_snapshot("BTCUSDT")
+            app.cached_snapshot(BTC_GRID_ID)
                 .unwrap()
                 .reference_price
                 .is_some()
         );
         assert!(
-            app.cached_snapshot("ETHUSDT")
+            app.cached_snapshot(ETH_GRID_ID)
                 .unwrap()
                 .reference_price
                 .is_some()
@@ -1227,14 +1242,14 @@ out_of_band_policy = "hold"
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_instance.as_ref().unwrap().id, "BTCUSDT");
+        assert_eq!(app.current_instance.as_ref().unwrap().id, BTC_GRID_ID);
 
         let action = crate::input::handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_instance.as_ref().unwrap().id, "ETHUSDT");
+        assert_eq!(app.current_instance.as_ref().unwrap().id, ETH_GRID_ID);
 
         for _ in 0..30 {
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
@@ -1272,6 +1287,8 @@ rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -1280,6 +1297,8 @@ short_exposure_units = 8.0
 notional_per_unit = 375.0
 
 [[grids]]
+grid_id = "eth-core"
+venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0

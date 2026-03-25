@@ -11,6 +11,7 @@ use tokio::{
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
+use grid_engine::grid::{Instrument, Venue};
 use grid_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
 
 use crate::rest::BinanceRestClient;
@@ -49,12 +50,15 @@ impl BinanceWsClient {
         }
     }
 
-    pub async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
+    pub async fn subscribe_prices(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<PriceTick>> {
         let (sender, receiver) = mpsc::channel(128);
         let url = format!(
             "{}/ws/{}@markPrice",
             self.ws_base_url,
-            symbol.to_lowercase()
+            instrument.symbol.to_lowercase()
         );
         let reconnect_delay = self.reconnect_delay;
 
@@ -238,7 +242,7 @@ fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
         .context("invalid event timestamp")?;
 
     Ok(Some(PriceTick {
-        symbol: message.symbol,
+        instrument: Instrument::new(Venue::Binance, message.symbol),
         reference_price: mark_price,
         mark_price,
         timestamp,
@@ -261,7 +265,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
             Ok(UserStreamMessage::Events(vec![UserDataEvent {
                 event_time,
                 payload: UserDataPayload::OrderUpdate(grid_engine::ports::ExchangeOrder {
-                    symbol: order.symbol,
+                    instrument: Instrument::new(Venue::Binance, order.symbol),
                     order_id: order.order_id.to_string(),
                     client_order_id: order.client_order_id,
                     side: parse_side(&order.side)?,
@@ -284,7 +288,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                     Ok(UserDataEvent {
                         event_time,
                         payload: UserDataPayload::PositionUpdate(grid_engine::ports::Position {
-                            symbol: position.symbol,
+                            instrument: Instrument::new(Venue::Binance, position.symbol),
                             qty: parse_decimal("a.P.pa", &position.position_amt)?,
                             avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
                             unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
@@ -400,6 +404,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use grid_core::types::Side;
+    use grid_engine::grid::{Instrument, Venue};
     use grid_engine::ports::{ExchangeOrder, OrderStatus, Position, UserDataPayload};
 
     use super::*;
@@ -419,7 +424,7 @@ mod tests {
         assert_eq!(
             tick,
             PriceTick {
-                symbol: "BTCUSDT".to_string(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 reference_price: 64000.10,
                 mark_price: 64000.10,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
@@ -451,7 +456,7 @@ mod tests {
             UserStreamMessage::Events(vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::OrderUpdate(ExchangeOrder {
-                    symbol: "BTCUSDT".to_string(),
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     order_id: "12345".to_string(),
                     client_order_id: "grid-order-004".to_string(),
                     side: Side::Sell,
@@ -486,7 +491,7 @@ mod tests {
             UserStreamMessage::Events(vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
-                    symbol: "BTCUSDT".to_string(),
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
@@ -539,7 +544,10 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let mut receiver = client.subscribe_prices("BTCUSDT").await.unwrap();
+        let mut receiver = client
+            .subscribe_prices(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .await
+            .unwrap();
         let first = timeout(Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
@@ -615,7 +623,7 @@ mod tests {
             UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
-                    symbol: "BTCUSDT".to_string(),
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
@@ -695,7 +703,7 @@ mod tests {
             UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
-                    symbol: "BTCUSDT".to_string(),
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,

@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use grid_engine::grid::Instrument;
 use grid_engine::ports::{
     ExchangeInfo, ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest,
     Position, PriceTick, UserDataEvent,
@@ -38,26 +39,26 @@ impl ExchangePort for BinanceAdapter {
         self.rest.new_order(&req).await
     }
 
-    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
-        self.rest.cancel_order(symbol, order_id).await?;
+    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()> {
+        self.rest.cancel_order(&instrument.symbol, order_id).await?;
         Ok(())
     }
 
-    async fn cancel_all(&self, symbol: &str) -> Result<()> {
-        self.rest.cancel_all_orders(symbol).await?;
+    async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
+        self.rest.cancel_all_orders(&instrument.symbol).await?;
         Ok(())
     }
 
-    async fn get_position(&self, symbol: &str) -> Result<Position> {
-        self.rest.get_position(symbol).await
+    async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+        self.rest.get_position(&instrument.symbol).await
     }
 
-    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
-        self.rest.get_open_orders(symbol).await
+    async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        self.rest.get_open_orders(&instrument.symbol).await
     }
 
-    async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
-        self.rest.get_exchange_info(symbol).await
+    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
+        self.rest.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
@@ -67,8 +68,8 @@ impl ExchangePort for BinanceAdapter {
 
 #[async_trait]
 impl MarketDataPort for BinanceAdapter {
-    async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
-        self.ws.subscribe_prices(symbol).await
+    async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+        self.ws.subscribe_prices(instrument).await
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
@@ -90,6 +91,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use grid_core::types::Side;
+    use grid_engine::grid::{Instrument, Venue};
 
     use super::*;
 
@@ -113,7 +115,7 @@ mod tests {
 
         let receipt = adapter
             .submit_order(OrderRequest {
-                symbol: "BTCUSDT".to_string(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 64000.5,
                 quantity: 0.01,
@@ -150,7 +152,10 @@ mod tests {
             "ws://127.0.0.1:1",
         );
 
-        adapter.cancel_order("BTCUSDT", "12345").await.unwrap();
+        adapter
+            .cancel_order(&Instrument::new(Venue::Binance, "BTCUSDT"), "12345")
+            .await
+            .unwrap();
         let requests = server.requests().await;
 
         assert_eq!(requests[0].method, "DELETE");
@@ -180,9 +185,12 @@ mod tests {
             "ws://127.0.0.1:1",
         );
 
-        let position = adapter.get_position("BTCUSDT").await.unwrap();
+        let position = adapter
+            .get_position(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .await
+            .unwrap();
 
-        assert_eq!(position.symbol, "BTCUSDT");
+        assert_eq!(position.instrument.symbol, "BTCUSDT");
         assert_eq!(position.qty, 0.25);
         assert_eq!(position.avg_price, 65000.5);
     }
@@ -214,13 +222,16 @@ mod tests {
             format!("ws://{}", address),
         );
 
-        let mut receiver = adapter.subscribe_prices("BTCUSDT").await.unwrap();
+        let mut receiver = adapter
+            .subscribe_prices(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .await
+            .unwrap();
         let tick = timeout(std::time::Duration::from_secs(1), receiver.recv())
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(tick.symbol, "BTCUSDT");
+        assert_eq!(tick.instrument.symbol, "BTCUSDT");
         assert_eq!(tick.mark_price, 64000.10);
     }
 

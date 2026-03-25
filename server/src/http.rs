@@ -2,6 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use grid_engine::command::GridCommand;
 pub use grid_protocol::{CommandRequest, CommandResponse, GridSnapshot, GridSummary};
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -71,21 +72,14 @@ async fn submit_command(
         return Err(not_found(format!("grid `{id}` not found")));
     }
 
-    match state
-        .service
-        .mutate_grid(&id, |manager| match command {
-            SupportedCommand::Pause => manager.pause_instance(&id),
-            SupportedCommand::Resume => manager.resume_instance(&id),
-        })
-        .await
-    {
-        Ok(()) => {}
-        Err(GridMutationError::Mutation(error)) => {
-            return Err(bad_request(error.to_string()));
-        }
-        Err(GridMutationError::Persistence(error)) => {
-            return Err(internal_error(error.to_string()));
-        }
+    let command = match command {
+        SupportedCommand::Pause => GridCommand::Pause,
+        SupportedCommand::Resume => GridCommand::Resume,
+    };
+
+    match state.service.command(&id, command).await {
+        Ok(_) => {}
+        Err(error) => return Err(map_command_error(error)),
     }
 
     Ok(Json(CommandResponse {
@@ -115,6 +109,15 @@ fn internal_error(message: String) -> (StatusCode, Json<ErrorResponse>) {
         Json(ErrorResponse { error: message }),
     )
 }
+
+fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
+    match error.downcast::<GridMutationError>() {
+        Ok(GridMutationError::Mutation(error)) => bad_request(error.to_string()),
+        Ok(GridMutationError::Persistence(error)) => internal_error(error.to_string()),
+        Err(error) => internal_error(error.to_string()),
+    }
+}
+
 impl TryFrom<&str> for SupportedCommand {
     type Error = String;
 
@@ -140,9 +143,10 @@ mod tests {
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{ExchangeRules, Exposure};
-    use grid_engine::instance::PendingOrder;
-    use grid_engine::manager::InstanceManager;
+    use grid_engine::grid::{GridId, Instrument, Venue};
+    use grid_engine::manager::GridManager;
     use grid_engine::ports::{ClockPort, OrderStatus, StateRepositoryPort};
+    use grid_engine::runtime::PendingOrder;
     use grid_protocol::GridStatus;
     use serde_json::json;
     use tower::ServiceExt;
@@ -203,11 +207,11 @@ mod tests {
     }
 
     fn app_state_with_persistence(repository: Arc<dyn StateRepositoryPort>) -> ServerState {
-        let mut manager = InstanceManager::new(Arc::new(FakeClock));
+        let mut manager = GridManager::new(Arc::new(FakeClock));
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("btc-core"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
                 GridConfig {
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -225,20 +229,20 @@ mod tests {
                 test_exchange_rules(),
             )
             .unwrap();
-        let tick = grid_engine::ports::PriceTick {
-            symbol: "BTCUSDT".into(),
-            reference_price: 95.0,
-            mark_price: 95.0,
-            timestamp: Utc::now(),
-        };
-        manager.on_price_tick(&tick).unwrap();
-        let instance = manager.get_instance("BTCUSDT").unwrap().id.clone();
-        let strategy = manager.get_instance(&instance).unwrap();
-        let strategy = manager
-            .get_instance(&strategy.id)
-            .expect("instance should still exist");
+        manager
+            .observe(
+                &GridId::new("btc-core"),
+                grid_engine::observation::GridObservation::Market(
+                    grid_engine::observation::MarketObservation {
+                        reference_price: 95.0,
+                    },
+                ),
+            )
+            .unwrap();
+        let grid = manager
+            .get_grid("btc-core")
+            .expect("grid should still exist");
         let pending_order = PendingOrder {
-            symbol: "BTCUSDT".into(),
             order_id: Some("order-1".into()),
             client_order_id: "client-1".into(),
             side: grid_core::types::Side::Buy,
@@ -248,17 +252,19 @@ mod tests {
             status: OrderStatus::New,
         };
         manager
-            .restore_instance_state(&grid_engine::ports::GridSnapshot {
-                id: strategy.id.clone(),
-                symbol: strategy.symbol.clone(),
-                config: strategy.config.clone(),
-                status: strategy.status.clone(),
-                current_exposure: strategy.current_exposure.clone(),
-                target_exposure: strategy.target_exposure.clone(),
+            .restore_grid_state(&grid_engine::ports::GridSnapshot {
+                grid_id: grid.id.clone(),
+                instrument: grid.instrument.clone(),
+                config: grid.config.clone(),
+                status: grid.status.clone(),
+                current_exposure: grid.current_exposure.clone(),
+                target_exposure: grid.target_exposure.clone(),
                 pending_order: Some(pending_order),
-                risk_state: strategy.risk_state.clone(),
-                reference_price: strategy.reference_price,
-                out_of_band_since: strategy.out_of_band_since,
+                risk: grid.risk_state.clone(),
+                observed: grid_engine::snapshot::ObservedState {
+                    reference_price: grid.reference_price,
+                    out_of_band_since: grid.out_of_band_since,
+                },
             })
             .unwrap();
         let (events, _) = tokio::sync::broadcast::channel::<WsEvent>(16);
@@ -269,7 +275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_instances_returns_registered_instances() {
+    async fn list_grids_returns_registered_grids() {
         let response = router(app_state())
             .oneshot(
                 Request::builder()
@@ -285,15 +291,15 @@ mod tests {
         let payload: Vec<GridSummary> = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(payload.len(), 1);
-        assert_eq!(payload[0].id, "BTCUSDT");
+        assert_eq!(payload[0].id, "btc-core");
     }
 
     #[tokio::test]
-    async fn get_snapshot_returns_instance_snapshot() {
+    async fn get_snapshot_returns_grid_snapshot() {
         let response = router(app_state())
             .oneshot(
                 Request::builder()
-                    .uri("/grids/BTCUSDT/snapshot")
+                    .uri("/grids/btc-core/snapshot")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -304,10 +310,11 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: GridSnapshot = serde_json::from_slice(&body).unwrap();
 
-        assert_eq!(payload.id, "BTCUSDT");
+        assert_eq!(payload.id, "btc-core");
         assert_eq!(payload.reference_price, Some(95.0));
         assert_eq!(payload.target_exposure, Some(4.0));
         assert!(payload.pending_order.is_some());
+        assert_eq!(payload.pending_order.as_ref().unwrap().symbol, "BTCUSDT");
     }
 
     #[tokio::test]
@@ -315,7 +322,7 @@ mod tests {
         let response = router(app_state())
             .oneshot(
                 Request::builder()
-                    .uri("/grids/BTCUSDT/snapshot")
+                    .uri("/grids/btc-core/snapshot")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -335,7 +342,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
@@ -359,7 +366,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "flatten-now" })).unwrap(),
@@ -373,12 +380,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_command_rejects_non_paused_instance() {
+    async fn resume_command_rejects_non_paused_grid() {
         let response = router(app_state())
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "resume" })).unwrap(),
@@ -400,7 +407,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
@@ -414,7 +421,7 @@ mod tests {
         let snapshot = app
             .oneshot(
                 Request::builder()
-                    .uri("/grids/BTCUSDT/snapshot")
+                    .uri("/grids/btc-core/snapshot")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -435,7 +442,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
@@ -449,7 +456,7 @@ mod tests {
         let snapshot = app
             .oneshot(
                 Request::builder()
-                    .uri("/grids/BTCUSDT/snapshot")
+                    .uri("/grids/btc-core/snapshot")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -463,7 +470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_command_reactivates_paused_instance() {
+    async fn resume_command_reactivates_paused_grid() {
         let app = router(app_state());
 
         let pause = app
@@ -471,7 +478,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "pause" })).unwrap(),
@@ -487,7 +494,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&json!({ "command": "resume" })).unwrap(),
@@ -501,7 +508,7 @@ mod tests {
         let snapshot = app
             .oneshot(
                 Request::builder()
-                    .uri("/grids/BTCUSDT/snapshot")
+                    .uri("/grids/btc-core/snapshot")
                     .body(Body::empty())
                     .unwrap(),
             )

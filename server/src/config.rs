@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-use grid_engine::key::GridId;
+use grid_engine::grid::{GridId, Instrument, Venue};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -16,6 +16,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GridDefinition {
+    pub grid_id: String,
+    pub venue: Venue,
     pub symbol: String,
     pub lower_price: f64,
     pub upper_price: f64,
@@ -56,7 +58,11 @@ impl Config {
 
 impl GridDefinition {
     pub fn grid_id(&self) -> GridId {
-        GridId::from_symbol(self.symbol.clone())
+        GridId::new(self.grid_id.clone())
+    }
+
+    pub fn instrument(&self) -> Instrument {
+        Instrument::new(self.venue, self.symbol.clone())
     }
 
     pub fn grid_config(&self) -> GridConfig {
@@ -113,6 +119,8 @@ rest_base_url = "http://127.0.0.1:18080"
 ws_base_url = "ws://127.0.0.1:18081"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -121,6 +129,8 @@ short_exposure_units = 6.0
 notional_per_unit = 3000.0
 
 [[grids]]
+grid_id = "eth-core"
+venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
@@ -137,7 +147,7 @@ out_of_band_policy = "hold"
         assert_eq!(config.bind_address, "127.0.0.1:9000");
         assert_eq!(config.grids.len(), 2);
         assert_eq!(config.grids[0].symbol, "BTCUSDT");
-        assert_eq!(config.grids[0].grid_id().as_str(), "BTCUSDT");
+        assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
         assert_eq!(
             config.grids[1].shape_family,
             grid_core::strategy::ShapeFamily::Concave
@@ -160,6 +170,8 @@ out_of_band_policy = "hold"
 environment = "paper"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -190,6 +202,8 @@ notional_per_unit = 375.0
 environment = "paper"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -202,10 +216,10 @@ out_of_band_policy = "reduce_only"
         )
         .unwrap();
 
-        let instance = &config.grids[0];
-        assert_eq!(instance.shape_family, ShapeFamily::Concave);
-        assert_eq!(instance.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
-        assert_eq!(instance.budget().max_notional, 3000.0);
+        let grid = &config.grids[0];
+        assert_eq!(grid.shape_family, ShapeFamily::Concave);
+        assert_eq!(grid.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
+        assert_eq!(grid.budget().max_notional, 3000.0);
     }
 
     #[test]
@@ -223,5 +237,28 @@ out_of_band_policy = "reduce_only"
                 .join("testnet")
                 .join("grid-server.sqlite")
         );
+    }
+
+    #[test]
+    fn parses_explicit_grid_id_from_config_instead_of_deriving_from_symbol() {
+        let config = parse_config(
+            r#"
+environment = "paper"
+
+[[grids]]
+grid_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.grids[0].symbol, "BTCUSDT");
+        assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
     }
 }

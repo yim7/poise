@@ -3,12 +3,13 @@ use grid_core::risk::{self, CapacityBudget, ExposureIntent, RiskDecision};
 use grid_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use grid_core::types::{Exposure, Side};
 
-use crate::execution_plan::{ExecutionAction, ExecutionPlan, is_meetable_minimum, round_to_step};
-use crate::instance::{GridStatus, StrategyInstance};
+use crate::execution_plan::{ExecutionAction, is_meetable_minimum, round_to_step};
 use crate::ports::OrderRequest;
+use crate::runtime::{GridRuntime, GridStatus};
 
 pub struct ReconcileResult {
-    pub plan: ExecutionPlan,
+    pub effects: Vec<ExecutionAction>,
+    pub events: Vec<DomainEvent>,
     pub target_exposure: Exposure,
     pub new_status: Option<GridStatus>,
 }
@@ -19,25 +20,21 @@ pub struct ReconcileResult {
 /// 1. 调用 core::band_status 判断带内/带外
 /// 2. 根据状态决定目标占用
 /// 3. 调用 core::evaluate_risk 风控拦截
-/// 4. 生成 ExecutionPlan（数据，不是 IO）
-pub fn reconcile(
-    instance: &StrategyInstance,
-    price: f64,
-    budget: &CapacityBudget,
-) -> ReconcileResult {
-    let band = strategy::band_status(price, &instance.config);
+/// 4. 生成 effect 列表（数据，不是 IO）
+pub fn reconcile(grid: &GridRuntime, price: f64, budget: &CapacityBudget) -> ReconcileResult {
+    let band = strategy::band_status(price, &grid.config);
 
     let (target, new_status) = match &band {
-        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(instance)),
-        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(instance, *policy),
+        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(grid)),
+        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(grid, *policy),
     };
 
     let intent = ExposureIntent {
-        current: instance.current_exposure.clone(),
+        current: grid.current_exposure.clone(),
         target: target.clone(),
-        unit_notional: instance.config.notional_per_unit,
-        realized_pnl_today: instance.risk_state.realized_pnl_today,
-        unrealized_pnl: instance.risk_state.unrealized_pnl,
+        unit_notional: grid.config.notional_per_unit,
+        realized_pnl_today: grid.risk_state.realized_pnl_today,
+        unrealized_pnl: grid.risk_state.unrealized_pnl,
     };
 
     let decision = risk::evaluate_risk(&intent, budget);
@@ -53,8 +50,9 @@ pub fn reconcile(
         }
         RiskDecision::Deny { reason } => {
             return ReconcileResult {
-                plan: ExecutionPlan::hold(reason),
-                target_exposure: instance.current_exposure.clone(),
+                effects: vec![ExecutionAction::NoOp],
+                events: vec![DomainEvent::RiskDenied { reason }],
+                target_exposure: grid.current_exposure.clone(),
                 new_status: None,
             };
         }
@@ -68,21 +66,19 @@ pub fn reconcile(
             ..
         }
     ) && approved_target.0.abs()
-        > instance.current_exposure.0.abs();
+        > grid.current_exposure.0.abs();
 
     if would_increase_risk_out_of_band {
         return ReconcileResult {
-            plan: ExecutionPlan {
-                actions: vec![ExecutionAction::NoOp],
-                events,
-            },
+            effects: vec![ExecutionAction::NoOp],
+            events,
             target_exposure: approved_target,
             new_status,
         };
     }
 
     // 如果已有匹配的 pending_order（目标一致），避免重复下单。
-    let pending_matches_target = instance
+    let pending_matches_target = grid
         .pending_order
         .as_ref()
         .map(|pending| (pending.target_exposure.0 - approved_target.0).abs() < f64::EPSILON)
@@ -90,67 +86,65 @@ pub fn reconcile(
 
     if pending_matches_target {
         return ReconcileResult {
-            plan: ExecutionPlan {
-                actions: vec![ExecutionAction::NoOp],
-                events,
-            },
+            effects: vec![ExecutionAction::NoOp],
+            events,
             target_exposure: approved_target,
             new_status,
         };
     }
 
-    let delta = instance.current_exposure.delta(&approved_target);
+    let delta = grid.current_exposure.delta(&approved_target);
     if delta.is_zero() {
         return ReconcileResult {
-            plan: ExecutionPlan {
-                actions: vec![ExecutionAction::NoOp],
-                events,
-            },
+            effects: vec![ExecutionAction::NoOp],
+            events,
             target_exposure: approved_target,
             new_status,
         };
     }
 
     events.push(DomainEvent::ExposureTargetChanged {
-        from: instance.current_exposure.clone(),
+        from: grid.current_exposure.clone(),
         to: approved_target.clone(),
     });
 
     let side = Side::from_exposure(&delta).expect("non-zero delta must have side");
-    let rules = &instance.exchange_rules;
+    let rules = &grid.exchange_rules;
     let price = round_to_step(price, rules.price_tick);
     let quantity = round_to_step(
-        delta.0.abs() * instance.config.base_qty_per_unit(),
+        delta.0.abs() * grid.config.base_qty_per_unit(),
         rules.quantity_step,
     );
 
-    let should_cancel_all = instance.pending_order.is_some();
+    let should_cancel_all = grid.pending_order.is_some();
     if !is_meetable_minimum(price, quantity, rules) {
         return ReconcileResult {
-            plan: ExecutionPlan {
-                actions: if should_cancel_all {
-                    vec![ExecutionAction::CancelAll]
-                } else {
-                    vec![ExecutionAction::NoOp]
-                },
-                events,
+            effects: if should_cancel_all {
+                vec![ExecutionAction::CancelAll {
+                    instrument: grid.instrument.clone(),
+                }]
+            } else {
+                vec![ExecutionAction::NoOp]
             },
+            events,
             target_exposure: approved_target,
             new_status,
         };
     }
 
     let request = OrderRequest {
-        symbol: instance.symbol.clone(),
+        instrument: grid.instrument.clone(),
         side,
         price,
         quantity,
-        client_order_id: format!("{}-reconcile", instance.id),
+        client_order_id: format!("{}-reconcile", grid.id.as_str()),
     };
 
     let actions = if should_cancel_all {
         vec![
-            ExecutionAction::CancelAll,
+            ExecutionAction::CancelAll {
+                instrument: grid.instrument.clone(),
+            },
             ExecutionAction::SubmitOrder {
                 request,
                 target_exposure: approved_target.clone(),
@@ -163,17 +157,16 @@ pub fn reconcile(
         }]
     };
 
-    let plan = ExecutionPlan { actions, events };
-
     ReconcileResult {
-        plan,
+        effects: actions,
+        events,
         target_exposure: approved_target,
         new_status,
     }
 }
 
-fn resolve_in_band_status(instance: &StrategyInstance) -> Option<GridStatus> {
-    match instance.status {
+fn resolve_in_band_status(grid: &GridRuntime) -> Option<GridStatus> {
+    match grid.status {
         GridStatus::WaitingMarketData => Some(GridStatus::Active),
         GridStatus::Frozen | GridStatus::Holding => Some(GridStatus::Active),
         _ => None,
@@ -181,13 +174,13 @@ fn resolve_in_band_status(instance: &StrategyInstance) -> Option<GridStatus> {
 }
 
 fn apply_out_of_band(
-    instance: &StrategyInstance,
+    grid: &GridRuntime,
     policy: OutOfBandPolicy,
 ) -> (Exposure, Option<GridStatus>) {
-    let frozen_target = instance
+    let frozen_target = grid
         .target_exposure
         .clone()
-        .unwrap_or_else(|| instance.current_exposure.clone());
+        .unwrap_or_else(|| grid.current_exposure.clone());
 
     match policy {
         OutOfBandPolicy::Freeze => (frozen_target, Some(GridStatus::Frozen)),
@@ -202,10 +195,10 @@ mod tests {
     use super::*;
     use grid_core::strategy::*;
 
-    fn test_instance() -> StrategyInstance {
-        StrategyInstance::new(
+    fn test_runtime() -> GridRuntime {
+        GridRuntime::new(
             "test".into(),
-            "BTCUSDT".into(),
+            crate::grid::Instrument::new(crate::grid::Venue::Binance, "BTCUSDT"),
             GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -224,9 +217,8 @@ mod tests {
         )
     }
 
-    fn test_pending_order(target: Exposure) -> crate::instance::PendingOrder {
-        crate::instance::PendingOrder {
-            symbol: "BTCUSDT".to_string(),
+    fn test_pending_order(target: Exposure) -> crate::runtime::PendingOrder {
+        crate::runtime::PendingOrder {
             order_id: Some("order-1".to_string()),
             client_order_id: "client-1".to_string(),
             side: grid_core::types::Side::Buy,
@@ -247,26 +239,30 @@ mod tests {
 
     #[test]
     fn reconcile_noop_when_exposure_unchanged() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(0.0);
-        instance.reference_price = Some(100.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
+        grid.reference_price = Some(100.0);
 
-        let result = reconcile(&instance, 100.0, &test_budget());
-        assert!(!result.plan.has_actions());
+        let result = reconcile(&grid, 100.0, &test_budget());
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| !matches!(effect, ExecutionAction::NoOp))
+        );
     }
 
     #[test]
     fn reconcile_produces_event_when_exposure_changes() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(0.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
 
-        let result = reconcile(&instance, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0, &test_budget());
         assert!((result.target_exposure.0 - 8.0).abs() < 0.001);
         assert!(
             result
-                .plan
                 .events
                 .iter()
                 .any(|e| matches!(e, DomainEvent::ExposureTargetChanged { .. }))
@@ -275,72 +271,72 @@ mod tests {
 
     #[test]
     fn reconcile_freezes_when_out_of_band() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(8.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&instance, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0, &test_budget());
         assert_eq!(result.new_status, Some(GridStatus::Frozen));
     }
 
     #[test]
     fn reconcile_activates_on_first_price() {
-        let instance = test_instance();
-        assert_eq!(instance.status, GridStatus::WaitingMarketData);
+        let grid = test_runtime();
+        assert_eq!(grid.status, GridStatus::WaitingMarketData);
 
-        let result = reconcile(&instance, 100.0, &test_budget());
+        let result = reconcile(&grid, 100.0, &test_budget());
         assert_eq!(result.new_status, Some(GridStatus::Active));
     }
 
     #[test]
     fn reconcile_reactivates_after_reenter() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Frozen;
-        instance.current_exposure = Exposure(8.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Frozen;
+        grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&instance, 100.0, &test_budget());
+        let result = reconcile(&grid, 100.0, &test_budget());
         assert_eq!(result.new_status, Some(GridStatus::Active));
     }
 
     #[test]
     fn reconcile_reduce_only_targets_zero() {
-        let mut instance = test_instance();
-        instance.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(8.0);
+        let mut grid = test_runtime();
+        grid.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&instance, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0, &test_budget());
         assert_eq!(result.new_status, Some(GridStatus::ReducingOnly));
         assert!((result.target_exposure.0).abs() < 0.001);
     }
 
     #[test]
     fn reconcile_terminate_targets_zero() {
-        let mut instance = test_instance();
-        instance.config.out_of_band_policy = OutOfBandPolicy::Terminate;
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(8.0);
+        let mut grid = test_runtime();
+        grid.config.out_of_band_policy = OutOfBandPolicy::Terminate;
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&instance, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0, &test_budget());
         assert_eq!(result.new_status, Some(GridStatus::Terminated));
         assert!((result.target_exposure.0).abs() < 0.001);
     }
 
     #[test]
     fn reconcile_emits_risk_cap_event_when_budget_caps_target() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(0.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
 
         let budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile(&instance, 90.0, &budget);
+        let result = reconcile(&grid, 90.0, &budget);
 
         assert_eq!(result.target_exposure, Exposure(4.0));
-        assert!(result.plan.events.iter().any(|event| matches!(
+        assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied {
                 intended,
@@ -351,20 +347,25 @@ mod tests {
 
     #[test]
     fn reconcile_keeps_risk_cap_event_when_cap_matches_current_exposure() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(4.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(4.0);
 
         let budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile(&instance, 90.0, &budget);
+        let result = reconcile(&grid, 90.0, &budget);
 
-        assert!(!result.plan.has_actions());
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| !matches!(effect, ExecutionAction::NoOp))
+        );
         assert_eq!(result.target_exposure, Exposure(4.0));
-        assert!(result.plan.events.iter().any(|event| matches!(
+        assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied {
                 intended,
@@ -373,7 +374,6 @@ mod tests {
         )));
         assert!(
             !result
-                .plan
                 .events
                 .iter()
                 .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
@@ -382,16 +382,16 @@ mod tests {
 
     #[test]
     fn reconcile_uses_risk_state_pnl_to_cap_target() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(2.0);
-        instance.risk_state.realized_pnl_today = -100.0;
-        instance.risk_state.unrealized_pnl = -25.0;
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(2.0);
+        grid.risk_state.realized_pnl_today = -100.0;
+        grid.risk_state.unrealized_pnl = -25.0;
 
-        let result = reconcile(&instance, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0, &test_budget());
 
         assert_eq!(result.target_exposure, Exposure(0.0));
-        assert!(result.plan.events.iter().any(|event| matches!(
+        assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied {
                 intended,
@@ -402,56 +402,66 @@ mod tests {
 
     #[test]
     fn reconcile_generates_submit_order_for_delta() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(0.0);
-        instance.reference_price = Some(90.0);
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
+        grid.reference_price = Some(90.0);
 
-        let result = reconcile(&instance, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0, &test_budget());
 
         assert!(matches!(
-            result.plan.actions.as_slice(),
+            result.effects.as_slice(),
             [ExecutionAction::SubmitOrder { .. }]
         ));
     }
 
     #[test]
     fn reconcile_does_not_resubmit_when_pending_order_already_matches_target() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.pending_order = Some(test_pending_order(Exposure(8.0)));
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.pending_order = Some(test_pending_order(Exposure(8.0)));
 
-        let result = reconcile(&instance, 90.0, &test_budget());
-        assert!(!result.plan.has_actions());
+        let result = reconcile(&grid, 90.0, &test_budget());
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| !matches!(effect, ExecutionAction::NoOp))
+        );
     }
 
     #[test]
     fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(4.0);
-        instance.target_exposure = Some(Exposure(6.0));
-        instance.config.out_of_band_policy = OutOfBandPolicy::Freeze;
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(4.0);
+        grid.target_exposure = Some(Exposure(6.0));
+        grid.config.out_of_band_policy = OutOfBandPolicy::Freeze;
 
-        let result = reconcile(&instance, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0, &test_budget());
 
         assert_eq!(result.target_exposure.0, 6.0);
-        assert!(!result.plan.has_actions());
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| !matches!(effect, ExecutionAction::NoOp))
+        );
     }
 
     #[test]
     fn reconcile_cancels_all_then_submits_when_pending_order_differs_from_target() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
-        instance.current_exposure = Exposure(0.0);
-        instance.pending_order = Some(test_pending_order(Exposure(4.0)));
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
+        grid.pending_order = Some(test_pending_order(Exposure(4.0)));
 
-        let result = reconcile(&instance, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0, &test_budget());
 
         assert!(matches!(
-            result.plan.actions.as_slice(),
+            result.effects.as_slice(),
             [
-                ExecutionAction::CancelAll,
+                ExecutionAction::CancelAll { .. },
                 ExecutionAction::SubmitOrder { .. }
             ]
         ));
@@ -459,21 +469,21 @@ mod tests {
 
     #[test]
     fn reconcile_rounds_price_and_quantity_by_exchange_rules() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
 
-        let target = grid_core::strategy::target_exposure(99.09, &instance.config);
-        instance.current_exposure = Exposure(target.0 - 0.8);
-        instance.exchange_rules = grid_core::types::ExchangeRules {
+        let target = grid_core::strategy::target_exposure(99.09, &grid.config);
+        grid.current_exposure = Exposure(target.0 - 0.8);
+        grid.exchange_rules = grid_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.7,
             min_qty: 0.0,
             min_notional: 0.0,
         };
 
-        let result = reconcile(&instance, 99.09, &test_budget());
+        let result = reconcile(&grid, 99.09, &test_budget());
 
-        match result.plan.actions.as_slice() {
+        match result.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
                     request: req,
@@ -490,19 +500,24 @@ mod tests {
 
     #[test]
     fn reconcile_does_not_submit_when_below_exchange_minimums() {
-        let mut instance = test_instance();
-        instance.status = GridStatus::Active;
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
 
-        let target = grid_core::strategy::target_exposure(99.09, &instance.config);
-        instance.current_exposure = Exposure(target.0 - 0.8);
-        instance.exchange_rules = grid_core::types::ExchangeRules {
+        let target = grid_core::strategy::target_exposure(99.09, &grid.config);
+        grid.current_exposure = Exposure(target.0 - 0.8);
+        grid.exchange_rules = grid_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.7,
             min_qty: 10.0,
             min_notional: 999999.0,
         };
 
-        let result = reconcile(&instance, 99.09, &test_budget());
-        assert!(!result.plan.has_actions());
+        let result = reconcile(&grid, 99.09, &test_budget());
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| !matches!(effect, ExecutionAction::NoOp))
+        );
     }
 }

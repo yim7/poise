@@ -2,10 +2,15 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use grid_core::events::DomainEvent;
-use grid_engine::instance::PendingOrder;
-use grid_engine::instance::StrategyInstance;
-use grid_engine::manager::{InstanceManager, TickOutcome};
-use grid_engine::ports::{GridSnapshot, StateRepositoryPort};
+use grid_engine::command::GridCommand;
+use grid_engine::grid::{GridId, Instrument};
+use grid_engine::manager::GridManager;
+use grid_engine::observation::{
+    GridObservation, MarketObservation, OrderObservation, PositionObservation,
+};
+use grid_engine::ports::StateRepositoryPort;
+use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder};
+use grid_engine::transition::GridTransition;
 use grid_protocol::{
     BandBoundary as ProtocolBandBoundary, DomainEvent as ProtocolDomainEvent,
     GridConfig as ProtocolGridConfig, GridSnapshot as ProtocolGridSnapshot,
@@ -15,7 +20,7 @@ use grid_protocol::{
 };
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-pub type SharedManager = Arc<RwLock<InstanceManager>>;
+pub type SharedManager = Arc<RwLock<GridManager>>;
 
 #[derive(Clone)]
 pub struct GridPlatformService {
@@ -26,9 +31,9 @@ pub struct GridPlatformService {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GridBinding {
+pub struct GridInstrument {
     pub id: String,
-    pub symbol: String,
+    pub instrument: Instrument,
 }
 
 #[derive(Debug)]
@@ -36,6 +41,14 @@ pub enum GridMutationError {
     Mutation(anyhow::Error),
     Persistence(anyhow::Error),
 }
+
+impl std::fmt::Display for GridMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
+impl std::error::Error for GridMutationError {}
 
 impl GridMutationError {
     pub fn message(&self) -> String {
@@ -55,7 +68,7 @@ impl TransitionResult for () {
     }
 }
 
-impl TransitionResult for TickOutcome {
+impl TransitionResult for GridTransition {
     fn domain_events(&self) -> &[DomainEvent] {
         &self.events
     }
@@ -63,7 +76,7 @@ impl TransitionResult for TickOutcome {
 
 impl GridPlatformService {
     pub fn new(
-        manager: InstanceManager,
+        manager: GridManager,
         repository: Arc<dyn StateRepositoryPort>,
         events: broadcast::Sender<WsEvent>,
     ) -> Self {
@@ -86,13 +99,13 @@ impl GridPlatformService {
 
     pub async fn has_grid(&self, id: &str) -> bool {
         let manager = self.manager.read().await;
-        manager.get_instance(id).is_some()
+        manager.get_grid(id).is_some()
     }
 
     pub async fn list_grid_summaries(&self) -> Vec<GridSummary> {
         let manager = self.manager.read().await;
         manager
-            .list_instances()
+            .list_grids()
             .into_iter()
             .map(protocol_grid_summary)
             .collect()
@@ -100,59 +113,119 @@ impl GridPlatformService {
 
     pub async fn grid_snapshot(&self, id: &str) -> Option<ProtocolGridSnapshot> {
         let manager = self.manager.read().await;
-        manager.get_instance(id).map(protocol_grid_snapshot)
+        manager.get_grid(id).map(protocol_grid_snapshot)
     }
 
-    pub async fn grid_bindings(&self) -> Vec<GridBinding> {
+    pub async fn grid_instruments(&self) -> Vec<GridInstrument> {
         let manager = self.manager.read().await;
         manager
-            .list_instances()
+            .list_grids()
             .into_iter()
-            .map(|grid| GridBinding {
-                id: grid.id.clone(),
-                symbol: grid.symbol.clone(),
+            .map(|grid| GridInstrument {
+                id: grid.id.as_str().to_string(),
+                instrument: grid.instrument.clone(),
             })
             .collect()
     }
 
-    pub async fn grid_id_for_symbol(&self, symbol: &str) -> Option<String> {
+    pub async fn resolve_grid_id(&self, instrument: &Instrument) -> Option<String> {
         let manager = self.manager.read().await;
         manager
-            .list_instances()
-            .into_iter()
-            .find(|grid| grid.symbol == symbol)
-            .map(|grid| grid.id.clone())
+            .resolve_grid_id(instrument)
+            .map(|grid_id| grid_id.as_str().to_string())
     }
 
-    pub async fn reconcile_context_for_symbol(&self, symbol: &str) -> Option<(String, f64)> {
-        let manager = self.manager.read().await;
-        manager.list_instances().into_iter().find_map(|grid| {
-            if grid.symbol == symbol {
-                grid.reference_price
-                    .map(|reference_price| (grid.id.clone(), reference_price))
-            } else {
-                None
-            }
+    pub async fn observe_market(&self, id: &str, reference_price: f64) -> Result<GridTransition> {
+        self.mutate_grid(id, |manager| {
+            manager.observe(
+                &GridId::new(id),
+                GridObservation::Market(MarketObservation { reference_price }),
+            )
         })
+        .await
+        .map_err(anyhow::Error::new)
     }
 
-    pub(crate) async fn mutate_grid<R, F>(
+    pub async fn command(&self, id: &str, command: GridCommand) -> Result<GridTransition> {
+        self.mutate_grid(id, |manager| {
+            manager.command(&GridId::new(id), command.clone())
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn observe_position(
+        &self,
+        id: &str,
+        observation: PositionObservation,
+    ) -> Result<GridTransition> {
+        self.mutate_grid(id, |manager| {
+            manager.observe(
+                &GridId::new(id),
+                GridObservation::Position(observation.clone()),
+            )
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn observe_order(
+        &self,
+        id: &str,
+        observation: OrderObservation,
+    ) -> Result<GridTransition> {
+        self.mutate_grid(id, |manager| {
+            manager.observe(
+                &GridId::new(id),
+                GridObservation::Order(observation.clone()),
+            )
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn record_pending_order(&self, id: &str, pending: PendingOrder) -> Result<()> {
+        self.mutate_grid(id, |manager| {
+            manager.record_submitted_order(&GridId::new(id), pending.clone())?;
+            Ok(())
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn clear_pending_order(&self, id: &str) -> Result<()> {
+        self.mutate_grid(id, |manager| manager.clear_pending_order(&GridId::new(id)))
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    pub async fn mark_pending_order_canceling(&self, id: &str) -> Result<()> {
+        self.mutate_grid(id, |manager| {
+            manager.mark_pending_order_canceling(&GridId::new(id))
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    async fn mutate_grid<R, F>(
         &self,
         id: &str,
         mutate: F,
     ) -> std::result::Result<R, GridMutationError>
     where
-        F: FnOnce(&mut InstanceManager) -> Result<R>,
+        F: FnOnce(&mut GridManager) -> Result<R>,
         R: TransitionResult,
     {
         let _mutation_guard = self.mutation_lock.lock().await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot =
-                snapshot_for_id(&manager, id).map_err(GridMutationError::Mutation)?;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
             let result = mutate(&mut manager).map_err(GridMutationError::Mutation)?;
-            let next_snapshot =
-                snapshot_for_id(&manager, id).map_err(GridMutationError::Mutation)?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
             (previous_snapshot, result, next_snapshot)
         };
 
@@ -163,11 +236,11 @@ impl GridPlatformService {
         {
             let rollback_result = {
                 let mut manager = self.manager.write().await;
-                manager.restore_instance_state(&previous_snapshot)
+                manager.restore_grid_state(&previous_snapshot)
             };
             if let Err(rollback_error) = rollback_result {
                 return Err(GridMutationError::Persistence(anyhow!(
-                    "failed to persist instance `{id}`: {error}; rollback failed: {rollback_error}"
+                    "failed to persist grid `{id}`: {error}; rollback failed: {rollback_error}"
                 )));
             }
             return Err(GridMutationError::Persistence(error));
@@ -189,28 +262,6 @@ impl GridPlatformService {
 
         Ok(result)
     }
-}
-
-pub(crate) fn snapshot_from_instance(instance: &StrategyInstance) -> GridSnapshot {
-    GridSnapshot {
-        id: instance.id.clone(),
-        symbol: instance.symbol.clone(),
-        config: instance.config.clone(),
-        status: instance.status.clone(),
-        current_exposure: instance.current_exposure.clone(),
-        target_exposure: instance.target_exposure.clone(),
-        pending_order: instance.pending_order.clone(),
-        risk_state: instance.risk_state.clone(),
-        reference_price: instance.reference_price,
-        out_of_band_since: instance.out_of_band_since,
-    }
-}
-
-fn snapshot_for_id(manager: &InstanceManager, id: &str) -> Result<GridSnapshot> {
-    let instance = manager
-        .get_instance(id)
-        .ok_or_else(|| anyhow!("instance `{id}` not found"))?;
-    Ok(snapshot_from_instance(instance))
 }
 
 fn protocol_domain_event(event: &DomainEvent) -> ProtocolDomainEvent {
@@ -253,45 +304,46 @@ fn protocol_domain_event(event: &DomainEvent) -> ProtocolDomainEvent {
     }
 }
 
-fn protocol_grid_summary(value: &StrategyInstance) -> GridSummary {
+fn protocol_grid_summary(value: &GridRuntime) -> GridSummary {
     GridSummary {
-        id: value.id.clone(),
-        symbol: value.symbol.clone(),
+        id: value.id.as_str().to_string(),
+        symbol: value.symbol().to_string(),
         status: protocol_grid_status(value.status.clone()),
         reference_price: value.reference_price,
     }
 }
 
-fn protocol_grid_snapshot(value: &StrategyInstance) -> ProtocolGridSnapshot {
+fn protocol_grid_snapshot(value: &GridRuntime) -> ProtocolGridSnapshot {
     ProtocolGridSnapshot {
-        id: value.id.clone(),
-        symbol: value.symbol.clone(),
+        id: value.id.as_str().to_string(),
+        symbol: value.symbol().to_string(),
         status: protocol_grid_status(value.status.clone()),
         current_exposure: value.current_exposure.0,
         target_exposure: value.target_exposure.as_ref().map(|exposure| exposure.0),
         reference_price: value.reference_price,
-        pending_order: value.pending_order.as_ref().map(protocol_pending_order),
+        pending_order: value
+            .pending_order
+            .as_ref()
+            .map(|pending_order| protocol_pending_order(value.symbol(), pending_order)),
         config: protocol_grid_config(&value.config),
     }
 }
 
-fn protocol_grid_status(value: grid_engine::instance::GridStatus) -> ProtocolGridStatus {
+fn protocol_grid_status(value: GridStatus) -> ProtocolGridStatus {
     match value {
-        grid_engine::instance::GridStatus::WaitingMarketData => {
-            ProtocolGridStatus::WaitingMarketData
-        }
-        grid_engine::instance::GridStatus::Active => ProtocolGridStatus::Active,
-        grid_engine::instance::GridStatus::Frozen => ProtocolGridStatus::Frozen,
-        grid_engine::instance::GridStatus::ReducingOnly => ProtocolGridStatus::ReducingOnly,
-        grid_engine::instance::GridStatus::Holding => ProtocolGridStatus::Holding,
-        grid_engine::instance::GridStatus::Terminated => ProtocolGridStatus::Terminated,
-        grid_engine::instance::GridStatus::Paused => ProtocolGridStatus::Paused,
+        GridStatus::WaitingMarketData => ProtocolGridStatus::WaitingMarketData,
+        GridStatus::Active => ProtocolGridStatus::Active,
+        GridStatus::Frozen => ProtocolGridStatus::Frozen,
+        GridStatus::ReducingOnly => ProtocolGridStatus::ReducingOnly,
+        GridStatus::Holding => ProtocolGridStatus::Holding,
+        GridStatus::Terminated => ProtocolGridStatus::Terminated,
+        GridStatus::Paused => ProtocolGridStatus::Paused,
     }
 }
 
-fn protocol_pending_order(value: &PendingOrder) -> ProtocolPendingOrder {
+fn protocol_pending_order(symbol: &str, value: &PendingOrder) -> ProtocolPendingOrder {
     ProtocolPendingOrder {
-        symbol: value.symbol.clone(),
+        symbol: symbol.to_string(),
         order_id: value.order_id.clone(),
         client_order_id: value.client_order_id.clone(),
         side: protocol_side(value.side),
@@ -362,10 +414,13 @@ mod tests {
     use grid_core::events::DomainEvent;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{ExchangeRules, Exposure};
-    use grid_engine::instance::RiskState;
-    use grid_engine::manager::InstanceManager;
-    use grid_engine::ports::{ClockPort, GridSnapshot, StateRepositoryPort};
+    use grid_core::types::ExchangeRules;
+    use grid_engine::command::GridCommand;
+    use grid_engine::grid::{GridId, Instrument, Venue};
+    use grid_engine::manager::GridManager;
+    use grid_engine::observation::{GridObservation, MarketObservation};
+    use grid_engine::ports::{ClockPort, StateRepositoryPort};
+    use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_protocol::{
         DomainEvent as ProtocolDomainEvent, GridSnapshot as ProtocolGridSnapshot,
         GridStatus as ProtocolGridStatus, GridSummary,
@@ -379,24 +434,48 @@ mod tests {
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_events();
 
-        let tick = grid_engine::ports::PriceTick {
-            symbol: "BTCUSDT".into(),
-            reference_price: 95.0,
-            mark_price: 95.0,
-            timestamp: Utc::now(),
-        };
-
         let outcome = service
-            .mutate_grid("BTCUSDT", |manager| manager.on_price_tick(&tick))
+            .mutate_grid("btc-core", |manager| {
+                manager.observe(
+                    &GridId::new("btc-core"),
+                    GridObservation::Market(MarketObservation {
+                        reference_price: 95.0,
+                    }),
+                )
+            })
             .await
             .unwrap();
 
         assert_eq!(outcome.events.len(), 1);
-        assert_eq!(repository.events_for("BTCUSDT"), outcome.events);
+        assert_eq!(repository.events_for("btc-core"), outcome.events);
 
         let broadcast = receiver.recv().await.unwrap();
-        assert_eq!(broadcast.grid_id, "BTCUSDT");
+        assert_eq!(broadcast.grid_id, "btc-core");
         assert_eq!(broadcast.event, protocol_domain_event(&outcome.events[0]));
+    }
+
+    #[tokio::test]
+    async fn mutate_grid_persists_engine_snapshot_without_server_side_snapshot_builder() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        service
+            .mutate_grid("btc-core", |manager| {
+                manager.observe(
+                    &GridId::new("btc-core"),
+                    GridObservation::Market(MarketObservation {
+                        reference_price: 95.0,
+                    }),
+                )
+            })
+            .await
+            .unwrap();
+
+        let manager_handle = service.manager();
+        let manager = manager_handle.read().await;
+        let expected = manager.get_grid("btc-core").unwrap().snapshot();
+
+        assert_eq!(repository.snapshot_for("btc-core"), Some(expected));
     }
 
     #[tokio::test]
@@ -405,15 +484,15 @@ mod tests {
         let service = test_service(repository as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_events();
 
-        let tick = grid_engine::ports::PriceTick {
-            symbol: "BTCUSDT".into(),
-            reference_price: 95.0,
-            mark_price: 95.0,
-            timestamp: Utc::now(),
-        };
-
         let error = match service
-            .mutate_grid("BTCUSDT", |manager| manager.on_price_tick(&tick))
+            .mutate_grid("btc-core", |manager| {
+                manager.observe(
+                    &GridId::new("btc-core"),
+                    GridObservation::Market(MarketObservation {
+                        reference_price: 95.0,
+                    }),
+                )
+            })
             .await
         {
             Ok(_) => panic!("mutation should fail when save fails"),
@@ -421,7 +500,7 @@ mod tests {
         };
         assert!(matches!(error, super::GridMutationError::Persistence(_)));
 
-        let snapshot = service.grid_snapshot("BTCUSDT").await.unwrap();
+        let snapshot = service.grid_snapshot("btc-core").await.unwrap();
         assert_eq!(snapshot.target_exposure, None);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
@@ -437,12 +516,14 @@ mod tests {
         let mut receiver = service.subscribe_events();
 
         service
-            .mutate_grid("BTCUSDT", |manager| manager.pause_instance("BTCUSDT"))
+            .mutate_grid("btc-core", |manager| {
+                manager.command(&GridId::new("btc-core"), GridCommand::Pause)
+            })
             .await
             .unwrap();
 
         let broadcast = receiver.recv().await.unwrap();
-        assert_eq!(broadcast.grid_id, "BTCUSDT");
+        assert_eq!(broadcast.grid_id, "btc-core");
         assert_eq!(broadcast.event, ProtocolDomainEvent::SnapshotUpdated);
     }
 
@@ -452,22 +533,34 @@ mod tests {
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
 
         let summaries: Vec<GridSummary> = service.list_grid_summaries().await;
-        let snapshot: ProtocolGridSnapshot = service.grid_snapshot("BTCUSDT").await.unwrap();
+        let snapshot: ProtocolGridSnapshot = service.grid_snapshot("btc-core").await.unwrap();
 
         assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, "BTCUSDT");
+        assert_eq!(summaries[0].id, "btc-core");
         assert_eq!(summaries[0].status, ProtocolGridStatus::WaitingMarketData);
-        assert_eq!(snapshot.id, "BTCUSDT");
+        assert_eq!(snapshot.id, "btc-core");
         assert_eq!(snapshot.status, ProtocolGridStatus::WaitingMarketData);
+    }
+
+    #[tokio::test]
+    async fn resolves_grid_id_from_instrument() {
+        let service =
+            test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
+
+        let grid_id = service
+            .resolve_grid_id(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .await;
+
+        assert_eq!(grid_id, Some("btc-core".to_string()));
     }
 
     fn test_service(repository: Arc<dyn StateRepositoryPort>) -> GridPlatformService {
         let (events, _) = tokio::sync::broadcast::channel(16);
-        let mut manager = InstanceManager::new(Arc::new(FixedClock));
+        let mut manager = GridManager::new(Arc::new(FixedClock));
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("btc-core"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
                 GridConfig {
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -496,7 +589,7 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryRepository {
-        snapshots: Mutex<HashMap<String, GridSnapshot>>,
+        snapshots: Mutex<HashMap<String, GridRuntimeSnapshot>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
     }
 
@@ -509,6 +602,10 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
         }
+
+        fn snapshot_for(&self, id: &str) -> Option<GridRuntimeSnapshot> {
+            self.snapshots.lock().unwrap().get(id).cloned()
+        }
     }
 
     #[async_trait::async_trait]
@@ -516,7 +613,7 @@ mod tests {
         async fn save_transition(
             &self,
             id: &str,
-            state: &GridSnapshot,
+            state: &GridRuntimeSnapshot,
             events: &[DomainEvent],
         ) -> Result<()> {
             self.snapshots
@@ -532,7 +629,7 @@ mod tests {
             Ok(())
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+        async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>> {
             Ok(self.snapshots.lock().unwrap().get(id).cloned())
         }
 
@@ -549,13 +646,13 @@ mod tests {
         async fn save_transition(
             &self,
             _id: &str,
-            _state: &GridSnapshot,
+            _state: &GridRuntimeSnapshot,
             _events: &[DomainEvent],
         ) -> Result<()> {
             Err(anyhow!("injected save failure"))
         }
 
-        async fn load_grid_state(&self, _id: &str) -> Result<Option<GridSnapshot>> {
+        async fn load_grid_state(&self, _id: &str) -> Result<Option<GridRuntimeSnapshot>> {
             Ok(None)
         }
 
@@ -573,26 +670,12 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn _test_snapshot() -> GridSnapshot {
-        GridSnapshot {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
-            status: grid_engine::instance::GridStatus::Active,
-            current_exposure: Exposure(0.0),
-            target_exposure: None,
-            pending_order: None,
-            risk_state: RiskState::default(),
-            reference_price: Some(95.0),
-            out_of_band_since: None,
-        }
+    fn _test_snapshot() -> GridRuntimeSnapshot {
+        test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>)
+            .manager
+            .blocking_read()
+            .get_grid("btc-core")
+            .unwrap()
+            .snapshot()
     }
 }

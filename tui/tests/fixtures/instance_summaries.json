@@ -1,6 +1,6 @@
 [
   {
-    "id": "BTCUSDT",
+    "id": "btc-core",
     "symbol": "BTCUSDT",
     "status": "active",
     "reference_price": 101.25

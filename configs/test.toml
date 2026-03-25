@@ -6,6 +6,8 @@ rest_base_url = "http://127.0.0.1:1"
 ws_base_url = "ws://127.0.0.1:1"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -14,6 +16,8 @@ short_exposure_units = 8.0
 notional_per_unit = 375.0
 
 [[grids]]
+grid_id = "eth-core"
+venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0

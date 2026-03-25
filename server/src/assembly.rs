@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use grid_binance::BinanceAdapter;
-use grid_engine::key::GridId;
-use grid_engine::manager::InstanceManager;
+use grid_engine::grid::{GridId, Instrument};
+use grid_engine::manager::GridManager;
 use grid_engine::ports::{ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort};
 use grid_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
@@ -24,13 +24,17 @@ pub struct ServerPlatform {
     pub runtime: ServerRuntime,
 }
 
-fn validate_unique_symbols<'a>(
-    symbols: impl IntoIterator<Item = &'a str>,
+fn validate_unique_instruments(
+    instruments: impl IntoIterator<Item = Instrument>,
 ) -> Result<(), anyhow::Error> {
-    let mut known_symbols = HashSet::new();
-    for symbol in symbols {
-        if !known_symbols.insert(symbol) {
-            return Err(anyhow!("duplicate symbol `{symbol}`"));
+    let mut known_instruments = HashSet::new();
+    for instrument in instruments {
+        if !known_instruments.insert(instrument.clone()) {
+            return Err(anyhow!(
+                "duplicate instrument `{}:{}`",
+                instrument.venue.as_str(),
+                instrument.symbol
+            ));
         }
     }
     Ok(())
@@ -49,7 +53,7 @@ fn validate_unique_grid_ids(
 }
 
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
-    validate_unique_symbols(config.grids.iter().map(|instance| instance.symbol.as_str()))?;
+    validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
 
     let adapter = Arc::new(BinanceAdapter::new(
@@ -84,22 +88,22 @@ pub(crate) async fn assemble_with_components(
     repository: Arc<dyn StateRepositoryPort>,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
-    validate_unique_symbols(config.grids.iter().map(|instance| instance.symbol.as_str()))?;
+    validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
 
-    let mut manager = InstanceManager::new(clock);
-    for instance in &config.grids {
-        let grid_id = instance.grid_id();
-        let info = exchange.get_exchange_info(&instance.symbol).await?;
+    let mut manager = GridManager::new(clock);
+    for grid in &config.grids {
+        let grid_id = grid.grid_id();
+        let info = exchange.get_exchange_info(&grid.instrument()).await?;
         manager.add_grid(
             grid_id.clone(),
-            instance.symbol.clone(),
-            instance.grid_config(),
-            instance.budget(),
+            grid.instrument(),
+            grid.grid_config(),
+            grid.budget(),
             info.rules,
         )?;
         if let Some(snapshot) = repository.load_grid_state(grid_id.as_str()).await? {
-            manager.restore_instance_state(&snapshot)?;
+            manager.restore_grid_state(&snapshot)?;
         }
     }
 
@@ -154,8 +158,9 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use grid_core::events::DomainEvent as EngineDomainEvent;
-    use grid_engine::key::GridId;
-    use grid_engine::manager::InstanceManager;
+    use grid_engine::grid::{GridId, Instrument, Venue};
+    use grid_engine::manager::GridManager;
+    use grid_engine::observation::{GridObservation, MarketObservation};
     use grid_engine::ports::{
         ExchangeInfo, ExchangeOrder, ExchangePort, GridSnapshot, OrderReceipt, OrderRequest,
         Position, PriceTick, StateRepositoryPort,
@@ -171,7 +176,10 @@ mod tests {
     use crate::http::router;
     use crate::websocket::WsEvent;
 
-    use super::{ServerPlatform, ServerState, SystemClock, assemble, validate_unique_grid_ids};
+    use super::{
+        ServerPlatform, ServerState, SystemClock, assemble, validate_unique_grid_ids,
+        validate_unique_instruments,
+    };
 
     fn test_exchange_rules() -> grid_core::types::ExchangeRules {
         grid_core::types::ExchangeRules {
@@ -197,6 +205,8 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             grids: vec![
                 GridDefinition {
+                    grid_id: "btc-core".into(),
+                    venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -207,6 +217,8 @@ mod tests {
                     out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
                 },
                 GridDefinition {
+                    grid_id: "eth-core".into(),
+                    venue: Venue::Binance,
                     symbol: "ETHUSDT".into(),
                     lower_price: 2000.0,
                     upper_price: 2500.0,
@@ -228,7 +240,7 @@ mod tests {
         let manager_handle = platform.state().service.manager();
         let manager = manager_handle.read().await;
 
-        assert_eq!(manager.list_instances().len(), 2);
+        assert_eq!(manager.list_grids().len(), 2);
         assert!(
             std::path::Path::new(".data")
                 .join(&suffix)
@@ -242,9 +254,18 @@ mod tests {
     #[test]
     fn assemble_rejects_duplicate_grid_ids() {
         let error =
-            validate_unique_grid_ids([GridId::from_symbol("alpha"), GridId::from_symbol("alpha")])
-                .unwrap_err();
+            validate_unique_grid_ids([GridId::new("alpha"), GridId::new("alpha")]).unwrap_err();
         assert!(error.to_string().contains("duplicate grid id"));
+    }
+
+    #[test]
+    fn assemble_rejects_duplicate_instruments() {
+        let error = validate_unique_instruments([
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate instrument"));
     }
 
     #[tokio::test]
@@ -262,6 +283,8 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             grids: vec![
                 GridDefinition {
+                    grid_id: "btc-core".into(),
+                    venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -272,6 +295,8 @@ mod tests {
                     out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
                 },
                 GridDefinition {
+                    grid_id: "btc-alt".into(),
+                    venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 80.0,
                     upper_price: 100.0,
@@ -290,7 +315,7 @@ mod tests {
         };
 
         let error = assemble(&config).await.err().unwrap();
-        assert!(error.to_string().contains("duplicate symbol"));
+        assert!(error.to_string().contains("duplicate instrument"));
     }
 
     #[tokio::test]
@@ -310,7 +335,7 @@ mod tests {
 
         btc_sender
             .send(PriceTick {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 reference_price: 95.0,
                 mark_price: 95.0,
                 timestamp: chrono::Utc::now(),
@@ -325,7 +350,7 @@ mod tests {
             .unwrap();
         let payload: WsEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
 
-        assert_eq!(payload.grid_id, "BTCUSDT");
+        assert_eq!(payload.grid_id, "btc-core");
         assert!(matches!(
             payload.event,
             ProtocolDomainEvent::ExposureTargetChanged { .. }
@@ -352,6 +377,8 @@ mod tests {
             environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
             grids: vec![GridDefinition {
+                grid_id: "btc-core".into(),
+                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -374,7 +401,7 @@ mod tests {
             app,
             axum::http::Request::builder()
                 .method("POST")
-                .uri("/grids/BTCUSDT/commands")
+                .uri("/grids/btc-core/commands")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(
                     serde_json::to_vec(&serde_json::json!({ "command": "pause" })).unwrap(),
@@ -388,9 +415,9 @@ mod tests {
         let second = assemble_with_fake_ports(&config).await.unwrap();
         let manager_handle = second.state().service.manager();
         let manager = manager_handle.read().await;
-        let instance = manager.get_instance("BTCUSDT").unwrap();
+        let grid = manager.get_grid("btc-core").unwrap();
 
-        assert_eq!(instance.status, grid_engine::instance::GridStatus::Paused);
+        assert_eq!(grid.status, grid_engine::runtime::GridStatus::Paused);
 
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
@@ -405,13 +432,18 @@ mod tests {
             let manager_handle = platform.state.service.manager();
             let mut manager = manager_handle.write().await;
             let tick = PriceTick {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 reference_price: 95.0,
                 mark_price: 95.0,
                 timestamp: chrono::Utc::now(),
             };
-            let _ = manager.on_price_tick(&tick);
-            manager.pause_instance("BTCUSDT").unwrap();
+            let _ = manager.observe(
+                &GridId::new("btc-core"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: tick.reference_price,
+                }),
+            );
+            manager.pause_grid("btc-core").unwrap();
         }
 
         let resume_request = tokio::spawn(async move {
@@ -419,7 +451,7 @@ mod tests {
                 app,
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/grids/BTCUSDT/commands")
+                    .uri("/grids/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         serde_json::to_vec(&serde_json::json!({ "command": "resume" })).unwrap(),
@@ -435,17 +467,16 @@ mod tests {
         let tick_state = platform.state.clone();
         let tick_request = tokio::spawn(async move {
             let tick = PriceTick {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 reference_price: 85.0,
                 mark_price: 85.0,
                 timestamp: chrono::Utc::now(),
             };
             tick_state
                 .service
-                .mutate_grid("BTCUSDT", |manager| {
-                    manager.on_price_tick(&tick).map(|_| ())
-                })
+                .observe_market("btc-core", tick.reference_price)
                 .await
+                .map(|_| ())
         });
 
         let second_save_started = tokio::time::timeout(
@@ -465,12 +496,12 @@ mod tests {
         );
 
         let snapshot = persistence
-            .load_grid_state("BTCUSDT")
+            .load_grid_state("btc-core")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.status, grid_engine::instance::GridStatus::Frozen);
-        assert_eq!(snapshot.reference_price, Some(85.0));
+        assert_eq!(snapshot.status, grid_engine::runtime::GridStatus::Frozen);
+        assert_eq!(snapshot.observed.reference_price, Some(85.0));
     }
 
     fn test_platform() -> (ServerPlatform, mpsc::Sender<PriceTick>) {
@@ -502,11 +533,11 @@ mod tests {
             receivers: Mutex::new(receivers),
         });
 
-        let mut manager = InstanceManager::new(Arc::new(SystemClock));
+        let mut manager = GridManager::new(Arc::new(SystemClock));
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("btc-core"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
                 grid_core::strategy::GridConfig {
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -546,30 +577,30 @@ mod tests {
             Err(anyhow!("not used in tests"))
         }
 
-        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
             Err(anyhow!("not used in tests"))
         }
 
-        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
             Err(anyhow!("not used in tests"))
         }
 
-        async fn get_position(&self, _symbol: &str) -> Result<Position> {
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
             Ok(Position {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.0,
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
             })
         }
 
-        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Ok(Vec::new())
         }
 
-        async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: test_exchange_rules(),
             })
         }
@@ -684,12 +715,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl grid_engine::ports::MarketDataPort for FakeMarketData {
-        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
+        async fn subscribe_prices(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
             self.receivers
                 .lock()
                 .unwrap()
-                .remove(symbol)
-                .ok_or_else(|| anyhow!("no test receiver for symbol `{symbol}`"))
+                .remove(&instrument.symbol)
+                .ok_or_else(|| anyhow!("no test receiver for symbol `{}`", instrument.symbol))
         }
 
         async fn subscribe_user_data(

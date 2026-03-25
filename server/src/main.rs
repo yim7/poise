@@ -55,6 +55,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::Utc;
     use grid_core::types::ExchangeRules;
+    use grid_engine::grid::{Instrument, Venue};
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
         OrderStatus, Position, PriceTick, StateRepositoryPort,
@@ -85,7 +86,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_flow_serves_instances_and_snapshots() {
+    async fn startup_flow_serves_grids_and_snapshots() {
         let suffix = format!(
             "test-{}",
             std::time::SystemTime::now()
@@ -109,6 +110,8 @@ rest_base_url = "http://127.0.0.1:1"
 ws_base_url = "ws://127.0.0.1:1"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -145,16 +148,16 @@ notional_per_unit = 375.0
         assert!(grids.status().is_success());
         let list: Vec<crate::http::GridSummary> = grids.json().await.unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "BTCUSDT");
+        assert_eq!(list[0].id, "btc-core");
 
         let snapshot = client
-            .get(format!("http://{bind_address}/grids/BTCUSDT/snapshot"))
+            .get(format!("http://{bind_address}/grids/btc-core/snapshot"))
             .send()
             .await
             .unwrap();
         assert!(snapshot.status().is_success());
         let payload: crate::http::GridSnapshot = snapshot.json().await.unwrap();
-        assert_eq!(payload.id, "BTCUSDT");
+        assert_eq!(payload.id, "btc-core");
         assert_eq!(payload.symbol, "BTCUSDT");
 
         server.abort();
@@ -178,30 +181,30 @@ notional_per_unit = 375.0
             })
         }
 
-        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
             Ok(())
         }
 
-        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
             Ok(())
         }
 
-        async fn get_position(&self, _symbol: &str) -> Result<Position> {
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
             Ok(Position {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.0,
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
             })
         }
 
-        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Ok(Vec::new())
         }
 
-        async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
-                symbol: "BTCUSDT".into(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: ExchangeRules {
                     price_tick: 0.1,
                     quantity_step: 0.1,
@@ -223,12 +226,15 @@ notional_per_unit = 375.0
 
     #[async_trait::async_trait]
     impl grid_engine::ports::MarketDataPort for FakeMarketData {
-        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
+        async fn subscribe_prices(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
             self.price_receivers
                 .lock()
                 .unwrap()
-                .remove(symbol)
-                .ok_or_else(|| anyhow!("missing price receiver for {symbol}"))
+                .remove(&instrument.symbol)
+                .ok_or_else(|| anyhow!("missing price receiver for {}", instrument.symbol))
         }
 
         async fn subscribe_user_data(

@@ -146,7 +146,7 @@ impl BinanceRestClient {
                 Method::POST,
                 "/fapi/v1/order",
                 vec![
-                    ("symbol", req.symbol.clone()),
+                    ("symbol", req.instrument.symbol.clone()),
                     ("side", side_to_binance(req.side).to_string()),
                     ("type", "LIMIT".to_string()),
                     ("timeInForce", "GTC".to_string()),

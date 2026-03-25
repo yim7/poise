@@ -1,6 +1,7 @@
 use grid_core::events::DomainEvent;
 use grid_core::types::{ExchangeRules, Exposure};
 
+use crate::grid::Instrument;
 use crate::ports::OrderRequest;
 
 #[derive(Debug, Clone)]
@@ -16,9 +17,12 @@ pub enum ExecutionAction {
         target_exposure: Exposure,
     },
     CancelOrder {
+        instrument: Instrument,
         order_id: String,
     },
-    CancelAll,
+    CancelAll {
+        instrument: Instrument,
+    },
     NoOp,
 }
 

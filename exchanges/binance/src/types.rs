@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
+use grid_engine::grid::{Instrument, Venue};
 use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,7 +79,7 @@ impl TryFrom<BinancePositionRisk> for Position {
 
     fn try_from(value: BinancePositionRisk) -> Result<Self, Self::Error> {
         Ok(Self {
-            symbol: value.symbol,
+            instrument: Instrument::new(Venue::Binance, value.symbol),
             qty: parse_decimal("positionAmt", &value.position_amt)?,
             avg_price: parse_decimal("entryPrice", &value.entry_price)?,
             unrealized_pnl: parse_decimal("unRealizedProfit", &value.unrealized_profit)?,
@@ -91,7 +92,7 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
 
     fn try_from(value: BinanceOpenOrder) -> Result<Self, Self::Error> {
         Ok(Self {
-            symbol: value.symbol,
+            instrument: Instrument::new(Venue::Binance, value.symbol),
             order_id: value.order_id.to_string(),
             client_order_id: value.client_order_id,
             side: parse_side(&value.side)?,
@@ -107,6 +108,7 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
     type Error = anyhow::Error;
 
     fn try_from(value: BinanceExchangeInfo) -> Result<Self, Self::Error> {
+        let instrument = Instrument::new(Venue::Binance, value.symbol);
         let price_filter = value
             .filters
             .iter()
@@ -124,7 +126,7 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
             .context("missing MIN_NOTIONAL filter")?;
 
         Ok(Self {
-            symbol: value.symbol,
+            instrument,
             rules: grid_core::types::ExchangeRules {
                 price_tick: parse_optional_decimal("tickSize", price_filter.tick_size.as_deref())?,
                 quantity_step: parse_optional_decimal(
@@ -218,7 +220,7 @@ mod tests {
         assert_eq!(
             converted,
             Position {
-                symbol: "BTCUSDT".to_string(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.25,
                 avg_price: 65000.5,
                 unrealized_pnl: 123.45,
@@ -246,7 +248,7 @@ mod tests {
         assert_eq!(
             converted,
             ExchangeOrder {
-                symbol: "BTCUSDT".to_string(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 order_id: "987654321".to_string(),
                 client_order_id: "grid-open-002".to_string(),
                 side: Side::Sell,
@@ -292,7 +294,7 @@ mod tests {
         assert_eq!(
             converted,
             ExchangeInfo {
-                symbol: "BTCUSDT".to_string(),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: ExchangeRules {
                     price_tick: 0.1,
                     quantity_step: 0.001,

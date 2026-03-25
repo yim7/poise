@@ -2,6 +2,11 @@
 
 基于[网格策略族模型设计](2026-03-24-grid-strategy-family-design.md)，从零定义整个平台的技术架构。
 
+补充说明：身份模型、运行态边界和 transport/application 的职责划分，以
+[`2026-03-25-grid-runtime-boundary-redesign.md`](2026-03-25-grid-runtime-boundary-redesign.md)
+为最新版本。本文档保留整体 crate 结构和依赖方向，具体到运行时术语时应以
+`GridId`、`Instrument`、`GridRuntime`、`GridManager` 为准。
+
 ## 1. 设计约束
 
 - 单机单进程，进程内通过 channel/trait 隔离
@@ -370,11 +375,11 @@ pub fn assemble(config: &Config) -> Result<ServerPlatform> {
 一次价格变动的完整路径：
 
 1. `MarketDataPort` 推送 `PriceTick`
-2. `InstanceManager` 把价格分发给相关 `StrategyInstance`
-3. 调用 `reconcile(instance, price, budget)` — 纯函数
-4. 拿到 `ExecutionPlan`，如果 `NoOp` 则跳过
+2. `GridManager` 根据 `Instrument` 找到对应 `GridRuntime`
+3. 调用 `observe(grid_id, GridObservation::Market(...))`
+4. engine 生成 `GridTransition`，如果 `effects` 为空则跳过执行
 5. 通过 `ExchangePort` 执行订单动作
-6. 执行成功后更新 `instance` 状态
+6. 执行成功后更新 `GridRuntime` 状态
 7. 通过 `StateRepositoryPort` 原子持久化快照与事件
 8. 广播 `DomainEvent` 给 HTTP/WS 层推送给客户端
 

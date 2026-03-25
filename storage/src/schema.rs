@@ -3,8 +3,9 @@ use rusqlite::Connection;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS instance_snapshots (
-            id TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS grid_snapshots (
+            grid_id TEXT PRIMARY KEY,
+            venue TEXT NOT NULL,
             symbol TEXT NOT NULL,
             config_json TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -47,7 +48,7 @@ mod tests {
 
         let snapshots_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='instance_snapshots'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='grid_snapshots'",
                 [],
                 |row| row.get(0),
             )
@@ -84,8 +85,9 @@ mod tests {
     fn initialize_does_not_upgrade_existing_snapshot_table() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE instance_snapshots (
-                id TEXT PRIMARY KEY,
+            "CREATE TABLE grid_snapshots (
+                grid_id TEXT PRIMARY KEY,
+                venue TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -98,9 +100,7 @@ mod tests {
 
         initialize(&conn).unwrap();
 
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(instance_snapshots)")
-            .unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get(1))
             .unwrap()

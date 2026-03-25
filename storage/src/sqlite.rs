@@ -10,8 +10,10 @@ use crate::schema;
 use grid_core::events::DomainEvent;
 use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
-use grid_engine::instance::{GridStatus, RiskState};
-use grid_engine::ports::{GridSnapshot, StateRepositoryPort};
+use grid_engine::grid::{GridId, Instrument, Venue};
+use grid_engine::ports::StateRepositoryPort;
+use grid_engine::runtime::{GridStatus, RiskState};
+use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -53,6 +55,20 @@ impl SqliteStorage {
         })
     }
 
+    fn deserialize_venue(venue: &str) -> rusqlite::Result<Venue> {
+        match venue {
+            "binance" => Ok(Venue::Binance),
+            other => Err(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown venue `{other}`"),
+                )),
+            )),
+        }
+    }
+
     fn deserialize_domain_event(event_json: &str) -> rusqlite::Result<DomainEvent> {
         serde_json::from_str(event_json).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
@@ -62,13 +78,13 @@ impl SqliteStorage {
     fn save_transition_blocking(
         conn: Arc<Mutex<Connection>>,
         id: String,
-        state: GridSnapshot,
+        state: GridRuntimeSnapshot,
         events: Vec<DomainEvent>,
     ) -> Result<()> {
         let config_json =
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
         let status_json =
-            serde_json::to_string(&state.status).context("failed to serialize instance status")?;
+            serde_json::to_string(&state.status).context("failed to serialize grid status")?;
         let pending_order_json = state
             .pending_order
             .as_ref()
@@ -76,10 +92,13 @@ impl SqliteStorage {
             .transpose()
             .context("failed to serialize pending order")?;
         let realized_pnl_day = state
-            .risk_state
+            .risk
             .realized_pnl_day
             .map(|day| day.format("%F").to_string());
-        let out_of_band_since = state.out_of_band_since.map(|value| value.to_rfc3339());
+        let out_of_band_since = state
+            .observed
+            .out_of_band_since
+            .map(|value| value.to_rfc3339());
         let updated_at = Utc::now().to_rfc3339();
 
         let mut conn = Self::lock_connection(&conn)?;
@@ -87,8 +106,9 @@ impl SqliteStorage {
             .transaction()
             .context("failed to start sqlite transition transaction")?;
         tx.execute(
-            "INSERT OR REPLACE INTO instance_snapshots (
-                id,
+            "INSERT OR REPLACE INTO grid_snapshots (
+                grid_id,
+                venue,
                 symbol,
                 config_json,
                 status,
@@ -101,24 +121,25 @@ impl SqliteStorage {
                 reference_price,
                 out_of_band_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 id,
-                state.symbol,
+                state.instrument.venue.as_str(),
+                state.instrument.symbol,
                 config_json,
                 status_json,
                 state.current_exposure.0,
                 state.target_exposure.as_ref().map(|exposure| exposure.0),
                 pending_order_json,
                 realized_pnl_day,
-                state.risk_state.realized_pnl_today,
-                state.risk_state.unrealized_pnl,
-                state.reference_price,
+                state.risk.realized_pnl_today,
+                state.risk.unrealized_pnl,
+                state.observed.reference_price,
                 out_of_band_since,
                 updated_at
             ],
         )
-        .context("failed to save instance snapshot")?;
+        .context("failed to save grid snapshot")?;
 
         for event in events {
             let event_json =
@@ -140,29 +161,31 @@ impl SqliteStorage {
     fn load_grid_state_blocking(
         conn: Arc<Mutex<Connection>>,
         id: String,
-    ) -> Result<Option<GridSnapshot>> {
+    ) -> Result<Option<GridRuntimeSnapshot>> {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT id, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
                         pending_order_json, realized_pnl_day, realized_pnl_today,
                         unrealized_pnl, reference_price, out_of_band_since
-                 FROM instance_snapshots
-                 WHERE id = ?1",
+                 FROM grid_snapshots
+                 WHERE grid_id = ?1",
                 params![id],
                 |row| {
-                    let config_json: String = row.get(2)?;
-                    let status_json: String = row.get(3)?;
-                    let pending_order_json: Option<String> = row.get(6)?;
-                    let realized_pnl_day: Option<String> = row.get(7)?;
-                    let out_of_band_since: Option<String> = row.get(11)?;
+                    let venue: String = row.get(1)?;
+                    let config_json: String = row.get(3)?;
+                    let status_json: String = row.get(4)?;
+                    let pending_order_json: Option<String> = row.get(7)?;
+                    let realized_pnl_day: Option<String> = row.get(8)?;
+                    let out_of_band_since: Option<String> = row.get(12)?;
                     let config = Self::deserialize_grid_config(&config_json)?;
                     let status = Self::deserialize_grid_status(&status_json)?;
+                    let venue = Self::deserialize_venue(&venue)?;
                     let pending_order = pending_order_json
                         .map(|json| {
                             serde_json::from_str(&json).map_err(|err| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    6,
+                                    7,
                                     rusqlite::types::Type::Text,
                                     Box::new(err),
                                 )
@@ -173,21 +196,21 @@ impl SqliteStorage {
                         .map(|value| {
                             NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    7,
+                                    8,
                                     rusqlite::types::Type::Text,
                                     Box::new(err),
                                 )
                             })
                         })
                         .transpose()?;
-                    let target_exposure = row.get::<_, Option<f64>>(5)?.map(Exposure);
+                    let target_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
                     let out_of_band_since = out_of_band_since
                         .map(|value| {
                             DateTime::parse_from_rfc3339(&value)
                                 .map(|parsed| parsed.with_timezone(&Utc))
                                 .map_err(|err| {
                                     rusqlite::Error::FromSqlConversionFailure(
-                                        11,
+                                        12,
                                         rusqlite::types::Type::Text,
                                         Box::new(err),
                                     )
@@ -195,21 +218,23 @@ impl SqliteStorage {
                         })
                         .transpose()?;
 
-                    Ok(GridSnapshot {
-                        id: row.get(0)?,
-                        symbol: row.get(1)?,
+                    Ok(GridRuntimeSnapshot {
+                        grid_id: GridId::new(row.get::<_, String>(0)?),
+                        instrument: Instrument::new(venue, row.get::<_, String>(2)?),
                         config,
                         status,
-                        current_exposure: Exposure(row.get(4)?),
+                        current_exposure: Exposure(row.get(5)?),
                         target_exposure,
                         pending_order,
-                        risk_state: RiskState {
+                        risk: RiskState {
                             realized_pnl_day,
-                            realized_pnl_today: row.get(8)?,
-                            unrealized_pnl: row.get(9)?,
+                            realized_pnl_today: row.get(9)?,
+                            unrealized_pnl: row.get(10)?,
                         },
-                        reference_price: row.get(10)?,
-                        out_of_band_since,
+                        observed: ObservedState {
+                            reference_price: row.get(11)?,
+                            out_of_band_since,
+                        },
                     })
                 },
             )
@@ -249,13 +274,13 @@ impl StateRepositoryPort for SqliteStorage {
     async fn save_transition(
         &self,
         id: &str,
-        state: &GridSnapshot,
+        state: &GridRuntimeSnapshot,
         events: &[DomainEvent],
     ) -> Result<()> {
         ensure!(
-            id == state.id,
-            "snapshot id mismatch: key `{id}` does not match state.id `{}`",
-            state.id
+            id == state.grid_id.as_str(),
+            "snapshot id mismatch: key `{id}` does not match snapshot.grid_id `{}`",
+            state.grid_id.as_str()
         );
 
         let conn = Arc::clone(&self.conn);
@@ -272,7 +297,7 @@ impl StateRepositoryPort for SqliteStorage {
         Ok(())
     }
 
-    async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+    async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
 
@@ -306,14 +331,16 @@ mod tests {
     use grid_core::strategy::BandBoundary;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
-    use grid_engine::instance::{GridStatus, PendingOrder, RiskState};
-    use grid_engine::ports::{GridSnapshot, OrderStatus, StateRepositoryPort};
+    use grid_engine::grid::{GridId, Instrument, Venue};
+    use grid_engine::ports::{OrderStatus, StateRepositoryPort};
+    use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
+    use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use rusqlite::Connection;
 
-    fn test_snapshot() -> GridSnapshot {
-        GridSnapshot {
-            id: "test-1".into(),
-            symbol: "BTCUSDT".into(),
+    fn test_snapshot() -> GridRuntimeSnapshot {
+        GridRuntimeSnapshot {
+            grid_id: GridId::new("test-1"),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -327,7 +354,6 @@ mod tests {
             current_exposure: Exposure(4.0),
             target_exposure: Some(Exposure(6.0)),
             pending_order: Some(PendingOrder {
-                symbol: "BTCUSDT".into(),
                 order_id: Some("order-1".into()),
                 client_order_id: "client-1".into(),
                 side: Side::Buy,
@@ -336,17 +362,19 @@ mod tests {
                 target_exposure: Exposure(6.0),
                 status: OrderStatus::New,
             }),
-            risk_state: RiskState {
+            risk: RiskState {
                 realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
                 realized_pnl_today: 12.5,
                 unrealized_pnl: -3.0,
             },
-            reference_price: Some(95.0),
-            out_of_band_since: Some(
-                DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
-                    .unwrap()
-                    .with_timezone(&Utc),
-            ),
+            observed: ObservedState {
+                reference_price: Some(95.0),
+                out_of_band_since: Some(
+                    DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+            },
         }
     }
 
@@ -382,21 +410,42 @@ mod tests {
 
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.id, "test-1");
-        assert_eq!(loaded.symbol, "BTCUSDT");
+        assert_eq!(loaded.grid_id.as_str(), "test-1");
+        assert_eq!(loaded.instrument.symbol, "BTCUSDT");
         assert_eq!(loaded.status, GridStatus::Active);
         assert_eq!(loaded.config, snapshot.config);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.target_exposure, Some(Exposure(6.0)));
         assert!(loaded.pending_order.is_some());
         assert_eq!(
-            loaded.risk_state.realized_pnl_day,
+            loaded.risk.realized_pnl_day,
             Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap())
         );
-        assert!((loaded.risk_state.realized_pnl_today - 12.5).abs() < f64::EPSILON);
-        assert!((loaded.risk_state.unrealized_pnl + 3.0).abs() < f64::EPSILON);
-        assert_eq!(loaded.reference_price, Some(95.0));
-        assert_eq!(loaded.out_of_band_since, snapshot.out_of_band_since);
+        assert!((loaded.risk.realized_pnl_today - 12.5).abs() < f64::EPSILON);
+        assert!((loaded.risk.unrealized_pnl + 3.0).abs() < f64::EPSILON);
+        assert_eq!(loaded.observed.reference_price, Some(95.0));
+        assert_eq!(
+            loaded.observed.out_of_band_since,
+            snapshot.observed.out_of_band_since
+        );
+    }
+
+    #[tokio::test]
+    async fn save_and_load_grid_runtime_snapshot_roundtrip() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition(snapshot.grid_id.as_str(), &snapshot, &[])
+            .await
+            .unwrap();
+
+        let loaded = storage
+            .load_grid_state(snapshot.grid_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, snapshot);
     }
 
     #[tokio::test]
@@ -412,7 +461,7 @@ mod tests {
         let loaded = storage.load_grid_state("test-1").await.unwrap().unwrap();
         let events = storage.list_events("test-1").await.unwrap();
 
-        assert_eq!(loaded.id, "test-1");
+        assert_eq!(loaded.grid_id.as_str(), "test-1");
         assert_eq!(events, vec![test_event()]);
     }
 
@@ -434,7 +483,7 @@ mod tests {
             .unwrap();
 
         snapshot.current_exposure = Exposure(6.0);
-        snapshot.reference_price = Some(96.0);
+        snapshot.observed.reference_price = Some(96.0);
         storage
             .save_transition("test-1", &snapshot, &[])
             .await
@@ -442,7 +491,7 @@ mod tests {
 
         let loaded = storage.load_grid_state("test-1").await.unwrap().unwrap();
         assert!((loaded.current_exposure.0 - 6.0).abs() < f64::EPSILON);
-        assert_eq!(loaded.reference_price, Some(96.0));
+        assert_eq!(loaded.observed.reference_price, Some(96.0));
     }
 
     #[tokio::test]
@@ -530,8 +579,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         schema::initialize(&conn).unwrap();
         conn.execute(
-            "INSERT INTO instance_snapshots (
-                id,
+            "INSERT INTO grid_snapshots (
+                grid_id,
+                venue,
                 symbol,
                 config_json,
                 status,
@@ -544,9 +594,10 @@ mod tests {
                 unrealized_pnl,
                 out_of_band_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, 0, 0, NULL, ?7)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, 0, 0, NULL, ?8)",
             params![
                 "legacy-grid",
+                "binance",
                 "BTCUSDT",
                 serde_json::json!({
                     "lower_price": 90.0,

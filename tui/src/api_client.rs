@@ -163,6 +163,9 @@ mod tests {
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
 
+    const BTC_GRID_ID: &str = "btc-core";
+    const BTC_SYMBOL: &str = "BTCUSDT";
+
     #[derive(Clone)]
     struct StubState {
         snapshots: Arc<Mutex<HashMap<String, GridSnapshot>>>,
@@ -217,7 +220,7 @@ mod tests {
 
     async fn handle_socket(mut socket: WebSocket) {
         let payload = serde_json::to_string(&WsEvent {
-            grid_id: "BTCUSDT".into(),
+            grid_id: BTC_GRID_ID.into(),
             event: DomainEvent::BandReentered { price: 99.0 },
         })
         .unwrap();
@@ -229,10 +232,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let state = StubState {
             snapshots: Arc::new(Mutex::new(HashMap::from([(
-                "BTCUSDT".to_string(),
+                BTC_GRID_ID.to_string(),
                 GridSnapshot {
-                    id: "BTCUSDT".into(),
-                    symbol: "BTCUSDT".into(),
+                    id: BTC_GRID_ID.into(),
+                    symbol: BTC_SYMBOL.into(),
                     status: GridStatus::Active,
                     current_exposure: 2.5,
                     target_exposure: None,
@@ -272,7 +275,8 @@ mod tests {
         let items = client.list_instances().await.unwrap();
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].id, "BTCUSDT");
+        assert_eq!(items[0].id, BTC_GRID_ID);
+        assert_eq!(items[0].symbol, BTC_SYMBOL);
     }
 
     #[tokio::test]
@@ -280,10 +284,12 @@ mod tests {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let snapshot = client.get_snapshot("BTCUSDT").await.unwrap();
+        let snapshot = client.get_snapshot(BTC_GRID_ID).await.unwrap();
 
         assert_eq!(snapshot.current_exposure, 2.5);
         assert_eq!(snapshot.status, GridStatus::Active);
+        assert_eq!(snapshot.id, BTC_GRID_ID);
+        assert_eq!(snapshot.symbol, BTC_SYMBOL);
     }
 
     #[tokio::test]
@@ -291,10 +297,11 @@ mod tests {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let response = client.submit_command("BTCUSDT", "pause").await.unwrap();
-        let snapshot = client.get_snapshot("BTCUSDT").await.unwrap();
+        let response = client.submit_command(BTC_GRID_ID, "pause").await.unwrap();
+        let snapshot = client.get_snapshot(BTC_GRID_ID).await.unwrap();
 
         assert!(response.accepted);
+        assert_eq!(response.grid_id, BTC_GRID_ID);
         assert_eq!(snapshot.status, GridStatus::Paused);
     }
 
@@ -313,7 +320,7 @@ mod tests {
 
         let event = receiver.recv().await.unwrap();
 
-        assert_eq!(event.grid_id, "BTCUSDT");
+        assert_eq!(event.grid_id, BTC_GRID_ID);
         assert_eq!(event.event, DomainEvent::BandReentered { price: 99.0 });
     }
 }

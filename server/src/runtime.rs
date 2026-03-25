@@ -2,13 +2,15 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use grid_core::types::Exposure;
+use grid_engine::command::GridCommand;
 use grid_engine::execution_plan::ExecutionAction;
-use grid_engine::instance::PendingOrder;
-use grid_engine::manager::TickOutcome;
+use grid_engine::observation::{OrderObservation, PositionObservation};
 use grid_engine::ports::{
-    ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, PriceTick,
+    ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
     UserDataEvent, UserDataPayload,
 };
+use grid_engine::runtime::PendingOrder;
+use grid_engine::transition::GridTransition;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -58,21 +60,22 @@ impl ServerRuntime {
     }
 
     async fn startup_sync(&self) -> Result<()> {
-        for binding in self.state.service.grid_bindings().await {
-            let position = self.exchange.get_position(&binding.symbol).await?;
-            let open_orders = self.exchange.get_open_orders(&binding.symbol).await?;
-            self.state
+        for grid in self.state.service.grid_instruments().await {
+            let position = self.exchange.get_position(&grid.instrument).await?;
+            let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
+            self.state.service.clear_pending_order(&grid.id).await?;
+            let _ = self
+                .state
                 .service
-                .mutate_grid(&binding.id, |manager| {
-                    manager.clear_pending_order(&binding.symbol)?;
-                    manager.apply_position_update(&position)?;
-                    for order in &open_orders {
-                        manager.apply_order_update(order)?;
-                    }
-                    Ok(())
-                })
-                .await
-                .map_err(mutate_error)?;
+                .observe_position(&grid.id, position_observation(&position))
+                .await?;
+            for order in &open_orders {
+                let _ = self
+                    .state
+                    .service
+                    .observe_order(&grid.id, order_observation(order))
+                    .await?;
+            }
         }
 
         Ok(())
@@ -91,14 +94,21 @@ impl ServerRuntime {
         buffered_events.sort_by_key(|event| event.event_time);
         for event in buffered_events {
             if event.event_time > startup_cutoff {
-                let symbol = event_symbol(&event);
                 let should_reconcile = should_reconcile_after_user_data(&event);
-                apply_user_data_event(&self.state, event)
+                let instrument = event.instrument().clone();
+                let Some(grid_id) = self.state.service.resolve_grid_id(&instrument).await else {
+                    tracing::warn!(
+                        "received user data for unknown instrument {}:{}",
+                        instrument.venue.as_str(),
+                        instrument.symbol
+                    );
+                    continue;
+                };
+                apply_user_data_event(&self.state, &grid_id, event)
                     .await
                     .map_err(mutate_error)?;
                 if should_reconcile {
-                    reconcile_symbol_at_last_price(&self.state, self.exchange.as_ref(), &symbol)
-                        .await?;
+                    command_reconcile(&self.state, self.exchange.as_ref(), &grid_id).await?;
                 }
             }
         }
@@ -112,11 +122,12 @@ impl ServerRuntime {
         let market_data = Arc::clone(&self.market_data);
 
         tokio::spawn(async move {
-            let bindings = state.service.grid_bindings().await;
+            let grids = state.service.grid_instruments().await;
             let mut workers = JoinSet::new();
 
-            for binding in bindings {
-                match market_data.subscribe_prices(&binding.symbol).await {
+            for grid in grids {
+                let instrument = grid.instrument.clone();
+                match market_data.subscribe_prices(&instrument).await {
                     Ok(mut receiver) => {
                         let state = state.clone();
                         let exchange = Arc::clone(&exchange);
@@ -124,32 +135,29 @@ impl ServerRuntime {
                             while let Some(tick) = receiver.recv().await {
                                 match state
                                     .service
-                                    .mutate_grid(&binding.id, |manager| {
-                                        manager.on_price_tick(&tick)
-                                    })
+                                    .observe_market(&grid.id, tick.reference_price)
                                     .await
                                 {
-                                    Ok(outcome) => {
-                                        if let Err(error) = handle_tick_outcome(
+                                    Ok(transition) => {
+                                        if let Err(error) = handle_transition(
                                             &state,
                                             exchange.as_ref(),
-                                            &binding.id,
-                                            &binding.symbol,
-                                            outcome,
+                                            &grid.id,
+                                            transition,
                                         )
                                         .await
                                         {
                                             tracing::warn!(
                                                 "failed to execute plan action for {}: {error}",
-                                                binding.symbol
+                                                instrument.symbol
                                             );
                                         }
                                     }
                                     Err(error) => {
                                         tracing::warn!(
                                             "failed to apply market data update for {}: {}",
-                                            binding.symbol,
-                                            error.message()
+                                            instrument.symbol,
+                                            error
                                         );
                                     }
                                 }
@@ -159,7 +167,7 @@ impl ServerRuntime {
                     Err(error) => {
                         tracing::warn!(
                             "failed to subscribe market data for {}: {error}",
-                            binding.symbol
+                            instrument.symbol
                         );
                     }
                 }
@@ -187,22 +195,31 @@ impl ServerRuntime {
                     continue;
                 }
 
-                let symbol = event_symbol(&event);
                 let should_reconcile = should_reconcile_after_user_data(&event);
-                if let Err(error) = apply_user_data_event(&state, event).await {
+                let instrument = event.instrument().clone();
+                let Some(grid_id) = state.service.resolve_grid_id(&instrument).await else {
                     tracing::warn!(
-                        "failed to apply user data update for {symbol}: {}",
+                        "received user data for unknown instrument {}:{}",
+                        instrument.venue.as_str(),
+                        instrument.symbol
+                    );
+                    continue;
+                };
+                if let Err(error) = apply_user_data_event(&state, &grid_id, event).await {
+                    tracing::warn!(
+                        "failed to apply user data update for {}: {}",
+                        instrument.symbol,
                         error.message()
                     );
                     continue;
                 }
 
                 if should_reconcile
-                    && let Err(error) =
-                        reconcile_symbol_at_last_price(&state, exchange.as_ref(), &symbol).await
+                    && let Err(error) = command_reconcile(&state, exchange.as_ref(), &grid_id).await
                 {
                     tracing::warn!(
-                        "failed to reconcile after user data update for {symbol}: {error}"
+                        "failed to reconcile after user data update for {}: {error}",
+                        instrument.symbol
                     );
                 }
             }
@@ -213,36 +230,30 @@ impl ServerRuntime {
 async fn execute_action(
     state: &ServerState,
     exchange: &dyn ExchangePort,
-    instance_id: &str,
-    symbol: &str,
+    grid_id: &str,
     action: ExecutionAction,
 ) -> Result<()> {
     match action {
-        ExecutionAction::CancelAll => {
-            mark_pending_order_canceling(state, instance_id, symbol).await?;
-            exchange.cancel_all(symbol).await?;
-            state
-                .service
-                .mutate_grid(instance_id, |manager| manager.clear_pending_order(symbol))
-                .await
-                .map_err(mutate_error)?;
+        ExecutionAction::CancelAll { instrument } => {
+            mark_pending_order_canceling(state, grid_id).await?;
+            exchange.cancel_all(&instrument).await?;
+            state.service.clear_pending_order(grid_id).await?;
         }
-        ExecutionAction::CancelOrder { order_id } => {
-            mark_pending_order_canceling(state, instance_id, symbol).await?;
-            exchange.cancel_order(symbol, &order_id).await?;
-            state
-                .service
-                .mutate_grid(instance_id, |manager| manager.clear_pending_order(symbol))
-                .await
-                .map_err(mutate_error)?;
+        ExecutionAction::CancelOrder {
+            instrument,
+            order_id,
+        } => {
+            mark_pending_order_canceling(state, grid_id).await?;
+            exchange.cancel_order(&instrument, &order_id).await?;
+            state.service.clear_pending_order(grid_id).await?;
         }
         ExecutionAction::SubmitOrder {
             request,
             target_exposure,
         } => {
-            record_submission_intent(state, instance_id, &request, target_exposure.clone()).await?;
+            record_submission_intent(state, grid_id, &request, target_exposure.clone()).await?;
             let receipt = exchange.submit_order(request.clone()).await?;
-            record_submitted_order(state, instance_id, &request, &receipt, target_exposure).await?;
+            record_submitted_order(state, grid_id, &request, &receipt, target_exposure).await?;
         }
         ExecutionAction::NoOp => {}
     }
@@ -250,16 +261,15 @@ async fn execute_action(
     Ok(())
 }
 
-async fn handle_tick_outcome(
+async fn handle_transition(
     state: &ServerState,
     exchange: &dyn ExchangePort,
-    instance_id: &str,
-    symbol: &str,
-    outcome: TickOutcome,
+    grid_id: &str,
+    transition: GridTransition,
 ) -> Result<()> {
     let mut action_error = None;
-    for action in outcome.plan.actions {
-        if let Err(error) = execute_action(state, exchange, instance_id, symbol, action).await {
+    for action in transition.effects {
+        if let Err(error) = execute_action(state, exchange, grid_id, action).await {
             action_error = Some(error);
             break;
         }
@@ -269,10 +279,6 @@ async fn handle_tick_outcome(
         Some(error) => Err(error),
         None => Ok(()),
     }
-}
-
-fn event_symbol(event: &UserDataEvent) -> String {
-    event.symbol().to_string()
 }
 
 fn should_reconcile_after_user_data(event: &UserDataEvent) -> bool {
@@ -286,148 +292,120 @@ fn should_reconcile_after_user_data(event: &UserDataEvent) -> bool {
 
 async fn apply_user_data_event(
     state: &ServerState,
+    grid_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), GridMutationError> {
-    let symbol = event_symbol(&event);
-
-    let Some(instance_id) = state.service.grid_id_for_symbol(&symbol).await else {
-        tracing::warn!("received user data for unknown symbol {symbol}");
-        return Ok(());
-    };
-
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
-            state
+            let _ = state
                 .service
-                .mutate_grid(&instance_id, |manager| {
-                    manager.apply_position_update(&position)
-                })
-                .await?;
+                .observe_position(grid_id, position_observation(&position))
+                .await
+                .map_err(|error| GridMutationError::Persistence(anyhow!(error)))?;
         }
         UserDataPayload::OrderUpdate(order) => {
-            state
+            let _ = state
                 .service
-                .mutate_grid(&instance_id, |manager| manager.apply_order_update(&order))
-                .await?;
+                .observe_order(grid_id, order_observation(&order))
+                .await
+                .map_err(|error| GridMutationError::Persistence(anyhow!(error)))?;
         }
     }
 
     Ok(())
 }
 
-async fn reconcile_symbol_at_last_price(
+async fn command_reconcile(
     state: &ServerState,
     exchange: &dyn ExchangePort,
-    symbol: &str,
+    grid_id: &str,
 ) -> Result<()> {
-    let Some((instance_id, reference_price)) =
-        state.service.reconcile_context_for_symbol(symbol).await
-    else {
-        return Ok(());
-    };
-
-    let tick = PriceTick {
-        symbol: symbol.to_string(),
-        reference_price,
-        mark_price: reference_price,
-        timestamp: chrono::Utc::now(),
-    };
-    let outcome = state
+    let transition = state
         .service
-        .mutate_grid(&instance_id, |manager| manager.on_price_tick(&tick))
-        .await
-        .map_err(mutate_error)?;
+        .command(grid_id, GridCommand::Reconcile)
+        .await?;
 
-    handle_tick_outcome(state, exchange, &instance_id, symbol, outcome).await
+    handle_transition(state, exchange, grid_id, transition).await
 }
 
 async fn record_submitted_order(
     state: &ServerState,
-    instance_id: &str,
+    grid_id: &str,
     request: &OrderRequest,
     receipt: &OrderReceipt,
     target_exposure: Exposure,
 ) -> Result<()> {
     state
         .service
-        .mutate_grid(instance_id, |manager| {
-            manager.record_submitted_order(
-                instance_id,
-                PendingOrder {
-                    symbol: request.symbol.clone(),
-                    order_id: Some(receipt.order_id.clone()),
-                    client_order_id: receipt.client_order_id.clone(),
-                    side: request.side,
-                    price: request.price,
-                    quantity: request.quantity,
-                    target_exposure: target_exposure.clone(),
-                    status: receipt.status,
-                },
-            )
-        })
-        .await
-        .map_err(mutate_error)?;
+        .record_pending_order(
+            grid_id,
+            PendingOrder {
+                order_id: Some(receipt.order_id.clone()),
+                client_order_id: receipt.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure: target_exposure.clone(),
+                status: receipt.status,
+            },
+        )
+        .await?;
 
     Ok(())
 }
 
 async fn record_submission_intent(
     state: &ServerState,
-    instance_id: &str,
+    grid_id: &str,
     request: &OrderRequest,
     target_exposure: Exposure,
 ) -> Result<()> {
     state
         .service
-        .mutate_grid(instance_id, |manager| {
-            manager.record_submitted_order(
-                instance_id,
-                PendingOrder {
-                    symbol: request.symbol.clone(),
-                    order_id: None,
-                    client_order_id: request.client_order_id.clone(),
-                    side: request.side,
-                    price: request.price,
-                    quantity: request.quantity,
-                    target_exposure: target_exposure.clone(),
-                    status: OrderStatus::Submitting,
-                },
-            )
-        })
-        .await
-        .map_err(mutate_error)?;
+        .record_pending_order(
+            grid_id,
+            PendingOrder {
+                order_id: None,
+                client_order_id: request.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure: target_exposure.clone(),
+                status: OrderStatus::Submitting,
+            },
+        )
+        .await?;
 
     Ok(())
 }
 
-async fn mark_pending_order_canceling(
-    state: &ServerState,
-    instance_id: &str,
-    symbol: &str,
-) -> Result<()> {
-    state
-        .service
-        .mutate_grid(instance_id, |manager| {
-            let pending = manager
-                .get_instance(instance_id)
-                .and_then(|instance| instance.pending_order.clone())
-                .filter(|pending| pending.symbol == symbol);
-
-            if let Some(mut pending) = pending {
-                pending.status = OrderStatus::Canceling;
-                manager.record_submitted_order(instance_id, pending)?;
-            }
-
-            Ok(())
-        })
-        .await
-        .map_err(mutate_error)?;
+async fn mark_pending_order_canceling(state: &ServerState, grid_id: &str) -> Result<()> {
+    state.service.mark_pending_order_canceling(grid_id).await?;
 
     Ok(())
 }
 
 fn mutate_error(error: GridMutationError) -> anyhow::Error {
     anyhow!(error.message())
+}
+
+fn position_observation(position: &Position) -> PositionObservation {
+    PositionObservation {
+        qty: position.qty,
+        unrealized_pnl: position.unrealized_pnl,
+    }
+}
+
+fn order_observation(order: &ExchangeOrder) -> OrderObservation {
+    OrderObservation {
+        order_id: order.order_id.clone(),
+        client_order_id: order.client_order_id.clone(),
+        side: order.side,
+        price: order.price,
+        quantity: order.qty,
+        realized_pnl: order.realized_pnl,
+        status: order.status,
+    }
 }
 
 #[cfg(test)]
@@ -442,14 +420,16 @@ mod tests {
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{ExchangeRules, Exposure, Side};
+    use grid_engine::command::GridCommand;
     use grid_engine::execution_plan::ExecutionAction;
-    use grid_engine::instance::{GridStatus, PendingOrder, RiskState, StrategyInstance};
-    use grid_engine::manager::InstanceManager;
+    use grid_engine::grid::{GridId, Instrument, Venue};
+    use grid_engine::manager::GridManager;
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, GridSnapshot, MarketDataPort,
         OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick, StateRepositoryPort,
         UserDataEvent, UserDataPayload,
     };
+    use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder, RiskState};
     use grid_protocol::DomainEvent as ProtocolDomainEvent;
     use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
@@ -461,30 +441,10 @@ mod tests {
 
     #[tokio::test]
     async fn market_tick_submits_order_and_records_pending_order() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        fixture
-            .price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                reference_price: 95.0,
-                mark_price: 95.0,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
 
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
         wait_until_instance(&fixture.state, |instance| instance.pending_order.is_some()).await;
@@ -499,15 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_order_keeps_submission_intent_when_receipt_persistence_fails() {
-        let exchange = Arc::new(FakeExchange::new(
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-        ));
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(FailOnSavePersistence::new(2));
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -521,15 +473,8 @@ mod tests {
             &state,
             exchange.as_ref(),
             "BTCUSDT",
-            "BTCUSDT",
             ExecutionAction::SubmitOrder {
-                request: OrderRequest {
-                    symbol: "BTCUSDT".into(),
-                    side: Side::Buy,
-                    price: 94.5,
-                    quantity: 0.25,
-                    client_order_id: "intent-1".into(),
-                },
+                request: btc_order_request(Side::Buy, 94.5, 0.25, "intent-1"),
                 target_exposure: Exposure(4.0),
             },
         )
@@ -543,7 +488,6 @@ mod tests {
         assert_eq!(
             instance.pending_order,
             Some(PendingOrder {
-                symbol: "BTCUSDT".into(),
                 order_id: None,
                 client_order_id: "intent-1".into(),
                 side: Side::Buy,
@@ -569,19 +513,10 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_order_keeps_canceling_intent_when_clear_persistence_fails() {
-        let exchange = Arc::new(FakeExchange::new(
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-        ));
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(FailOnSavePersistence::new(2));
         let snapshot = GridSnapshot {
             pending_order: Some(PendingOrder {
-                symbol: "BTCUSDT".into(),
                 order_id: Some("order-1".into()),
                 client_order_id: "intent-1".into(),
                 side: Side::Buy,
@@ -609,8 +544,8 @@ mod tests {
             &state,
             exchange.as_ref(),
             "BTCUSDT",
-            "BTCUSDT",
             ExecutionAction::CancelOrder {
+                instrument: btc_instrument(),
                 order_id: "order-1".into(),
             },
         )
@@ -646,32 +581,15 @@ mod tests {
 
     #[tokio::test]
     async fn submitted_order_keeps_action_target_when_instance_changes_before_recording() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
-        let tick = PriceTick {
-            symbol: "BTCUSDT".into(),
-            reference_price: 95.0,
-            mark_price: 95.0,
-            timestamp: Utc::now(),
-        };
         let outcome = fixture
             .state
             .service
-            .mutate_grid("BTCUSDT", |manager| manager.on_price_tick(&tick))
+            .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
-        let (request, target_exposure) = match outcome.plan.actions.as_slice() {
+        let (request, target_exposure) = match outcome.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
                     request,
@@ -684,7 +602,7 @@ mod tests {
         fixture
             .state
             .service
-            .mutate_grid("BTCUSDT", |manager| manager.pause_instance("BTCUSDT"))
+            .command("BTCUSDT", GridCommand::Pause)
             .await
             .unwrap();
 
@@ -715,30 +633,10 @@ mod tests {
 
     #[tokio::test]
     async fn position_update_reconciles_actual_exposure_without_overwriting_target() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        fixture
-            .price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                reference_price: 95.0,
-                mark_price: 95.0,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until_instance(&fixture.state, |instance| {
             instance
                 .target_exposure
@@ -782,16 +680,11 @@ mod tests {
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
         snapshot.pending_order = None;
-        snapshot.reference_price = Some(95.0);
+        snapshot.observed.reference_price = Some(95.0);
 
         let fixture = runtime_fixture(
             Some(snapshot),
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
+            btc_position(0.0, 0.0),
             vec![],
             test_budget(),
         )
@@ -831,17 +724,12 @@ mod tests {
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(0.0));
         snapshot.pending_order = None;
-        snapshot.reference_price = Some(100.0);
-        snapshot.risk_state.unrealized_pnl = 0.0;
+        snapshot.observed.reference_price = Some(100.0);
+        snapshot.risk.unrealized_pnl = 0.0;
 
         let fixture = runtime_fixture(
             Some(snapshot),
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
+            btc_position(0.0, 0.0),
             vec![],
             test_budget(),
         )
@@ -870,30 +758,10 @@ mod tests {
 
     #[tokio::test]
     async fn order_update_clears_pending_order_on_terminal_status() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        fixture
-            .price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                reference_price: 95.0,
-                mark_price: 95.0,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until_instance(&fixture.state, |instance| instance.pending_order.is_some()).await;
 
         let pending = current_instance(&fixture.state)
@@ -905,16 +773,15 @@ mod tests {
             .user_sender
             .send(order_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
-                ExchangeOrder {
-                    symbol: "BTCUSDT".into(),
-                    order_id: pending.order_id.clone().unwrap(),
-                    client_order_id: pending.client_order_id.clone(),
-                    side: Side::Buy,
-                    price: pending.price,
-                    qty: pending.quantity,
-                    realized_pnl: 0.0,
-                    status: OrderStatus::Filled,
-                },
+                btc_exchange_order(
+                    &pending.order_id.clone().unwrap(),
+                    &pending.client_order_id,
+                    Side::Buy,
+                    pending.price,
+                    pending.quantity,
+                    0.0,
+                    OrderStatus::Filled,
+                ),
             ))
             .await
             .unwrap();
@@ -926,30 +793,10 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_order_update_reconciles_without_waiting_for_new_tick() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        fixture
-            .price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                reference_price: 95.0,
-                mark_price: 95.0,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
 
         let pending = current_instance(&fixture.state)
@@ -961,16 +808,15 @@ mod tests {
             .user_sender
             .send(order_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
-                ExchangeOrder {
-                    symbol: "BTCUSDT".into(),
-                    order_id: pending.order_id.clone().unwrap(),
-                    client_order_id: pending.client_order_id.clone(),
-                    side: Side::Buy,
-                    price: pending.price,
-                    qty: pending.quantity,
-                    realized_pnl: 0.0,
-                    status: OrderStatus::Canceled,
-                },
+                btc_exchange_order(
+                    &pending.order_id.clone().unwrap(),
+                    &pending.client_order_id,
+                    Side::Buy,
+                    pending.price,
+                    pending.quantity,
+                    0.0,
+                    OrderStatus::Canceled,
+                ),
             ))
             .await
             .unwrap();
@@ -992,11 +838,13 @@ mod tests {
     async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event()
      {
         let snapshot = GridSnapshot {
+            grid_id: GridId::new("BTCUSDT"),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            config: test_config(),
+            status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(0.0)),
-            reference_price: Some(100.0),
             pending_order: Some(PendingOrder {
-                symbol: "BTCUSDT".into(),
                 order_id: Some("order-1".into()),
                 client_order_id: "order-1".into(),
                 side: Side::Buy,
@@ -1005,10 +853,14 @@ mod tests {
                 target_exposure: Exposure(0.0),
                 status: OrderStatus::New,
             }),
-            ..test_snapshot()
+            risk: RiskState::default(),
+            observed: grid_engine::snapshot::ObservedState {
+                reference_price: Some(100.0),
+                out_of_band_since: None,
+            },
         };
         let open_orders = vec![ExchangeOrder {
-            symbol: "BTCUSDT".into(),
+            instrument: btc_instrument(),
             order_id: "order-1".into(),
             client_order_id: "order-1".into(),
             side: Side::Buy,
@@ -1019,12 +871,7 @@ mod tests {
         }];
         let fixture = runtime_fixture(
             Some(snapshot),
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
+            btc_position(0.0, 0.0),
             open_orders,
             test_budget(),
         )
@@ -1036,16 +883,15 @@ mod tests {
             .user_sender
             .send(order_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
-                ExchangeOrder {
-                    symbol: "BTCUSDT".into(),
-                    order_id: "order-1".into(),
-                    client_order_id: "order-1".into(),
-                    side: Side::Buy,
-                    price: 100.0,
-                    qty: 0.1,
-                    realized_pnl: 0.0,
-                    status: OrderStatus::Canceled,
-                },
+                btc_exchange_order(
+                    "order-1",
+                    "order-1",
+                    Side::Buy,
+                    100.0,
+                    0.1,
+                    0.0,
+                    OrderStatus::Canceled,
+                ),
             ))
             .await
             .unwrap();
@@ -1062,24 +908,18 @@ mod tests {
     #[tokio::test]
     async fn startup_sync_uses_live_position_and_open_orders_before_first_tick() {
         let snapshot = test_snapshot();
-        let live_order = ExchangeOrder {
-            symbol: "BTCUSDT".into(),
-            order_id: "live-1".into(),
-            client_order_id: "live-1".into(),
-            side: Side::Buy,
-            price: 94.5,
-            qty: 0.25,
-            realized_pnl: 0.0,
-            status: OrderStatus::New,
-        };
+        let live_order = btc_exchange_order(
+            "live-1",
+            "live-1",
+            Side::Buy,
+            94.5,
+            0.25,
+            0.0,
+            OrderStatus::New,
+        );
         let fixture = runtime_fixture(
             Some(snapshot),
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 7.5,
-                avg_price: 100.0,
-                unrealized_pnl: 3.0,
-            },
+            btc_position(7.5, 3.0),
             vec![live_order],
             test_budget(),
         )
@@ -1109,16 +949,7 @@ mod tests {
             Some(Exposure(6.0))
         );
 
-        fixture
-            .price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                reference_price: 92.5,
-                mark_price: 92.5,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
+        fixture.price_sender.send(btc_tick(92.5)).await.unwrap();
         sleep(Duration::from_millis(100)).await;
 
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -1130,12 +961,7 @@ mod tests {
     async fn startup_sync_clears_stale_pending_order_when_exchange_has_no_open_orders() {
         let fixture = runtime_fixture(
             Some(test_snapshot()),
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 7.5,
-                avg_price: 100.0,
-                unrealized_pnl: 3.0,
-            },
+            btc_position(7.5, 3.0),
             vec![],
             test_budget(),
         )
@@ -1153,18 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_sync_replays_buffered_user_event_before_first_tick() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
         fixture
             .user_sender
             .send(position_event_at(
@@ -1187,18 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_sync_ignores_buffered_user_event_older_than_cutoff() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 7.5,
-                avg_price: 100.0,
-                unrealized_pnl: 3.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(7.5, 3.0), vec![], test_budget()).await;
         fixture
             .user_sender
             .send(position_event_at(
@@ -1224,25 +1028,17 @@ mod tests {
         drop(price_sender);
         let (user_sender, user_receiver) = mpsc::channel(8);
         let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
-        let exchange = Arc::new(FakeExchange::new(
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-        ));
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(FailOnSavePersistence::new(2));
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
 
-        let mut manager = InstanceManager::new(clock);
+        let mut manager = GridManager::new(clock);
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 test_budget(),
                 exchange.exchange_info.rules.clone(),
@@ -1273,18 +1069,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_live_user_event_does_not_rollback_state_after_start() {
-        let fixture = runtime_fixture(
-            None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 7.5,
-                avg_price: 100.0,
-                unrealized_pnl: 3.0,
-            },
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let fixture = runtime_fixture(None, btc_position(7.5, 3.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
         fixture
@@ -1309,12 +1094,7 @@ mod tests {
     async fn filled_order_updates_realized_pnl_and_trips_daily_loss_cap() {
         let fixture = runtime_fixture(
             None,
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 7.5,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
+            btc_position(7.5, 0.0),
             vec![],
             CapacityBudget {
                 max_notional: 3000.0,
@@ -1329,16 +1109,15 @@ mod tests {
             .user_sender
             .send(order_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
-                ExchangeOrder {
-                    symbol: "BTCUSDT".into(),
-                    order_id: "fill-1".into(),
-                    client_order_id: "fill-1".into(),
-                    side: Side::Sell,
-                    price: 95.0,
-                    qty: 7.5,
-                    realized_pnl: -20.0,
-                    status: OrderStatus::Filled,
-                },
+                btc_exchange_order(
+                    "fill-1",
+                    "fill-1",
+                    Side::Sell,
+                    95.0,
+                    7.5,
+                    -20.0,
+                    OrderStatus::Filled,
+                ),
             ))
             .await
             .unwrap();
@@ -1348,16 +1127,7 @@ mod tests {
         })
         .await;
 
-        fixture
-            .price_sender
-            .send(PriceTick {
-                symbol: "BTCUSDT".into(),
-                reference_price: 95.0,
-                mark_price: 95.0,
-                timestamp: Utc::now(),
-            })
-            .await
-            .unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
 
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
 
@@ -1373,15 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
-        let exchange = Arc::new(FakeExchange::new(
-            Position {
-                symbol: "BTCUSDT".into(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            },
-            vec![],
-        ));
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let (price_sender, price_receiver) = mpsc::channel(8);
         drop(price_sender);
@@ -1390,11 +1152,11 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
 
-        let mut manager = InstanceManager::new(clock);
+        let mut manager = GridManager::new(clock);
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 test_budget(),
                 exchange.exchange_info.rules.clone(),
@@ -1439,11 +1201,11 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
 
-        let mut manager = InstanceManager::new(clock);
+        let mut manager = GridManager::new(clock);
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 budget,
                 exchange.exchange_info.rules.clone(),
@@ -1451,7 +1213,7 @@ mod tests {
             .unwrap();
 
         if let Some(snapshot) = restored_snapshot.clone() {
-            manager.restore_instance_state(&snapshot).unwrap();
+            manager.restore_grid_state(&snapshot).unwrap();
             persistence
                 .save_transition("BTCUSDT", &snapshot, &[])
                 .await
@@ -1485,18 +1247,19 @@ mod tests {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
-        let mut manager = InstanceManager::new(clock);
+        let mut manager = GridManager::new(clock);
+        let instrument = btc_instrument();
         manager
             .add_grid(
-                "BTCUSDT".into(),
-                "BTCUSDT".into(),
+                GridId::new("BTCUSDT"),
+                instrument.clone(),
                 test_config(),
                 budget,
-                exchange.get_exchange_info("BTCUSDT").await.unwrap().rules,
+                exchange.get_exchange_info(&instrument).await.unwrap().rules,
             )
             .unwrap();
         if let Some(snapshot) = restored_snapshot {
-            manager.restore_instance_state(&snapshot).unwrap();
+            manager.restore_grid_state(&snapshot).unwrap();
         }
 
         let (events, _) = broadcast::channel(16);
@@ -1505,10 +1268,10 @@ mod tests {
         }
     }
 
-    async fn current_instance(state: &ServerState) -> grid_engine::instance::StrategyInstance {
+    async fn current_instance(state: &ServerState) -> GridRuntime {
         let manager_handle = state.service.manager();
         let manager = manager_handle.read().await;
-        manager.get_instance("BTCUSDT").unwrap().clone()
+        manager.get_grid("BTCUSDT").unwrap().clone()
     }
 
     async fn shutdown(handles: RuntimeHandles) {
@@ -1536,7 +1299,7 @@ mod tests {
 
     async fn wait_until_instance<F>(state: &ServerState, predicate: F)
     where
-        F: Fn(&StrategyInstance) -> bool,
+        F: Fn(&GridRuntime) -> bool,
     {
         timeout(Duration::from_secs(1), async {
             loop {
@@ -1574,6 +1337,64 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()
     }
 
+    fn btc_instrument() -> Instrument {
+        Instrument::new(Venue::Binance, "BTCUSDT")
+    }
+
+    fn btc_position(qty: f64, unrealized_pnl: f64) -> Position {
+        Position {
+            instrument: btc_instrument(),
+            qty,
+            avg_price: 100.0,
+            unrealized_pnl,
+        }
+    }
+
+    fn btc_tick(reference_price: f64) -> PriceTick {
+        PriceTick {
+            instrument: btc_instrument(),
+            reference_price,
+            mark_price: reference_price,
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn btc_order_request(
+        side: Side,
+        price: f64,
+        quantity: f64,
+        client_order_id: &str,
+    ) -> OrderRequest {
+        OrderRequest {
+            instrument: btc_instrument(),
+            side,
+            price,
+            quantity,
+            client_order_id: client_order_id.into(),
+        }
+    }
+
+    fn btc_exchange_order(
+        order_id: &str,
+        client_order_id: &str,
+        side: Side,
+        price: f64,
+        qty: f64,
+        realized_pnl: f64,
+        status: OrderStatus,
+    ) -> ExchangeOrder {
+        ExchangeOrder {
+            instrument: btc_instrument(),
+            order_id: order_id.into(),
+            client_order_id: client_order_id.into(),
+            side,
+            price,
+            qty,
+            realized_pnl,
+            status,
+        }
+    }
+
     fn position_event_at(
         event_time: chrono::DateTime<Utc>,
         qty: f64,
@@ -1581,12 +1402,7 @@ mod tests {
     ) -> UserDataEvent {
         UserDataEvent {
             event_time,
-            payload: UserDataPayload::PositionUpdate(Position {
-                symbol: "BTCUSDT".into(),
-                qty,
-                avg_price: 100.0,
-                unrealized_pnl,
-            }),
+            payload: UserDataPayload::PositionUpdate(btc_position(qty, unrealized_pnl)),
         }
     }
 
@@ -1599,14 +1415,13 @@ mod tests {
 
     fn test_snapshot() -> GridSnapshot {
         GridSnapshot {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
+            grid_id: GridId::new("BTCUSDT"),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config: test_config(),
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
             pending_order: Some(PendingOrder {
-                symbol: "BTCUSDT".into(),
                 order_id: Some("snapshot-1".into()),
                 client_order_id: "snapshot-1".into(),
                 side: Side::Buy,
@@ -1615,9 +1430,11 @@ mod tests {
                 target_exposure: Exposure(6.0),
                 status: OrderStatus::New,
             }),
-            risk_state: RiskState::default(),
-            reference_price: Some(95.0),
-            out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
+            risk: RiskState::default(),
+            observed: grid_engine::snapshot::ObservedState {
+                reference_price: Some(95.0),
+                out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
+            },
         }
     }
 
@@ -1643,7 +1460,7 @@ mod tests {
         fn new(position: Position, open_orders: Vec<ExchangeOrder>) -> Self {
             Self {
                 exchange_info: ExchangeInfo {
-                    symbol: "BTCUSDT".into(),
+                    instrument: btc_instrument(),
                     rules: ExchangeRules {
                         price_tick: 0.1,
                         quantity_step: 0.1,
@@ -1673,27 +1490,27 @@ mod tests {
             })
         }
 
-        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
             Ok(())
         }
 
-        async fn cancel_all(&self, symbol: &str) -> Result<()> {
+        async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
             self.cancel_all_symbols
                 .lock()
                 .unwrap()
-                .push(symbol.to_string());
+                .push(instrument.symbol.clone());
             Ok(())
         }
 
-        async fn get_position(&self, _symbol: &str) -> Result<Position> {
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
             Ok(self.position.lock().unwrap().clone())
         }
 
-        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Ok(self.open_orders.lock().unwrap().clone())
         }
 
-        async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(self.exchange_info.clone())
         }
 
@@ -1806,12 +1623,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MarketDataPort for FakeMarketData {
-        async fn subscribe_prices(&self, symbol: &str) -> Result<mpsc::Receiver<PriceTick>> {
+        async fn subscribe_prices(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
             self.price_receivers
                 .lock()
                 .unwrap()
-                .remove(symbol)
-                .ok_or_else(|| anyhow!("missing test price receiver for {symbol}"))
+                .remove(&instrument.symbol)
+                .ok_or_else(|| anyhow!("missing test price receiver for {}", instrument.symbol))
         }
 
         async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {

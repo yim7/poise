@@ -21,7 +21,7 @@
 ## 当前约束
 
 - 同一交易所内，同一 `symbol` 只允许一个网格
-- 当前 `GridId` 由 `symbol` 派生
+- `grid_id` 是显式配置的稳定标识，不由 `symbol` 派生
 - HTTP / WebSocket 以 `grid_id` 作为一等标识
 - SQLite 默认路径是 `.data/<environment>/grid-server.sqlite`
 - Binance 适配层当前用 `mark price` 作为策略 `reference_price`
@@ -41,6 +41,8 @@ rest_base_url = "https://testnet.binancefuture.com"
 ws_base_url = "wss://stream.binancefuture.com"
 
 [[grids]]
+grid_id = "btc-core"
+venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90000.0
 upper_price = 110000.0
@@ -51,7 +53,8 @@ notional_per_unit = 375.0
 
 补充说明：
 
-- 可以继续追加 `[[grids]]`，每个 `symbol` 只能出现一次
+- 可以继续追加 `[[grids]]`，每个网格都要配置唯一的 `grid_id`
+- 当前同一交易所内每个 `symbol` 只能出现一次
 - `environment` 只决定数据目录和环境名，不自动切换交易所地址
 - 需要用户流时，在 `[exchange]` 里补 `api_key` 和 `api_secret`
 
@@ -93,7 +96,7 @@ cargo run -p grid-tui
 
 ```bash
 curl http://127.0.0.1:8000/grids
-curl http://127.0.0.1:8000/grids/BTCUSDT/snapshot
+curl http://127.0.0.1:8000/grids/btc-core/snapshot
 ```
 
 ## 当前协议
