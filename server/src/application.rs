@@ -10,7 +10,7 @@ use grid_engine::observation::{
 };
 use grid_engine::ports::StateRepositoryPort;
 use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder};
-use grid_engine::transition::GridTransition;
+use grid_engine::transition::{GridEffect, GridTransition};
 use grid_protocol::{
     BandBoundary as ProtocolBandBoundary, DomainEvent as ProtocolDomainEvent,
     GridConfig as ProtocolGridConfig, GridSnapshot as ProtocolGridSnapshot,
@@ -60,10 +60,15 @@ impl GridMutationError {
 
 pub(crate) trait TransitionResult {
     fn domain_events(&self) -> &[DomainEvent];
+    fn effects(&self) -> &[GridEffect];
 }
 
 impl TransitionResult for () {
     fn domain_events(&self) -> &[DomainEvent] {
+        &[]
+    }
+
+    fn effects(&self) -> &[GridEffect] {
         &[]
     }
 }
@@ -71,6 +76,10 @@ impl TransitionResult for () {
 impl TransitionResult for GridTransition {
     fn domain_events(&self) -> &[DomainEvent] {
         &self.events
+    }
+
+    fn effects(&self) -> &[GridEffect] {
+        &self.effects
     }
 }
 
@@ -91,6 +100,10 @@ impl GridPlatformService {
     #[cfg(test)]
     pub fn manager(&self) -> SharedManager {
         Arc::clone(&self.manager)
+    }
+
+    pub(crate) fn repository(&self) -> Arc<dyn StateRepositoryPort> {
+        Arc::clone(&self.repository)
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<WsEvent> {
@@ -199,14 +212,6 @@ impl GridPlatformService {
             .map_err(anyhow::Error::new)
     }
 
-    pub async fn mark_pending_order_canceling(&self, id: &str) -> Result<()> {
-        self.mutate_grid(id, |manager| {
-            manager.mark_pending_order_canceling(&GridId::new(id))
-        })
-        .await
-        .map_err(anyhow::Error::new)
-    }
-
     async fn mutate_grid<R, F>(
         &self,
         id: &str,
@@ -231,7 +236,7 @@ impl GridPlatformService {
 
         if let Err(error) = self
             .repository
-            .save_transition(id, &next_snapshot, result.domain_events())
+            .save_transition(id, &next_snapshot, result.domain_events(), result.effects())
             .await
         {
             let rollback_result = {
@@ -419,8 +424,11 @@ mod tests {
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::GridManager;
     use grid_engine::observation::{GridObservation, MarketObservation};
-    use grid_engine::ports::{ClockPort, StateRepositoryPort};
+    use grid_engine::ports::{
+        ClockPort, CommittedGridWrite, EffectStatus, PersistedGridEffect, StateRepositoryPort,
+    };
     use grid_engine::snapshot::GridRuntimeSnapshot;
+    use grid_engine::transition::GridEffect;
     use grid_protocol::{
         DomainEvent as ProtocolDomainEvent, GridSnapshot as ProtocolGridSnapshot,
         GridStatus as ProtocolGridStatus, GridSummary,
@@ -476,6 +484,28 @@ mod tests {
         let expected = manager.get_grid("btc-core").unwrap().snapshot();
 
         assert_eq!(repository.snapshot_for("btc-core"), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn mutate_grid_persists_effects_with_snapshot_and_events() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        let transition = service.observe_market("btc-core", 95.0).await.unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, GridEffect::SubmitOrder { .. }))
+        );
+
+        let pending = repository.pending_effects();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].grid_id.as_str(), "btc-core");
+        assert!(matches!(pending[0].effect, GridEffect::SubmitOrder { .. }));
+        assert_eq!(pending[0].status, EffectStatus::Pending);
+        assert_eq!(repository.events_for("btc-core"), transition.events);
+        assert!(repository.snapshot_for("btc-core").is_some());
     }
 
     #[tokio::test]
@@ -591,6 +621,8 @@ mod tests {
     struct MemoryRepository {
         snapshots: Mutex<HashMap<String, GridRuntimeSnapshot>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
+        effects: Mutex<Vec<PersistedGridEffect>>,
+        next_effect_seq: Mutex<u64>,
     }
 
     impl MemoryRepository {
@@ -606,6 +638,16 @@ mod tests {
         fn snapshot_for(&self, id: &str) -> Option<GridRuntimeSnapshot> {
             self.snapshots.lock().unwrap().get(id).cloned()
         }
+
+        fn pending_effects(&self) -> Vec<PersistedGridEffect> {
+            self.effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .cloned()
+                .collect()
+        }
     }
 
     #[async_trait::async_trait]
@@ -615,7 +657,8 @@ mod tests {
             id: &str,
             state: &GridRuntimeSnapshot,
             events: &[DomainEvent],
-        ) -> Result<()> {
+            effects: &[GridEffect],
+        ) -> Result<CommittedGridWrite> {
             self.snapshots
                 .lock()
                 .unwrap()
@@ -626,7 +669,38 @@ mod tests {
                 .entry(id.to_string())
                 .or_default()
                 .extend_from_slice(events);
-            Ok(())
+
+            let now = Utc::now();
+            let mut next_effect_seq = self.next_effect_seq.lock().unwrap();
+            let mut effect_store = self.effects.lock().unwrap();
+            let mut persisted_effects = Vec::new();
+            *next_effect_seq += 1;
+            let batch_id = next_effect_seq.to_string();
+            for (sequence, effect) in effects.iter().enumerate() {
+                if matches!(effect, GridEffect::NoOp) {
+                    continue;
+                }
+
+                let persisted = PersistedGridEffect {
+                    effect_id: format!("{id}:{batch_id}:{sequence}"),
+                    grid_id: GridId::new(id),
+                    batch_id: batch_id.clone(),
+                    sequence: u32::try_from(sequence).unwrap(),
+                    effect: effect.clone(),
+                    status: EffectStatus::Pending,
+                    attempt_count: 0,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                effect_store.push(persisted.clone());
+                persisted_effects.push(persisted);
+            }
+
+            Ok(CommittedGridWrite {
+                grid_id: GridId::new(id),
+                effects: persisted_effects,
+            })
         }
 
         async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>> {
@@ -635,6 +709,46 @@ mod tests {
 
         async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
             Ok(self.events_for(id))
+        }
+
+        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            Ok(self.pending_effects())
+        }
+
+        async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().unwrap();
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Executing;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().unwrap();
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Succeeded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
+            let mut effects = self.effects.lock().unwrap();
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Failed;
+            effect.attempt_count += 1;
+            effect.last_error = Some(error.to_string());
+            effect.updated_at = Utc::now();
+            Ok(())
         }
     }
 
@@ -648,7 +762,8 @@ mod tests {
             _id: &str,
             _state: &GridRuntimeSnapshot,
             _events: &[DomainEvent],
-        ) -> Result<()> {
+            _effects: &[GridEffect],
+        ) -> Result<CommittedGridWrite> {
             Err(anyhow!("injected save failure"))
         }
 
@@ -658,6 +773,22 @@ mod tests {
 
         async fn list_events(&self, _id: &str) -> Result<Vec<DomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
+            Ok(())
         }
     }
 

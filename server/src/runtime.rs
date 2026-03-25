@@ -1,21 +1,19 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use grid_core::types::Exposure;
 use grid_engine::command::GridCommand;
-use grid_engine::execution_plan::ExecutionAction;
 use grid_engine::observation::{OrderObservation, PositionObservation};
 use grid_engine::ports::{
-    ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
-    UserDataEvent, UserDataPayload,
+    ExchangeOrder, ExchangePort, MarketDataPort, OrderStatus, Position, UserDataEvent,
+    UserDataPayload,
 };
-use grid_engine::runtime::PendingOrder;
-use grid_engine::transition::GridTransition;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::application::GridMutationError;
 use crate::assembly::ServerState;
+use crate::effect_worker::EffectWorker;
 #[derive(Clone)]
 pub struct ServerRuntime {
     state: ServerState,
@@ -29,6 +27,8 @@ pub struct RuntimeHandles {
     pub market_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub user_task: JoinHandle<()>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub effect_task: JoinHandle<()>,
 }
 
 impl ServerRuntime {
@@ -50,20 +50,32 @@ impl ServerRuntime {
         self.startup_sync().await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
+        let effect_task = self.spawn_effect_task();
         let user_task = self.spawn_user_task(user_receiver, startup_cutoff);
         let market_task = self.spawn_market_task();
 
         Ok(RuntimeHandles {
             market_task,
             user_task,
+            effect_task,
         })
     }
 
     async fn startup_sync(&self) -> Result<()> {
+        let repository = self.state.service.repository();
         for grid in self.state.service.grid_instruments().await {
             let position = self.exchange.get_position(&grid.instrument).await?;
             let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
-            self.state.service.clear_pending_order(&grid.id).await?;
+            let preserve_submitting_anchor = repository
+                .load_grid_state(&grid.id)
+                .await?
+                .and_then(|snapshot| snapshot.pending_order)
+                .map(|pending| pending.status == OrderStatus::Submitting)
+                .unwrap_or(false);
+
+            if !preserve_submitting_anchor {
+                self.state.service.clear_pending_order(&grid.id).await?;
+            }
             let _ = self
                 .state
                 .service
@@ -108,7 +120,7 @@ impl ServerRuntime {
                     .await
                     .map_err(mutate_error)?;
                 if should_reconcile {
-                    command_reconcile(&self.state, self.exchange.as_ref(), &grid_id).await?;
+                    command_reconcile(&self.state, &grid_id).await?;
                 }
             }
         }
@@ -118,7 +130,6 @@ impl ServerRuntime {
 
     fn spawn_market_task(&self) -> JoinHandle<()> {
         let state = self.state.clone();
-        let exchange = Arc::clone(&self.exchange);
         let market_data = Arc::clone(&self.market_data);
 
         tokio::spawn(async move {
@@ -130,7 +141,6 @@ impl ServerRuntime {
                 match market_data.subscribe_prices(&instrument).await {
                     Ok(mut receiver) => {
                         let state = state.clone();
-                        let exchange = Arc::clone(&exchange);
                         workers.spawn(async move {
                             while let Some(tick) = receiver.recv().await {
                                 match state
@@ -138,21 +148,7 @@ impl ServerRuntime {
                                     .observe_market(&grid.id, tick.reference_price)
                                     .await
                                 {
-                                    Ok(transition) => {
-                                        if let Err(error) = handle_transition(
-                                            &state,
-                                            exchange.as_ref(),
-                                            &grid.id,
-                                            transition,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                "failed to execute plan action for {}: {error}",
-                                                instrument.symbol
-                                            );
-                                        }
-                                    }
+                                    Ok(_) => {}
                                     Err(error) => {
                                         tracing::warn!(
                                             "failed to apply market data update for {}: {}",
@@ -181,13 +177,21 @@ impl ServerRuntime {
         })
     }
 
+    fn spawn_effect_task(&self) -> JoinHandle<()> {
+        EffectWorker::new(
+            self.state.clone(),
+            Arc::clone(&self.exchange),
+            Duration::from_millis(10),
+        )
+        .spawn()
+    }
+
     fn spawn_user_task(
         &self,
         mut receiver: mpsc::Receiver<UserDataEvent>,
         startup_cutoff: chrono::DateTime<chrono::Utc>,
     ) -> JoinHandle<()> {
         let state = self.state.clone();
-        let exchange = Arc::clone(&self.exchange);
 
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
@@ -214,9 +218,7 @@ impl ServerRuntime {
                     continue;
                 }
 
-                if should_reconcile
-                    && let Err(error) = command_reconcile(&state, exchange.as_ref(), &grid_id).await
-                {
+                if should_reconcile && let Err(error) = command_reconcile(&state, &grid_id).await {
                     tracing::warn!(
                         "failed to reconcile after user data update for {}: {error}",
                         instrument.symbol
@@ -224,60 +226,6 @@ impl ServerRuntime {
                 }
             }
         })
-    }
-}
-
-async fn execute_action(
-    state: &ServerState,
-    exchange: &dyn ExchangePort,
-    grid_id: &str,
-    action: ExecutionAction,
-) -> Result<()> {
-    match action {
-        ExecutionAction::CancelAll { instrument } => {
-            mark_pending_order_canceling(state, grid_id).await?;
-            exchange.cancel_all(&instrument).await?;
-            state.service.clear_pending_order(grid_id).await?;
-        }
-        ExecutionAction::CancelOrder {
-            instrument,
-            order_id,
-        } => {
-            mark_pending_order_canceling(state, grid_id).await?;
-            exchange.cancel_order(&instrument, &order_id).await?;
-            state.service.clear_pending_order(grid_id).await?;
-        }
-        ExecutionAction::SubmitOrder {
-            request,
-            target_exposure,
-        } => {
-            record_submission_intent(state, grid_id, &request, target_exposure.clone()).await?;
-            let receipt = exchange.submit_order(request.clone()).await?;
-            record_submitted_order(state, grid_id, &request, &receipt, target_exposure).await?;
-        }
-        ExecutionAction::NoOp => {}
-    }
-
-    Ok(())
-}
-
-async fn handle_transition(
-    state: &ServerState,
-    exchange: &dyn ExchangePort,
-    grid_id: &str,
-    transition: GridTransition,
-) -> Result<()> {
-    let mut action_error = None;
-    for action in transition.effects {
-        if let Err(error) = execute_action(state, exchange, grid_id, action).await {
-            action_error = Some(error);
-            break;
-        }
-    }
-
-    match action_error {
-        Some(error) => Err(error),
-        None => Ok(()),
     }
 }
 
@@ -315,73 +263,11 @@ async fn apply_user_data_event(
     Ok(())
 }
 
-async fn command_reconcile(
-    state: &ServerState,
-    exchange: &dyn ExchangePort,
-    grid_id: &str,
-) -> Result<()> {
-    let transition = state
+async fn command_reconcile(state: &ServerState, grid_id: &str) -> Result<()> {
+    let _ = state
         .service
         .command(grid_id, GridCommand::Reconcile)
         .await?;
-
-    handle_transition(state, exchange, grid_id, transition).await
-}
-
-async fn record_submitted_order(
-    state: &ServerState,
-    grid_id: &str,
-    request: &OrderRequest,
-    receipt: &OrderReceipt,
-    target_exposure: Exposure,
-) -> Result<()> {
-    state
-        .service
-        .record_pending_order(
-            grid_id,
-            PendingOrder {
-                order_id: Some(receipt.order_id.clone()),
-                client_order_id: receipt.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                target_exposure: target_exposure.clone(),
-                status: receipt.status,
-            },
-        )
-        .await?;
-
-    Ok(())
-}
-
-async fn record_submission_intent(
-    state: &ServerState,
-    grid_id: &str,
-    request: &OrderRequest,
-    target_exposure: Exposure,
-) -> Result<()> {
-    state
-        .service
-        .record_pending_order(
-            grid_id,
-            PendingOrder {
-                order_id: None,
-                client_order_id: request.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                target_exposure: target_exposure.clone(),
-                status: OrderStatus::Submitting,
-            },
-        )
-        .await?;
-
-    Ok(())
-}
-
-async fn mark_pending_order_canceling(state: &ServerState, grid_id: &str) -> Result<()> {
-    state.service.mark_pending_order_canceling(grid_id).await?;
-
     Ok(())
 }
 
@@ -411,6 +297,7 @@ fn order_observation(order: &ExchangeOrder) -> OrderObservation {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -425,19 +312,20 @@ mod tests {
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::GridManager;
     use grid_engine::ports::{
-        ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, GridSnapshot, MarketDataPort,
-        OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick, StateRepositoryPort,
-        UserDataEvent, UserDataPayload,
+        ClockPort, CommittedGridWrite, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
+        GridSnapshot, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect,
+        Position, PriceTick, StateRepositoryPort, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder, RiskState};
     use grid_protocol::DomainEvent as ProtocolDomainEvent;
-    use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
+    use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
     use crate::application::GridPlatformService;
     use crate::assembly::ServerState;
+    use crate::effect_worker::EffectWorker;
 
-    use super::{RuntimeHandles, ServerRuntime, execute_action, record_submitted_order};
+    use super::{RuntimeHandles, ServerRuntime};
 
     #[tokio::test]
     async fn market_tick_submits_order_and_records_pending_order() {
@@ -458,9 +346,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_order_keeps_submission_intent_when_receipt_persistence_fails() {
-        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
-        let persistence = Arc::new(FailOnSavePersistence::new(2));
+    async fn effect_worker_executes_persisted_submit_order_and_marks_success() {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+
+        let transition = fixture
+            .state
+            .service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+        assert_eq!(
+            fixture
+                .persistence
+                .list_pending_effects()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
+        wait_until_async(|| {
+            let persistence = Arc::clone(&fixture.persistence);
+            async move { persistence.list_pending_effects().await.unwrap().is_empty() }
+        })
+        .await;
+
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(
+            instance
+                .pending_order
+                .as_ref()
+                .and_then(|pending| pending.order_id.as_deref()),
+            Some("order-1")
+        );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn effect_worker_restores_pending_effect_after_restart() {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+
+        fixture
+            .state
+            .service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .persistence
+                .list_pending_effects()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let restarted_runtime = ServerRuntime::new(
+            fixture.state.clone(),
+            fixture.exchange.clone() as Arc<dyn ExchangePort>,
+            Arc::new(FakeMarketData::new(price_receiver, user_receiver)) as Arc<dyn MarketDataPort>,
+        );
+
+        let handles = restarted_runtime.start().await.unwrap();
+
+        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
+        wait_until_async(|| {
+            let persistence = Arc::clone(&fixture.persistence);
+            async move { persistence.list_pending_effects().await.unwrap().is_empty() }
+        })
+        .await;
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn failed_effect_does_not_roll_back_committed_snapshot() {
+        let exchange = Arc::new(FakeExchange::with_submit_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            "submit rejected",
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone() as Arc<dyn StateRepositoryPort>,
@@ -468,119 +451,82 @@ mod tests {
             test_budget(),
         )
         .await;
+        let runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
 
-        let error = execute_action(
-            &state,
-            exchange.as_ref(),
-            "BTCUSDT",
-            ExecutionAction::SubmitOrder {
-                request: btc_order_request(Side::Buy, 94.5, 0.25, "intent-1"),
-                target_exposure: Exposure(4.0),
-            },
-        )
-        .await
-        .unwrap_err();
+        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+        assert_eq!(persistence.list_pending_effects().await.unwrap().len(), 1);
 
-        assert!(error.to_string().contains("injected save failure"));
-        assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
+        let handles = runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = Arc::clone(&persistence);
+            async move {
+                persistence
+                    .all_effects()
+                    .await
+                    .iter()
+                    .any(|effect| effect.status == EffectStatus::Failed)
+            }
+        })
+        .await;
 
         let instance = current_instance(&state).await;
-        assert_eq!(
-            instance.pending_order,
-            Some(PendingOrder {
-                order_id: None,
-                client_order_id: "intent-1".into(),
-                side: Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure: Exposure(4.0),
-                status: OrderStatus::Submitting,
-            })
-        );
+        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert!(instance.pending_order.is_none());
 
-        let persisted = persistence
-            .snapshots
-            .lock()
-            .await
-            .get("BTCUSDT")
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            persisted.pending_order.unwrap().status,
-            OrderStatus::Submitting
-        );
+        shutdown(handles).await;
     }
 
     #[tokio::test]
-    async fn cancel_order_keeps_canceling_intent_when_clear_persistence_fails() {
+    async fn effect_worker_leaves_submitting_pending_order_when_receipt_persistence_fails() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
-        let persistence = Arc::new(FailOnSavePersistence::new(2));
-        let snapshot = GridSnapshot {
-            pending_order: Some(PendingOrder {
-                order_id: Some("order-1".into()),
-                client_order_id: "intent-1".into(),
-                side: Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure: Exposure(4.0),
-                status: OrderStatus::New,
-            }),
-            ..test_snapshot()
-        };
+        let persistence = Arc::new(FailOnReceiptPersistence::default());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone() as Arc<dyn StateRepositoryPort>,
-            Some(snapshot.clone()),
+            None,
             test_budget(),
         )
         .await;
-        persistence
-            .snapshots
-            .lock()
-            .await
-            .insert("BTCUSDT".into(), snapshot);
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
 
-        let error = execute_action(
-            &state,
-            exchange.as_ref(),
-            "BTCUSDT",
-            ExecutionAction::CancelOrder {
-                instrument: btc_instrument(),
-                order_id: "order-1".into(),
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("injected save failure"));
+        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+        worker.run_once().await.unwrap();
 
         let instance = current_instance(&state).await;
-        assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .map(|pending| pending.status),
-            Some(OrderStatus::Canceling)
-        );
+        let pending = instance
+            .pending_order
+            .expect("submit intent should remain durable");
+        assert_eq!(pending.order_id, None);
+        assert_eq!(pending.status, OrderStatus::Submitting);
 
-        let persisted = persistence
-            .snapshots
-            .lock()
-            .await
-            .get("BTCUSDT")
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            persisted
-                .pending_order
-                .as_ref()
-                .map(|pending| pending.status),
-            Some(OrderStatus::Canceling)
-        );
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Failed);
     }
 
     #[tokio::test]
-    async fn submitted_order_keeps_action_target_when_instance_changes_before_recording() {
+    async fn effect_worker_keeps_action_target_when_instance_changes_before_receipt_recording() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let outcome = fixture
@@ -589,13 +535,12 @@ mod tests {
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
-        let (request, target_exposure) = match outcome.effects.as_slice() {
+        let target_exposure = match outcome.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
-                    request,
-                    target_exposure,
+                    target_exposure, ..
                 },
-            ] => (request.clone(), target_exposure.clone()),
+            ] => target_exposure.clone(),
             other => panic!("unexpected actions: {other:?}"),
         };
 
@@ -605,21 +550,8 @@ mod tests {
             .command("BTCUSDT", GridCommand::Pause)
             .await
             .unwrap();
-
-        let receipt = fixture
-            .exchange
-            .submit_order(request.clone())
-            .await
-            .unwrap();
-        record_submitted_order(
-            &fixture.state,
-            "BTCUSDT",
-            &request,
-            &receipt,
-            target_exposure.clone(),
-        )
-        .await
-        .unwrap();
+        let handles = fixture.runtime.start().await.unwrap();
+        wait_until_instance(&fixture.state, |instance| instance.pending_order.is_some()).await;
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.target_exposure, None);
@@ -629,6 +561,209 @@ mod tests {
                 .map(|pending| pending.target_exposure),
             Some(target_exposure)
         );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn effect_worker_does_not_resubmit_when_matching_pending_order_is_already_restored() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            None,
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        let (request, target_exposure) = match transition.effects.as_slice() {
+            [
+                ExecutionAction::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] => (request.clone(), target_exposure.clone()),
+            other => panic!("unexpected actions: {other:?}"),
+        };
+
+        state
+            .service
+            .record_pending_order(
+                "BTCUSDT",
+                PendingOrder {
+                    order_id: Some("order-restored".into()),
+                    client_order_id: request.client_order_id.clone(),
+                    side: request.side,
+                    price: request.price,
+                    quantity: request.quantity,
+                    target_exposure,
+                    status: OrderStatus::New,
+                },
+            )
+            .await
+            .unwrap();
+
+        worker.run_once().await.unwrap();
+
+        assert!(
+            exchange.submitted_orders.lock().unwrap().is_empty(),
+            "worker should not resubmit when the same client order is already restored"
+        );
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_same_batch() {
+        let exchange = Arc::new(FakeExchange::with_cancel_all_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            "cancel rejected",
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: Some("snapshot-1".into()),
+            client_order_id: "snapshot-1".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(4.0),
+            status: OrderStatus::New,
+        });
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            Some(snapshot),
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let transition = state.service.observe_market("BTCUSDT", 90.0).await.unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [
+                ExecutionAction::CancelAll { .. },
+                ExecutionAction::SubmitOrder { .. }
+            ]
+        ));
+
+        worker.run_once().await.unwrap();
+
+        assert_eq!(
+            exchange.cancel_all_symbols.lock().unwrap().as_slice(),
+            ["BTCUSDT"]
+        );
+        assert!(
+            exchange.submitted_orders.lock().unwrap().is_empty(),
+            "submit should stay blocked behind failed cancel"
+        );
+
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0].status, EffectStatus::Failed);
+        assert_eq!(effects[1].status, EffectStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn effect_worker_marks_effect_failed_even_if_submit_cleanup_persistence_fails() {
+        let exchange = Arc::new(FakeExchange::with_submit_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            "submit rejected",
+        ));
+        let persistence = Arc::new(FailOnSavePersistence::new(3));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            None,
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+
+        worker.run_once().await.unwrap();
+
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Failed);
+        assert_eq!(effects[0].attempt_count, 1);
+
+        let instance = current_instance(&state).await;
+        assert_eq!(
+            instance
+                .pending_order
+                .as_ref()
+                .map(|pending| pending.status),
+            Some(OrderStatus::Submitting)
+        );
+    }
+
+    #[tokio::test]
+    async fn effect_worker_keeps_effect_pending_while_submit_is_inflight() {
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            btc_position(0.0, 0.0),
+            vec![],
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            None,
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+
+        let task = tokio::spawn({
+            let worker = worker.clone();
+            async move { worker.run_once().await }
+        });
+
+        submit_started.notified().await;
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Pending);
+
+        release_submit.notify_waiters();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -978,6 +1113,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_sync_preserves_submitting_pending_order_until_exchange_catches_up() {
+        let mut snapshot = test_snapshot();
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: None,
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::Submitting,
+        });
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(7.5, 3.0),
+            vec![],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(
+            instance
+                .pending_order
+                .as_ref()
+                .map(|pending| pending.status),
+            Some(OrderStatus::Submitting)
+        );
+
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
+            "submitting recovery anchor should suppress duplicate submit before exchange state arrives"
+        );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn startup_sync_replays_buffered_user_event_before_first_tick() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
         fixture
@@ -1047,7 +1224,11 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let state = ServerState {
-            service: Arc::new(GridPlatformService::new(manager, persistence, events)),
+            service: Arc::new(GridPlatformService::new(
+                manager,
+                persistence.clone(),
+                events,
+            )),
         };
         let runtime = ServerRuntime::new(
             state,
@@ -1165,7 +1346,11 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let state = ServerState {
-            service: Arc::new(GridPlatformService::new(manager, persistence, events)),
+            service: Arc::new(GridPlatformService::new(
+                manager,
+                persistence.clone(),
+                events,
+            )),
         };
 
         let runtime = ServerRuntime::new(
@@ -1182,6 +1367,7 @@ mod tests {
         runtime: ServerRuntime,
         state: ServerState,
         exchange: Arc<FakeExchange>,
+        persistence: Arc<MemoryPersistence>,
         price_sender: mpsc::Sender<PriceTick>,
         user_sender: mpsc::Sender<UserDataEvent>,
     }
@@ -1215,14 +1401,18 @@ mod tests {
         if let Some(snapshot) = restored_snapshot.clone() {
             manager.restore_grid_state(&snapshot).unwrap();
             persistence
-                .save_transition("BTCUSDT", &snapshot, &[])
+                .save_transition("BTCUSDT", &snapshot, &[], &[])
                 .await
                 .unwrap();
         }
 
         let (events, _) = broadcast::channel(16);
         let state = ServerState {
-            service: Arc::new(GridPlatformService::new(manager, persistence, events)),
+            service: Arc::new(GridPlatformService::new(
+                manager,
+                persistence.clone(),
+                events,
+            )),
         };
 
         RuntimeFixture {
@@ -1233,6 +1423,7 @@ mod tests {
             ),
             state,
             exchange,
+            persistence,
             price_sender,
             user_sender,
         }
@@ -1277,8 +1468,10 @@ mod tests {
     async fn shutdown(handles: RuntimeHandles) {
         handles.market_task.abort();
         handles.user_task.abort();
+        handles.effect_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
+        let _ = handles.effect_task.await;
     }
 
     async fn wait_until<F>(condition: F)
@@ -1311,6 +1504,39 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    async fn wait_until_async<F, Fut>(condition: F)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if condition().await {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn ready_pending_effects(effects: &[PersistedGridEffect]) -> Vec<PersistedGridEffect> {
+        effects
+            .iter()
+            .filter(|effect| {
+                effect.status == EffectStatus::Pending
+                    && !effects.iter().any(|prior| {
+                        prior.grid_id == effect.grid_id
+                            && prior.batch_id == effect.batch_id
+                            && prior.sequence < effect.sequence
+                            && prior.status != EffectStatus::Succeeded
+                    })
+            })
+            .cloned()
+            .collect()
     }
 
     fn test_config() -> GridConfig {
@@ -1356,21 +1582,6 @@ mod tests {
             reference_price,
             mark_price: reference_price,
             timestamp: Utc::now(),
-        }
-    }
-
-    fn btc_order_request(
-        side: Side,
-        price: f64,
-        quantity: f64,
-        client_order_id: &str,
-    ) -> OrderRequest {
-        OrderRequest {
-            instrument: btc_instrument(),
-            side,
-            price,
-            quantity,
-            client_order_id: client_order_id.into(),
         }
     }
 
@@ -1452,8 +1663,12 @@ mod tests {
         open_orders: Mutex<Vec<ExchangeOrder>>,
         submitted_orders: Mutex<Vec<OrderRequest>>,
         cancel_all_symbols: Mutex<Vec<String>>,
+        submit_error: Mutex<Option<String>>,
+        cancel_all_error: Mutex<Option<String>>,
         server_time: chrono::DateTime<Utc>,
         sequence: AtomicUsize,
+        submit_started: Option<Arc<Notify>>,
+        release_submit: Option<Arc<Notify>>,
     }
 
     impl FakeExchange {
@@ -1472,9 +1687,45 @@ mod tests {
                 open_orders: Mutex::new(open_orders),
                 submitted_orders: Mutex::new(Vec::new()),
                 cancel_all_symbols: Mutex::new(Vec::new()),
+                submit_error: Mutex::new(None),
+                cancel_all_error: Mutex::new(None),
                 server_time: test_server_time(),
                 sequence: AtomicUsize::new(1),
+                submit_started: None,
+                release_submit: None,
             }
+        }
+
+        fn with_submit_error(
+            position: Position,
+            open_orders: Vec<ExchangeOrder>,
+            error: &str,
+        ) -> Self {
+            let exchange = Self::new(position, open_orders);
+            *exchange.submit_error.lock().unwrap() = Some(error.to_string());
+            exchange
+        }
+
+        fn with_cancel_all_error(
+            position: Position,
+            open_orders: Vec<ExchangeOrder>,
+            error: &str,
+        ) -> Self {
+            let exchange = Self::new(position, open_orders);
+            *exchange.cancel_all_error.lock().unwrap() = Some(error.to_string());
+            exchange
+        }
+
+        fn with_blocked_submit(
+            position: Position,
+            open_orders: Vec<ExchangeOrder>,
+            submit_started: Arc<Notify>,
+            release_submit: Arc<Notify>,
+        ) -> Self {
+            let mut exchange = Self::new(position, open_orders);
+            exchange.submit_started = Some(submit_started);
+            exchange.release_submit = Some(release_submit);
+            exchange
         }
     }
 
@@ -1482,6 +1733,15 @@ mod tests {
     impl ExchangePort for FakeExchange {
         async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
             self.submitted_orders.lock().unwrap().push(req.clone());
+            if let Some(notify) = &self.submit_started {
+                notify.notify_waiters();
+            }
+            if let Some(notify) = &self.release_submit {
+                notify.notified().await;
+            }
+            if let Some(error) = self.submit_error.lock().unwrap().clone() {
+                return Err(anyhow!(error));
+            }
             let order_id = self.sequence.fetch_add(1, Ordering::SeqCst);
             Ok(OrderReceipt {
                 order_id: format!("order-{order_id}"),
@@ -1499,6 +1759,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(instrument.symbol.clone());
+            if let Some(error) = self.cancel_all_error.lock().unwrap().clone() {
+                return Err(anyhow!(error));
+            }
             Ok(())
         }
 
@@ -1522,6 +1785,8 @@ mod tests {
     #[derive(Default)]
     struct MemoryPersistence {
         snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        next_effect_batch: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -1531,12 +1796,42 @@ mod tests {
             id: &str,
             state: &GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
-        ) -> Result<()> {
+            effects: &[ExecutionAction],
+        ) -> Result<CommittedGridWrite> {
             self.snapshots
                 .lock()
                 .await
                 .insert(id.to_string(), state.clone());
-            Ok(())
+
+            let now = Utc::now();
+            let batch_id = (self.next_effect_batch.fetch_add(1, Ordering::SeqCst) + 1).to_string();
+            let mut effect_store = self.effects.lock().await;
+            let mut persisted_effects = Vec::new();
+            for (sequence, effect) in effects.iter().enumerate() {
+                if matches!(effect, ExecutionAction::NoOp) {
+                    continue;
+                }
+
+                let persisted = PersistedGridEffect {
+                    effect_id: format!("{id}:{batch_id}:{sequence}"),
+                    grid_id: GridId::new(id),
+                    batch_id: batch_id.clone(),
+                    sequence: u32::try_from(sequence).unwrap(),
+                    effect: effect.clone(),
+                    status: EffectStatus::Pending,
+                    attempt_count: 0,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                effect_store.push(persisted.clone());
+                persisted_effects.push(persisted);
+            }
+
+            Ok(CommittedGridWrite {
+                grid_id: GridId::new(id),
+                effects: persisted_effects,
+            })
         }
 
         async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
@@ -1546,10 +1841,176 @@ mod tests {
         async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
+
+        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(ready_pending_effects(&effects))
+        }
+
+        async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Executing;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Succeeded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Failed;
+            effect.attempt_count += 1;
+            effect.last_error = Some(error.to_string());
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+    }
+
+    impl MemoryPersistence {
+        async fn all_effects(&self) -> Vec<PersistedGridEffect> {
+            self.effects.lock().await.clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct FailOnReceiptPersistence {
+        snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        next_effect_batch: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StateRepositoryPort for FailOnReceiptPersistence {
+        async fn save_transition(
+            &self,
+            id: &str,
+            state: &GridSnapshot,
+            _events: &[grid_core::events::DomainEvent],
+            effects: &[ExecutionAction],
+        ) -> Result<CommittedGridWrite> {
+            if state
+                .pending_order
+                .as_ref()
+                .and_then(|pending| pending.order_id.as_ref())
+                .is_some()
+            {
+                return Err(anyhow!("injected receipt persistence failure"));
+            }
+
+            self.snapshots
+                .lock()
+                .await
+                .insert(id.to_string(), state.clone());
+
+            let now = Utc::now();
+            let batch_id = (self.next_effect_batch.fetch_add(1, Ordering::SeqCst) + 1).to_string();
+            let mut effect_store = self.effects.lock().await;
+            let mut persisted_effects = Vec::new();
+            for (sequence, effect) in effects.iter().enumerate() {
+                if matches!(effect, ExecutionAction::NoOp) {
+                    continue;
+                }
+
+                let persisted = PersistedGridEffect {
+                    effect_id: format!("{id}:{batch_id}:{sequence}"),
+                    grid_id: GridId::new(id),
+                    batch_id: batch_id.clone(),
+                    sequence: u32::try_from(sequence).unwrap(),
+                    effect: effect.clone(),
+                    status: EffectStatus::Pending,
+                    attempt_count: 0,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                effect_store.push(persisted.clone());
+                persisted_effects.push(persisted);
+            }
+
+            Ok(CommittedGridWrite {
+                grid_id: GridId::new(id),
+                effects: persisted_effects,
+            })
+        }
+
+        async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+            Ok(self.snapshots.lock().await.get(id).cloned())
+        }
+
+        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(ready_pending_effects(&effects))
+        }
+
+        async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Executing;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Succeeded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Failed;
+            effect.attempt_count += 1;
+            effect.last_error = Some(error.to_string());
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+    }
+
+    impl FailOnReceiptPersistence {
+        async fn all_effects(&self) -> Vec<PersistedGridEffect> {
+            self.effects.lock().await.clone()
+        }
     }
 
     struct FailOnSavePersistence {
         snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        next_effect_batch: AtomicUsize,
         save_count: AtomicUsize,
         fail_on: usize,
     }
@@ -1558,9 +2019,15 @@ mod tests {
         fn new(fail_on: usize) -> Self {
             Self {
                 snapshots: AsyncMutex::new(HashMap::new()),
+                effects: AsyncMutex::new(Vec::new()),
+                next_effect_batch: AtomicUsize::new(0),
                 save_count: AtomicUsize::new(0),
                 fail_on,
             }
+        }
+
+        async fn all_effects(&self) -> Vec<PersistedGridEffect> {
+            self.effects.lock().await.clone()
         }
     }
 
@@ -1571,7 +2038,8 @@ mod tests {
             id: &str,
             state: &GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
-        ) -> Result<()> {
+            effects: &[ExecutionAction],
+        ) -> Result<CommittedGridWrite> {
             let save_number = self.save_count.fetch_add(1, Ordering::SeqCst) + 1;
             if save_number == self.fail_on {
                 return Err(anyhow!("injected save failure"));
@@ -1581,7 +2049,36 @@ mod tests {
                 .lock()
                 .await
                 .insert(id.to_string(), state.clone());
-            Ok(())
+
+            let now = Utc::now();
+            let batch_id = (self.next_effect_batch.fetch_add(1, Ordering::SeqCst) + 1).to_string();
+            let mut effect_store = self.effects.lock().await;
+            let mut persisted_effects = Vec::new();
+            for (sequence, effect) in effects.iter().enumerate() {
+                if matches!(effect, ExecutionAction::NoOp) {
+                    continue;
+                }
+
+                let persisted = PersistedGridEffect {
+                    effect_id: format!("{id}:{batch_id}:{sequence}"),
+                    grid_id: GridId::new(id),
+                    batch_id: batch_id.clone(),
+                    sequence: u32::try_from(sequence).unwrap(),
+                    effect: effect.clone(),
+                    status: EffectStatus::Pending,
+                    attempt_count: 0,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                effect_store.push(persisted.clone());
+                persisted_effects.push(persisted);
+            }
+
+            Ok(CommittedGridWrite {
+                grid_id: GridId::new(id),
+                effects: persisted_effects,
+            })
         }
 
         async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
@@ -1590,6 +2087,47 @@ mod tests {
 
         async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(ready_pending_effects(&effects))
+        }
+
+        async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Executing;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Succeeded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Failed;
+            effect.attempt_count += 1;
+            effect.last_error = Some(error.to_string());
+            effect.updated_at = Utc::now();
+            Ok(())
         }
     }
 

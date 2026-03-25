@@ -1,6 +1,7 @@
 mod application;
 mod assembly;
 mod config;
+mod effect_worker;
 mod http;
 mod runtime;
 mod websocket;
@@ -164,8 +165,10 @@ notional_per_unit = 375.0
         let _ = server.await;
         runtime_handles.market_task.abort();
         runtime_handles.user_task.abort();
+        runtime_handles.effect_task.abort();
         let _ = runtime_handles.market_task.await;
         let _ = runtime_handles.user_task.await;
+        let _ = runtime_handles.effect_task.await;
         let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 
@@ -251,11 +254,15 @@ notional_per_unit = 375.0
     impl StateRepositoryPort for FakePersistence {
         async fn save_transition(
             &self,
-            _id: &str,
+            id: &str,
             _state: &grid_engine::ports::GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
-        ) -> Result<()> {
-            Ok(())
+            _effects: &[grid_engine::transition::GridEffect],
+        ) -> Result<grid_engine::ports::CommittedGridWrite> {
+            Ok(grid_engine::ports::CommittedGridWrite {
+                grid_id: grid_engine::grid::GridId::new(id),
+                effects: Vec::new(),
+            })
         }
 
         async fn load_grid_state(
@@ -267,6 +274,24 @@ notional_per_unit = 375.0
 
         async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(
+            &self,
+        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
+            Ok(())
         }
     }
 

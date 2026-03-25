@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use rusqlite::Connection;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
@@ -25,13 +25,67 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             grid_id TEXT NOT NULL,
             event_json TEXT NOT NULL,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS grid_effects (
+            effect_id TEXT PRIMARY KEY,
+            grid_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            effect_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );",
+    )?;
+
+    ensure_columns_present(&conn, "domain_events", &["grid_id"])?;
+    ensure_columns_present(
+        &conn,
+        "grid_effects",
+        &[
+            "effect_id",
+            "grid_id",
+            "batch_id",
+            "sequence",
+            "effect_json",
+            "status",
+            "attempt_count",
+            "last_error",
+            "created_at",
+            "updated_at",
+        ],
     )?;
 
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_events_grid
-         ON domain_events(grid_id, created_at);",
+         ON domain_events(grid_id, created_at);
+
+         CREATE INDEX IF NOT EXISTS idx_grid_effects_pending
+         ON grid_effects(status, created_at, batch_id, sequence, effect_id);
+
+         CREATE INDEX IF NOT EXISTS idx_grid_effects_batch_sequence
+         ON grid_effects(grid_id, batch_id, sequence, status);",
     )?;
+
+    Ok(())
+}
+
+fn ensure_columns_present(conn: &Connection, table: &str, required: &[&str]) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for column in required {
+        ensure!(
+            columns.iter().any(|existing| existing == column),
+            "legacy sqlite schema for `{table}` is missing required column `{column}`"
+        );
+    }
 
     Ok(())
 }
@@ -64,6 +118,15 @@ mod tests {
             .unwrap();
         assert_eq!(events_count, 1);
 
+        let effects_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='grid_effects'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(effects_count, 1);
+
         let index_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_events_grid'",
@@ -72,6 +135,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index_count, 1);
+
+        let effects_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_grid_effects_pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(effects_index_count, 1);
+
+        let effects_batch_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_grid_effects_batch_sequence'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(effects_batch_index_count, 1);
     }
 
     #[test]
@@ -128,6 +209,32 @@ mod tests {
 
             INSERT INTO domain_events (instance_id, event_json, created_at)
             VALUES ('BTCUSDT', '{\"band_reentered\":{\"price\":99.0}}', '2026-03-25T00:00:00Z');",
+        )
+        .unwrap();
+
+        assert!(initialize(&conn).is_err());
+    }
+
+    #[test]
+    fn initialize_rejects_legacy_grid_effects_table_without_batch_sequence() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE grid_effects (
+                effect_id TEXT PRIMARY KEY,
+                grid_id TEXT NOT NULL,
+                effect_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_grid_effects_pending
+            ON grid_effects(status, created_at, effect_id);
+
+            CREATE INDEX idx_grid_effects_batch_sequence
+            ON grid_effects(grid_id, status);",
         )
         .unwrap();
 

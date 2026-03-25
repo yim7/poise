@@ -360,8 +360,10 @@ mod tests {
         let _ = server.await;
         handles.market_task.abort();
         handles.user_task.abort();
+        handles.effect_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
+        let _ = handles.effect_task.await;
     }
 
     #[tokio::test]
@@ -616,11 +618,15 @@ mod tests {
     impl StateRepositoryPort for FakePersistence {
         async fn save_transition(
             &self,
-            _id: &str,
+            id: &str,
             _state: &grid_engine::ports::GridSnapshot,
             _events: &[EngineDomainEvent],
-        ) -> Result<()> {
-            Ok(())
+            _effects: &[grid_engine::transition::GridEffect],
+        ) -> Result<grid_engine::ports::CommittedGridWrite> {
+            Ok(grid_engine::ports::CommittedGridWrite {
+                grid_id: grid_engine::grid::GridId::new(id),
+                effects: Vec::new(),
+            })
         }
 
         async fn load_grid_state(
@@ -632,6 +638,24 @@ mod tests {
 
         async fn list_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(
+            &self,
+        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -676,7 +700,8 @@ mod tests {
             id: &str,
             state: &GridSnapshot,
             _events: &[EngineDomainEvent],
-        ) -> Result<()> {
+            _effects: &[grid_engine::transition::GridEffect],
+        ) -> Result<grid_engine::ports::CommittedGridWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
             self.first_save_started.notify_waiters();
             if save_index == 0 {
@@ -689,7 +714,10 @@ mod tests {
                 .insert(id.to_string(), state.clone());
             self.completed_saves.fetch_add(1, Ordering::SeqCst);
             self.completed_save.notify_waiters();
-            Ok(())
+            Ok(grid_engine::ports::CommittedGridWrite {
+                grid_id: grid_engine::grid::GridId::new(id),
+                effects: Vec::new(),
+            })
         }
 
         async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
@@ -698,6 +726,24 @@ mod tests {
 
         async fn list_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(
+            &self,
+        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
+            Ok(())
         }
     }
 

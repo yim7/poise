@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use grid_core::events::DomainEvent;
 use grid_core::types::Side;
 
-use crate::grid::Instrument;
+use crate::grid::{GridId, Instrument};
 use crate::snapshot::GridRuntimeSnapshot;
+use crate::transition::GridEffect;
 
 pub use crate::snapshot::GridRuntimeSnapshot as GridSnapshot;
 
@@ -144,11 +145,56 @@ pub trait StateRepositoryPort: Send + Sync {
         id: &str,
         state: &GridRuntimeSnapshot,
         events: &[DomainEvent],
-    ) -> Result<()>;
+        effects: &[GridEffect],
+    ) -> Result<CommittedGridWrite>;
     async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>>;
     async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
+    async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>>;
+    async fn mark_effect_executing(&self, effect_id: &str) -> Result<()>;
+    async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()>;
+    async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()>;
 }
 
 pub trait ClockPort: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommittedGridWrite {
+    pub grid_id: GridId,
+    pub effects: Vec<PersistedGridEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedGridEffect {
+    pub effect_id: String,
+    pub grid_id: GridId,
+    pub batch_id: String,
+    pub sequence: u32,
+    pub effect: GridEffect,
+    pub status: EffectStatus,
+    pub attempt_count: u32,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectStatus {
+    Pending,
+    Executing,
+    Succeeded,
+    Failed,
+}
+
+impl EffectStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Executing => "executing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
 }

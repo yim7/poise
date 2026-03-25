@@ -170,11 +170,15 @@ mod tests {
     impl grid_engine::ports::StateRepositoryPort for FakePersistence {
         async fn save_transition(
             &self,
-            _id: &str,
+            id: &str,
             _state: &grid_engine::ports::GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
-        ) -> anyhow::Result<()> {
-            Ok(())
+            _effects: &[grid_engine::transition::GridEffect],
+        ) -> anyhow::Result<grid_engine::ports::CommittedGridWrite> {
+            Ok(grid_engine::ports::CommittedGridWrite {
+                grid_id: grid_engine::grid::GridId::new(id),
+                effects: Vec::new(),
+            })
         }
 
         async fn load_grid_state(
@@ -189,6 +193,24 @@ mod tests {
             _id: &str,
         ) -> anyhow::Result<Vec<grid_core::events::DomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_effects(
+            &self,
+        ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_effect_executing(&self, _effect_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_succeeded(&self, _effect_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 

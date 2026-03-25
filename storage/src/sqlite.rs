@@ -11,9 +11,12 @@ use grid_core::events::DomainEvent;
 use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
 use grid_engine::grid::{GridId, Instrument, Venue};
-use grid_engine::ports::StateRepositoryPort;
+use grid_engine::ports::{
+    CommittedGridWrite, EffectStatus, PersistedGridEffect, StateRepositoryPort,
+};
 use grid_engine::runtime::{GridStatus, RiskState};
 use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+use grid_engine::transition::GridEffect;
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -75,12 +78,85 @@ impl SqliteStorage {
         })
     }
 
+    fn deserialize_grid_effect(effect_json: &str) -> rusqlite::Result<GridEffect> {
+        serde_json::from_str(effect_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
+        })
+    }
+
+    fn deserialize_effect_status(status: &str) -> rusqlite::Result<EffectStatus> {
+        match status {
+            "pending" => Ok(EffectStatus::Pending),
+            "executing" => Ok(EffectStatus::Executing),
+            "succeeded" => Ok(EffectStatus::Succeeded),
+            "failed" => Ok(EffectStatus::Failed),
+            other => Err(rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown effect status `{other}`"),
+                )),
+            )),
+        }
+    }
+
+    fn deserialize_timestamp(value: &str, column: usize) -> rusqlite::Result<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    column,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })
+    }
+
+    fn persisted_effect_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedGridEffect> {
+        let effect_id = row.get::<_, String>(0)?;
+        let grid_id = GridId::new(row.get::<_, String>(1)?);
+        let batch_id = row.get::<_, String>(2)?;
+        let sequence = row.get::<_, i64>(3)?;
+        let effect_json = row.get::<_, String>(4)?;
+        let status_text = row.get::<_, String>(5)?;
+        let attempt_count = row.get::<_, i64>(6)?;
+        let created_at = row.get::<_, String>(8)?;
+        let updated_at = row.get::<_, String>(9)?;
+
+        Ok(PersistedGridEffect {
+            effect_id,
+            grid_id,
+            batch_id,
+            sequence: u32::try_from(sequence).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Integer,
+                    Box::new(err),
+                )
+            })?,
+            effect: Self::deserialize_grid_effect(&effect_json)?,
+            status: Self::deserialize_effect_status(&status_text)?,
+            attempt_count: u32::try_from(attempt_count).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Integer,
+                    Box::new(err),
+                )
+            })?,
+            last_error: row.get(7)?,
+            created_at: Self::deserialize_timestamp(&created_at, 8)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 9)?,
+        })
+    }
+
     fn save_transition_blocking(
         conn: Arc<Mutex<Connection>>,
         id: String,
         state: GridRuntimeSnapshot,
         events: Vec<DomainEvent>,
-    ) -> Result<()> {
+        effects: Vec<GridEffect>,
+    ) -> Result<CommittedGridWrite> {
         let config_json =
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
         let status_json =
@@ -99,7 +175,12 @@ impl SqliteStorage {
             .observed
             .out_of_band_since
             .map(|value| value.to_rfc3339());
-        let updated_at = Utc::now().to_rfc3339();
+        let updated_at = Utc::now();
+        let updated_at_text = updated_at.to_rfc3339();
+        let batch_nonce = updated_at
+            .timestamp_nanos_opt()
+            .unwrap_or(updated_at.timestamp_micros() * 1_000);
+        let batch_id = batch_nonce.to_string();
 
         let mut conn = Self::lock_connection(&conn)?;
         let tx = conn
@@ -136,7 +217,7 @@ impl SqliteStorage {
                 state.risk.unrealized_pnl,
                 state.observed.reference_price,
                 out_of_band_since,
-                updated_at
+                updated_at_text
             ],
         )
         .context("failed to save grid snapshot")?;
@@ -147,15 +228,71 @@ impl SqliteStorage {
             tx.execute(
                 "INSERT INTO domain_events (grid_id, event_json, created_at)
                  VALUES (?1, ?2, ?3)",
-                params![id, event_json, updated_at],
+                params![id, event_json, updated_at_text],
             )
             .context("failed to save domain event")?;
+        }
+
+        let grid_id = GridId::new(id.clone());
+        let mut persisted_effects = Vec::new();
+        for (index, effect) in effects.into_iter().enumerate() {
+            if matches!(effect, GridEffect::NoOp) {
+                continue;
+            }
+
+            let effect_id = format!("{id}:{batch_nonce}:{index}");
+            let sequence = u32::try_from(index).context("effect sequence overflow")?;
+            let effect_json =
+                serde_json::to_string(&effect).context("failed to serialize grid effect")?;
+            tx.execute(
+                "INSERT INTO grid_effects (
+                    effect_id,
+                    grid_id,
+                    batch_id,
+                    sequence,
+                    effect_json,
+                    status,
+                    attempt_count,
+                    last_error,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    effect_id,
+                    id,
+                    batch_id.as_str(),
+                    i64::from(sequence),
+                    effect_json,
+                    EffectStatus::Pending.as_str(),
+                    0_i64,
+                    Option::<String>::None,
+                    updated_at_text,
+                    updated_at_text
+                ],
+            )
+            .context("failed to save grid effect")?;
+
+            persisted_effects.push(PersistedGridEffect {
+                effect_id,
+                grid_id: grid_id.clone(),
+                batch_id: batch_id.clone(),
+                sequence,
+                effect,
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: updated_at,
+                updated_at,
+            });
         }
 
         tx.commit()
             .context("failed to commit sqlite transition transaction")?;
 
-        Ok(())
+        Ok(CommittedGridWrite {
+            grid_id,
+            effects: persisted_effects,
+        })
     }
 
     fn load_grid_state_blocking(
@@ -267,6 +404,73 @@ impl SqliteStorage {
 
         Ok(events)
     }
+
+    fn list_pending_effects_blocking(
+        conn: Arc<Mutex<Connection>>,
+    ) -> Result<Vec<PersistedGridEffect>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM grid_effects ge
+                 WHERE ge.status = ?1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM grid_effects prior
+                       WHERE prior.grid_id = ge.grid_id
+                         AND prior.batch_id = ge.batch_id
+                         AND prior.sequence < ge.sequence
+                         AND prior.status != ?2
+                   )
+                 ORDER BY ge.created_at ASC, ge.batch_id ASC, ge.sequence ASC, ge.effect_id ASC",
+            )
+            .context("failed to prepare pending effect query")?;
+
+        let effects = stmt
+            .query_map(
+                params![
+                    EffectStatus::Pending.as_str(),
+                    EffectStatus::Succeeded.as_str()
+                ],
+                Self::persisted_effect_from_row,
+            )
+            .context("failed to query pending effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize pending effects")?;
+
+        Ok(effects)
+    }
+
+    fn mark_effect_status_blocking(
+        conn: Arc<Mutex<Connection>>,
+        effect_id: String,
+        status: EffectStatus,
+        attempt_delta: u32,
+        last_error: Option<String>,
+    ) -> Result<()> {
+        let updated_at = Utc::now().to_rfc3339();
+        let conn = Self::lock_connection(&conn)?;
+        let changed = conn
+            .execute(
+                "UPDATE grid_effects
+                 SET status = ?1,
+                     attempt_count = attempt_count + ?2,
+                     last_error = ?3,
+                     updated_at = ?4
+                 WHERE effect_id = ?5",
+                params![
+                    status.as_str(),
+                    i64::from(attempt_delta),
+                    last_error,
+                    updated_at,
+                    effect_id
+                ],
+            )
+            .context("failed to update grid effect status")?;
+
+        ensure!(changed == 1, "effect status update affected {changed} rows");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -276,7 +480,8 @@ impl StateRepositoryPort for SqliteStorage {
         id: &str,
         state: &GridRuntimeSnapshot,
         events: &[DomainEvent],
-    ) -> Result<()> {
+        effects: &[GridEffect],
+    ) -> Result<CommittedGridWrite> {
         ensure!(
             id == state.grid_id.as_str(),
             "snapshot id mismatch: key `{id}` does not match snapshot.grid_id `{}`",
@@ -287,14 +492,13 @@ impl StateRepositoryPort for SqliteStorage {
         let id = id.to_owned();
         let state = state.clone();
         let events = events.to_vec();
+        let effects = effects.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            Self::save_transition_blocking(conn, id, state, events)
+            Self::save_transition_blocking(conn, id, state, events, effects)
         })
         .await
-        .context("failed to join save_transition blocking task")??;
-
-        Ok(())
+        .context("failed to join save_transition blocking task")?
     }
 
     async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>> {
@@ -314,6 +518,48 @@ impl StateRepositoryPort for SqliteStorage {
             .await
             .context("failed to join list_events blocking task")?
     }
+
+    async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        let conn = Arc::clone(&self.conn);
+
+        tokio::task::spawn_blocking(move || Self::list_pending_effects_blocking(conn))
+            .await
+            .context("failed to join list_pending_effects blocking task")?
+    }
+
+    async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let effect_id = effect_id.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Executing, 0, None)
+        })
+        .await
+        .context("failed to join mark_effect_executing blocking task")?
+    }
+
+    async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let effect_id = effect_id.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Succeeded, 0, None)
+        })
+        .await
+        .context("failed to join mark_effect_succeeded blocking task")?
+    }
+
+    async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let effect_id = effect_id.to_owned();
+        let error = error.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Failed, 1, Some(error))
+        })
+        .await
+        .context("failed to join mark_effect_failed blocking task")?
+    }
 }
 
 #[cfg(test)]
@@ -332,9 +578,10 @@ mod tests {
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
     use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::ports::{OrderStatus, StateRepositoryPort};
+    use grid_engine::ports::{EffectStatus, OrderRequest, OrderStatus, StateRepositoryPort};
     use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+    use grid_engine::transition::GridEffect;
     use rusqlite::Connection;
 
     fn test_snapshot() -> GridRuntimeSnapshot {
@@ -385,6 +632,16 @@ mod tests {
         }
     }
 
+    fn test_order_request() -> OrderRequest {
+        OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 0.25,
+            client_order_id: "client-2".into(),
+        }
+    }
+
     fn temp_db_path() -> std::path::PathBuf {
         static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -403,7 +660,7 @@ mod tests {
         let snapshot = test_snapshot();
 
         storage
-            .save_transition("test-1", &snapshot, &[])
+            .save_transition("test-1", &snapshot, &[], &[])
             .await
             .unwrap();
         let loaded = storage.load_grid_state("test-1").await.unwrap();
@@ -436,7 +693,7 @@ mod tests {
         let snapshot = test_snapshot();
 
         storage
-            .save_transition(snapshot.grid_id.as_str(), &snapshot, &[])
+            .save_transition(snapshot.grid_id.as_str(), &snapshot, &[], &[])
             .await
             .unwrap();
 
@@ -454,7 +711,7 @@ mod tests {
         let snapshot = test_snapshot();
 
         storage
-            .save_transition("test-1", &snapshot, &[test_event()])
+            .save_transition("test-1", &snapshot, &[test_event()], &[])
             .await
             .unwrap();
 
@@ -463,6 +720,138 @@ mod tests {
 
         assert_eq!(loaded.grid_id.as_str(), "test-1");
         assert_eq!(events, vec![test_event()]);
+    }
+
+    #[tokio::test]
+    async fn save_transition_persists_snapshot_events_and_effects_atomically() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+        let effects = vec![GridEffect::SubmitOrder {
+            request: test_order_request(),
+            target_exposure: Exposure(6.0),
+        }];
+
+        let persisted = storage
+            .save_transition("test-1", &snapshot, &[test_event()], &effects)
+            .await
+            .unwrap();
+
+        let loaded = storage.load_grid_state("test-1").await.unwrap().unwrap();
+        let events = storage.list_events("test-1").await.unwrap();
+        let pending = storage.list_pending_effects().await.unwrap();
+
+        assert_eq!(loaded.grid_id.as_str(), "test-1");
+        assert_eq!(events, vec![test_event()]);
+        assert_eq!(persisted.effects, pending);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].grid_id.as_str(), "test-1");
+        assert_eq!(pending[0].effect, effects[0]);
+        assert_eq!(pending[0].status, EffectStatus::Pending);
+        assert_eq!(pending[0].attempt_count, 0);
+        assert_eq!(pending[0].last_error, None);
+    }
+
+    #[tokio::test]
+    async fn mark_effect_failed_updates_attempt_count_and_last_error() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+        let effects = vec![GridEffect::SubmitOrder {
+            request: test_order_request(),
+            target_exposure: Exposure(6.0),
+        }];
+
+        let persisted = storage
+            .save_transition("test-1", &snapshot, &[], &effects)
+            .await
+            .unwrap();
+        let effect_id = persisted.effects[0].effect_id.clone();
+
+        storage
+            .mark_effect_failed(&effect_id, "submit order rejected")
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let effect_row = conn
+            .query_row(
+                "SELECT status, attempt_count, last_error
+                 FROM grid_effects
+                 WHERE effect_id = ?1",
+                params![effect_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(effect_row.0, "failed");
+        assert_eq!(effect_row.1, 1);
+        assert_eq!(effect_row.2.as_deref(), Some("submit order rejected"));
+    }
+
+    #[tokio::test]
+    async fn list_pending_effects_only_returns_batch_head_until_prior_effect_succeeds() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+        let effects = vec![
+            GridEffect::CancelAll {
+                instrument: snapshot.instrument.clone(),
+            },
+            GridEffect::SubmitOrder {
+                request: test_order_request(),
+                target_exposure: Exposure(6.0),
+            },
+        ];
+
+        let persisted = storage
+            .save_transition("test-1", &snapshot, &[], &effects)
+            .await
+            .unwrap();
+
+        let pending = storage.list_pending_effects().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_id, persisted.effects[0].effect_id);
+
+        storage
+            .mark_effect_succeeded(&persisted.effects[0].effect_id)
+            .await
+            .unwrap();
+
+        let pending = storage.list_pending_effects().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
+    }
+
+    #[tokio::test]
+    async fn list_pending_effects_keeps_follow_up_blocked_after_prior_failure() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+        let effects = vec![
+            GridEffect::CancelAll {
+                instrument: snapshot.instrument.clone(),
+            },
+            GridEffect::SubmitOrder {
+                request: test_order_request(),
+                target_exposure: Exposure(6.0),
+            },
+        ];
+
+        let persisted = storage
+            .save_transition("test-1", &snapshot, &[], &effects)
+            .await
+            .unwrap();
+
+        storage
+            .mark_effect_failed(&persisted.effects[0].effect_id, "cancel rejected")
+            .await
+            .unwrap();
+
+        let pending = storage.list_pending_effects().await.unwrap();
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]
@@ -478,14 +867,14 @@ mod tests {
         let mut snapshot = test_snapshot();
 
         storage
-            .save_transition("test-1", &snapshot, &[])
+            .save_transition("test-1", &snapshot, &[], &[])
             .await
             .unwrap();
 
         snapshot.current_exposure = Exposure(6.0);
         snapshot.observed.reference_price = Some(96.0);
         storage
-            .save_transition("test-1", &snapshot, &[])
+            .save_transition("test-1", &snapshot, &[], &[])
             .await
             .unwrap();
 
@@ -500,7 +889,7 @@ mod tests {
         let snapshot = test_snapshot();
 
         let result = storage
-            .save_transition("different-id", &snapshot, &[])
+            .save_transition("different-id", &snapshot, &[], &[])
             .await;
 
         assert!(result.is_err());
@@ -534,7 +923,7 @@ mod tests {
         let snapshot = test_snapshot();
         let save_task = tokio::spawn(async move {
             save_storage
-                .save_transition("test-1", &snapshot, &[])
+                .save_transition("test-1", &snapshot, &[], &[])
                 .await
                 .unwrap();
         });
@@ -560,7 +949,7 @@ mod tests {
         let snapshot = test_snapshot();
 
         storage
-            .save_transition("test-1", &snapshot, &[])
+            .save_transition("test-1", &snapshot, &[], &[])
             .await
             .unwrap();
 

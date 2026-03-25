@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use grid_core::events::DomainEvent;
 use grid_core::types::{ExchangeRules, Exposure};
 
@@ -10,7 +12,7 @@ pub struct ExecutionPlan {
     pub events: Vec<DomainEvent>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExecutionAction {
     SubmitOrder {
         request: OrderRequest,
