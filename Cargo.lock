@@ -553,6 +553,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "grid-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "grid-server"
 version = "0.1.0"
 dependencies = [
@@ -564,6 +571,7 @@ dependencies = [
  "grid-binance",
  "grid-core",
  "grid-engine",
+ "grid-protocol",
  "grid-storage",
  "reqwest",
  "serde",
@@ -601,6 +609,7 @@ dependencies = [
  "axum",
  "crossterm",
  "futures-util",
+ "grid-protocol",
  "ratatui",
  "reqwest",
  "serde",

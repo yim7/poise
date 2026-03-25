@@ -58,11 +58,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let config_lines = vec![
         Line::from(format!("lower: {:.4}", snapshot.config.lower_price)),
         Line::from(format!("upper: {:.4}", snapshot.config.upper_price)),
-        Line::from(format!("long cap: {:.4}", snapshot.config.long_capacity)),
-        Line::from(format!("short cap: {:.4}", snapshot.config.short_capacity)),
+        Line::from(format!("long cap: {:.4}", snapshot.config.long_exposure_units)),
+        Line::from(format!("short cap: {:.4}", snapshot.config.short_exposure_units)),
         Line::from(format!(
             "capacity notional: {:.4}",
-            snapshot.config.capacity_notional
+            snapshot.config.notional_per_unit
         )),
         Line::from(format!("shape: {}", snapshot.config.shape_family)),
         Line::from(format!(
@@ -99,7 +99,7 @@ mod tests {
 
     use crate::app::{App, View};
     use crate::protocol::{
-        DomainEvent, GridConfig, InstanceSnapshot, InstanceStatus, InstanceSummary,
+        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
         OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
@@ -119,20 +119,20 @@ mod tests {
     fn renders_instance_details_and_events() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(vec![InstanceSummary {
+        let mut app = App::new(vec![GridSummary {
             id: "BTCUSDT".into(),
             symbol: "BTCUSDT".into(),
-            status: InstanceStatus::Active,
-            last_price: Some(100.0),
+            status: GridStatus::Active,
+            reference_price: Some(100.0),
         }]);
         app.current_view = View::Instance;
-        app.apply_snapshot(InstanceSnapshot {
+        app.apply_snapshot(GridSnapshot {
             id: "BTCUSDT".into(),
             symbol: "BTCUSDT".into(),
-            status: InstanceStatus::Active,
+            status: GridStatus::Active,
             current_exposure: 1.0,
             target_exposure: Some(4.0),
-            last_price: Some(100.0),
+            reference_price: Some(100.0),
             pending_order: Some(PendingOrder {
                 symbol: "BTCUSDT".into(),
                 order_id: Some("12345".into()),
@@ -145,16 +145,16 @@ mod tests {
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
-                long_capacity: 8.0,
-                short_capacity: 8.0,
-                capacity_notional: 375.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
                 shape_family: ShapeFamily::Concave,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
         });
         app.show_instance_for_selected();
         app.record_event(WsEvent {
-            instance_id: "BTCUSDT".into(),
+            grid_id: "BTCUSDT".into(),
             event: DomainEvent::BandReentered { price: 99.0 },
         });
 

@@ -3,6 +3,6 @@
     "id": "BTCUSDT",
     "symbol": "BTCUSDT",
     "status": "active",
-    "last_price": 101.25
+    "reference_price": 101.25
   }
 ]

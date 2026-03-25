@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    CommandRequest, CommandResponse, InstanceSnapshot, InstanceSummary, WsEvent,
+    CommandRequest, CommandResponse, GridSnapshot, GridSummary, WsEvent,
 };
 
 #[derive(Debug, Clone)]
@@ -35,10 +35,10 @@ impl ApiClient {
         }
     }
 
-    pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
+    pub async fn list_instances(&self) -> Result<Vec<GridSummary>> {
         let response = self
             .http
-            .get(self.endpoint("/instances"))
+            .get(self.endpoint("/grids"))
             .send()
             .await
             .context("failed to request instance list")?;
@@ -46,10 +46,10 @@ impl ApiClient {
         decode_json(response, "list instances").await
     }
 
-    pub async fn get_snapshot(&self, id: &str) -> Result<InstanceSnapshot> {
+    pub async fn get_snapshot(&self, id: &str) -> Result<GridSnapshot> {
         let response = self
             .http
-            .get(self.endpoint(&format!("/instances/{id}/snapshot")))
+            .get(self.endpoint(&format!("/grids/{id}/snapshot")))
             .send()
             .await
             .with_context(|| format!("failed to request snapshot for `{id}`"))?;
@@ -60,7 +60,7 @@ impl ApiClient {
     pub async fn submit_command(&self, id: &str, cmd: &str) -> Result<CommandResponse> {
         let response = self
             .http
-            .post(self.endpoint(&format!("/instances/{id}/commands")))
+            .post(self.endpoint(&format!("/grids/{id}/commands")))
             .json(&CommandRequest {
                 command: cmd.to_string(),
             })
@@ -159,27 +159,27 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::protocol::{
-        CommandResponse, DomainEvent, GridConfig, InstanceSnapshot, InstanceStatus,
-        InstanceSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
+        CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus,
+        GridSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
 
     #[derive(Clone)]
     struct StubState {
-        snapshots: Arc<Mutex<HashMap<String, InstanceSnapshot>>>,
+        snapshots: Arc<Mutex<HashMap<String, GridSnapshot>>>,
     }
 
-    async fn list_instances(State(state): State<StubState>) -> Json<Vec<InstanceSummary>> {
+    async fn list_instances(State(state): State<StubState>) -> Json<Vec<GridSummary>> {
         let snapshots = state.snapshots.lock().await;
         Json(
             snapshots
                 .values()
-                .map(|snapshot| InstanceSummary {
+                .map(|snapshot| GridSummary {
                     id: snapshot.id.clone(),
                     symbol: snapshot.symbol.clone(),
                     status: snapshot.status.clone(),
-                    last_price: snapshot.last_price,
+                    reference_price: snapshot.reference_price,
                 })
                 .collect(),
         )
@@ -188,7 +188,7 @@ mod tests {
     async fn get_snapshot(
         axum::extract::Path(id): axum::extract::Path<String>,
         State(state): State<StubState>,
-    ) -> Json<InstanceSnapshot> {
+    ) -> Json<GridSnapshot> {
         Json(state.snapshots.lock().await.get(&id).unwrap().clone())
     }
 
@@ -200,14 +200,14 @@ mod tests {
         let mut snapshots = state.snapshots.lock().await;
         if let Some(snapshot) = snapshots.get_mut(&id) {
             if command.command == "pause" {
-                snapshot.status = InstanceStatus::Paused;
+                snapshot.status = GridStatus::Paused;
             } else if command.command == "resume" {
-                snapshot.status = InstanceStatus::Active;
+                snapshot.status = GridStatus::Active;
             }
         }
 
         Json(CommandResponse {
-            instance_id: id,
+            grid_id: id,
             command: command.command,
             accepted: true,
         })
@@ -219,7 +219,7 @@ mod tests {
 
     async fn handle_socket(mut socket: WebSocket) {
         let payload = serde_json::to_string(&WsEvent {
-            instance_id: "BTCUSDT".into(),
+            grid_id: "BTCUSDT".into(),
             event: DomainEvent::BandReentered { price: 99.0 },
         })
         .unwrap();
@@ -232,20 +232,20 @@ mod tests {
         let state = StubState {
             snapshots: Arc::new(Mutex::new(HashMap::from([(
                 "BTCUSDT".to_string(),
-                InstanceSnapshot {
+                GridSnapshot {
                     id: "BTCUSDT".into(),
                     symbol: "BTCUSDT".into(),
-                    status: InstanceStatus::Active,
+                    status: GridStatus::Active,
                     current_exposure: 2.5,
                     target_exposure: None,
-                    last_price: Some(100.0),
+                    reference_price: Some(100.0),
                     pending_order: None,
                     config: GridConfig {
                         lower_price: 90.0,
                         upper_price: 110.0,
-                        long_capacity: 8.0,
-                        short_capacity: 8.0,
-                        capacity_notional: 375.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
                         shape_family: ShapeFamily::Linear,
                         out_of_band_policy: OutOfBandPolicy::Freeze,
                     },
@@ -253,9 +253,9 @@ mod tests {
             )]))),
         };
         let app = Router::new()
-            .route("/instances", get(list_instances))
-            .route("/instances/:id/snapshot", get(get_snapshot))
-            .route("/instances/:id/commands", post(submit_command))
+            .route("/grids", get(list_instances))
+            .route("/grids/:id/snapshot", get(get_snapshot))
+            .route("/grids/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state);
 
@@ -285,7 +285,7 @@ mod tests {
         let snapshot = client.get_snapshot("BTCUSDT").await.unwrap();
 
         assert_eq!(snapshot.current_exposure, 2.5);
-        assert_eq!(snapshot.status, InstanceStatus::Active);
+        assert_eq!(snapshot.status, GridStatus::Active);
     }
 
     #[tokio::test]
@@ -297,7 +297,7 @@ mod tests {
         let snapshot = client.get_snapshot("BTCUSDT").await.unwrap();
 
         assert!(response.accepted);
-        assert_eq!(snapshot.status, InstanceStatus::Paused);
+        assert_eq!(snapshot.status, GridStatus::Paused);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
 
         let event = receiver.recv().await.unwrap();
 
-        assert_eq!(event.instance_id, "BTCUSDT");
+        assert_eq!(event.grid_id, "BTCUSDT");
         assert_eq!(event.event, DomainEvent::BandReentered { price: 99.0 });
     }
 }

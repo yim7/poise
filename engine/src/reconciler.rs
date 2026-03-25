@@ -4,13 +4,13 @@ use grid_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use grid_core::types::{Exposure, Side};
 
 use crate::execution_plan::{ExecutionAction, ExecutionPlan, is_meetable_minimum, round_to_step};
-use crate::instance::{InstanceStatus, StrategyInstance};
+use crate::instance::{GridStatus, StrategyInstance};
 use crate::ports::OrderRequest;
 
 pub struct ReconcileResult {
     pub plan: ExecutionPlan,
     pub target_exposure: Exposure,
-    pub new_status: Option<InstanceStatus>,
+    pub new_status: Option<GridStatus>,
 }
 
 /// 纯函数：给定实例当前状态、价格和风控预算，返回执行计划。
@@ -35,7 +35,7 @@ pub fn reconcile(
     let intent = ExposureIntent {
         current: instance.current_exposure.clone(),
         target: target.clone(),
-        unit_notional: instance.config.capacity_notional,
+        unit_notional: instance.config.notional_per_unit,
         realized_pnl_today: instance.risk_state.realized_pnl_today,
         unrealized_pnl: instance.risk_state.unrealized_pnl,
     };
@@ -120,7 +120,7 @@ pub fn reconcile(
     let rules = &instance.exchange_rules;
     let price = round_to_step(price, rules.price_tick);
     let quantity = round_to_step(
-        delta.0.abs() * instance.config.capacity_unit_qty(),
+        delta.0.abs() * instance.config.base_qty_per_unit(),
         rules.quantity_step,
     );
 
@@ -172,10 +172,10 @@ pub fn reconcile(
     }
 }
 
-fn resolve_in_band_status(instance: &StrategyInstance) -> Option<InstanceStatus> {
+fn resolve_in_band_status(instance: &StrategyInstance) -> Option<GridStatus> {
     match instance.status {
-        InstanceStatus::WaitingMarketData => Some(InstanceStatus::Active),
-        InstanceStatus::Frozen | InstanceStatus::Holding => Some(InstanceStatus::Active),
+        GridStatus::WaitingMarketData => Some(GridStatus::Active),
+        GridStatus::Frozen | GridStatus::Holding => Some(GridStatus::Active),
         _ => None,
     }
 }
@@ -183,17 +183,17 @@ fn resolve_in_band_status(instance: &StrategyInstance) -> Option<InstanceStatus>
 fn apply_out_of_band(
     instance: &StrategyInstance,
     policy: OutOfBandPolicy,
-) -> (Exposure, Option<InstanceStatus>) {
+) -> (Exposure, Option<GridStatus>) {
     let frozen_target = instance
         .target_exposure
         .clone()
         .unwrap_or_else(|| instance.current_exposure.clone());
 
     match policy {
-        OutOfBandPolicy::Freeze => (frozen_target, Some(InstanceStatus::Frozen)),
-        OutOfBandPolicy::Hold => (frozen_target, Some(InstanceStatus::Holding)),
-        OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(InstanceStatus::ReducingOnly)),
-        OutOfBandPolicy::Terminate => (Exposure(0.0), Some(InstanceStatus::Terminated)),
+        OutOfBandPolicy::Freeze => (frozen_target, Some(GridStatus::Frozen)),
+        OutOfBandPolicy::Hold => (frozen_target, Some(GridStatus::Holding)),
+        OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(GridStatus::ReducingOnly)),
+        OutOfBandPolicy::Terminate => (Exposure(0.0), Some(GridStatus::Terminated)),
     }
 }
 
@@ -209,9 +209,9 @@ mod tests {
             GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
-                long_capacity: 8.0,
-                short_capacity: 8.0,
-                capacity_notional: 375.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
@@ -248,9 +248,9 @@ mod tests {
     #[test]
     fn reconcile_noop_when_exposure_unchanged() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(0.0);
-        instance.last_price = Some(100.0);
+        instance.reference_price = Some(100.0);
 
         let result = reconcile(&instance, 100.0, &test_budget());
         assert!(!result.plan.has_actions());
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn reconcile_produces_event_when_exposure_changes() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(0.0);
 
         let result = reconcile(&instance, 90.0, &test_budget());
@@ -276,41 +276,41 @@ mod tests {
     #[test]
     fn reconcile_freezes_when_out_of_band() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(8.0);
 
         let result = reconcile(&instance, 85.0, &test_budget());
-        assert_eq!(result.new_status, Some(InstanceStatus::Frozen));
+        assert_eq!(result.new_status, Some(GridStatus::Frozen));
     }
 
     #[test]
     fn reconcile_activates_on_first_price() {
         let instance = test_instance();
-        assert_eq!(instance.status, InstanceStatus::WaitingMarketData);
+        assert_eq!(instance.status, GridStatus::WaitingMarketData);
 
         let result = reconcile(&instance, 100.0, &test_budget());
-        assert_eq!(result.new_status, Some(InstanceStatus::Active));
+        assert_eq!(result.new_status, Some(GridStatus::Active));
     }
 
     #[test]
     fn reconcile_reactivates_after_reenter() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Frozen;
+        instance.status = GridStatus::Frozen;
         instance.current_exposure = Exposure(8.0);
 
         let result = reconcile(&instance, 100.0, &test_budget());
-        assert_eq!(result.new_status, Some(InstanceStatus::Active));
+        assert_eq!(result.new_status, Some(GridStatus::Active));
     }
 
     #[test]
     fn reconcile_reduce_only_targets_zero() {
         let mut instance = test_instance();
         instance.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(8.0);
 
         let result = reconcile(&instance, 85.0, &test_budget());
-        assert_eq!(result.new_status, Some(InstanceStatus::ReducingOnly));
+        assert_eq!(result.new_status, Some(GridStatus::ReducingOnly));
         assert!((result.target_exposure.0).abs() < 0.001);
     }
 
@@ -318,18 +318,18 @@ mod tests {
     fn reconcile_terminate_targets_zero() {
         let mut instance = test_instance();
         instance.config.out_of_band_policy = OutOfBandPolicy::Terminate;
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(8.0);
 
         let result = reconcile(&instance, 85.0, &test_budget());
-        assert_eq!(result.new_status, Some(InstanceStatus::Terminated));
+        assert_eq!(result.new_status, Some(GridStatus::Terminated));
         assert!((result.target_exposure.0).abs() < 0.001);
     }
 
     #[test]
     fn reconcile_emits_risk_cap_event_when_budget_caps_target() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(0.0);
 
         let budget = CapacityBudget {
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn reconcile_keeps_risk_cap_event_when_cap_matches_current_exposure() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(4.0);
 
         let budget = CapacityBudget {
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn reconcile_uses_risk_state_pnl_to_cap_target() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(2.0);
         instance.risk_state.realized_pnl_today = -100.0;
         instance.risk_state.unrealized_pnl = -25.0;
@@ -403,9 +403,9 @@ mod tests {
     #[test]
     fn reconcile_generates_submit_order_for_delta() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(0.0);
-        instance.last_price = Some(90.0);
+        instance.reference_price = Some(90.0);
 
         let result = reconcile(&instance, 90.0, &test_budget());
 
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn reconcile_does_not_resubmit_when_pending_order_already_matches_target() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.pending_order = Some(test_pending_order(Exposure(8.0)));
 
         let result = reconcile(&instance, 90.0, &test_budget());
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(4.0);
         instance.target_exposure = Some(Exposure(6.0));
         instance.config.out_of_band_policy = OutOfBandPolicy::Freeze;
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn reconcile_cancels_all_then_submits_when_pending_order_differs_from_target() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
         instance.current_exposure = Exposure(0.0);
         instance.pending_order = Some(test_pending_order(Exposure(4.0)));
 
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn reconcile_rounds_price_and_quantity_by_exchange_rules() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
 
         let target = grid_core::strategy::target_exposure(99.09, &instance.config);
         instance.current_exposure = Exposure(target.0 - 0.8);
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn reconcile_does_not_submit_when_below_exchange_minimums() {
         let mut instance = test_instance();
-        instance.status = InstanceStatus::Active;
+        instance.status = GridStatus::Active;
 
         let target = grid_core::strategy::target_exposure(99.09, &instance.config);
         instance.current_exposure = Exposure(target.0 - 0.8);

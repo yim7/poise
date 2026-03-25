@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+use grid_engine::key::GridId;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -8,19 +9,19 @@ pub struct Config {
     pub environment: String,
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
-    pub instances: Vec<InstanceConfig>,
+    pub grids: Vec<GridDefinition>,
     #[serde(default)]
     pub exchange: ExchangeConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct InstanceConfig {
+pub struct GridDefinition {
     pub symbol: String,
     pub lower_price: f64,
     pub upper_price: f64,
-    pub long_capacity: f64,
-    pub short_capacity: f64,
-    pub capacity_notional: f64,
+    pub long_exposure_units: f64,
+    pub short_exposure_units: f64,
+    pub notional_per_unit: f64,
     #[serde(default = "default_shape_family")]
     pub shape_family: ShapeFamily,
     #[serde(default = "default_out_of_band_policy")]
@@ -53,18 +54,18 @@ impl Config {
     }
 }
 
-impl InstanceConfig {
-    pub fn instance_id(&self) -> String {
-        self.symbol.clone()
+impl GridDefinition {
+    pub fn grid_id(&self) -> GridId {
+        GridId::from_symbol(self.symbol.clone())
     }
 
     pub fn grid_config(&self) -> GridConfig {
         GridConfig {
             lower_price: self.lower_price,
             upper_price: self.upper_price,
-            long_capacity: self.long_capacity,
-            short_capacity: self.short_capacity,
-            capacity_notional: self.capacity_notional,
+            long_exposure_units: self.long_exposure_units,
+            short_exposure_units: self.short_exposure_units,
+            notional_per_unit: self.notional_per_unit,
             shape_family: self.shape_family,
             out_of_band_policy: self.out_of_band_policy,
         }
@@ -72,7 +73,7 @@ impl InstanceConfig {
 
     pub fn budget(&self) -> CapacityBudget {
         CapacityBudget {
-            max_notional: self.long_capacity.max(self.short_capacity) * self.capacity_notional,
+            max_notional: self.long_exposure_units.max(self.short_exposure_units) * self.notional_per_unit,
             daily_loss_limit: f64::NEG_INFINITY,
             stop_loss_pct: 100.0,
         }
@@ -98,7 +99,7 @@ mod tests {
     use super::{Config, default_bind_address, parse_config};
 
     #[test]
-    fn parses_config_file_with_instances_and_exchange() {
+    fn parses_config_file_with_grids_and_exchange() {
         let config = parse_config(
             r#"
 environment = "test"
@@ -110,21 +111,21 @@ api_secret = "demo-secret"
 rest_base_url = "http://127.0.0.1:18080"
 ws_base_url = "ws://127.0.0.1:18081"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 6.0
-capacity_notional = 3000.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
 
-[[instances]]
+[[grids]]
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
-long_capacity = 5.0
-short_capacity = 4.0
-capacity_notional = 2000.0
+long_exposure_units = 5.0
+short_exposure_units = 4.0
+notional_per_unit = 2000.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
@@ -133,14 +134,15 @@ out_of_band_policy = "hold"
 
         assert_eq!(config.environment, "test");
         assert_eq!(config.bind_address, "127.0.0.1:9000");
-        assert_eq!(config.instances.len(), 2);
-        assert_eq!(config.instances[0].symbol, "BTCUSDT");
+        assert_eq!(config.grids.len(), 2);
+        assert_eq!(config.grids[0].symbol, "BTCUSDT");
+        assert_eq!(config.grids[0].grid_id().as_str(), "BTCUSDT");
         assert_eq!(
-            config.instances[1].shape_family,
+            config.grids[1].shape_family,
             grid_core::strategy::ShapeFamily::Concave
         );
         assert_eq!(
-            config.instances[1].out_of_band_policy,
+            config.grids[1].out_of_band_policy,
             grid_core::strategy::OutOfBandPolicy::Hold
         );
         assert_eq!(config.exchange.api_key.as_deref(), Some("demo-key"));
@@ -156,13 +158,13 @@ out_of_band_policy = "hold"
             r#"
 environment = "paper"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 8.0
-capacity_notional = 375.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
 "#,
         )
         .unwrap();
@@ -171,11 +173,11 @@ capacity_notional = 375.0
         assert_eq!(config.exchange.api_key, None);
         assert_eq!(config.exchange.api_secret, None);
         assert_eq!(
-            config.instances[0].grid_config().shape_family,
+            config.grids[0].grid_config().shape_family,
             grid_core::strategy::ShapeFamily::Linear
         );
         assert_eq!(
-            config.instances[0].grid_config().out_of_band_policy,
+            config.grids[0].grid_config().out_of_band_policy,
             grid_core::strategy::OutOfBandPolicy::Freeze
         );
     }
@@ -186,20 +188,20 @@ capacity_notional = 375.0
             r#"
 environment = "paper"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 4.0
-capacity_notional = 375.0
+long_exposure_units = 8.0
+short_exposure_units = 4.0
+notional_per_unit = 375.0
 shape_family = "concave"
 out_of_band_policy = "reduce_only"
 "#,
         )
         .unwrap();
 
-        let instance = &config.instances[0];
+        let instance = &config.grids[0];
         assert_eq!(instance.shape_family, ShapeFamily::Concave);
         assert_eq!(instance.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
         assert_eq!(instance.budget().max_notional, 3000.0);
@@ -210,7 +212,7 @@ out_of_band_policy = "reduce_only"
         let config = Config {
             environment: "testnet".into(),
             bind_address: default_bind_address(),
-            instances: vec![],
+            grids: vec![],
             exchange: Default::default(),
         };
 

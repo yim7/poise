@@ -1,23 +1,17 @@
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use grid_core::events::DomainEvent;
-use serde::{Deserialize, Serialize};
+#[cfg_attr(not(test), allow(dead_code))]
+pub type WsEvent = grid_protocol::WsEvent;
 
-use crate::assembly::AppState;
+use crate::assembly::ServerState;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WsEvent {
-    pub instance_id: String,
-    pub event: DomainEvent,
-}
-
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    let mut receiver = state.events.subscribe();
+async fn handle_socket(mut socket: WebSocket, state: ServerState) {
+    let mut receiver = state.service.subscribe_events();
 
     loop {
         let event = match receiver.recv().await {
@@ -46,12 +40,12 @@ mod tests {
 
     use axum::Router;
     use futures_util::StreamExt;
-    use grid_core::events::DomainEvent;
-    use grid_core::types::Exposure;
+    use grid_protocol::DomainEvent;
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::assembly::AppState;
+    use crate::application::GridPlatformService;
+    use crate::assembly::ServerState;
 
     use super::{WsEvent, ws_handler};
 
@@ -59,17 +53,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (events, _) = tokio::sync::broadcast::channel(16);
-        let state = AppState {
-            manager: std::sync::Arc::new(tokio::sync::RwLock::new(
-                grid_engine::manager::InstanceManager::new(
-                    std::sync::Arc::new(FakeExchange),
-                    std::sync::Arc::new(FakePersistence),
-                    std::sync::Arc::new(FakeClock),
-                ),
-            )),
-            persistence: std::sync::Arc::new(FakePersistence),
-            mutation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            events: events.clone(),
+        let service = GridPlatformService::new(
+            grid_engine::manager::InstanceManager::new(std::sync::Arc::new(FakeClock)),
+            std::sync::Arc::new(FakePersistence),
+            events.clone(),
+        );
+        let state = ServerState {
+            service: std::sync::Arc::new(service),
         };
         let app = Router::new()
             .route("/ws", axum::routing::get(ws_handler))
@@ -92,11 +82,8 @@ mod tests {
 
         events
             .send(WsEvent {
-                instance_id: "BTCUSDT".into(),
-                event: DomainEvent::ExposureTargetChanged {
-                    from: Exposure(0.0),
-                    to: Exposure(4.0),
-                },
+                grid_id: "BTCUSDT".into(),
+                event: DomainEvent::ExposureTargetChanged { from: 0.0, to: 4.0 },
             })
             .unwrap();
 
@@ -115,71 +102,34 @@ mod tests {
         let payload_b: WsEvent = serde_json::from_str(message_b.to_text().unwrap()).unwrap();
 
         assert_eq!(payload_a, payload_b);
-        assert_eq!(payload_a.instance_id, "BTCUSDT");
-    }
-
-    struct FakeExchange;
-
-    #[async_trait::async_trait]
-    impl grid_engine::ports::ExchangePort for FakeExchange {
-        async fn submit_order(
-            &self,
-            _req: grid_engine::ports::OrderRequest,
-        ) -> anyhow::Result<grid_engine::ports::OrderReceipt> {
-            unreachable!()
-        }
-
-        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> anyhow::Result<()> {
-            unreachable!()
-        }
-
-        async fn cancel_all(&self, _symbol: &str) -> anyhow::Result<()> {
-            unreachable!()
-        }
-
-        async fn get_position(
-            &self,
-            _symbol: &str,
-        ) -> anyhow::Result<grid_engine::ports::Position> {
-            unreachable!()
-        }
-
-        async fn get_open_orders(
-            &self,
-            _symbol: &str,
-        ) -> anyhow::Result<Vec<grid_engine::ports::OpenOrder>> {
-            unreachable!()
-        }
-
-        async fn get_exchange_info(
-            &self,
-            _symbol: &str,
-        ) -> anyhow::Result<grid_engine::ports::ExchangeInfo> {
-            unreachable!()
-        }
-
-        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
-            unreachable!()
-        }
+        assert_eq!(payload_a.grid_id, "BTCUSDT");
     }
 
     struct FakePersistence;
 
     #[async_trait::async_trait]
-    impl grid_engine::ports::PersistencePort for FakePersistence {
-        async fn save_instance_state(
+    impl grid_engine::ports::StateRepositoryPort for FakePersistence {
+        async fn save_transition(
             &self,
             _id: &str,
-            _state: &grid_engine::ports::InstanceSnapshot,
+            _state: &grid_engine::ports::GridSnapshot,
+            _events: &[grid_core::events::DomainEvent],
         ) -> anyhow::Result<()> {
             Ok(())
         }
 
-        async fn load_instance_state(
+        async fn load_grid_state(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Option<grid_engine::ports::InstanceSnapshot>> {
+        ) -> anyhow::Result<Option<grid_engine::ports::GridSnapshot>> {
             Ok(None)
+        }
+
+        async fn list_events(
+            &self,
+            _id: &str,
+        ) -> anyhow::Result<Vec<grid_core::events::DomainEvent>> {
+            Ok(Vec::new())
         }
     }
 

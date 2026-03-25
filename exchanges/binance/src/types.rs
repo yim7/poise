@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use grid_engine::ports::{ExchangeInfo, OpenOrder, OrderReceipt, Position};
+use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, Position};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceOrderResponse {
@@ -86,7 +86,7 @@ impl TryFrom<BinancePositionRisk> for Position {
     }
 }
 
-impl TryFrom<BinanceOpenOrder> for OpenOrder {
+impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
     type Error = anyhow::Error;
 
     fn try_from(value: BinanceOpenOrder) -> Result<Self, Self::Error> {
@@ -229,11 +229,11 @@ mod tests {
         "#;
 
         let order: BinanceOpenOrder = serde_json::from_str(payload).unwrap();
-        let converted = OpenOrder::try_from(order).unwrap();
+        let converted = ExchangeOrder::try_from(order).unwrap();
 
         assert_eq!(
             converted,
-            OpenOrder {
+            ExchangeOrder {
                 symbol: "BTCUSDT".to_string(),
                 order_id: "987654321".to_string(),
                 client_order_id: "grid-open-002".to_string(),

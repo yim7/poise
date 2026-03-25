@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use grid_engine::ports::{
-    ExchangeInfo, ExchangePort, MarketDataPort, OpenOrder, OrderReceipt, OrderRequest, Position,
+    ExchangeInfo, ExchangePort, MarketDataPort, ExchangeOrder, OrderReceipt, OrderRequest, Position,
     PriceTick, UserDataEvent,
 };
 
@@ -52,7 +52,7 @@ impl ExchangePort for BinanceAdapter {
         self.rest.get_position(symbol).await
     }
 
-    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>> {
+    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
         self.rest.get_open_orders(symbol).await
     }
 

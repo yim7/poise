@@ -6,9 +6,9 @@ use crate::types::Exposure;
 pub struct GridConfig {
     pub lower_price: f64,
     pub upper_price: f64,
-    pub long_capacity: f64,
-    pub short_capacity: f64,
-    pub capacity_notional: f64,
+    pub long_exposure_units: f64,
+    pub short_exposure_units: f64,
+    pub notional_per_unit: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: OutOfBandPolicy,
 }
@@ -52,14 +52,14 @@ pub fn validate_config(config: &GridConfig) -> Result<(), String> {
     if config.lower_price >= config.upper_price {
         return Err("lower_price must be less than upper_price".into());
     }
-    if config.long_capacity < 0.0 || config.short_capacity < 0.0 {
+    if config.long_exposure_units < 0.0 || config.short_exposure_units < 0.0 {
         return Err("capacities must not be negative".into());
     }
-    if config.long_capacity + config.short_capacity <= f64::EPSILON {
+    if config.long_exposure_units + config.short_exposure_units <= f64::EPSILON {
         return Err("at least one capacity must be positive".into());
     }
-    if config.capacity_notional <= 0.0 {
-        return Err("capacity_notional must be positive".into());
+    if config.notional_per_unit <= 0.0 {
+        return Err("notional_per_unit must be positive".into());
     }
     Ok(())
 }
@@ -71,7 +71,7 @@ pub fn validate_config(config: &GridConfig) -> Result<(), String> {
 /// - Convex: p=2, g(x) = 1 - x²
 /// - Concave: p=0.5, g(x) = 1 - √x
 ///
-/// target = -short_capacity + (long_capacity + short_capacity) * g(x)
+/// target = -short_exposure_units + (long_exposure_units + short_exposure_units) * g(x)
 pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
     let x =
         ((price - config.lower_price) / (config.upper_price - config.lower_price)).clamp(0.0, 1.0);
@@ -80,7 +80,7 @@ pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
         ShapeFamily::Convex => 1.0 - x.powi(2),
         ShapeFamily::Concave => 1.0 - x.sqrt(),
     };
-    Exposure(-config.short_capacity + (config.long_capacity + config.short_capacity) * g)
+    Exposure(-config.short_exposure_units + (config.long_exposure_units + config.short_exposure_units) * g)
 }
 
 pub fn band_status(price: f64, config: &GridConfig) -> BandStatus {
@@ -106,12 +106,12 @@ impl GridConfig {
         (self.lower_price + self.upper_price) / 2.0
     }
 
-    pub fn capacity_unit_qty(&self) -> f64 {
+    pub fn base_qty_per_unit(&self) -> f64 {
         let center = self.band_center();
         if center <= f64::EPSILON {
             0.0
         } else {
-            self.capacity_notional / center
+            self.notional_per_unit / center
         }
     }
 }
@@ -124,9 +124,9 @@ mod tests {
         GridConfig {
             lower_price: 90.0,
             upper_price: 110.0,
-            long_capacity: 8.0,
-            short_capacity: 8.0,
-            capacity_notional: 375.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
         }
@@ -134,8 +134,8 @@ mod tests {
 
     fn long_only_config() -> GridConfig {
         GridConfig {
-            long_capacity: 8.0,
-            short_capacity: 0.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 0.0,
             ..neutral_config()
         }
     }
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn validate_rejects_negative_capacity() {
         let config = GridConfig {
-            long_capacity: -1.0,
+            long_exposure_units: -1.0,
             ..neutral_config()
         };
         assert!(validate_config(&config).is_err());
@@ -162,8 +162,8 @@ mod tests {
     #[test]
     fn validate_rejects_both_zero_capacity() {
         let config = GridConfig {
-            long_capacity: 0.0,
-            short_capacity: 0.0,
+            long_exposure_units: 0.0,
+            short_exposure_units: 0.0,
             ..neutral_config()
         };
         assert!(validate_config(&config).is_err());
@@ -247,9 +247,9 @@ mod tests {
     }
 
     #[test]
-    fn capacity_unit_qty() {
+    fn base_qty_per_unit() {
         let config = neutral_config();
-        let qty = config.capacity_unit_qty();
+        let qty = config.base_qty_per_unit();
         assert!((qty - 3.75).abs() < 0.01); // 375 / 100
     }
 }

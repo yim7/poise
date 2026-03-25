@@ -238,7 +238,7 @@ fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
 
     Ok(Some(PriceTick {
         symbol: message.symbol,
-        last_price: mark_price,
+        reference_price: mark_price,
         mark_price,
         timestamp,
     }))
@@ -259,7 +259,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
 
             Ok(UserStreamMessage::Events(vec![UserDataEvent {
                 event_time,
-                payload: UserDataPayload::OrderUpdate(grid_engine::ports::OpenOrder {
+                payload: UserDataPayload::OrderUpdate(grid_engine::ports::ExchangeOrder {
                     symbol: order.symbol,
                     order_id: order.order_id.to_string(),
                     client_order_id: order.client_order_id,
@@ -399,7 +399,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use grid_core::types::Side;
-    use grid_engine::ports::{OpenOrder, Position, UserDataPayload};
+    use grid_engine::ports::{ExchangeOrder, Position, UserDataPayload};
 
     use super::*;
 
@@ -419,7 +419,7 @@ mod tests {
             tick,
             PriceTick {
                 symbol: "BTCUSDT".to_string(),
-                last_price: 64000.10,
+                reference_price: 64000.10,
                 mark_price: 64000.10,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             }
@@ -449,7 +449,7 @@ mod tests {
             events,
             UserStreamMessage::Events(vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::OrderUpdate(OpenOrder {
+                payload: UserDataPayload::OrderUpdate(ExchangeOrder {
                     symbol: "BTCUSDT".to_string(),
                     order_id: "12345".to_string(),
                     client_order_id: "grid-order-004".to_string(),

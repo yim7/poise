@@ -13,8 +13,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .cached_snapshot(&item.id)
             .map(|snapshot| format!("{:.4}", snapshot.current_exposure))
             .unwrap_or_else(|| "-".to_string());
-        let last_price = item
-            .last_price
+        let reference_price = item
+            .reference_price
             .map(|value| format!("{value:.4}"))
             .unwrap_or_else(|| "-".to_string());
 
@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.symbol.clone(),
             item.status.to_string(),
             exposure,
-            last_price,
+            reference_price,
         ])
         .style(Theme::status(&item.status))
     });
@@ -57,7 +57,7 @@ mod tests {
 
     use crate::app::App;
     use crate::protocol::{
-        GridConfig, InstanceSnapshot, InstanceStatus, InstanceSummary, OutOfBandPolicy, ShapeFamily,
+        GridConfig, GridSnapshot, GridStatus, GridSummary, OutOfBandPolicy, ShapeFamily,
     };
 
     use super::render;
@@ -76,26 +76,26 @@ mod tests {
     fn renders_dashboard_rows() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(vec![InstanceSummary {
+        let mut app = App::new(vec![GridSummary {
             id: "BTCUSDT".into(),
             symbol: "BTCUSDT".into(),
-            status: InstanceStatus::Active,
-            last_price: Some(100.0),
+            status: GridStatus::Active,
+            reference_price: Some(100.0),
         }]);
-        app.apply_snapshot(InstanceSnapshot {
+        app.apply_snapshot(GridSnapshot {
             id: "BTCUSDT".into(),
             symbol: "BTCUSDT".into(),
-            status: InstanceStatus::Active,
+            status: GridStatus::Active,
             current_exposure: 1.25,
             target_exposure: None,
-            last_price: Some(100.0),
+            reference_price: Some(100.0),
             pending_order: None,
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
-                long_capacity: 8.0,
-                short_capacity: 8.0,
-                capacity_notional: 375.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },

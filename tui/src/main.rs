@@ -135,12 +135,12 @@ fn derive_ws_url(base_url: &str) -> Result<String> {
 }
 
 async fn load_initial_state(client: &ApiClient) -> Result<App> {
-    let instances = client.list_instances().await?;
-    let ids = instances
+    let grids = client.list_instances().await?;
+    let ids = grids
         .iter()
         .map(|instance| instance.id.clone())
         .collect::<Vec<_>>();
-    let mut app = App::new(instances);
+    let mut app = App::new(grids);
 
     for id in ids {
         let snapshot = client.get_snapshot(&id).await?;
@@ -289,19 +289,19 @@ async fn submit_selected_command(
     app: &mut App,
     command: CommandKind,
 ) -> Result<()> {
-    let instance_id = app
+    let grid_id = app
         .selected_instance_id()
         .context("no instance selected for command")?
         .to_string();
     let response = client
-        .submit_command(&instance_id, command.as_str())
+        .submit_command(&grid_id, command.as_str())
         .await
-        .with_context(|| format!("failed to submit command for `{instance_id}`"))?;
+        .with_context(|| format!("failed to submit command for `{grid_id}`"))?;
     if !response.accepted {
         anyhow::bail!(
             "command `{}` rejected for `{}`",
             response.command,
-            response.instance_id
+            response.grid_id
         );
     }
     app.set_status_message(format_command_response(&response));
@@ -315,25 +315,25 @@ async fn submit_selected_command(
 fn format_command_response(response: &CommandResponse) -> String {
     format!(
         "command `{}` accepted for `{}`",
-        response.command, response.instance_id
+        response.command, response.grid_id
     )
 }
 
 async fn refresh_selected_snapshot(client: &ApiClient, app: &mut App) -> Result<()> {
-    let instance_id = app
+    let grid_id = app
         .selected_instance_id()
         .context("no instance selected")?
         .to_string();
-    let snapshot = client.get_snapshot(&instance_id).await?;
+    let snapshot = client.get_snapshot(&grid_id).await?;
     app.apply_snapshot(snapshot);
     Ok(())
 }
 
 async fn handle_ws_event(client: &ApiClient, app: &mut App, event: WsEvent) -> Result<()> {
-    let instance_id = event.instance_id.clone();
+    let grid_id = event.grid_id.clone();
     app.record_event(event);
-    let snapshot = client.get_snapshot(&instance_id).await.with_context(|| {
-        format!("failed to refresh snapshot after ws event for `{instance_id}`")
+    let snapshot = client.get_snapshot(&grid_id).await.with_context(|| {
+        format!("failed to refresh snapshot after ws event for `{grid_id}`")
     })?;
     app.apply_snapshot(snapshot);
     Ok(())
@@ -395,67 +395,67 @@ mod tests {
     use crate::api_client::connect_ws;
     use crate::app::App;
     use crate::protocol::{
-        CommandRequest, CommandResponse, DomainEvent, GridConfig, InstanceSnapshot, InstanceStatus,
-        InstanceSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
+        CommandRequest, CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus,
+        GridSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
     };
 
     #[derive(Clone)]
     struct StubState {
-        snapshots: Arc<Mutex<HashMap<String, InstanceSnapshot>>>,
+        snapshots: Arc<Mutex<HashMap<String, GridSnapshot>>>,
     }
 
-    fn btc_snapshot(exposure: f64, status: InstanceStatus) -> InstanceSnapshot {
-        InstanceSnapshot {
+    fn btc_snapshot(exposure: f64, status: GridStatus) -> GridSnapshot {
+        GridSnapshot {
             id: "BTCUSDT".into(),
             symbol: "BTCUSDT".into(),
             status,
             current_exposure: exposure,
             target_exposure: None,
-            last_price: Some(100.0),
+            reference_price: Some(100.0),
             pending_order: None,
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
-                long_capacity: 8.0,
-                short_capacity: 8.0,
-                capacity_notional: 375.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
         }
     }
 
-    fn eth_snapshot() -> InstanceSnapshot {
-        InstanceSnapshot {
+    fn eth_snapshot() -> GridSnapshot {
+        GridSnapshot {
             id: "ETHUSDT".into(),
             symbol: "ETHUSDT".into(),
-            status: InstanceStatus::Paused,
+            status: GridStatus::Paused,
             current_exposure: -1.0,
             target_exposure: None,
-            last_price: Some(2200.0),
+            reference_price: Some(2200.0),
             pending_order: None,
             config: GridConfig {
                 lower_price: 2000.0,
                 upper_price: 2600.0,
-                long_capacity: 5.0,
-                short_capacity: 4.0,
-                capacity_notional: 2000.0,
+                long_exposure_units: 5.0,
+                short_exposure_units: 4.0,
+                notional_per_unit: 2000.0,
                 shape_family: ShapeFamily::Concave,
                 out_of_band_policy: OutOfBandPolicy::Hold,
             },
         }
     }
 
-    async fn list_instances(State(state): State<StubState>) -> Json<Vec<InstanceSummary>> {
+    async fn list_instances(State(state): State<StubState>) -> Json<Vec<GridSummary>> {
         let snapshots = state.snapshots.lock().await;
         Json(
             snapshots
                 .values()
-                .map(|snapshot| InstanceSummary {
+                .map(|snapshot| GridSummary {
                     id: snapshot.id.clone(),
                     symbol: snapshot.symbol.clone(),
                     status: snapshot.status.clone(),
-                    last_price: snapshot.last_price,
+                    reference_price: snapshot.reference_price,
                 })
                 .collect(),
         )
@@ -464,7 +464,7 @@ mod tests {
     async fn get_snapshot(
         Path(id): Path<String>,
         State(state): State<StubState>,
-    ) -> Json<InstanceSnapshot> {
+    ) -> Json<GridSnapshot> {
         Json(state.snapshots.lock().await.get(&id).unwrap().clone())
     }
 
@@ -476,13 +476,13 @@ mod tests {
         let mut snapshots = state.snapshots.lock().await;
         let snapshot = snapshots.get_mut(&id).unwrap();
         snapshot.status = match command.command.as_str() {
-            "pause" => InstanceStatus::Paused,
-            "resume" => InstanceStatus::Active,
+            "pause" => GridStatus::Paused,
+            "resume" => GridStatus::Active,
             _ => snapshot.status.clone(),
         };
 
         Json(CommandResponse {
-            instance_id: id,
+            grid_id: id,
             command: command.command,
             accepted: true,
         })
@@ -494,7 +494,7 @@ mod tests {
 
     async fn handle_ws_socket(mut socket: WebSocket) {
         let payload = serde_json::to_string(&WsEvent {
-            instance_id: "BTCUSDT".into(),
+            grid_id: "BTCUSDT".into(),
             event: DomainEvent::BandReentered { price: 101.0 },
         })
         .unwrap();
@@ -643,7 +643,7 @@ mod tests {
             snapshots: Arc::new(Mutex::new(HashMap::from([
                 (
                     "BTCUSDT".to_string(),
-                    btc_snapshot(2.0, InstanceStatus::Active),
+                    btc_snapshot(2.0, GridStatus::Active),
                 ),
                 ("ETHUSDT".to_string(), eth_snapshot()),
             ]))),
@@ -651,9 +651,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/instances", get(list_instances))
-            .route("/instances/:id/snapshot", get(get_snapshot))
-            .route("/instances/:id/commands", post(submit_command))
+            .route("/grids", get(list_instances))
+            .route("/grids/:id/snapshot", get(get_snapshot))
+            .route("/grids/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
 
@@ -675,16 +675,16 @@ mod tests {
             snapshots: Arc::new(Mutex::new(HashMap::from([
                 (
                     "BTCUSDT".to_string(),
-                    btc_snapshot(2.0, InstanceStatus::Active),
+                    btc_snapshot(2.0, GridStatus::Active),
                 ),
                 ("ETHUSDT".to_string(), eth_snapshot()),
             ]))),
         };
         let listener = TcpListener::bind(address).await.unwrap();
         let app = Router::new()
-            .route("/instances", get(list_instances))
-            .route("/instances/:id/snapshot", get(get_snapshot))
-            .route("/instances/:id/commands", post(submit_command))
+            .route("/grids", get(list_instances))
+            .route("/grids/:id/snapshot", get(get_snapshot))
+            .route("/grids/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
 
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn formats_command_response_message() {
         let text = format_command_response(&CommandResponse {
-            instance_id: "BTCUSDT".into(),
+            grid_id: "BTCUSDT".into(),
             command: "pause".into(),
             accepted: true,
         });
@@ -745,7 +745,7 @@ mod tests {
         );
         assert_eq!(
             app.cached_snapshot("ETHUSDT").unwrap().status,
-            InstanceStatus::Paused
+            GridStatus::Paused
         );
     }
 
@@ -760,13 +760,13 @@ mod tests {
             .snapshots
             .lock()
             .await
-            .insert("BTCUSDT".into(), btc_snapshot(4.0, InstanceStatus::Frozen));
+            .insert("BTCUSDT".into(), btc_snapshot(4.0, GridStatus::Frozen));
 
         handle_ws_event(
             &client,
             &mut app,
             WsEvent {
-                instance_id: "BTCUSDT".into(),
+                grid_id: "BTCUSDT".into(),
                 event: DomainEvent::BandBreached {
                     boundary: crate::protocol::BandBoundary::Above,
                     price: 120.0,
@@ -782,7 +782,7 @@ mod tests {
         );
         assert_eq!(
             app.current_instance.as_ref().unwrap().status,
-            InstanceStatus::Frozen
+            GridStatus::Frozen
         );
         assert_eq!(app.recent_events_for_current().len(), 1);
     }
@@ -800,7 +800,7 @@ mod tests {
 
         assert_eq!(
             app.cached_snapshot("BTCUSDT").unwrap().status,
-            InstanceStatus::Paused
+            GridStatus::Paused
         );
         assert!(
             app.status_message()
@@ -891,7 +891,7 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         let event = ws_receiver.as_mut().unwrap().recv().await.unwrap();
-        assert_eq!(event.instance_id, "BTCUSDT");
+        assert_eq!(event.grid_id, "BTCUSDT");
         assert_eq!(app.status_message(), Some("websocket reconnected"));
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
             .build()
             .unwrap();
         for _ in 0..50 {
-            let Ok(response) = client.get(format!("{base_url}/instances")).send().await else {
+            let Ok(response) = client.get(format!("{base_url}/grids")).send().await else {
                 sleep(Duration::from_millis(100)).await;
                 continue;
             };
@@ -1141,7 +1141,7 @@ mod tests {
     async fn wait_for_snapshot_price(client: &ApiClient, id: &str) {
         for _ in 0..50 {
             let snapshot = client.get_snapshot(id).await.unwrap();
-            if snapshot.last_price.is_some() {
+            if snapshot.reference_price.is_some() {
                 return;
             }
             sleep(Duration::from_millis(100)).await;
@@ -1170,21 +1170,21 @@ bind_address = "{bind_address}"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 8.0
-capacity_notional = 375.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
 
-[[instances]]
+[[grids]]
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
-long_capacity = 5.0
-short_capacity = 4.0
-capacity_notional = 2000.0
+long_exposure_units = 5.0
+short_exposure_units = 4.0
+notional_per_unit = 2000.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
@@ -1214,8 +1214,8 @@ out_of_band_policy = "hold"
 
         let mut app = load_initial_state(&client).await.unwrap();
         assert_eq!(app.instances.len(), 2);
-        assert!(app.cached_snapshot("BTCUSDT").unwrap().last_price.is_some());
-        assert!(app.cached_snapshot("ETHUSDT").unwrap().last_price.is_some());
+        assert!(app.cached_snapshot("BTCUSDT").unwrap().reference_price.is_some());
+        assert!(app.cached_snapshot("ETHUSDT").unwrap().reference_price.is_some());
 
         let action = crate::input::handle_key_event(
             &mut app,
@@ -1266,21 +1266,21 @@ bind_address = "{bind_address}"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 8.0
-capacity_notional = 375.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
 
-[[instances]]
+[[grids]]
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
-long_capacity = 5.0
-short_capacity = 4.0
-capacity_notional = 2000.0
+long_exposure_units = 5.0
+short_exposure_units = 4.0
+notional_per_unit = 2000.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,

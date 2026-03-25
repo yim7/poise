@@ -1,5 +1,5 @@
 {
-  "instance_id": "BTCUSDT",
+  "grid_id": "BTCUSDT",
   "event": {
     "exposure_target_changed": {
       "from": 0.0,

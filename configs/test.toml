@@ -5,18 +5,18 @@ bind_address = "127.0.0.1:18080"
 rest_base_url = "http://127.0.0.1:1"
 ws_base_url = "ws://127.0.0.1:1"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 8.0
-capacity_notional = 375.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
 
-[[instances]]
+[[grids]]
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
-long_capacity = 5.0
-short_capacity = 4.0
-capacity_notional = 1200.0
+long_exposure_units = 5.0
+short_exposure_units = 4.0
+notional_per_unit = 1200.0

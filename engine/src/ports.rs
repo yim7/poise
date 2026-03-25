@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use grid_core::events::DomainEvent;
 use grid_core::types::{Exposure, Side};
 
 // ── Exchange types ──
@@ -33,7 +34,7 @@ pub struct Position {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OpenOrder {
+pub struct ExchangeOrder {
     pub symbol: String,
     pub order_id: String,
     pub client_order_id: String,
@@ -47,7 +48,7 @@ pub struct OpenOrder {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceTick {
     pub symbol: String,
-    pub last_price: f64,
+    pub reference_price: f64,
     pub mark_price: f64,
     pub timestamp: DateTime<Utc>,
 }
@@ -60,7 +61,7 @@ pub struct ExchangeInfo {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UserDataPayload {
-    OrderUpdate(OpenOrder),
+    OrderUpdate(ExchangeOrder),
     PositionUpdate(Position),
 }
 
@@ -83,17 +84,23 @@ impl UserDataEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 // Internal persistence snapshot: keeps full engine state, including fields not exposed over HTTP.
-pub struct InstanceSnapshot {
+pub struct GridSnapshot {
     pub id: String,
     pub symbol: String,
     pub config: grid_core::strategy::GridConfig,
-    pub status: super::instance::InstanceStatus,
+    pub status: super::instance::GridStatus,
     pub current_exposure: Exposure,
     pub target_exposure: Option<Exposure>,
     pub pending_order: Option<super::instance::PendingOrder>,
     pub risk_state: super::instance::RiskState,
-    pub last_price: Option<f64>,
+    pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedGridState {
+    pub snapshot: GridSnapshot,
+    pub events: Vec<DomainEvent>,
 }
 
 // ── Port traits ──
@@ -104,7 +111,7 @@ pub trait ExchangePort: Send + Sync {
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
     async fn cancel_all(&self, symbol: &str) -> Result<()>;
     async fn get_position(&self, symbol: &str) -> Result<Position>;
-    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>>;
+    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>>;
     async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
 }
@@ -116,9 +123,15 @@ pub trait MarketDataPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait PersistencePort: Send + Sync {
-    async fn save_instance_state(&self, id: &str, state: &InstanceSnapshot) -> Result<()>;
-    async fn load_instance_state(&self, id: &str) -> Result<Option<InstanceSnapshot>>;
+pub trait StateRepositoryPort: Send + Sync {
+    async fn save_transition(
+        &self,
+        id: &str,
+        state: &GridSnapshot,
+        events: &[DomainEvent],
+    ) -> Result<()>;
+    async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>>;
+    async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
 }
 
 pub trait ClockPort: Send + Sync {

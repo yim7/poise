@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::protocol::InstanceStatus;
+use crate::protocol::GridStatus;
 
 pub struct Theme;
 
@@ -28,13 +28,13 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    pub fn status(status: &InstanceStatus) -> Style {
+    pub fn status(status: &GridStatus) -> Style {
         let color = match status {
-            InstanceStatus::WaitingMarketData => Color::DarkGray,
-            InstanceStatus::Active => Color::Green,
-            InstanceStatus::Frozen | InstanceStatus::Holding => Color::Yellow,
-            InstanceStatus::ReducingOnly => Color::LightYellow,
-            InstanceStatus::Terminated | InstanceStatus::Paused => Color::Red,
+            GridStatus::WaitingMarketData => Color::DarkGray,
+            GridStatus::Active => Color::Green,
+            GridStatus::Frozen | GridStatus::Holding => Color::Yellow,
+            GridStatus::ReducingOnly => Color::LightYellow,
+            GridStatus::Terminated | GridStatus::Paused => Color::Red,
         };
 
         Style::default().fg(color)

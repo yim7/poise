@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crate::protocol::{InstanceSnapshot, InstanceSummary, WsEvent};
+use crate::protocol::{GridSnapshot, GridSummary, WsEvent};
 
 const MAX_RECENT_EVENTS: usize = 20;
 
@@ -14,12 +14,12 @@ pub enum View {
 
 #[derive(Debug, Clone)]
 pub struct App {
-    pub instances: Vec<InstanceSummary>,
-    pub current_instance: Option<InstanceSnapshot>,
+    pub instances: Vec<GridSummary>,
+    pub current_instance: Option<GridSnapshot>,
     pub selected_index: usize,
     pub current_view: View,
     pub should_quit: bool,
-    snapshot_cache: HashMap<String, InstanceSnapshot>,
+    snapshot_cache: HashMap<String, GridSnapshot>,
     recent_events: HashMap<String, VecDeque<WsEvent>>,
     status_message: Option<String>,
     initial_load_pending: bool,
@@ -28,7 +28,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mut instances: Vec<InstanceSummary>) -> Self {
+    pub fn new(mut instances: Vec<GridSummary>) -> Self {
         instances.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
@@ -52,17 +52,17 @@ impl App {
             .map(|instance| instance.id.as_str())
     }
 
-    pub fn selected_snapshot(&self) -> Option<&InstanceSnapshot> {
+    pub fn selected_snapshot(&self) -> Option<&GridSnapshot> {
         self.selected_instance_id()
             .and_then(|id| self.snapshot_cache.get(id))
     }
 
-    pub fn cached_snapshot(&self, id: &str) -> Option<&InstanceSnapshot> {
+    pub fn cached_snapshot(&self, id: &str) -> Option<&GridSnapshot> {
         self.snapshot_cache.get(id)
     }
 
     pub fn recent_events_for_current(&self) -> Vec<WsEvent> {
-        let Some(instance_id) = self
+        let Some(grid_id) = self
             .current_instance
             .as_ref()
             .map(|snapshot| snapshot.id.as_str())
@@ -72,7 +72,7 @@ impl App {
         };
 
         self.recent_events
-            .get(instance_id)
+            .get(grid_id)
             .map(|events| events.iter().cloned().collect())
             .unwrap_or_default()
     }
@@ -119,14 +119,14 @@ impl App {
         self.current_instance.is_some()
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: InstanceSnapshot) {
+    pub fn apply_snapshot(&mut self, snapshot: GridSnapshot) {
         if let Some(summary) = self
             .instances
             .iter_mut()
             .find(|item| item.id == snapshot.id)
         {
             summary.status = snapshot.status.clone();
-            summary.last_price = snapshot.last_price;
+            summary.reference_price = snapshot.reference_price;
         }
 
         let selected_matches = self.selected_instance_id() == Some(snapshot.id.as_str());
@@ -145,7 +145,7 @@ impl App {
     pub fn record_event(&mut self, event: WsEvent) {
         let events = self
             .recent_events
-            .entry(event.instance_id.clone())
+            .entry(event.grid_id.clone())
             .or_default();
         events.push_front(event);
         while events.len() > MAX_RECENT_EVENTS {
@@ -191,29 +191,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        DomainEvent, GridConfig, InstanceSnapshot, InstanceStatus, InstanceSummary,
+        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
         OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
     use super::{App, View};
 
-    fn summary(id: &str) -> InstanceSummary {
-        InstanceSummary {
+    fn summary(id: &str) -> GridSummary {
+        GridSummary {
             id: id.into(),
             symbol: id.into(),
-            status: InstanceStatus::WaitingMarketData,
-            last_price: None,
+            status: GridStatus::WaitingMarketData,
+            reference_price: None,
         }
     }
 
-    fn snapshot(id: &str, exposure: f64) -> InstanceSnapshot {
-        InstanceSnapshot {
+    fn snapshot(id: &str, exposure: f64) -> GridSnapshot {
+        GridSnapshot {
             id: id.into(),
             symbol: id.into(),
-            status: InstanceStatus::Active,
+            status: GridStatus::Active,
             current_exposure: exposure,
             target_exposure: Some(exposure + 1.0),
-            last_price: Some(100.0),
+            reference_price: Some(100.0),
             pending_order: Some(PendingOrder {
                 symbol: id.into(),
                 order_id: Some(format!("{id}-order")),
@@ -226,9 +226,9 @@ mod tests {
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
-                long_capacity: 8.0,
-                short_capacity: 8.0,
-                capacity_notional: 375.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
@@ -243,8 +243,8 @@ mod tests {
 
         app.apply_snapshot(snapshot("BTCUSDT", 3.5));
 
-        assert_eq!(app.instances[0].status, InstanceStatus::Active);
-        assert_eq!(app.instances[0].last_price, Some(100.0));
+        assert_eq!(app.instances[0].status, GridStatus::Active);
+        assert_eq!(app.instances[0].reference_price, Some(100.0));
         assert_eq!(app.current_instance.unwrap().current_exposure, 3.5);
     }
 
@@ -254,7 +254,7 @@ mod tests {
 
         for index in 0..25 {
             app.record_event(WsEvent {
-                instance_id: "BTCUSDT".into(),
+                grid_id: "BTCUSDT".into(),
                 event: DomainEvent::BandReentered {
                     price: index as f64,
                 },

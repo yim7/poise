@@ -25,6 +25,7 @@
 grid-platform/
 ├── core/           # grid-core (library)
 ├── engine/         # grid-engine (library)
+├── protocol/       # grid-protocol (library)
 ├── exchanges/
 │   └── binance/    # grid-binance (library)
 ├── storage/        # grid-storage (library)
@@ -37,10 +38,12 @@ grid-platform/
 ```
 grid-server (bin)
   ├── grid-engine    → grid-core
+  ├── grid-protocol
   ├── grid-binance   → grid-engine (实现端口 trait)
   └── grid-storage   → grid-engine (实现端口 trait)
 
 grid-tui (bin)
+  ├── grid-protocol
   └── 通过 HTTP/WS 连接 grid-server，不依赖 engine 或 core
 ```
 
@@ -51,6 +54,7 @@ grid-tui (bin)
 | `grid-binance` | Binance REST/WS 适配器 | 不包含策略逻辑 |
 | `grid-storage` | SQLite 持久化适配器 | 不包含业务规则 |
 | `grid-server` | HTTP/WS 服务 + 组件组装 + 启动入口 | 不包含策略逻辑 |
+| `grid-protocol` | 共享 HTTP / WS DTO，与服务端内部类型解耦 | 不依赖 engine / server 实现细节 |
 | `grid-tui` | 终端 UI，纯客户端 | 不直接依赖 engine |
 
 `grid-core` 的 `Cargo.toml` 只允许 `serde`，不允许 `tokio`/`async`/`reqwest` 等 IO 依赖。
@@ -197,7 +201,7 @@ pub trait ExchangePort: Send + Sync {
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
     async fn cancel_all(&self, symbol: &str) -> Result<Vec<String>>;
     async fn get_position(&self, symbol: &str) -> Result<Position>;
-    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>>;
+    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>>;
     async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo>;
 }
 
@@ -210,9 +214,15 @@ pub trait MarketDataPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait PersistencePort: Send + Sync {
-    async fn save_instance_state(&self, id: &str, state: &InstanceSnapshot) -> Result<()>;
-    async fn load_instance_state(&self, id: &str) -> Result<Option<InstanceSnapshot>>;
+pub trait StateRepositoryPort: Send + Sync {
+    async fn save_transition(
+        &self,
+        id: &str,
+        state: &GridSnapshot,
+        events: &[DomainEvent],
+    ) -> Result<()>;
+    async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>>;
+    async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
 }
 
 pub trait ClockPort: Send + Sync {
@@ -227,13 +237,13 @@ pub struct StrategyInstance {
     pub id: String,
     pub symbol: String,
     pub config: GridConfig,
-    pub status: InstanceStatus,
+    pub status: GridStatus,
     pub current_exposure: Exposure,
-    pub last_price: Option<f64>,
+    pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
 }
 
-pub enum InstanceStatus {
+pub enum GridStatus {
     WaitingMarketData,
     Active,
     Frozen,
@@ -308,7 +318,7 @@ exchanges/binance/src/
 ```
 storage/src/
 ├── lib.rs
-├── sqlite.rs       # 实现 PersistencePort
+├── sqlite.rs       # 实现 StateRepositoryPort
 └── schema.rs       # 表结构定义
 ```
 
@@ -328,18 +338,21 @@ server/src/
 六边形架构的组装点，只有这个文件知道所有具体类型：
 
 ```rust
-pub fn assemble(config: &Config) -> Result<Platform> {
+pub fn assemble(config: &Config) -> Result<ServerPlatform> {
     let clock = SystemClock::new();
     let exchange = BinanceAdapter::new(&config.exchange)?;
-    let persistence = SqliteStorage::new(&config.db_path)?;
+    let repository = SqliteStorage::new(&config.db_path)?;
 
-    let engine = InstanceManager::new(
-        Arc::new(exchange),
-        Arc::new(persistence),
-        Arc::new(clock),
-    );
+    let manager = InstanceManager::new(Arc::new(clock));
+    let service = Arc::new(GridPlatformService::new(
+        manager,
+        Arc::new(repository),
+        broadcast::channel(256).0,
+    ));
+    let state = ServerState { service: service.clone() };
+    let runtime = ServerRuntime::new(state.clone(), Arc::new(exchange), Arc::new(exchange));
 
-    Ok(Platform { engine })
+    Ok(ServerPlatform { state, runtime })
 }
 ```
 
@@ -347,9 +360,9 @@ pub fn assemble(config: &Config) -> Result<Platform> {
 
 | 路径 | 方法 | 用途 |
 |---|---|---|
-| `/instances` | GET | 列出所有策略实例 |
-| `/instances/{id}/snapshot` | GET | 查询实例快照 |
-| `/instances/{id}/commands` | POST | 提交命令 |
+| `/grids` | GET | 列出所有网格 |
+| `/grids/{id}/snapshot` | GET | 查询网格快照 |
+| `/grids/{id}/commands` | POST | 提交命令 |
 | `/ws` | WS | 实时事件流 |
 
 ## 8. 整体数据流
@@ -362,7 +375,7 @@ pub fn assemble(config: &Config) -> Result<Platform> {
 4. 拿到 `ExecutionPlan`，如果 `NoOp` 则跳过
 5. 通过 `ExchangePort` 执行订单动作
 6. 执行成功后更新 `instance` 状态
-7. 通过 `PersistencePort` 持久化
+7. 通过 `StateRepositoryPort` 原子持久化快照与事件
 8. 广播 `DomainEvent` 给 HTTP/WS 层推送给客户端
 
 ## 9. 非目标

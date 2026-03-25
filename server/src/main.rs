@@ -1,3 +1,4 @@
+mod application;
 mod assembly;
 mod config;
 mod http;
@@ -18,7 +19,7 @@ async fn main() -> Result<()> {
     let platform = assembly::assemble(&config).await?;
     let _runtime_handles = platform.runtime.start().await?;
 
-    let app = http::router(platform.app_state());
+    let app = http::router(platform.state());
     let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
     axum::serve(listener, app).await?;
 
@@ -55,8 +56,8 @@ mod tests {
     use chrono::Utc;
     use grid_core::types::ExchangeRules;
     use grid_engine::ports::{
-        ClockPort, ExchangeInfo, ExchangePort, OpenOrder, OrderReceipt, OrderRequest,
-        PersistencePort, Position, PriceTick,
+        ClockPort, ExchangeInfo, ExchangePort, ExchangeOrder, OrderReceipt, OrderRequest,
+        Position, PriceTick, StateRepositoryPort,
     };
     use tokio::sync::mpsc;
 
@@ -107,13 +108,13 @@ bind_address = "{bind_address}"
 rest_base_url = "http://127.0.0.1:1"
 ws_base_url = "ws://127.0.0.1:1"
 
-[[instances]]
+[[grids]]
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
-long_capacity = 8.0
-short_capacity = 8.0
-capacity_notional = 375.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
 "#
             ),
         )
@@ -130,29 +131,29 @@ capacity_notional = 375.0
         .await
         .unwrap();
         let runtime_handles = platform.runtime.start().await.unwrap();
-        let app = crate::http::router(platform.app_state());
+        let app = crate::http::router(platform.state());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
         let client = reqwest::Client::new();
-        let instances = client
-            .get(format!("http://{bind_address}/instances"))
+        let grids = client
+            .get(format!("http://{bind_address}/grids"))
             .send()
             .await
             .unwrap();
-        assert!(instances.status().is_success());
-        let list: Vec<crate::http::InstanceSummary> = instances.json().await.unwrap();
+        assert!(grids.status().is_success());
+        let list: Vec<crate::http::GridSummary> = grids.json().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "BTCUSDT");
 
         let snapshot = client
-            .get(format!("http://{bind_address}/instances/BTCUSDT/snapshot"))
+            .get(format!("http://{bind_address}/grids/BTCUSDT/snapshot"))
             .send()
             .await
             .unwrap();
         assert!(snapshot.status().is_success());
-        let payload: crate::http::InstanceSnapshot = snapshot.json().await.unwrap();
+        let payload: crate::http::GridSnapshot = snapshot.json().await.unwrap();
         assert_eq!(payload.id, "BTCUSDT");
         assert_eq!(payload.symbol, "BTCUSDT");
 
@@ -194,7 +195,7 @@ capacity_notional = 375.0
             })
         }
 
-        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OpenOrder>> {
+        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<ExchangeOrder>> {
             Ok(Vec::new())
         }
 
@@ -241,20 +242,25 @@ capacity_notional = 375.0
     struct FakePersistence;
 
     #[async_trait::async_trait]
-    impl PersistencePort for FakePersistence {
-        async fn save_instance_state(
+    impl StateRepositoryPort for FakePersistence {
+        async fn save_transition(
             &self,
             _id: &str,
-            _state: &grid_engine::ports::InstanceSnapshot,
+            _state: &grid_engine::ports::GridSnapshot,
+            _events: &[grid_core::events::DomainEvent],
         ) -> Result<()> {
             Ok(())
         }
 
-        async fn load_instance_state(
+        async fn load_grid_state(
             &self,
             _id: &str,
-        ) -> Result<Option<grid_engine::ports::InstanceSnapshot>> {
+        ) -> Result<Option<grid_engine::ports::GridSnapshot>> {
             Ok(None)
+        }
+
+        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+            Ok(Vec::new())
         }
     }
 

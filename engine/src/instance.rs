@@ -6,7 +6,7 @@ use grid_core::types::{ExchangeRules, Exposure, Side};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InstanceStatus {
+pub enum GridStatus {
     WaitingMarketData,
     Active,
     Frozen,
@@ -41,13 +41,13 @@ pub struct StrategyInstance {
     pub symbol: String,
     pub config: GridConfig,
     pub exchange_rules: ExchangeRules,
-    pub status: InstanceStatus,
+    pub status: GridStatus,
     pub current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
     pub risk_state: RiskState,
-    pub last_price: Option<f64>,
+    pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
 }
 
@@ -63,12 +63,12 @@ impl StrategyInstance {
             symbol,
             config,
             exchange_rules,
-            status: InstanceStatus::WaitingMarketData,
+            status: GridStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
             pending_order: None,
             risk_state: RiskState::default(),
-            last_price: None,
+            reference_price: None,
             out_of_band_since: None,
         }
     }

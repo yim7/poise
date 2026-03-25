@@ -93,24 +93,24 @@ mod tests {
 
     use crate::app::{App, View};
     use crate::protocol::{
-        GridConfig, InstanceSnapshot, InstanceStatus, InstanceSummary, OutOfBandPolicy, ShapeFamily,
+        GridConfig, GridSnapshot, GridStatus, GridSummary, OutOfBandPolicy, ShapeFamily,
     };
 
     use super::{Action, CommandKind, handle_key_event};
 
     fn app() -> App {
         App::new(vec![
-            InstanceSummary {
+            GridSummary {
                 id: "BTCUSDT".into(),
                 symbol: "BTCUSDT".into(),
-                status: InstanceStatus::Active,
-                last_price: Some(100.0),
+                status: GridStatus::Active,
+                reference_price: Some(100.0),
             },
-            InstanceSummary {
+            GridSummary {
                 id: "ETHUSDT".into(),
                 symbol: "ETHUSDT".into(),
-                status: InstanceStatus::Paused,
-                last_price: Some(2000.0),
+                status: GridStatus::Paused,
+                reference_price: Some(2000.0),
             },
         ])
     }
@@ -188,20 +188,20 @@ mod tests {
     fn pause_and_resume_are_available_in_instance_view() {
         let mut app = app();
         app.current_view = View::Instance;
-        app.current_instance = Some(InstanceSnapshot {
+        app.current_instance = Some(GridSnapshot {
             id: "BTCUSDT".into(),
             symbol: "BTCUSDT".into(),
-            status: InstanceStatus::Active,
+            status: GridStatus::Active,
             current_exposure: 1.0,
             target_exposure: None,
-            last_price: Some(100.0),
+            reference_price: Some(100.0),
             pending_order: None,
             config: GridConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
-                long_capacity: 8.0,
-                short_capacity: 8.0,
-                capacity_notional: 375.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },

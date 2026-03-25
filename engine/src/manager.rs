@@ -8,10 +8,9 @@ use grid_core::strategy::GridConfig;
 use grid_core::types::ExchangeRules;
 
 use crate::execution_plan::ExecutionPlan;
-use crate::instance::{InstanceStatus, PendingOrder, StrategyInstance};
-use crate::ports::{
-    ClockPort, ExchangePort, InstanceSnapshot, OpenOrder, PersistencePort, Position, PriceTick,
-};
+use crate::instance::{GridStatus, PendingOrder, StrategyInstance};
+use crate::key::GridId;
+use crate::ports::{ClockPort, GridSnapshot, ExchangeOrder, Position, PriceTick};
 use crate::reconciler;
 
 pub struct TickOutcome {
@@ -22,36 +21,29 @@ pub struct TickOutcome {
 pub struct InstanceManager {
     instances: HashMap<String, StrategyInstance>,
     budgets: HashMap<String, CapacityBudget>,
-    exchange: Arc<dyn ExchangePort>,
-    persistence: Arc<dyn PersistencePort>,
     clock: Arc<dyn ClockPort>,
 }
 
 impl InstanceManager {
-    pub fn new(
-        exchange: Arc<dyn ExchangePort>,
-        persistence: Arc<dyn PersistencePort>,
-        clock: Arc<dyn ClockPort>,
-    ) -> Self {
+    pub fn new(clock: Arc<dyn ClockPort>) -> Self {
         Self {
             instances: HashMap::new(),
             budgets: HashMap::new(),
-            exchange,
-            persistence,
             clock,
         }
     }
 
-    pub fn add_instance(
+    pub fn add_grid(
         &mut self,
-        id: String,
+        id: GridId,
         symbol: String,
         config: GridConfig,
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
     ) -> Result<()> {
+        let id = id.as_str().to_string();
         if self.instances.contains_key(&id) {
-            bail!("duplicate instance id `{id}`");
+            bail!("duplicate grid id `{id}`");
         }
         grid_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
         let instance = StrategyInstance::new(id.clone(), symbol, config, exchange_rules);
@@ -72,23 +64,23 @@ impl InstanceManager {
             .collect();
 
         for id in ids {
-            if matches!(self.instances[&id].status, InstanceStatus::Paused) {
+            if matches!(self.instances[&id].status, GridStatus::Paused) {
                 let instance = self.instances.get_mut(&id).unwrap();
-                instance.last_price = Some(tick.last_price);
+                instance.reference_price = Some(tick.reference_price);
                 instance.target_exposure = None;
                 continue;
             }
 
             let instance = self.instances.get(&id).unwrap();
             let budget = self.budgets.get(&id).unwrap();
-            let result = reconciler::reconcile(instance, tick.last_price, budget);
+            let result = reconciler::reconcile(instance, tick.reference_price, budget);
 
             let instance = self.instances.get_mut(&id).unwrap();
             if let Some(new_status) = result.new_status {
                 instance.status = new_status;
             }
             instance.target_exposure = Some(result.target_exposure);
-            instance.last_price = Some(tick.last_price);
+            instance.reference_price = Some(tick.reference_price);
 
             actions.extend(result.plan.actions);
             all_events.extend(result.plan.events.clone());
@@ -110,7 +102,7 @@ impl InstanceManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
         // Pause disables strategy targeting, but does not rewrite observed exchange state.
-        instance.status = InstanceStatus::Paused;
+        instance.status = GridStatus::Paused;
         instance.target_exposure = None;
         Ok(())
     }
@@ -122,24 +114,24 @@ impl InstanceManager {
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("instance `{id}` not found"))?;
 
-            if !matches!(instance.status, InstanceStatus::Paused) {
+            if !matches!(instance.status, GridStatus::Paused) {
                 bail!(
                     "cannot resume instance `{id}` from status {:?}",
                     instance.status
                 );
             }
 
-            match instance.last_price {
-                Some(last_price) => {
+            match instance.reference_price {
+                Some(reference_price) => {
                     let budget = self
                         .budgets
                         .get(id)
                         .ok_or_else(|| anyhow::anyhow!("budget for instance `{id}` not found"))?;
                     let mut resumed = instance.clone();
-                    resumed.status = InstanceStatus::WaitingMarketData;
-                    let result = reconciler::reconcile(&resumed, last_price, budget);
+                    resumed.status = GridStatus::WaitingMarketData;
+                    let result = reconciler::reconcile(&resumed, reference_price, budget);
                     Some((
-                        result.new_status.unwrap_or(InstanceStatus::Active),
+                        result.new_status.unwrap_or(GridStatus::Active),
                         result.target_exposure,
                     ))
                 }
@@ -157,7 +149,7 @@ impl InstanceManager {
                 instance.target_exposure = Some(exposure);
             }
             None => {
-                instance.status = InstanceStatus::WaitingMarketData;
+                instance.status = GridStatus::WaitingMarketData;
                 instance.target_exposure = None;
             }
         }
@@ -165,7 +157,7 @@ impl InstanceManager {
         Ok(())
     }
 
-    pub fn restore_instance_state(&mut self, snapshot: &InstanceSnapshot) -> Result<()> {
+    pub fn restore_instance_state(&mut self, snapshot: &GridSnapshot) -> Result<()> {
         let instance = self
             .instances
             .get_mut(&snapshot.id)
@@ -184,7 +176,7 @@ impl InstanceManager {
         instance.target_exposure = snapshot.target_exposure.clone();
         instance.pending_order = snapshot.pending_order.clone();
         instance.risk_state = snapshot.risk_state.clone();
-        instance.last_price = snapshot.last_price;
+        instance.reference_price = snapshot.reference_price;
         instance.out_of_band_since = snapshot.out_of_band_since;
         Ok(())
     }
@@ -206,7 +198,7 @@ impl InstanceManager {
 
     pub fn apply_position_update(&mut self, position: &Position) -> Result<()> {
         let instance = self.instance_by_symbol_mut(&position.symbol)?;
-        let unit_qty = instance.config.capacity_unit_qty();
+        let unit_qty = instance.config.base_qty_per_unit();
         instance.current_exposure = if unit_qty <= f64::EPSILON {
             grid_core::types::Exposure(0.0)
         } else {
@@ -216,7 +208,7 @@ impl InstanceManager {
         Ok(())
     }
 
-    pub fn apply_order_update(&mut self, order: &OpenOrder) -> Result<()> {
+    pub fn apply_order_update(&mut self, order: &ExchangeOrder) -> Result<()> {
         let today = self.clock.now().date_naive();
         let instance = self.instance_by_symbol_mut(&order.symbol)?;
 
@@ -278,14 +270,6 @@ impl InstanceManager {
         self.instances.get(id)
     }
 
-    pub fn exchange(&self) -> &dyn ExchangePort {
-        self.exchange.as_ref()
-    }
-
-    pub fn persistence(&self) -> &dyn PersistencePort {
-        self.persistence.as_ref()
-    }
-
     pub fn clock(&self) -> &dyn ClockPort {
         self.clock.as_ref()
     }
@@ -301,52 +285,10 @@ impl InstanceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::InstanceStatus;
+    use crate::instance::GridStatus;
     use crate::ports::*;
     use chrono::{TimeZone, Utc};
     use grid_core::strategy::*;
-
-    // ── Fake adapters for testing ──
-
-    struct FakeExchange;
-
-    #[async_trait::async_trait]
-    impl ExchangePort for FakeExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            unimplemented!()
-        }
-        async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
-            unimplemented!()
-        }
-        async fn cancel_all(&self, _symbol: &str) -> Result<()> {
-            unimplemented!()
-        }
-        async fn get_position(&self, _symbol: &str) -> Result<Position> {
-            unimplemented!()
-        }
-        async fn get_open_orders(&self, _symbol: &str) -> Result<Vec<OpenOrder>> {
-            unimplemented!()
-        }
-        async fn get_exchange_info(&self, _symbol: &str) -> Result<ExchangeInfo> {
-            unimplemented!()
-        }
-
-        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-            Ok(Utc::now())
-        }
-    }
-
-    struct FakePersistence;
-
-    #[async_trait::async_trait]
-    impl PersistencePort for FakePersistence {
-        async fn save_instance_state(&self, _id: &str, _state: &InstanceSnapshot) -> Result<()> {
-            Ok(())
-        }
-        async fn load_instance_state(&self, _id: &str) -> Result<Option<InstanceSnapshot>> {
-            Ok(None)
-        }
-    }
 
     struct FakeClock;
 
@@ -365,24 +307,20 @@ mod tests {
     }
 
     fn test_manager() -> InstanceManager {
-        InstanceManager::new(
-            Arc::new(FakeExchange),
-            Arc::new(FakePersistence),
-            Arc::new(FakeClock),
-        )
+        InstanceManager::new(Arc::new(FakeClock))
     }
 
     fn test_manager_with_clock(clock: Arc<dyn ClockPort>) -> InstanceManager {
-        InstanceManager::new(Arc::new(FakeExchange), Arc::new(FakePersistence), clock)
+        InstanceManager::new(clock)
     }
 
     fn test_config() -> GridConfig {
         GridConfig {
             lower_price: 90.0,
             upper_price: 110.0,
-            long_capacity: 8.0,
-            short_capacity: 8.0,
-            capacity_notional: 375.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
         }
@@ -415,7 +353,7 @@ mod tests {
         };
         assert!(
             manager
-                .add_instance(
+                .add_grid(
                     "test".into(),
                     "BTCUSDT".into(),
                     bad_config,
@@ -430,7 +368,7 @@ mod tests {
     fn add_and_list_instances() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -439,7 +377,7 @@ mod tests {
             )
             .unwrap();
         manager
-            .add_instance(
+            .add_grid(
                 "eth1".into(),
                 "ETHUSDT".into(),
                 test_config(),
@@ -455,11 +393,12 @@ mod tests {
     }
 
     #[test]
-    fn add_instance_rejects_duplicate_ids() {
+    fn add_grid_rejects_duplicate_grid_ids() {
         let mut manager = test_manager();
+        let grid_id = GridId::from_symbol("BTCUSDT");
         manager
-            .add_instance(
-                "dup".into(),
+            .add_grid(
+                grid_id.clone(),
                 "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
@@ -468,23 +407,23 @@ mod tests {
             .unwrap();
 
         let error = manager
-            .add_instance(
-                "dup".into(),
-                "ETHUSDT".into(),
+            .add_grid(
+                grid_id,
+                "BTCUSDT".into(),
                 test_config(),
                 test_budget(),
                 test_exchange_rules(),
             )
             .unwrap_err();
 
-        assert!(error.to_string().contains("duplicate instance id"));
+        assert!(error.to_string().contains("duplicate grid id"));
     }
 
     #[test]
     fn on_price_tick_updates_instance() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -495,7 +434,7 @@ mod tests {
 
         let tick = PriceTick {
             symbol: "BTCUSDT".into(),
-            last_price: 95.0,
+            reference_price: 95.0,
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
@@ -504,8 +443,8 @@ mod tests {
         assert!(!outcome.events.is_empty());
 
         let instance = manager.get_instance("btc1").unwrap();
-        assert_eq!(instance.status, InstanceStatus::Active);
-        assert_eq!(instance.last_price, Some(95.0));
+        assert_eq!(instance.status, GridStatus::Active);
+        assert_eq!(instance.reference_price, Some(95.0));
         assert_eq!(instance.current_exposure.0, 0.0);
         assert!(instance.target_exposure.as_ref().unwrap().0 > 0.0); // should be long below center
     }
@@ -514,7 +453,7 @@ mod tests {
     fn on_price_tick_returns_tick_outcome_with_plan_and_events() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -525,7 +464,7 @@ mod tests {
 
         let tick = PriceTick {
             symbol: "BTCUSDT".into(),
-            last_price: 95.0,
+            reference_price: 95.0,
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
@@ -540,7 +479,7 @@ mod tests {
     fn on_price_tick_updates_target_without_faking_current_exposure() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -554,7 +493,7 @@ mod tests {
 
         let tick = PriceTick {
             symbol: "BTCUSDT".into(),
-            last_price: 95.0,
+            reference_price: 95.0,
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
@@ -566,14 +505,14 @@ mod tests {
         let instance = manager.get_instance("btc1").unwrap();
         assert_eq!(instance.current_exposure.0, 2.0);
         assert_eq!(instance.target_exposure.as_ref().unwrap().0, 4.0);
-        assert_eq!(instance.last_price, Some(95.0));
+        assert_eq!(instance.reference_price, Some(95.0));
     }
 
     #[test]
     fn on_price_tick_ignores_unrelated_symbol() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -584,7 +523,7 @@ mod tests {
 
         let tick = PriceTick {
             symbol: "ETHUSDT".into(),
-            last_price: 2500.0,
+            reference_price: 2500.0,
             mark_price: 2500.0,
             timestamp: Utc::now(),
         };
@@ -594,14 +533,14 @@ mod tests {
         assert!(outcome.plan.actions.is_empty());
 
         let instance = manager.get_instance("btc1").unwrap();
-        assert_eq!(instance.status, InstanceStatus::WaitingMarketData);
+        assert_eq!(instance.status, GridStatus::WaitingMarketData);
     }
 
     #[test]
     fn paused_instance_ignores_reconcile_updates() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -610,13 +549,13 @@ mod tests {
             )
             .unwrap();
         let instance = manager.instances.get_mut("btc1").unwrap();
-        instance.status = InstanceStatus::Paused;
+        instance.status = GridStatus::Paused;
         instance.current_exposure = grid_core::types::Exposure(2.0);
         instance.target_exposure = Some(grid_core::types::Exposure(4.0));
 
         let tick = PriceTick {
             symbol: "BTCUSDT".into(),
-            last_price: 95.0,
+            reference_price: 95.0,
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
@@ -625,17 +564,17 @@ mod tests {
 
         assert!(outcome.events.is_empty());
         let instance = manager.get_instance("btc1").unwrap();
-        assert_eq!(instance.status, InstanceStatus::Paused);
+        assert_eq!(instance.status, GridStatus::Paused);
         assert_eq!(instance.current_exposure.0, 2.0);
         assert_eq!(instance.target_exposure, None);
-        assert_eq!(instance.last_price, Some(95.0));
+        assert_eq!(instance.reference_price, Some(95.0));
     }
 
     #[test]
     fn resume_instance_rejects_non_paused_status() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -653,7 +592,7 @@ mod tests {
     fn resume_instance_recomputes_status_from_last_price() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -663,14 +602,14 @@ mod tests {
             .unwrap();
 
         let instance = manager.instances.get_mut("btc1").unwrap();
-        instance.status = InstanceStatus::Paused;
+        instance.status = GridStatus::Paused;
         instance.current_exposure = grid_core::types::Exposure(8.0);
-        instance.last_price = Some(85.0);
+        instance.reference_price = Some(85.0);
 
         manager.resume_instance("btc1").unwrap();
 
         let instance = manager.get_instance("btc1").unwrap();
-        assert_eq!(instance.status, InstanceStatus::Frozen);
+        assert_eq!(instance.status, GridStatus::Frozen);
         assert_eq!(instance.current_exposure.0, 8.0);
     }
 
@@ -678,7 +617,7 @@ mod tests {
     fn record_submitted_order_stores_pending_order() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -710,7 +649,7 @@ mod tests {
     fn clear_pending_order_clears_by_symbol() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -739,7 +678,7 @@ mod tests {
     fn apply_position_update_converts_qty_to_exposure_and_updates_unrealized_pnl() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -766,7 +705,7 @@ mod tests {
     fn apply_order_update_rebuilds_pending_order_for_open_status() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -779,7 +718,7 @@ mod tests {
             Some(grid_core::types::Exposure(6.0));
 
         manager
-            .apply_order_update(&OpenOrder {
+            .apply_order_update(&ExchangeOrder {
                 symbol: "BTCUSDT".into(),
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
@@ -811,7 +750,7 @@ mod tests {
     fn apply_order_update_clears_matching_pending_order_on_terminal_status() {
         let mut manager = test_manager();
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -833,7 +772,7 @@ mod tests {
             });
 
         manager
-            .apply_order_update(&OpenOrder {
+            .apply_order_update(&ExchangeOrder {
                 symbol: "BTCUSDT".into(),
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
@@ -856,7 +795,7 @@ mod tests {
         ));
         let mut manager = test_manager_with_clock(clock);
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -866,7 +805,7 @@ mod tests {
             .unwrap();
 
         manager
-            .apply_order_update(&OpenOrder {
+            .apply_order_update(&ExchangeOrder {
                 symbol: "BTCUSDT".into(),
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
@@ -897,7 +836,7 @@ mod tests {
         ));
         let mut manager = test_manager_with_clock(clock);
         manager
-            .add_instance(
+            .add_grid(
                 "btc1".into(),
                 "BTCUSDT".into(),
                 test_config(),
@@ -916,7 +855,7 @@ mod tests {
         };
 
         manager
-            .apply_order_update(&OpenOrder {
+            .apply_order_update(&ExchangeOrder {
                 symbol: "BTCUSDT".into(),
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),

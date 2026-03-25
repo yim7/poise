@@ -9,7 +9,7 @@ use sha2::Sha256;
 use tokio::time::{Duration, sleep};
 use url::form_urlencoded::Serializer;
 
-use grid_engine::ports::{ExchangeInfo, OpenOrder, OrderReceipt, OrderRequest, Position};
+use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position};
 
 use crate::types::{
     BinanceExchangeInfoResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
@@ -124,7 +124,7 @@ impl BinanceRestClient {
         position.try_into()
     }
 
-    pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>> {
+    pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
         let orders: Vec<BinanceOpenOrder> = self
             .send_request(
                 Method::GET,
