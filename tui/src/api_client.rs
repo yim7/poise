@@ -9,9 +9,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
-use crate::protocol::{
-    CommandRequest, CommandResponse, GridSnapshot, GridSummary, WsEvent,
-};
+use crate::protocol::{CommandRequest, CommandResponse, GridSnapshot, GridSummary, WsEvent};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -159,8 +157,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::protocol::{
-        CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus,
-        GridSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
+        CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
+        OutOfBandPolicy, ShapeFamily, WsEvent,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};

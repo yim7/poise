@@ -6,7 +6,8 @@ use grid_engine::execution_plan::ExecutionAction;
 use grid_engine::instance::PendingOrder;
 use grid_engine::manager::TickOutcome;
 use grid_engine::ports::{
-    ExchangePort, MarketDataPort, OrderReceipt, PriceTick, UserDataEvent, UserDataPayload,
+    ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, PriceTick,
+    UserDataEvent, UserDataPayload,
 };
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
@@ -60,16 +61,18 @@ impl ServerRuntime {
         for binding in self.state.service.grid_bindings().await {
             let position = self.exchange.get_position(&binding.symbol).await?;
             let open_orders = self.exchange.get_open_orders(&binding.symbol).await?;
-            self.state.service.mutate_grid(&binding.id, |manager| {
-                manager.clear_pending_order(&binding.symbol)?;
-                manager.apply_position_update(&position)?;
-                for order in &open_orders {
-                    manager.apply_order_update(order)?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(mutate_error)?;
+            self.state
+                .service
+                .mutate_grid(&binding.id, |manager| {
+                    manager.clear_pending_order(&binding.symbol)?;
+                    manager.apply_position_update(&position)?;
+                    for order in &open_orders {
+                        manager.apply_order_update(order)?;
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(mutate_error)?;
         }
 
         Ok(())
@@ -119,10 +122,12 @@ impl ServerRuntime {
                         let exchange = Arc::clone(&exchange);
                         workers.spawn(async move {
                             while let Some(tick) = receiver.recv().await {
-                                match state.service.mutate_grid(&binding.id, |manager| {
-                                    manager.on_price_tick(&tick)
-                                })
-                                .await
+                                match state
+                                    .service
+                                    .mutate_grid(&binding.id, |manager| {
+                                        manager.on_price_tick(&tick)
+                                    })
+                                    .await
                                 {
                                     Ok(outcome) => {
                                         if let Err(error) = handle_tick_outcome(
@@ -214,25 +219,28 @@ async fn execute_action(
 ) -> Result<()> {
     match action {
         ExecutionAction::CancelAll => {
+            mark_pending_order_canceling(state, instance_id, symbol).await?;
             exchange.cancel_all(symbol).await?;
-            state.service.mutate_grid(instance_id, |manager| {
-                manager.clear_pending_order(symbol)
-            })
-            .await
-            .map_err(mutate_error)?;
+            state
+                .service
+                .mutate_grid(instance_id, |manager| manager.clear_pending_order(symbol))
+                .await
+                .map_err(mutate_error)?;
         }
         ExecutionAction::CancelOrder { order_id } => {
+            mark_pending_order_canceling(state, instance_id, symbol).await?;
             exchange.cancel_order(symbol, &order_id).await?;
-            state.service.mutate_grid(instance_id, |manager| {
-                manager.clear_pending_order(symbol)
-            })
-            .await
-            .map_err(mutate_error)?;
+            state
+                .service
+                .mutate_grid(instance_id, |manager| manager.clear_pending_order(symbol))
+                .await
+                .map_err(mutate_error)?;
         }
         ExecutionAction::SubmitOrder {
             request,
             target_exposure,
         } => {
+            record_submission_intent(state, instance_id, &request, target_exposure.clone()).await?;
             let receipt = exchange.submit_order(request.clone()).await?;
             record_submitted_order(state, instance_id, &request, &receipt, target_exposure).await?;
         }
@@ -270,11 +278,9 @@ fn event_symbol(event: &UserDataEvent) -> String {
 fn should_reconcile_after_user_data(event: &UserDataEvent) -> bool {
     match &event.payload {
         UserDataPayload::PositionUpdate(_) => true,
-        UserDataPayload::OrderUpdate(order) => {
-            // FILLED / PARTIALLY_FILLED 需要等待随后到达的仓位更新提供真实 exposure，
-            // 否则会在旧仓位上提前补单。撤单/拒单/过期不会改仓位，可以立刻重算。
-            matches!(order.status.as_str(), "CANCELED" | "REJECTED" | "EXPIRED")
-        }
+        // FILLED / PARTIALLY_FILLED 需要等待随后到达的仓位更新提供真实 exposure，
+        // 否则会在旧仓位上提前补单。撤单/拒单/过期不会改仓位，可以立刻重算。
+        UserDataPayload::OrderUpdate(order) => order.status.should_reconcile_after_order_update(),
     }
 }
 
@@ -291,16 +297,18 @@ async fn apply_user_data_event(
 
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
-            state.service.mutate_grid(&instance_id, |manager| {
-                manager.apply_position_update(&position)
-            })
-            .await?;
+            state
+                .service
+                .mutate_grid(&instance_id, |manager| {
+                    manager.apply_position_update(&position)
+                })
+                .await?;
         }
         UserDataPayload::OrderUpdate(order) => {
-            state.service.mutate_grid(&instance_id, |manager| {
-                manager.apply_order_update(&order)
-            })
-            .await?;
+            state
+                .service
+                .mutate_grid(&instance_id, |manager| manager.apply_order_update(&order))
+                .await?;
         }
     }
 
@@ -312,7 +320,9 @@ async fn reconcile_symbol_at_last_price(
     exchange: &dyn ExchangePort,
     symbol: &str,
 ) -> Result<()> {
-    let Some((instance_id, reference_price)) = state.service.reconcile_context_for_symbol(symbol).await else {
+    let Some((instance_id, reference_price)) =
+        state.service.reconcile_context_for_symbol(symbol).await
+    else {
         return Ok(());
     };
 
@@ -334,27 +344,84 @@ async fn reconcile_symbol_at_last_price(
 async fn record_submitted_order(
     state: &ServerState,
     instance_id: &str,
-    request: &grid_engine::ports::OrderRequest,
+    request: &OrderRequest,
     receipt: &OrderReceipt,
     target_exposure: Exposure,
 ) -> Result<()> {
-    state.service.mutate_grid(instance_id, |manager| {
-        manager.record_submitted_order(
-            instance_id,
-            PendingOrder {
-                symbol: request.symbol.clone(),
-                order_id: Some(receipt.order_id.clone()),
-                client_order_id: receipt.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                target_exposure: target_exposure.clone(),
-                status: receipt.status.clone(),
-            },
-        )
-    })
-    .await
-    .map_err(mutate_error)?;
+    state
+        .service
+        .mutate_grid(instance_id, |manager| {
+            manager.record_submitted_order(
+                instance_id,
+                PendingOrder {
+                    symbol: request.symbol.clone(),
+                    order_id: Some(receipt.order_id.clone()),
+                    client_order_id: receipt.client_order_id.clone(),
+                    side: request.side,
+                    price: request.price,
+                    quantity: request.quantity,
+                    target_exposure: target_exposure.clone(),
+                    status: receipt.status,
+                },
+            )
+        })
+        .await
+        .map_err(mutate_error)?;
+
+    Ok(())
+}
+
+async fn record_submission_intent(
+    state: &ServerState,
+    instance_id: &str,
+    request: &OrderRequest,
+    target_exposure: Exposure,
+) -> Result<()> {
+    state
+        .service
+        .mutate_grid(instance_id, |manager| {
+            manager.record_submitted_order(
+                instance_id,
+                PendingOrder {
+                    symbol: request.symbol.clone(),
+                    order_id: None,
+                    client_order_id: request.client_order_id.clone(),
+                    side: request.side,
+                    price: request.price,
+                    quantity: request.quantity,
+                    target_exposure: target_exposure.clone(),
+                    status: OrderStatus::Submitting,
+                },
+            )
+        })
+        .await
+        .map_err(mutate_error)?;
+
+    Ok(())
+}
+
+async fn mark_pending_order_canceling(
+    state: &ServerState,
+    instance_id: &str,
+    symbol: &str,
+) -> Result<()> {
+    state
+        .service
+        .mutate_grid(instance_id, |manager| {
+            let pending = manager
+                .get_instance(instance_id)
+                .and_then(|instance| instance.pending_order.clone())
+                .filter(|pending| pending.symbol == symbol);
+
+            if let Some(mut pending) = pending {
+                pending.status = OrderStatus::Canceling;
+                manager.record_submitted_order(instance_id, pending)?;
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(mutate_error)?;
 
     Ok(())
 }
@@ -379,17 +446,18 @@ mod tests {
     use grid_engine::instance::{GridStatus, PendingOrder, RiskState, StrategyInstance};
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
-        ClockPort, ExchangeInfo, ExchangePort, GridSnapshot, MarketDataPort, ExchangeOrder,
-        OrderReceipt, OrderRequest, Position, PriceTick, StateRepositoryPort, UserDataEvent,
-        UserDataPayload,
+        ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, GridSnapshot, MarketDataPort,
+        OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick, StateRepositoryPort,
+        UserDataEvent, UserDataPayload,
     };
+    use grid_protocol::DomainEvent as ProtocolDomainEvent;
     use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
     use crate::application::GridPlatformService;
     use crate::assembly::ServerState;
 
-    use super::{RuntimeHandles, ServerRuntime, record_submitted_order};
+    use super::{RuntimeHandles, ServerRuntime, execute_action, record_submitted_order};
 
     #[tokio::test]
     async fn market_tick_submits_order_and_records_pending_order() {
@@ -430,6 +498,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_order_keeps_submission_intent_when_receipt_persistence_fails() {
+        let exchange = Arc::new(FakeExchange::new(
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            vec![],
+        ));
+        let persistence = Arc::new(FailOnSavePersistence::new(2));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            None,
+            test_budget(),
+        )
+        .await;
+
+        let error = execute_action(
+            &state,
+            exchange.as_ref(),
+            "BTCUSDT",
+            "BTCUSDT",
+            ExecutionAction::SubmitOrder {
+                request: OrderRequest {
+                    symbol: "BTCUSDT".into(),
+                    side: Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    client_order_id: "intent-1".into(),
+                },
+                target_exposure: Exposure(4.0),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected save failure"));
+        assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
+
+        let instance = current_instance(&state).await;
+        assert_eq!(
+            instance.pending_order,
+            Some(PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: None,
+                client_order_id: "intent-1".into(),
+                side: Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                target_exposure: Exposure(4.0),
+                status: OrderStatus::Submitting,
+            })
+        );
+
+        let persisted = persistence
+            .snapshots
+            .lock()
+            .await
+            .get("BTCUSDT")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            persisted.pending_order.unwrap().status,
+            OrderStatus::Submitting
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_order_keeps_canceling_intent_when_clear_persistence_fails() {
+        let exchange = Arc::new(FakeExchange::new(
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            vec![],
+        ));
+        let persistence = Arc::new(FailOnSavePersistence::new(2));
+        let snapshot = GridSnapshot {
+            pending_order: Some(PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("order-1".into()),
+                client_order_id: "intent-1".into(),
+                side: Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                target_exposure: Exposure(4.0),
+                status: OrderStatus::New,
+            }),
+            ..test_snapshot()
+        };
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .snapshots
+            .lock()
+            .await
+            .insert("BTCUSDT".into(), snapshot);
+
+        let error = execute_action(
+            &state,
+            exchange.as_ref(),
+            "BTCUSDT",
+            "BTCUSDT",
+            ExecutionAction::CancelOrder {
+                order_id: "order-1".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected save failure"));
+
+        let instance = current_instance(&state).await;
+        assert_eq!(
+            instance
+                .pending_order
+                .as_ref()
+                .map(|pending| pending.status),
+            Some(OrderStatus::Canceling)
+        );
+
+        let persisted = persistence
+            .snapshots
+            .lock()
+            .await
+            .get("BTCUSDT")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            persisted
+                .pending_order
+                .as_ref()
+                .map(|pending| pending.status),
+            Some(OrderStatus::Canceling)
+        );
+    }
+
+    #[tokio::test]
     async fn submitted_order_keeps_action_target_when_instance_changes_before_recording() {
         let fixture = runtime_fixture(
             None,
@@ -450,11 +665,12 @@ mod tests {
             mark_price: 95.0,
             timestamp: Utc::now(),
         };
-        let outcome = fixture.state.service.mutate_grid("BTCUSDT", |manager| {
-            manager.on_price_tick(&tick)
-        })
-        .await
-        .unwrap();
+        let outcome = fixture
+            .state
+            .service
+            .mutate_grid("BTCUSDT", |manager| manager.on_price_tick(&tick))
+            .await
+            .unwrap();
         let (request, target_exposure) = match outcome.plan.actions.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
@@ -465,11 +681,12 @@ mod tests {
             other => panic!("unexpected actions: {other:?}"),
         };
 
-        fixture.state.service.mutate_grid("BTCUSDT", |manager| {
-            manager.pause_instance("BTCUSDT")
-        })
-        .await
-        .unwrap();
+        fixture
+            .state
+            .service
+            .mutate_grid("BTCUSDT", |manager| manager.pause_instance("BTCUSDT"))
+            .await
+            .unwrap();
 
         let receipt = fixture
             .exchange
@@ -609,6 +826,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn position_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event() {
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.pending_order = None;
+        snapshot.reference_price = Some(100.0);
+        snapshot.risk_state.unrealized_pnl = 0.0;
+
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            vec![],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+        let mut receiver = fixture.state.service.subscribe_events();
+        fixture
+            .user_sender
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                0.0,
+                11.0,
+            ))
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event, ProtocolDomainEvent::SnapshotUpdated);
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn order_update_clears_pending_order_on_terminal_status() {
         let fixture = runtime_fixture(
             None,
@@ -653,7 +913,7 @@ mod tests {
                     price: pending.price,
                     qty: pending.quantity,
                     realized_pnl: 0.0,
-                    status: "FILLED".into(),
+                    status: OrderStatus::Filled,
                 },
             ))
             .await
@@ -709,7 +969,7 @@ mod tests {
                     price: pending.price,
                     qty: pending.quantity,
                     realized_pnl: 0.0,
-                    status: "CANCELED".into(),
+                    status: OrderStatus::Canceled,
                 },
             ))
             .await
@@ -729,6 +989,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event()
+     {
+        let snapshot = GridSnapshot {
+            current_exposure: Exposure(0.0),
+            target_exposure: Some(Exposure(0.0)),
+            reference_price: Some(100.0),
+            pending_order: Some(PendingOrder {
+                symbol: "BTCUSDT".into(),
+                order_id: Some("order-1".into()),
+                client_order_id: "order-1".into(),
+                side: Side::Buy,
+                price: 100.0,
+                quantity: 0.1,
+                target_exposure: Exposure(0.0),
+                status: OrderStatus::New,
+            }),
+            ..test_snapshot()
+        };
+        let open_orders = vec![ExchangeOrder {
+            symbol: "BTCUSDT".into(),
+            order_id: "order-1".into(),
+            client_order_id: "order-1".into(),
+            side: Side::Buy,
+            price: 100.0,
+            qty: 0.1,
+            realized_pnl: 0.0,
+            status: OrderStatus::New,
+        }];
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            Position {
+                symbol: "BTCUSDT".into(),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            },
+            open_orders,
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+        let mut receiver = fixture.state.service.subscribe_events();
+        fixture
+            .user_sender
+            .send(order_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                ExchangeOrder {
+                    symbol: "BTCUSDT".into(),
+                    order_id: "order-1".into(),
+                    client_order_id: "order-1".into(),
+                    side: Side::Buy,
+                    price: 100.0,
+                    qty: 0.1,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::Canceled,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event, ProtocolDomainEvent::SnapshotUpdated);
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn startup_sync_uses_live_position_and_open_orders_before_first_tick() {
         let snapshot = test_snapshot();
         let live_order = ExchangeOrder {
@@ -739,7 +1070,7 @@ mod tests {
             price: 94.5,
             qty: 0.25,
             realized_pnl: 0.0,
-            status: "NEW".into(),
+            status: OrderStatus::New,
         };
         let fixture = runtime_fixture(
             Some(snapshot),
@@ -1006,7 +1337,7 @@ mod tests {
                     price: 95.0,
                     qty: 7.5,
                     realized_pnl: -20.0,
-                    status: "FILLED".into(),
+                    status: OrderStatus::Filled,
                 },
             ))
             .await
@@ -1145,6 +1476,35 @@ mod tests {
         }
     }
 
+    async fn test_state(
+        exchange: Arc<dyn ExchangePort>,
+        persistence: Arc<dyn StateRepositoryPort>,
+        restored_snapshot: Option<GridSnapshot>,
+        budget: CapacityBudget,
+    ) -> ServerState {
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+        let mut manager = InstanceManager::new(clock);
+        manager
+            .add_grid(
+                "BTCUSDT".into(),
+                "BTCUSDT".into(),
+                test_config(),
+                budget,
+                exchange.get_exchange_info("BTCUSDT").await.unwrap().rules,
+            )
+            .unwrap();
+        if let Some(snapshot) = restored_snapshot {
+            manager.restore_instance_state(&snapshot).unwrap();
+        }
+
+        let (events, _) = broadcast::channel(16);
+        ServerState {
+            service: Arc::new(GridPlatformService::new(manager, persistence, events)),
+        }
+    }
+
     async fn current_instance(state: &ServerState) -> grid_engine::instance::StrategyInstance {
         let manager_handle = state.service.manager();
         let manager = manager_handle.read().await;
@@ -1253,7 +1613,7 @@ mod tests {
                 price: 94.0,
                 quantity: 0.25,
                 target_exposure: Exposure(6.0),
-                status: "NEW".into(),
+                status: OrderStatus::New,
             }),
             risk_state: RiskState::default(),
             reference_price: Some(95.0),
@@ -1309,7 +1669,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: format!("order-{order_id}"),
                 client_order_id: req.client_order_id,
-                status: "NEW".into(),
+                status: OrderStatus::New,
             })
         }
 
@@ -1366,10 +1726,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(
-            &self,
-            _id: &str,
-        ) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
     }
@@ -1414,10 +1771,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(
-            &self,
-            _id: &str,
-        ) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
     }

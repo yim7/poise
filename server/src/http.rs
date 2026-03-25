@@ -71,11 +71,13 @@ async fn submit_command(
         return Err(not_found(format!("grid `{id}` not found")));
     }
 
-    match state.service.mutate_grid(&id, |manager| match command {
-        SupportedCommand::Pause => manager.pause_instance(&id),
-        SupportedCommand::Resume => manager.resume_instance(&id),
-    })
-    .await
+    match state
+        .service
+        .mutate_grid(&id, |manager| match command {
+            SupportedCommand::Pause => manager.pause_instance(&id),
+            SupportedCommand::Resume => manager.resume_instance(&id),
+        })
+        .await
     {
         Ok(()) => {}
         Err(GridMutationError::Mutation(error)) => {
@@ -140,7 +142,7 @@ mod tests {
     use grid_core::types::{ExchangeRules, Exposure};
     use grid_engine::instance::PendingOrder;
     use grid_engine::manager::InstanceManager;
-    use grid_engine::ports::{ClockPort, StateRepositoryPort};
+    use grid_engine::ports::{ClockPort, OrderStatus, StateRepositoryPort};
     use grid_protocol::GridStatus;
     use serde_json::json;
     use tower::ServiceExt;
@@ -243,7 +245,7 @@ mod tests {
             price: 94.5,
             quantity: 0.25,
             target_exposure: Exposure(4.0),
-            status: "NEW".into(),
+            status: OrderStatus::New,
         };
         manager
             .restore_instance_state(&grid_engine::ports::GridSnapshot {

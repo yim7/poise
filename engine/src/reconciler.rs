@@ -233,7 +233,7 @@ mod tests {
             price: 90.0,
             quantity: 0.01,
             target_exposure: target,
-            status: "NEW".to_string(),
+            status: crate::ports::OrderStatus::New,
         }
     }
 

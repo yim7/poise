@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, Position};
+use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceOrderResponse {
@@ -68,7 +68,7 @@ impl TryFrom<BinanceOrderResponse> for OrderReceipt {
         Ok(Self {
             order_id: value.order_id.to_string(),
             client_order_id: value.client_order_id,
-            status: value.status,
+            status: parse_order_status(&value.status)?,
         })
     }
 }
@@ -98,7 +98,7 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
             price: parse_decimal("price", &value.price)?,
             qty: parse_decimal("origQty", &value.orig_qty)?,
             realized_pnl: 0.0,
-            status: value.status,
+            status: parse_order_status(&value.status)?,
         })
     }
 }
@@ -149,6 +149,18 @@ fn parse_side(value: &str) -> Result<grid_core::types::Side> {
     }
 }
 
+pub(crate) fn parse_order_status(value: &str) -> Result<OrderStatus> {
+    match value {
+        "NEW" => Ok(OrderStatus::New),
+        "PARTIALLY_FILLED" => Ok(OrderStatus::PartiallyFilled),
+        "FILLED" => Ok(OrderStatus::Filled),
+        "CANCELED" => Ok(OrderStatus::Canceled),
+        "REJECTED" => Ok(OrderStatus::Rejected),
+        "EXPIRED" => Ok(OrderStatus::Expired),
+        other => Err(anyhow!("unsupported order status: {other}")),
+    }
+}
+
 fn parse_optional_decimal(field: &str, value: Option<&str>) -> Result<f64> {
     let value = value.context(format!("missing {field}"))?;
     parse_decimal(field, value)
@@ -184,7 +196,7 @@ mod tests {
             OrderReceipt {
                 order_id: "20072994037".to_string(),
                 client_order_id: "grid-order-001".to_string(),
-                status: "NEW".to_string(),
+                status: OrderStatus::New,
             }
         );
     }
@@ -241,7 +253,7 @@ mod tests {
                 price: 65123.4,
                 qty: 0.01,
                 realized_pnl: 0.0,
-                status: "PARTIALLY_FILLED".to_string(),
+                status: OrderStatus::PartiallyFilled,
             }
         );
     }

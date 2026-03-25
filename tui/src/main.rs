@@ -332,9 +332,10 @@ async fn refresh_selected_snapshot(client: &ApiClient, app: &mut App) -> Result<
 async fn handle_ws_event(client: &ApiClient, app: &mut App, event: WsEvent) -> Result<()> {
     let grid_id = event.grid_id.clone();
     app.record_event(event);
-    let snapshot = client.get_snapshot(&grid_id).await.with_context(|| {
-        format!("failed to refresh snapshot after ws event for `{grid_id}`")
-    })?;
+    let snapshot = client
+        .get_snapshot(&grid_id)
+        .await
+        .with_context(|| format!("failed to refresh snapshot after ws event for `{grid_id}`"))?;
     app.apply_snapshot(snapshot);
     Ok(())
 }
@@ -641,10 +642,7 @@ mod tests {
     async fn spawn_stub_server() -> (ApiClient, String, StubState) {
         let state = StubState {
             snapshots: Arc::new(Mutex::new(HashMap::from([
-                (
-                    "BTCUSDT".to_string(),
-                    btc_snapshot(2.0, GridStatus::Active),
-                ),
+                ("BTCUSDT".to_string(), btc_snapshot(2.0, GridStatus::Active)),
                 ("ETHUSDT".to_string(), eth_snapshot()),
             ]))),
         };
@@ -673,10 +671,7 @@ mod tests {
     ) -> (ApiClient, String, StubState, tokio::task::JoinHandle<()>) {
         let state = StubState {
             snapshots: Arc::new(Mutex::new(HashMap::from([
-                (
-                    "BTCUSDT".to_string(),
-                    btc_snapshot(2.0, GridStatus::Active),
-                ),
+                ("BTCUSDT".to_string(), btc_snapshot(2.0, GridStatus::Active)),
                 ("ETHUSDT".to_string(), eth_snapshot()),
             ]))),
         };
@@ -1214,8 +1209,18 @@ out_of_band_policy = "hold"
 
         let mut app = load_initial_state(&client).await.unwrap();
         assert_eq!(app.instances.len(), 2);
-        assert!(app.cached_snapshot("BTCUSDT").unwrap().reference_price.is_some());
-        assert!(app.cached_snapshot("ETHUSDT").unwrap().reference_price.is_some());
+        assert!(
+            app.cached_snapshot("BTCUSDT")
+                .unwrap()
+                .reference_price
+                .is_some()
+        );
+        assert!(
+            app.cached_snapshot("ETHUSDT")
+                .unwrap()
+                .reference_price
+                .is_some()
+        );
 
         let action = crate::input::handle_key_event(
             &mut app,

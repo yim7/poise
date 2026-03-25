@@ -14,6 +14,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 use grid_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
 
 use crate::rest::BinanceRestClient;
+use crate::types::parse_order_status;
 
 type UserWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -267,7 +268,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                     price: parse_decimal("o.p", &order.price)?,
                     qty: parse_decimal("o.q", &order.quantity)?,
                     realized_pnl: parse_decimal("o.rp", &order.realized_pnl)?,
-                    status: order.status,
+                    status: parse_order_status(&order.status)?,
                 }),
             }]))
         }
@@ -399,7 +400,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use grid_core::types::Side;
-    use grid_engine::ports::{ExchangeOrder, Position, UserDataPayload};
+    use grid_engine::ports::{ExchangeOrder, OrderStatus, Position, UserDataPayload};
 
     use super::*;
 
@@ -457,7 +458,7 @@ mod tests {
                     price: 65000.5,
                     qty: 0.02,
                     realized_pnl: 12.34,
-                    status: "FILLED".to_string(),
+                    status: OrderStatus::Filled,
                 }),
             }])
         );

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use grid_engine::ports::{
-    ExchangeInfo, ExchangePort, MarketDataPort, ExchangeOrder, OrderReceipt, OrderRequest, Position,
-    PriceTick, UserDataEvent,
+    ExchangeInfo, ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest,
+    Position, PriceTick, UserDataEvent,
 };
 
 use crate::{rest::BinanceRestClient, websocket::BinanceWsClient};

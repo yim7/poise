@@ -10,7 +10,7 @@ use grid_core::types::ExchangeRules;
 use crate::execution_plan::ExecutionPlan;
 use crate::instance::{GridStatus, PendingOrder, StrategyInstance};
 use crate::key::GridId;
-use crate::ports::{ClockPort, GridSnapshot, ExchangeOrder, Position, PriceTick};
+use crate::ports::{ClockPort, ExchangeOrder, GridSnapshot, Position, PriceTick};
 use crate::reconciler;
 
 pub struct TickOutcome {
@@ -220,7 +220,7 @@ impl InstanceManager {
             instance.risk_state.realized_pnl_today += order.realized_pnl;
         }
 
-        if matches!(order.status.as_str(), "NEW" | "PARTIALLY_FILLED") {
+        if order.status.keeps_pending_order() {
             let target_exposure = instance
                 .pending_order
                 .as_ref()
@@ -236,15 +236,12 @@ impl InstanceManager {
                 price: order.price,
                 quantity: order.qty,
                 target_exposure,
-                status: order.status.clone(),
+                status: order.status,
             });
             return Ok(());
         }
 
-        if matches!(
-            order.status.as_str(),
-            "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED"
-        ) {
+        if order.status.clears_pending_order() {
             let should_clear = instance
                 .pending_order
                 .as_ref()
@@ -634,7 +631,7 @@ mod tests {
             price: 95.0,
             quantity: 0.4,
             target_exposure: grid_core::types::Exposure(4.0),
-            status: "NEW".into(),
+            status: OrderStatus::New,
         };
 
         manager
@@ -665,7 +662,7 @@ mod tests {
             price: 94.5,
             quantity: 0.25,
             target_exposure: grid_core::types::Exposure(4.0),
-            status: "NEW".into(),
+            status: OrderStatus::New,
         });
 
         manager.clear_pending_order("BTCUSDT").unwrap();
@@ -726,7 +723,7 @@ mod tests {
                 price: 94.5,
                 qty: 0.25,
                 realized_pnl: 0.0,
-                status: "NEW".into(),
+                status: OrderStatus::New,
             })
             .unwrap();
 
@@ -741,7 +738,7 @@ mod tests {
                 price: 94.5,
                 quantity: 0.25,
                 target_exposure: grid_core::types::Exposure(6.0),
-                status: "NEW".into(),
+                status: OrderStatus::New,
             })
         );
     }
@@ -768,7 +765,7 @@ mod tests {
                 price: 94.5,
                 quantity: 0.25,
                 target_exposure: grid_core::types::Exposure(4.0),
-                status: "NEW".into(),
+                status: OrderStatus::New,
             });
 
         manager
@@ -780,7 +777,7 @@ mod tests {
                 price: 94.5,
                 qty: 0.25,
                 realized_pnl: 0.0,
-                status: "FILLED".into(),
+                status: OrderStatus::Filled,
             })
             .unwrap();
 
@@ -813,7 +810,7 @@ mod tests {
                 price: 94.5,
                 qty: 0.25,
                 realized_pnl: -12.5,
-                status: "PARTIALLY_FILLED".into(),
+                status: OrderStatus::PartiallyFilled,
             })
             .unwrap();
 
@@ -863,7 +860,7 @@ mod tests {
                 price: 94.5,
                 qty: 0.25,
                 realized_pnl: -5.0,
-                status: "PARTIALLY_FILLED".into(),
+                status: OrderStatus::PartiallyFilled,
             })
             .unwrap();
 

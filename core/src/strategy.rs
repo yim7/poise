@@ -80,7 +80,10 @@ pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
         ShapeFamily::Convex => 1.0 - x.powi(2),
         ShapeFamily::Concave => 1.0 - x.sqrt(),
     };
-    Exposure(-config.short_exposure_units + (config.long_exposure_units + config.short_exposure_units) * g)
+    Exposure(
+        -config.short_exposure_units
+            + (config.long_exposure_units + config.short_exposure_units) * g,
+    )
 }
 
 pub fn band_status(price: f64, config: &GridConfig) -> BandStatus {

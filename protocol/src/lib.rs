@@ -44,7 +44,7 @@ pub struct PendingOrder {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
-    pub status: String,
+    pub status: OrderStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +96,19 @@ pub enum Side {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum OrderStatus {
+    Submitting,
+    New,
+    PartiallyFilled,
+    Filled,
+    Canceling,
+    Canceled,
+    Rejected,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BandBoundary {
     Below,
     Above,
@@ -104,6 +117,7 @@ pub enum BandBoundary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainEvent {
+    SnapshotUpdated,
     ExposureTargetChanged { from: f64, to: f64 },
     BandBreached { boundary: BandBoundary, price: f64 },
     BandReentered { price: f64 },
@@ -198,6 +212,23 @@ impl fmt::Display for Side {
     }
 }
 
+impl fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Submitting => "submitting",
+            Self::New => "new",
+            Self::PartiallyFilled => "partially_filled",
+            Self::Filled => "filled",
+            Self::Canceling => "canceling",
+            Self::Canceled => "canceled",
+            Self::Rejected => "rejected",
+            Self::Expired => "expired",
+        };
+
+        f.write_str(value)
+    }
+}
+
 impl fmt::Display for BandState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
@@ -214,6 +245,7 @@ impl fmt::Display for BandState {
 impl fmt::Display for DomainEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SnapshotUpdated => write!(f, "snapshot updated"),
             Self::ExposureTargetChanged { from, to } => {
                 write!(f, "target exposure {:.4} -> {:.4}", from, to)
             }

@@ -58,8 +58,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let config_lines = vec![
         Line::from(format!("lower: {:.4}", snapshot.config.lower_price)),
         Line::from(format!("upper: {:.4}", snapshot.config.upper_price)),
-        Line::from(format!("long cap: {:.4}", snapshot.config.long_exposure_units)),
-        Line::from(format!("short cap: {:.4}", snapshot.config.short_exposure_units)),
+        Line::from(format!(
+            "long cap: {:.4}",
+            snapshot.config.long_exposure_units
+        )),
+        Line::from(format!(
+            "short cap: {:.4}",
+            snapshot.config.short_exposure_units
+        )),
         Line::from(format!(
             "capacity notional: {:.4}",
             snapshot.config.notional_per_unit
@@ -99,7 +105,7 @@ mod tests {
 
     use crate::app::{App, View};
     use crate::protocol::{
-        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
+        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary, OrderStatus,
         OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
@@ -140,7 +146,7 @@ mod tests {
                 side: Side::Buy,
                 price: 90.0,
                 quantity: 0.5,
-                status: "NEW".into(),
+                status: OrderStatus::New,
             }),
             config: GridConfig {
                 lower_price: 90.0,

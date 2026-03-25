@@ -20,6 +20,8 @@
 - [x] 2026-03-25 Task 5 启动语义修正完成：改为 `user stream -> server time cutoff -> startup sync -> buffered replay -> live apply`，并验证旧 user-data 事件不会回滚 `current_exposure`、`pending_order`、`risk_state`
 - [x] 2026-03-25 Task 5 运行期闭环补齐：`PositionUpdate` 与 `CANCELED/REJECTED/EXPIRED` 订单事件会在无新行情时触发一次 `reconcile`，补齐挂单恢复窗口
 - [x] 2026-03-25 复验通过：启动流程改为 `user stream -> server time cutoff -> startup sync -> buffered replay -> live apply`，并补齐 runtime/TUI 回归测试
+- [x] 2026-03-25 Review 问题修复完成：提交/撤单先持久化 `Submitting` / `Canceling` 意图，订单状态归一化为 `OrderStatus`，快照变化但无领域事件时广播 `SnapshotUpdated`，并删除 SQLite 旧兼容逻辑
+- [x] 2026-03-25 重新验收通过：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`
 
 ---
 
@@ -1332,7 +1334,7 @@ InstanceSnapshot {
         side: Side::Buy,
         price: 90.0,
         quantity: 0.5,
-        status: "NEW".into(),
+        status: OrderStatus::New,
     }),
     ...
 }
@@ -1383,7 +1385,7 @@ Expected: PASS
 Run: `cargo test -p grid-tui -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 5: 跑整仓验证命令**
+- [x] **Step 5: 跑整仓验证命令**
 
 Run: `cargo fmt --all --check`
 Expected: PASS
@@ -1394,7 +1396,7 @@ Expected: PASS
 Run: `cargo test --workspace`
 Expected: PASS
 
-- [ ] **Step 6: 人工对照验收问题逐条勾销**
+- [x] **Step 6: 人工对照验收问题逐条勾销**
 
 确认这几项都成立：
 
@@ -1402,12 +1404,15 @@ Expected: PASS
 - `evaluate_risk` 会消费预算和风险状态
 - `reconcile` 能产出真实订单动作
 - server 会执行动作并通过 user stream / position sync 回写真实仓位
+- runtime 不再依赖交易所原始订单状态字符串，统一消费 `OrderStatus`
+- 提交/撤单会先持久化本地意图，再执行交易所副作用
+- 快照变化但无领域事件时会广播 `SnapshotUpdated`，TUI 能刷新
 - 配置和协议使用 snake_case
 - 默认预算公式正确
 - `--config` 缺失时启动失败且退出非零
 - `cargo clippy --workspace --all-targets -- -D warnings` 通过
 
-- [ ] **Step 7: 同步任务清单**
+- [x] **Step 7: 同步任务清单**
 
 把本计划文件顶部或尾部增加一个“验收记录”小节，记录：
 
@@ -1440,3 +1445,18 @@ git commit -m "test: re-accept grid platform after execution loop fixes"
    - user stream / position sync 会回写真实仓位和挂单状态
 5. HTTP/TUI 快照里同时能看到 `current_exposure` 与 `target_exposure`
 6. 本计划文件已补“验收记录”
+
+## 验收记录
+
+- 通过时间：2026-03-25
+- 验证命令：
+  - `cargo fmt --all --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+- 本轮关闭的问题：
+  - 交易所下单/撤单前先持久化 `Submitting` / `Canceling` 意图，避免交易所已产生副作用但本地回滚到旧快照
+  - `runtime` 改为消费归一化后的 `OrderStatus`，不再匹配交易所原始状态字符串
+  - `PositionUpdate`、终态 `OrderUpdate` 这类只改快照的路径会广播 `SnapshotUpdated`，TUI 能及时刷新
+  - SQLite 只接受当前 schema 和当前 JSON 结构，删除旧列名、旧字段名、旧事件格式兼容
+- 仍留待后续探索的事项：
+  - 暂无新的验收阻塞项

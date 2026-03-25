@@ -3,8 +3,8 @@ pub use grid_protocol::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        BandState, CommandResponse, DomainEvent, GridConfig, GridSnapshot,
-        GridStatus, GridSummary, OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
+        BandState, CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
+        OrderStatus, OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
     #[test]
@@ -46,11 +46,22 @@ mod tests {
         assert_eq!(event.grid_id, "BTCUSDT");
         assert_eq!(
             event.event,
-            DomainEvent::ExposureTargetChanged {
-                from: 0.0,
-                to: 4.0,
-            }
+            DomainEvent::ExposureTargetChanged { from: 0.0, to: 4.0 }
         );
+    }
+
+    #[test]
+    fn deserializes_snapshot_updated_ws_event() {
+        let event: WsEvent = serde_json::from_str(
+            r#"{
+                "grid_id": "BTCUSDT",
+                "event": "snapshot_updated"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(event.grid_id, "BTCUSDT");
+        assert_eq!(event.event, DomainEvent::SnapshotUpdated);
     }
 
     #[test]
@@ -69,7 +80,7 @@ mod tests {
                 side: Side::Buy,
                 price: 85.0,
                 quantity: 0.1,
-                status: "NEW".into(),
+                status: OrderStatus::New,
             }),
             config: GridConfig {
                 lower_price: 90.0,

@@ -107,11 +107,9 @@ curl http://127.0.0.1:8000/grids/BTCUSDT/snapshot
 
 字段和错误语义见 [`docs/protocol-contract.md`](docs/protocol-contract.md)。
 
-## 数据与兼容
+## 数据
 
 - 服务端按 `environment` 使用单个 SQLite 文件保存全部网格状态
-- `storage` 已内建旧快照字段名、旧事件字段名和旧列结构的兼容读取
-- 兼容逻辑只留在存储层，不把旧命名重新带回 `core`、`server` 或协议层
 
 ## 开发与验证
 

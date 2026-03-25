@@ -42,44 +42,20 @@ impl SqliteStorage {
     }
 
     fn deserialize_grid_config(config_json: &str) -> rusqlite::Result<GridConfig> {
-        serde_json::from_str(config_json).or_else(|primary_error| {
-            serde_json::from_str::<LegacyGridConfig>(config_json)
-                .map(Into::into)
-                .map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Text,
-                        Box::new(primary_error),
-                    )
-                })
+        serde_json::from_str(config_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
         })
     }
 
     fn deserialize_grid_status(status_json: &str) -> rusqlite::Result<GridStatus> {
-        serde_json::from_str(status_json).or_else(|primary_error| {
-            serde_json::from_str::<LegacyGridStatus>(status_json)
-                .map(Into::into)
-                .map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        Box::new(primary_error),
-                    )
-                })
+        serde_json::from_str(status_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
         })
     }
 
     fn deserialize_domain_event(event_json: &str) -> rusqlite::Result<DomainEvent> {
-        serde_json::from_str(event_json).or_else(|primary_error| {
-            serde_json::from_str::<LegacyDomainEvent>(event_json)
-                .map(Into::into)
-                .map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(primary_error),
-                    )
-                })
+        serde_json::from_str(event_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
         })
     }
 
@@ -268,145 +244,6 @@ impl SqliteStorage {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct LegacyGridConfig {
-    lower_price: f64,
-    upper_price: f64,
-    long_capacity: f64,
-    short_capacity: f64,
-    capacity_notional: f64,
-    shape_family: LegacyShapeFamily,
-    out_of_band_policy: LegacyOutOfBandPolicy,
-}
-
-impl From<LegacyGridConfig> for GridConfig {
-    fn from(value: LegacyGridConfig) -> Self {
-        Self {
-            lower_price: value.lower_price,
-            upper_price: value.upper_price,
-            long_exposure_units: value.long_capacity,
-            short_exposure_units: value.short_capacity,
-            notional_per_unit: value.capacity_notional,
-            shape_family: value.shape_family.into(),
-            out_of_band_policy: value.out_of_band_policy.into(),
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-enum LegacyShapeFamily {
-    Linear,
-    Convex,
-    Concave,
-}
-
-impl From<LegacyShapeFamily> for grid_core::strategy::ShapeFamily {
-    fn from(value: LegacyShapeFamily) -> Self {
-        match value {
-            LegacyShapeFamily::Linear => Self::Linear,
-            LegacyShapeFamily::Convex => Self::Convex,
-            LegacyShapeFamily::Concave => Self::Concave,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-enum LegacyOutOfBandPolicy {
-    Freeze,
-    ReduceOnly,
-    Terminate,
-    Hold,
-}
-
-impl From<LegacyOutOfBandPolicy> for grid_core::strategy::OutOfBandPolicy {
-    fn from(value: LegacyOutOfBandPolicy) -> Self {
-        match value {
-            LegacyOutOfBandPolicy::Freeze => Self::Freeze,
-            LegacyOutOfBandPolicy::ReduceOnly => Self::ReduceOnly,
-            LegacyOutOfBandPolicy::Terminate => Self::Terminate,
-            LegacyOutOfBandPolicy::Hold => Self::Hold,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-enum LegacyBandBoundary {
-    Below,
-    Above,
-}
-
-impl From<LegacyBandBoundary> for grid_core::strategy::BandBoundary {
-    fn from(value: LegacyBandBoundary) -> Self {
-        match value {
-            LegacyBandBoundary::Below => Self::Below,
-            LegacyBandBoundary::Above => Self::Above,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-enum LegacyGridStatus {
-    WaitingMarketData,
-    Active,
-    Frozen,
-    ReducingOnly,
-    Holding,
-    Terminated,
-    Paused,
-}
-
-impl From<LegacyGridStatus> for GridStatus {
-    fn from(value: LegacyGridStatus) -> Self {
-        match value {
-            LegacyGridStatus::WaitingMarketData => Self::WaitingMarketData,
-            LegacyGridStatus::Active => Self::Active,
-            LegacyGridStatus::Frozen => Self::Frozen,
-            LegacyGridStatus::ReducingOnly => Self::ReducingOnly,
-            LegacyGridStatus::Holding => Self::Holding,
-            LegacyGridStatus::Terminated => Self::Terminated,
-            LegacyGridStatus::Paused => Self::Paused,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-enum LegacyDomainEvent {
-    ExposureTargetChanged { from: Exposure, to: Exposure },
-    BandBreached {
-        boundary: LegacyBandBoundary,
-        price: f64,
-    },
-    BandReentered { price: f64 },
-    PolicyTriggered { policy: LegacyOutOfBandPolicy },
-    RiskCapApplied {
-        intended: Exposure,
-        capped: Exposure,
-    },
-    RiskDenied { reason: String },
-}
-
-impl From<LegacyDomainEvent> for DomainEvent {
-    fn from(value: LegacyDomainEvent) -> Self {
-        match value {
-            LegacyDomainEvent::ExposureTargetChanged { from, to } => {
-                Self::ExposureTargetChanged { from, to }
-            }
-            LegacyDomainEvent::BandBreached { boundary, price } => Self::BandBreached {
-                boundary: boundary.into(),
-                price,
-            },
-            LegacyDomainEvent::BandReentered { price } => Self::BandReentered { price },
-            LegacyDomainEvent::PolicyTriggered { policy } => Self::PolicyTriggered {
-                policy: policy.into(),
-            },
-            LegacyDomainEvent::RiskCapApplied { intended, capped } => {
-                Self::RiskCapApplied { intended, capped }
-            }
-            LegacyDomainEvent::RiskDenied { reason } => Self::RiskDenied { reason },
-        }
-    }
-}
-
 #[async_trait]
 impl StateRepositoryPort for SqliteStorage {
     async fn save_transition(
@@ -429,8 +266,8 @@ impl StateRepositoryPort for SqliteStorage {
         tokio::task::spawn_blocking(move || {
             Self::save_transition_blocking(conn, id, state, events)
         })
-            .await
-            .context("failed to join save_transition blocking task")??;
+        .await
+        .context("failed to join save_transition blocking task")??;
 
         Ok(())
     }
@@ -470,7 +307,7 @@ mod tests {
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
     use grid_engine::instance::{GridStatus, PendingOrder, RiskState};
-    use grid_engine::ports::{GridSnapshot, StateRepositoryPort};
+    use grid_engine::ports::{GridSnapshot, OrderStatus, StateRepositoryPort};
     use rusqlite::Connection;
 
     fn test_snapshot() -> GridSnapshot {
@@ -497,7 +334,7 @@ mod tests {
                 price: 94.5,
                 quantity: 0.25,
                 target_exposure: Exposure(6.0),
-                status: "NEW".into(),
+                status: OrderStatus::New,
             }),
             risk_state: RiskState {
                 realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
@@ -603,11 +440,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = storage
-            .load_grid_state("test-1")
-            .await
-            .unwrap()
-            .unwrap();
+        let loaded = storage.load_grid_state("test-1").await.unwrap().unwrap();
         assert!((loaded.current_exposure.0 - 6.0).abs() < f64::EPSILON);
         assert_eq!(loaded.reference_price, Some(96.0));
     }
@@ -617,7 +450,9 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
 
-        let result = storage.save_transition("different-id", &snapshot, &[]).await;
+        let result = storage
+            .save_transition("different-id", &snapshot, &[])
+            .await;
 
         assert!(result.is_err());
     }
@@ -691,20 +526,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_grid_state_accepts_real_legacy_snapshot_json() {
+    async fn load_grid_state_rejects_legacy_snapshot_json() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE instance_snapshots (
-                id TEXT PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                current_exposure REAL NOT NULL,
-                last_price REAL,
-                updated_at TEXT NOT NULL
-            );",
-        )
-        .unwrap();
+        schema::initialize(&conn).unwrap();
         conn.execute(
             "INSERT INTO instance_snapshots (
                 id,
@@ -712,9 +536,15 @@ mod tests {
                 config_json,
                 status,
                 current_exposure,
-                last_price,
+                reference_price,
+                target_exposure,
+                pending_order_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                unrealized_pnl,
+                out_of_band_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, 0, 0, NULL, ?7)",
             params![
                 "legacy-grid",
                 "BTCUSDT",
@@ -737,44 +567,27 @@ mod tests {
         .unwrap();
 
         let storage = SqliteStorage::from_connection(conn).unwrap();
-        let loaded = storage.load_grid_state("legacy-grid").await.unwrap().unwrap();
-
-        assert_eq!(loaded.status, GridStatus::Active);
-        assert_eq!(loaded.reference_price, Some(95.0));
-        assert_eq!(loaded.config.long_exposure_units, 8.0);
-        assert_eq!(loaded.config.short_exposure_units, 6.0);
-        assert_eq!(loaded.config.notional_per_unit, 375.0);
+        let result = storage.load_grid_state("legacy-grid").await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn list_events_accepts_real_legacy_event_json() {
+    async fn list_events_rejects_legacy_event_json() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE domain_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                instance_id TEXT NOT NULL,
-                event_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            INSERT INTO domain_events (instance_id, event_json, created_at)
-            VALUES (
-                'BTCUSDT',
-                '{\"BandBreached\":{\"boundary\":\"Above\",\"price\":120.0}}',
-                '2026-03-25T00:00:00Z'
-            );",
+        schema::initialize(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO domain_events (grid_id, event_json, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![
+                "BTCUSDT",
+                "{\"BandBreached\":{\"boundary\":\"Above\",\"price\":120.0}}",
+                "2026-03-25T00:00:00Z"
+            ],
         )
         .unwrap();
 
         let storage = SqliteStorage::from_connection(conn).unwrap();
-        let events = storage.list_events("BTCUSDT").await.unwrap();
-
-        assert_eq!(
-            events,
-            vec![DomainEvent::BandBreached {
-                boundary: BandBoundary::Above,
-                price: 120.0,
-            }]
-        );
+        let result = storage.list_events("BTCUSDT").await;
+        assert!(result.is_err());
     }
 }

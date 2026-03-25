@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use grid_core::strategy::GridConfig;
 use grid_core::types::{ExchangeRules, Exposure, Side};
 
+use crate::ports::OrderStatus;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GridStatus {
@@ -25,7 +27,7 @@ pub struct PendingOrder {
     pub price: f64,
     pub quantity: f64,
     pub target_exposure: Exposure,
-    pub status: String,
+    pub status: OrderStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

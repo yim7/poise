@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use grid_core::events::DomainEvent;
+use grid_engine::instance::PendingOrder;
+use grid_engine::instance::StrategyInstance;
+use grid_engine::manager::{InstanceManager, TickOutcome};
+use grid_engine::ports::{GridSnapshot, StateRepositoryPort};
 use grid_protocol::{
     BandBoundary as ProtocolBandBoundary, DomainEvent as ProtocolDomainEvent,
     GridConfig as ProtocolGridConfig, GridSnapshot as ProtocolGridSnapshot,
-    GridStatus as ProtocolGridStatus, GridSummary, OutOfBandPolicy as ProtocolOutOfBandPolicy,
-    PendingOrder as ProtocolPendingOrder, ShapeFamily as ProtocolShapeFamily,
-    Side as ProtocolSide, WsEvent,
+    GridStatus as ProtocolGridStatus, GridSummary, OrderStatus as ProtocolOrderStatus,
+    OutOfBandPolicy as ProtocolOutOfBandPolicy, PendingOrder as ProtocolPendingOrder,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, WsEvent,
 };
-use grid_engine::instance::StrategyInstance;
-use grid_engine::manager::{InstanceManager, TickOutcome};
-use grid_engine::instance::PendingOrder;
-use grid_engine::ports::{GridSnapshot, StateRepositoryPort};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 pub type SharedManager = Arc<RwLock<InstanceManager>>;
@@ -148,9 +148,11 @@ impl GridPlatformService {
         let _mutation_guard = self.mutation_lock.lock().await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = snapshot_for_id(&manager, id).map_err(GridMutationError::Mutation)?;
+            let previous_snapshot =
+                snapshot_for_id(&manager, id).map_err(GridMutationError::Mutation)?;
             let result = mutate(&mut manager).map_err(GridMutationError::Mutation)?;
-            let next_snapshot = snapshot_for_id(&manager, id).map_err(GridMutationError::Mutation)?;
+            let next_snapshot =
+                snapshot_for_id(&manager, id).map_err(GridMutationError::Mutation)?;
             (previous_snapshot, result, next_snapshot)
         };
 
@@ -175,6 +177,13 @@ impl GridPlatformService {
             let _ = self.events.send(WsEvent {
                 grid_id: id.to_string(),
                 event: protocol_domain_event(event),
+            });
+        }
+
+        if result.domain_events().is_empty() && previous_snapshot != next_snapshot {
+            let _ = self.events.send(WsEvent {
+                grid_id: id.to_string(),
+                event: ProtocolDomainEvent::SnapshotUpdated,
             });
         }
 
@@ -219,9 +228,9 @@ fn protocol_domain_event(event: &DomainEvent) -> ProtocolDomainEvent {
             },
             price: *price,
         },
-        DomainEvent::BandReentered { price } => ProtocolDomainEvent::BandReentered {
-            price: *price,
-        },
+        DomainEvent::BandReentered { price } => {
+            ProtocolDomainEvent::BandReentered { price: *price }
+        }
         DomainEvent::PolicyTriggered { policy } => ProtocolDomainEvent::PolicyTriggered {
             policy: match policy {
                 grid_core::strategy::OutOfBandPolicy::Freeze => ProtocolOutOfBandPolicy::Freeze,
@@ -268,7 +277,9 @@ fn protocol_grid_snapshot(value: &StrategyInstance) -> ProtocolGridSnapshot {
 
 fn protocol_grid_status(value: grid_engine::instance::GridStatus) -> ProtocolGridStatus {
     match value {
-        grid_engine::instance::GridStatus::WaitingMarketData => ProtocolGridStatus::WaitingMarketData,
+        grid_engine::instance::GridStatus::WaitingMarketData => {
+            ProtocolGridStatus::WaitingMarketData
+        }
         grid_engine::instance::GridStatus::Active => ProtocolGridStatus::Active,
         grid_engine::instance::GridStatus::Frozen => ProtocolGridStatus::Frozen,
         grid_engine::instance::GridStatus::ReducingOnly => ProtocolGridStatus::ReducingOnly,
@@ -286,7 +297,7 @@ fn protocol_pending_order(value: &PendingOrder) -> ProtocolPendingOrder {
         side: protocol_side(value.side),
         price: value.price,
         quantity: value.quantity,
-        status: value.status.clone(),
+        status: protocol_order_status(value.status),
     }
 }
 
@@ -306,6 +317,19 @@ fn protocol_side(value: grid_core::types::Side) -> ProtocolSide {
     match value {
         grid_core::types::Side::Buy => ProtocolSide::Buy,
         grid_core::types::Side::Sell => ProtocolSide::Sell,
+    }
+}
+
+fn protocol_order_status(value: grid_engine::ports::OrderStatus) -> ProtocolOrderStatus {
+    match value {
+        grid_engine::ports::OrderStatus::Submitting => ProtocolOrderStatus::Submitting,
+        grid_engine::ports::OrderStatus::New => ProtocolOrderStatus::New,
+        grid_engine::ports::OrderStatus::PartiallyFilled => ProtocolOrderStatus::PartiallyFilled,
+        grid_engine::ports::OrderStatus::Filled => ProtocolOrderStatus::Filled,
+        grid_engine::ports::OrderStatus::Canceling => ProtocolOrderStatus::Canceling,
+        grid_engine::ports::OrderStatus::Canceled => ProtocolOrderStatus::Canceled,
+        grid_engine::ports::OrderStatus::Rejected => ProtocolOrderStatus::Rejected,
+        grid_engine::ports::OrderStatus::Expired => ProtocolOrderStatus::Expired,
     }
 }
 
@@ -342,7 +366,10 @@ mod tests {
     use grid_engine::instance::RiskState;
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{ClockPort, GridSnapshot, StateRepositoryPort};
-    use grid_protocol::{GridSnapshot as ProtocolGridSnapshot, GridStatus as ProtocolGridStatus, GridSummary};
+    use grid_protocol::{
+        DomainEvent as ProtocolDomainEvent, GridSnapshot as ProtocolGridSnapshot,
+        GridStatus as ProtocolGridStatus, GridSummary,
+    };
 
     use super::{GridPlatformService, protocol_domain_event};
 
@@ -365,10 +392,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.events.len(), 1);
-        assert_eq!(
-            repository.events_for("BTCUSDT"),
-            outcome.events
-        );
+        assert_eq!(repository.events_for("BTCUSDT"), outcome.events);
 
         let broadcast = receiver.recv().await.unwrap();
         assert_eq!(broadcast.grid_id, "BTCUSDT");
@@ -377,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutate_grid_rolls_back_and_does_not_broadcast_when_save_fails() {
-        let repository = Arc::new(FailOnSaveRepository::default());
+        let repository = Arc::new(FailOnSaveRepository);
         let service = test_service(repository as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_events();
 
@@ -399,14 +423,33 @@ mod tests {
 
         let snapshot = service.grid_snapshot("BTCUSDT").await.unwrap();
         assert_eq!(snapshot.target_exposure, None);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn mutate_grid_broadcasts_snapshot_updated_when_state_changes_without_domain_events() {
+        let service =
+            test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
+        let mut receiver = service.subscribe_events();
+
+        service
+            .mutate_grid("BTCUSDT", |manager| manager.pause_instance("BTCUSDT"))
             .await
-            .is_err());
+            .unwrap();
+
+        let broadcast = receiver.recv().await.unwrap();
+        assert_eq!(broadcast.grid_id, "BTCUSDT");
+        assert_eq!(broadcast.event, ProtocolDomainEvent::SnapshotUpdated);
     }
 
     #[tokio::test]
     async fn exposes_protocol_read_models_without_http_side_mapping() {
-        let service = test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
+        let service =
+            test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
 
         let summaries: Vec<GridSummary> = service.list_grid_summaries().await;
         let snapshot: ProtocolGridSnapshot = service.grid_snapshot("BTCUSDT").await.unwrap();

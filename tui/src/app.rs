@@ -143,10 +143,7 @@ impl App {
     }
 
     pub fn record_event(&mut self, event: WsEvent) {
-        let events = self
-            .recent_events
-            .entry(event.grid_id.clone())
-            .or_default();
+        let events = self.recent_events.entry(event.grid_id.clone()).or_default();
         events.push_front(event);
         while events.len() > MAX_RECENT_EVENTS {
             events.pop_back();
@@ -191,7 +188,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
+        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary, OrderStatus,
         OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
     };
 
@@ -221,7 +218,7 @@ mod tests {
                 side: Side::Buy,
                 price: 99.0,
                 quantity: 0.25,
-                status: "NEW".into(),
+                status: OrderStatus::New,
             }),
             config: GridConfig {
                 lower_price: 90.0,

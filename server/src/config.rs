@@ -73,7 +73,8 @@ impl GridDefinition {
 
     pub fn budget(&self) -> CapacityBudget {
         CapacityBudget {
-            max_notional: self.long_exposure_units.max(self.short_exposure_units) * self.notional_per_unit,
+            max_notional: self.long_exposure_units.max(self.short_exposure_units)
+                * self.notional_per_unit,
             daily_loss_limit: f64::NEG_INFINITY,
             stop_loss_pct: 100.0,
         }

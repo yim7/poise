@@ -49,12 +49,7 @@ fn validate_unique_grid_ids(
 }
 
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
-    validate_unique_symbols(
-        config
-            .grids
-            .iter()
-            .map(|instance| instance.symbol.as_str()),
-    )?;
+    validate_unique_symbols(config.grids.iter().map(|instance| instance.symbol.as_str()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
 
     let adapter = Arc::new(BinanceAdapter::new(
@@ -89,12 +84,7 @@ pub(crate) async fn assemble_with_components(
     repository: Arc<dyn StateRepositoryPort>,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
-    validate_unique_symbols(
-        config
-            .grids
-            .iter()
-            .map(|instance| instance.symbol.as_str()),
-    )?;
+    validate_unique_symbols(config.grids.iter().map(|instance| instance.symbol.as_str()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
 
     let mut manager = InstanceManager::new(clock);
@@ -164,13 +154,13 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use grid_core::events::DomainEvent as EngineDomainEvent;
-    use grid_protocol::DomainEvent as ProtocolDomainEvent;
     use grid_engine::key::GridId;
     use grid_engine::manager::InstanceManager;
     use grid_engine::ports::{
-        ExchangeInfo, ExchangePort, GridSnapshot, ExchangeOrder, OrderReceipt, OrderRequest,
+        ExchangeInfo, ExchangeOrder, ExchangePort, GridSnapshot, OrderReceipt, OrderRequest,
         Position, PriceTick, StateRepositoryPort,
     };
+    use grid_protocol::DomainEvent as ProtocolDomainEvent;
     use grid_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -181,9 +171,7 @@ mod tests {
     use crate::http::router;
     use crate::websocket::WsEvent;
 
-    use super::{
-        ServerPlatform, ServerState, SystemClock, assemble, validate_unique_grid_ids,
-    };
+    use super::{ServerPlatform, ServerState, SystemClock, assemble, validate_unique_grid_ids};
 
     fn test_exchange_rules() -> grid_core::types::ExchangeRules {
         grid_core::types::ExchangeRules {
@@ -253,11 +241,9 @@ mod tests {
 
     #[test]
     fn assemble_rejects_duplicate_grid_ids() {
-        let error = validate_unique_grid_ids([
-            GridId::from_symbol("alpha"),
-            GridId::from_symbol("alpha"),
-        ])
-        .unwrap_err();
+        let error =
+            validate_unique_grid_ids([GridId::from_symbol("alpha"), GridId::from_symbol("alpha")])
+                .unwrap_err();
         assert!(error.to_string().contains("duplicate grid id"));
     }
 
@@ -404,10 +390,7 @@ mod tests {
         let manager = manager_handle.read().await;
         let instance = manager.get_instance("BTCUSDT").unwrap();
 
-        assert_eq!(
-            instance.status,
-            grid_engine::instance::GridStatus::Paused
-        );
+        assert_eq!(instance.status, grid_engine::instance::GridStatus::Paused);
 
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
@@ -457,10 +440,12 @@ mod tests {
                 mark_price: 85.0,
                 timestamp: chrono::Utc::now(),
             };
-            tick_state.service.mutate_grid("BTCUSDT", |manager| {
-                manager.on_price_tick(&tick).map(|_| ())
-            })
-            .await
+            tick_state
+                .service
+                .mutate_grid("BTCUSDT", |manager| {
+                    manager.on_price_tick(&tick).map(|_| ())
+                })
+                .await
         });
 
         let second_save_started = tokio::time::timeout(
@@ -484,10 +469,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            snapshot.status,
-            grid_engine::instance::GridStatus::Frozen
-        );
+        assert_eq!(snapshot.status, grid_engine::instance::GridStatus::Frozen);
         assert_eq!(snapshot.reference_price, Some(85.0));
     }
 

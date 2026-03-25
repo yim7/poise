@@ -56,8 +56,8 @@ mod tests {
     use chrono::Utc;
     use grid_core::types::ExchangeRules;
     use grid_engine::ports::{
-        ClockPort, ExchangeInfo, ExchangePort, ExchangeOrder, OrderReceipt, OrderRequest,
-        Position, PriceTick, StateRepositoryPort,
+        ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
+        OrderStatus, Position, PriceTick, StateRepositoryPort,
     };
     use tokio::sync::mpsc;
 
@@ -174,7 +174,7 @@ notional_per_unit = 375.0
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
-                status: "NEW".into(),
+                status: OrderStatus::New,
             })
         }
 
