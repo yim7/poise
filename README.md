@@ -129,5 +129,7 @@ cargo test
 ## 当前文档
 
 - [`docs/protocol-contract.md`](docs/protocol-contract.md)：当前 HTTP / WebSocket 协议
+- [`docs/grid-strategy-product-theory-research.md`](docs/grid-strategy-product-theory-research.md)：当前策略研究与产品侧约束
 - [`docs/superpowers/specs/2026-03-24-grid-platform-architecture-design.md`](docs/superpowers/specs/2026-03-24-grid-platform-architecture-design.md)：当前架构 spec
+- [`docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md`](docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md)：当前策略族模型设计
 - [`docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md`](docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md)：当前收敛计划与验收标准
