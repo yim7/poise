@@ -5,19 +5,28 @@ use axum::response::Response;
 pub type WsEvent = grid_protocol::WsEvent;
 
 use crate::assembly::ServerState;
+use crate::notifications::GridInternalNotification;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: ServerState) {
-    let mut receiver = state.service.subscribe_events();
+    let mut receiver = state.write_service.subscribe_notifications();
 
     loop {
-        let event = match receiver.recv().await {
+        let notification = match receiver.recv().await {
             Ok(event) => event,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+
+        let event = match notification {
+            GridInternalNotification::GridWriteCommitted { grid_id }
+            | GridInternalNotification::GridEffectStateChanged { grid_id } => WsEvent {
+                grid_id: grid_id.as_str().to_string(),
+                event: grid_protocol::DomainEvent::SnapshotUpdated,
+            },
         };
 
         let message = match serde_json::to_string(&event) {
@@ -50,19 +59,22 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::application::GridPlatformService;
     use crate::assembly::ServerState;
+    use crate::notifications::GridInternalNotification;
+    use crate::projector::GridProjector;
+    use crate::query_service::GridQueryService;
+    use crate::write_service::GridWriteService;
 
     use super::{WsEvent, ws_handler};
 
     async fn spawn_server() -> (
         String,
-        Arc<GridPlatformService>,
-        tokio::sync::broadcast::Sender<WsEvent>,
+        Arc<GridWriteService>,
+        tokio::sync::broadcast::Sender<GridInternalNotification>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (events, _) = tokio::sync::broadcast::channel(16);
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mut manager = grid_engine::manager::GridManager::new(std::sync::Arc::new(FakeClock));
         manager
             .add_grid(
@@ -90,13 +102,16 @@ mod tests {
                 },
             )
             .unwrap();
-        let service = Arc::new(GridPlatformService::new(
+        let service = Arc::new(GridWriteService::new(
             manager,
             std::sync::Arc::new(FakePersistence),
-            events.clone(),
+            notifications.clone(),
         ));
         let state = ServerState {
-            service: Arc::clone(&service),
+            write_service: Arc::clone(&service),
+            query_service: Arc::new(GridQueryService::new(Arc::new(FakeReadRepository))),
+            projector: Arc::new(GridProjector::new()),
+            notifications: notifications.clone(),
         };
         let app = Router::new()
             .route("/ws", axum::routing::get(ws_handler))
@@ -106,7 +121,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        (format!("ws://{address}/ws"), service, events)
+        (format!("ws://{address}/ws"), service, notifications)
     }
 
     #[tokio::test]
@@ -118,9 +133,8 @@ mod tests {
         let (_, mut stream_b) = client_b.split();
 
         events
-            .send(WsEvent {
-                grid_id: "BTCUSDT".into(),
-                event: DomainEvent::ExposureTargetChanged { from: 0.0, to: 4.0 },
+            .send(GridInternalNotification::GridWriteCommitted {
+                grid_id: GridId::new("btc-core"),
             })
             .unwrap();
 
@@ -139,7 +153,7 @@ mod tests {
         let payload_b: WsEvent = serde_json::from_str(message_b.to_text().unwrap()).unwrap();
 
         assert_eq!(payload_a, payload_b);
-        assert_eq!(payload_a.grid_id, "BTCUSDT");
+        assert_eq!(payload_a.grid_id, "btc-core");
     }
 
     #[tokio::test]
@@ -211,6 +225,40 @@ mod tests {
 
         async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> anyhow::Result<()> {
             Ok(())
+        }
+    }
+
+    struct FakeReadRepository;
+
+    #[async_trait::async_trait]
+    impl grid_engine::ports::GridReadRepositoryPort for FakeReadRepository {
+        async fn list_grid_snapshots(
+            &self,
+        ) -> anyhow::Result<Vec<grid_engine::ports::StoredGridSnapshot>> {
+            Ok(Vec::new())
+        }
+
+        async fn load_grid_snapshot(
+            &self,
+            _grid_id: &grid_engine::grid::GridId,
+        ) -> anyhow::Result<Option<grid_engine::ports::StoredGridSnapshot>> {
+            Ok(None)
+        }
+
+        async fn list_recent_grid_events(
+            &self,
+            _grid_id: &grid_engine::grid::GridId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<grid_engine::ports::StoredDomainEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_recent_grid_effects(
+            &self,
+            _grid_id: &grid_engine::grid::GridId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
         }
     }
 

@@ -291,7 +291,7 @@ Expected: 新增测试通过，`grid-storage` 全绿。
 - `list_recent_grid_effects_orders_results_by_updated_at`
 - `list_recent_grid_effects_includes_status_updated_effect_in_recent_window`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add engine/src/ports.rs storage/src/sqlite.rs
@@ -435,7 +435,7 @@ git commit -m "feat: add grid query service and projector"
 - Test: `server/src/runtime.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住写侧只发内部通知，不再组装协议 DTO**
+- [x] **Step 1: 先写失败测试，锁住写侧只发内部通知，不再组装协议 DTO**
 
 在 `server/src/write_service.rs` 新增测试，覆盖：
 
@@ -464,7 +464,7 @@ async fn command_persists_transition_and_emits_grid_write_committed() {
 async fn startup_sync_still_restores_submitting_pending_order_after_service_split() { /* ... */ }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认旧服务边界不满足新要求**
+- [x] **Step 2: 运行定向测试，确认旧服务边界不满足新要求**
 
 Run:
 
@@ -478,7 +478,7 @@ Expected:
 - 新的写侧模块不存在
 - 旧 `application.rs` 仍绑定 protocol DTO 和 `WsEvent`
 
-- [ ] **Step 3: 实现 `GridWriteService` 并删除旧 `GridPlatformService`**
+- [x] **Step 3: 实现 `GridWriteService` 并删除旧 `GridPlatformService`**
 
 实现要点：
 
@@ -501,7 +501,7 @@ pub struct GridWriteService {
 - `runtime` 和 `effect_worker` 改为依赖 `GridWriteService`
 - `assembly` 状态对象改为同时持有 `write_service`、`query_service`、`projector`
 
-- [ ] **Step 4: 跑 `grid-server` 写侧和运行时回归测试**
+- [x] **Step 4: 跑 `grid-server` 写侧和运行时回归测试**
 
 Run:
 
@@ -513,13 +513,18 @@ cargo test -p grid-server runtime::tests::effect_worker_does_not_resubmit_when_m
 
 Expected: 写侧测试通过，关键运行时恢复语义不回退。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add server/src/write_service.rs server/src/notifications.rs server/src/assembly.rs server/src/runtime.rs server/src/effect_worker.rs server/src/main.rs
 git rm server/src/application.rs
 git commit -m "refactor: split grid write service from application layer"
 ```
+
+实现备注：
+
+- 当前实现已拆掉旧 `application.rs`，并把运行时 / effect worker 改成只依赖 `GridWriteService`
+- 为了把 Task 4 和 Task 5 分开验收，`server/src/http.rs` 与 `server/src/websocket.rs` 仍保留本地 snapshot 映射和 `SnapshotUpdated` 临时桥接；彻底切到新读模型 contract 放在任务 5
 
 ---
 

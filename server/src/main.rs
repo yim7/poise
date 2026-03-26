@@ -1,14 +1,15 @@
-mod application;
 mod assembly;
 mod config;
 mod effect_worker;
 mod http;
+mod notifications;
 #[allow(dead_code)]
 mod projector;
 #[allow(dead_code)]
 mod query_service;
 mod runtime;
 mod websocket;
+mod write_service;
 
 use std::env;
 

@@ -7,16 +7,26 @@ use chrono::Utc;
 use grid_binance::BinanceAdapter;
 use grid_engine::grid::{GridId, Instrument};
 use grid_engine::manager::GridManager;
-use grid_engine::ports::{ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort};
+use grid_engine::ports::{
+    ClockPort, ExchangePort, GridReadRepositoryPort, MarketDataPort, StateRepositoryPort,
+};
 use grid_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
-use crate::application::GridPlatformService;
 use crate::config::Config;
+use crate::notifications::GridInternalNotification;
+use crate::projector::GridProjector;
+use crate::query_service::GridQueryService;
 use crate::runtime::{RuntimeHandles, ServerRuntime};
+use crate::write_service::GridWriteService;
 #[derive(Clone)]
 pub struct ServerState {
-    pub service: Arc<GridPlatformService>,
+    pub write_service: Arc<GridWriteService>,
+    #[allow(dead_code)]
+    pub query_service: Arc<GridQueryService>,
+    #[allow(dead_code)]
+    pub projector: Arc<GridProjector>,
+    pub notifications: broadcast::Sender<GridInternalNotification>,
 }
 
 pub struct ServerPlatform {
@@ -75,17 +85,47 @@ pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
 
     let db_path = config.default_db_path();
     ensure_parent_dir(&db_path)?;
-    let repository: Arc<dyn StateRepositoryPort> = Arc::new(SqliteStorage::new(&db_path)?);
+    let storage = Arc::new(SqliteStorage::new(&db_path)?);
+    let repository: Arc<dyn StateRepositoryPort> = storage.clone();
+    let read_repository: Arc<dyn GridReadRepositoryPort> = storage;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_components(config, exchange, market_data, repository, clock).await
+    assemble_with_components_with_read_repository(
+        config,
+        exchange,
+        market_data,
+        repository,
+        read_repository,
+        clock,
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(crate) async fn assemble_with_components(
     config: &Config,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
     repository: Arc<dyn StateRepositoryPort>,
+    clock: Arc<dyn ClockPort>,
+) -> Result<ServerPlatform> {
+    assemble_with_components_with_read_repository(
+        config,
+        exchange,
+        market_data,
+        repository,
+        Arc::new(NoopReadRepository),
+        clock,
+    )
+    .await
+}
+
+async fn assemble_with_components_with_read_repository(
+    config: &Config,
+    exchange: Arc<dyn ExchangePort>,
+    market_data: Arc<dyn MarketDataPort>,
+    repository: Arc<dyn StateRepositoryPort>,
+    read_repository: Arc<dyn GridReadRepositoryPort>,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
     validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
@@ -107,9 +147,15 @@ pub(crate) async fn assemble_with_components(
         }
     }
 
-    let (events, _) = broadcast::channel(256);
-    let service = Arc::new(GridPlatformService::new(manager, repository, events));
-    let server_state = build_server_state(service);
+    let (notifications, _) = broadcast::channel(256);
+    let write_service = Arc::new(GridWriteService::new(
+        manager,
+        repository,
+        notifications.clone(),
+    ));
+    let query_service = Arc::new(GridQueryService::new(read_repository));
+    let projector = Arc::new(GridProjector::new());
+    let server_state = build_server_state(write_service, query_service, projector, notifications);
 
     Ok(ServerPlatform {
         state: server_state.clone(),
@@ -144,8 +190,52 @@ impl ClockPort for SystemClock {
     }
 }
 
-fn build_server_state(service: Arc<GridPlatformService>) -> ServerState {
-    ServerState { service }
+pub(crate) fn build_server_state(
+    write_service: Arc<GridWriteService>,
+    query_service: Arc<GridQueryService>,
+    projector: Arc<GridProjector>,
+    notifications: broadcast::Sender<GridInternalNotification>,
+) -> ServerState {
+    ServerState {
+        write_service,
+        query_service,
+        projector,
+        notifications,
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct NoopReadRepository;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl GridReadRepositoryPort for NoopReadRepository {
+    async fn list_grid_snapshots(&self) -> Result<Vec<grid_engine::ports::StoredGridSnapshot>> {
+        Ok(Vec::new())
+    }
+
+    async fn load_grid_snapshot(
+        &self,
+        _grid_id: &GridId,
+    ) -> Result<Option<grid_engine::ports::StoredGridSnapshot>> {
+        Ok(None)
+    }
+
+    async fn list_recent_grid_events(
+        &self,
+        _grid_id: &GridId,
+        _limit: usize,
+    ) -> Result<Vec<grid_engine::ports::StoredDomainEvent>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_recent_grid_effects(
+        &self,
+        _grid_id: &GridId,
+        _limit: usize,
+    ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -171,14 +261,16 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio_tungstenite::connect_async;
 
-    use crate::application::GridPlatformService;
     use crate::config::{Config, ExchangeConfig, GridDefinition};
     use crate::http::router;
+    use crate::projector::GridProjector;
+    use crate::query_service::GridQueryService;
     use crate::websocket::WsEvent;
+    use crate::write_service::GridWriteService;
 
     use super::{
-        ServerPlatform, ServerState, SystemClock, assemble, validate_unique_grid_ids,
-        validate_unique_instruments,
+        NoopReadRepository, ServerPlatform, SystemClock, assemble, build_server_state,
+        validate_unique_grid_ids, validate_unique_instruments,
     };
 
     fn test_exchange_rules() -> grid_core::types::ExchangeRules {
@@ -237,7 +329,7 @@ mod tests {
         };
 
         let platform = assemble_with_fake_ports(&config).await.unwrap();
-        let manager_handle = platform.state().service.manager();
+        let manager_handle = platform.state().write_service.manager();
         let manager = manager_handle.read().await;
 
         assert_eq!(manager.list_grids().len(), 2);
@@ -351,10 +443,7 @@ mod tests {
         let payload: WsEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
 
         assert_eq!(payload.grid_id, "btc-core");
-        assert!(matches!(
-            payload.event,
-            ProtocolDomainEvent::ExposureTargetChanged { .. }
-        ));
+        assert_eq!(payload.event, ProtocolDomainEvent::SnapshotUpdated);
 
         server.abort();
         let _ = server.await;
@@ -415,7 +504,7 @@ mod tests {
         assert_eq!(pause.status(), axum::http::StatusCode::OK);
 
         let second = assemble_with_fake_ports(&config).await.unwrap();
-        let manager_handle = second.state().service.manager();
+        let manager_handle = second.state().write_service.manager();
         let manager = manager_handle.read().await;
         let grid = manager.get_grid("btc-core").unwrap();
 
@@ -431,7 +520,7 @@ mod tests {
         let app = router(platform.state());
 
         {
-            let manager_handle = platform.state.service.manager();
+            let manager_handle = platform.state.write_service.manager();
             let mut manager = manager_handle.write().await;
             let tick = PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -475,7 +564,7 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             };
             tick_state
-                .service
+                .write_service
                 .observe_market("btc-core", tick.reference_price)
                 .await
                 .map(|_| ())
@@ -558,9 +647,13 @@ mod tests {
             )
             .unwrap();
         let (events, _) = broadcast::channel(16);
-        let state = ServerState {
-            service: Arc::new(GridPlatformService::new(manager, repository, events)),
-        };
+        let write_service = Arc::new(GridWriteService::new(manager, repository, events.clone()));
+        let state = build_server_state(
+            write_service,
+            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridProjector::new()),
+            events,
+        );
 
         (
             ServerPlatform {

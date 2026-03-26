@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::assembly::ServerState;
+use crate::notifications::GridInternalNotification;
 
 #[derive(Clone)]
 pub struct EffectWorker {
@@ -43,7 +44,7 @@ impl EffectWorker {
     }
 
     pub async fn run_once(&self) -> Result<()> {
-        let repository = self.state.service.repository();
+        let repository = self.state.write_service.repository();
         let effects = repository.list_pending_effects().await?;
         for effect in effects {
             if let Err(error) = self.process_effect(effect).await {
@@ -86,10 +87,11 @@ impl EffectWorker {
             }
             GridEffect::NoOp => {
                 self.state
-                    .service
+                    .write_service
                     .repository()
                     .mark_effect_succeeded(&persisted.effect_id)
                     .await?;
+                self.notify_effect_state_changed(&persisted.grid_id);
                 Ok(())
             }
         }
@@ -101,7 +103,7 @@ impl EffectWorker {
         request: OrderRequest,
         target_exposure: grid_core::types::Exposure,
     ) -> Result<()> {
-        let repository = self.state.service.repository();
+        let repository = self.state.write_service.repository();
         match self.handle_recovered_submit(persisted, &request).await? {
             SubmitRecovery::Proceed => {}
             SubmitRecovery::Recovered => return Ok(()),
@@ -109,7 +111,7 @@ impl EffectWorker {
         }
 
         self.state
-            .service
+            .write_service
             .record_pending_order(
                 persisted.grid_id.as_str(),
                 PendingOrder {
@@ -138,7 +140,7 @@ impl EffectWorker {
 
                 if let Err(error) = self
                     .state
-                    .service
+                    .write_service
                     .record_pending_order(persisted.grid_id.as_str(), submitted)
                     .await
                 {
@@ -151,12 +153,13 @@ impl EffectWorker {
                 repository
                     .mark_effect_succeeded(&persisted.effect_id)
                     .await?;
+                self.notify_effect_state_changed(&persisted.grid_id);
                 Ok(())
             }
             Err(error) => {
                 let failure_message = match self
                     .state
-                    .service
+                    .write_service
                     .clear_pending_order(persisted.grid_id.as_str())
                     .await
                 {
@@ -169,6 +172,7 @@ impl EffectWorker {
                 repository
                     .mark_effect_failed(&persisted.effect_id, &failure_message)
                     .await?;
+                self.notify_effect_state_changed(&persisted.grid_id);
                 Err(anyhow!(failure_message))
             }
         }
@@ -179,7 +183,7 @@ impl EffectWorker {
         persisted: &PersistedGridEffect,
         request: &OrderRequest,
     ) -> Result<SubmitRecovery> {
-        let repository = self.state.service.repository();
+        let repository = self.state.write_service.repository();
         let Some(snapshot) = repository
             .load_grid_state(persisted.grid_id.as_str())
             .await?
@@ -208,7 +212,7 @@ impl EffectWorker {
             .find(|order| order.client_order_id == request.client_order_id)
         {
             self.state
-                .service
+                .write_service
                 .record_pending_order(
                     persisted.grid_id.as_str(),
                     PendingOrder {
@@ -225,6 +229,7 @@ impl EffectWorker {
             repository
                 .mark_effect_succeeded(&persisted.effect_id)
                 .await?;
+            self.notify_effect_state_changed(&persisted.grid_id);
             return Ok(SubmitRecovery::Recovered);
         }
 
@@ -236,7 +241,7 @@ impl EffectWorker {
         persisted: &PersistedGridEffect,
         cancellation: Cancellation,
     ) -> Result<()> {
-        let repository = self.state.service.repository();
+        let repository = self.state.write_service.repository();
         let result = match cancellation {
             Cancellation::One {
                 instrument,
@@ -250,15 +255,26 @@ impl EffectWorker {
                 repository
                     .mark_effect_succeeded(&persisted.effect_id)
                     .await?;
+                self.notify_effect_state_changed(&persisted.grid_id);
                 Ok(())
             }
             Err(error) => {
                 repository
                     .mark_effect_failed(&persisted.effect_id, &error.to_string())
                     .await?;
+                self.notify_effect_state_changed(&persisted.grid_id);
                 Err(error)
             }
         }
+    }
+
+    fn notify_effect_state_changed(&self, grid_id: &grid_engine::grid::GridId) {
+        let _ = self
+            .state
+            .notifications
+            .send(GridInternalNotification::GridEffectStateChanged {
+                grid_id: grid_id.clone(),
+            });
     }
 }
 

@@ -1348,12 +1348,15 @@ out_of_band_policy = "hold"
             "eth view:\n{eth_view}"
         );
 
-        let event_view = wait_for_pane_text(&session, "->").await;
+        let event_view = wait_for_pane_text(&session, "snapshot updated").await;
         assert!(
             event_view.contains("Recent Events"),
             "event view:\n{event_view}"
         );
-        assert!(event_view.contains("->"), "event view:\n{event_view}");
+        assert!(
+            event_view.contains("snapshot updated"),
+            "event view:\n{event_view}"
+        );
 
         session.send_keys(&["q"]);
         for _ in 0..30 {

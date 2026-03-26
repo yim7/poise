@@ -9,25 +9,21 @@ use grid_engine::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
 };
 use grid_engine::ports::StateRepositoryPort;
-use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder};
+use grid_engine::runtime::PendingOrder;
+use grid_engine::snapshot::GridRuntimeSnapshot;
 use grid_engine::transition::{GridEffect, GridTransition};
-use grid_protocol::{
-    BandBoundary as ProtocolBandBoundary, DomainEvent as ProtocolDomainEvent,
-    GridConfig as ProtocolGridConfig, GridSnapshot as ProtocolGridSnapshot,
-    GridStatus as ProtocolGridStatus, GridSummary, OrderStatus as ProtocolOrderStatus,
-    OutOfBandPolicy as ProtocolOutOfBandPolicy, PendingOrder as ProtocolPendingOrder,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, WsEvent,
-};
 use tokio::sync::{Mutex, RwLock, broadcast};
+
+use crate::notifications::GridInternalNotification;
 
 pub type SharedManager = Arc<RwLock<GridManager>>;
 
 #[derive(Clone)]
-pub struct GridPlatformService {
+pub struct GridWriteService {
     manager: SharedManager,
     repository: Arc<dyn StateRepositoryPort>,
     mutation_lock: Arc<Mutex<()>>,
-    events: broadcast::Sender<WsEvent>,
+    notifications: broadcast::Sender<GridInternalNotification>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,17 +79,17 @@ impl TransitionResult for GridTransition {
     }
 }
 
-impl GridPlatformService {
+impl GridWriteService {
     pub fn new(
         manager: GridManager,
         repository: Arc<dyn StateRepositoryPort>,
-        events: broadcast::Sender<WsEvent>,
+        notifications: broadcast::Sender<GridInternalNotification>,
     ) -> Self {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             repository,
             mutation_lock: Arc::new(Mutex::new(())),
-            events,
+            notifications,
         }
     }
 
@@ -106,8 +102,8 @@ impl GridPlatformService {
         Arc::clone(&self.repository)
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<WsEvent> {
-        self.events.subscribe()
+    pub fn subscribe_notifications(&self) -> broadcast::Receiver<GridInternalNotification> {
+        self.notifications.subscribe()
     }
 
     pub async fn has_grid(&self, id: &str) -> bool {
@@ -115,18 +111,18 @@ impl GridPlatformService {
         manager.get_grid(id).is_some()
     }
 
-    pub async fn list_grid_summaries(&self) -> Vec<GridSummary> {
+    pub async fn list_grid_snapshots(&self) -> Vec<GridRuntimeSnapshot> {
         let manager = self.manager.read().await;
         manager
             .list_grids()
             .into_iter()
-            .map(protocol_grid_summary)
+            .map(|grid| grid.snapshot())
             .collect()
     }
 
-    pub async fn grid_snapshot(&self, id: &str) -> Option<ProtocolGridSnapshot> {
+    pub async fn grid_snapshot(&self, id: &str) -> Option<GridRuntimeSnapshot> {
         let manager = self.manager.read().await;
-        manager.get_grid(id).map(protocol_grid_snapshot)
+        manager.snapshot(id)
     }
 
     pub async fn grid_instruments(&self) -> Vec<GridInstrument> {
@@ -251,161 +247,13 @@ impl GridPlatformService {
             return Err(GridMutationError::Persistence(error));
         }
 
-        for event in result.domain_events() {
-            let _ = self.events.send(WsEvent {
-                grid_id: id.to_string(),
-                event: protocol_domain_event(event),
+        let _ = self
+            .notifications
+            .send(GridInternalNotification::GridWriteCommitted {
+                grid_id: GridId::new(id),
             });
-        }
-
-        if result.domain_events().is_empty() && previous_snapshot != next_snapshot {
-            let _ = self.events.send(WsEvent {
-                grid_id: id.to_string(),
-                event: ProtocolDomainEvent::SnapshotUpdated,
-            });
-        }
 
         Ok(result)
-    }
-}
-
-fn protocol_domain_event(event: &DomainEvent) -> ProtocolDomainEvent {
-    match event {
-        DomainEvent::ExposureTargetChanged { from, to } => {
-            ProtocolDomainEvent::ExposureTargetChanged {
-                from: from.0,
-                to: to.0,
-            }
-        }
-        DomainEvent::BandBreached { boundary, price } => ProtocolDomainEvent::BandBreached {
-            boundary: match boundary {
-                grid_core::strategy::BandBoundary::Below => ProtocolBandBoundary::Below,
-                grid_core::strategy::BandBoundary::Above => ProtocolBandBoundary::Above,
-            },
-            price: *price,
-        },
-        DomainEvent::BandReentered { price } => {
-            ProtocolDomainEvent::BandReentered { price: *price }
-        }
-        DomainEvent::PolicyTriggered { policy } => ProtocolDomainEvent::PolicyTriggered {
-            policy: match policy {
-                grid_core::strategy::OutOfBandPolicy::Freeze => ProtocolOutOfBandPolicy::Freeze,
-                grid_core::strategy::OutOfBandPolicy::ReduceOnly => {
-                    ProtocolOutOfBandPolicy::ReduceOnly
-                }
-                grid_core::strategy::OutOfBandPolicy::Terminate => {
-                    ProtocolOutOfBandPolicy::Terminate
-                }
-                grid_core::strategy::OutOfBandPolicy::Hold => ProtocolOutOfBandPolicy::Hold,
-            },
-        },
-        DomainEvent::RiskCapApplied { intended, capped } => ProtocolDomainEvent::RiskCapApplied {
-            intended: intended.0,
-            capped: capped.0,
-        },
-        DomainEvent::RiskDenied { reason } => ProtocolDomainEvent::RiskDenied {
-            reason: reason.clone(),
-        },
-    }
-}
-
-fn protocol_grid_summary(value: &GridRuntime) -> GridSummary {
-    GridSummary {
-        id: value.id.as_str().to_string(),
-        symbol: value.symbol().to_string(),
-        status: protocol_grid_status(value.status.clone()),
-        reference_price: value.reference_price,
-    }
-}
-
-fn protocol_grid_snapshot(value: &GridRuntime) -> ProtocolGridSnapshot {
-    ProtocolGridSnapshot {
-        id: value.id.as_str().to_string(),
-        symbol: value.symbol().to_string(),
-        status: protocol_grid_status(value.status.clone()),
-        current_exposure: value.current_exposure.0,
-        target_exposure: value.target_exposure.as_ref().map(|exposure| exposure.0),
-        reference_price: value.reference_price,
-        pending_order: value
-            .pending_order
-            .as_ref()
-            .map(|pending_order| protocol_pending_order(value.symbol(), pending_order)),
-        config: protocol_grid_config(&value.config),
-    }
-}
-
-fn protocol_grid_status(value: GridStatus) -> ProtocolGridStatus {
-    match value {
-        GridStatus::WaitingMarketData => ProtocolGridStatus::WaitingMarketData,
-        GridStatus::Active => ProtocolGridStatus::Active,
-        GridStatus::Frozen => ProtocolGridStatus::Frozen,
-        GridStatus::ReducingOnly => ProtocolGridStatus::ReducingOnly,
-        GridStatus::Holding => ProtocolGridStatus::Holding,
-        GridStatus::Terminated => ProtocolGridStatus::Terminated,
-        GridStatus::Paused => ProtocolGridStatus::Paused,
-    }
-}
-
-fn protocol_pending_order(symbol: &str, value: &PendingOrder) -> ProtocolPendingOrder {
-    ProtocolPendingOrder {
-        symbol: symbol.to_string(),
-        order_id: value.order_id.clone(),
-        client_order_id: value.client_order_id.clone(),
-        side: protocol_side(value.side),
-        price: value.price,
-        quantity: value.quantity,
-        status: protocol_order_status(value.status),
-    }
-}
-
-fn protocol_grid_config(value: &grid_core::strategy::GridConfig) -> ProtocolGridConfig {
-    ProtocolGridConfig {
-        lower_price: value.lower_price,
-        upper_price: value.upper_price,
-        long_exposure_units: value.long_exposure_units,
-        short_exposure_units: value.short_exposure_units,
-        notional_per_unit: value.notional_per_unit,
-        shape_family: protocol_shape_family(value.shape_family),
-        out_of_band_policy: protocol_out_of_band_policy(value.out_of_band_policy),
-    }
-}
-
-fn protocol_side(value: grid_core::types::Side) -> ProtocolSide {
-    match value {
-        grid_core::types::Side::Buy => ProtocolSide::Buy,
-        grid_core::types::Side::Sell => ProtocolSide::Sell,
-    }
-}
-
-fn protocol_order_status(value: grid_engine::ports::OrderStatus) -> ProtocolOrderStatus {
-    match value {
-        grid_engine::ports::OrderStatus::Submitting => ProtocolOrderStatus::Submitting,
-        grid_engine::ports::OrderStatus::New => ProtocolOrderStatus::New,
-        grid_engine::ports::OrderStatus::PartiallyFilled => ProtocolOrderStatus::PartiallyFilled,
-        grid_engine::ports::OrderStatus::Filled => ProtocolOrderStatus::Filled,
-        grid_engine::ports::OrderStatus::Canceling => ProtocolOrderStatus::Canceling,
-        grid_engine::ports::OrderStatus::Canceled => ProtocolOrderStatus::Canceled,
-        grid_engine::ports::OrderStatus::Rejected => ProtocolOrderStatus::Rejected,
-        grid_engine::ports::OrderStatus::Expired => ProtocolOrderStatus::Expired,
-    }
-}
-
-fn protocol_shape_family(value: grid_core::strategy::ShapeFamily) -> ProtocolShapeFamily {
-    match value {
-        grid_core::strategy::ShapeFamily::Linear => ProtocolShapeFamily::Linear,
-        grid_core::strategy::ShapeFamily::Convex => ProtocolShapeFamily::Convex,
-        grid_core::strategy::ShapeFamily::Concave => ProtocolShapeFamily::Concave,
-    }
-}
-
-fn protocol_out_of_band_policy(
-    value: grid_core::strategy::OutOfBandPolicy,
-) -> ProtocolOutOfBandPolicy {
-    match value {
-        grid_core::strategy::OutOfBandPolicy::Freeze => ProtocolOutOfBandPolicy::Freeze,
-        grid_core::strategy::OutOfBandPolicy::ReduceOnly => ProtocolOutOfBandPolicy::ReduceOnly,
-        grid_core::strategy::OutOfBandPolicy::Terminate => ProtocolOutOfBandPolicy::Terminate,
-        grid_core::strategy::OutOfBandPolicy::Hold => ProtocolOutOfBandPolicy::Hold,
     }
 }
 
@@ -429,18 +277,16 @@ mod tests {
     };
     use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_engine::transition::GridEffect;
-    use grid_protocol::{
-        DomainEvent as ProtocolDomainEvent, GridSnapshot as ProtocolGridSnapshot,
-        GridStatus as ProtocolGridStatus, GridSummary,
-    };
 
-    use super::{GridPlatformService, protocol_domain_event};
+    use crate::notifications::GridInternalNotification;
+
+    use super::GridWriteService;
 
     #[tokio::test]
-    async fn mutate_grid_persists_tick_events_and_broadcasts_after_save() {
+    async fn mutate_grid_persists_tick_events_and_emits_notification_after_save() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
-        let mut receiver = service.subscribe_events();
+        let mut receiver = service.subscribe_notifications();
 
         let outcome = service
             .mutate_grid("btc-core", |manager| {
@@ -457,9 +303,13 @@ mod tests {
         assert_eq!(outcome.events.len(), 1);
         assert_eq!(repository.events_for("btc-core"), outcome.events);
 
-        let broadcast = receiver.recv().await.unwrap();
-        assert_eq!(broadcast.grid_id, "btc-core");
-        assert_eq!(broadcast.event, protocol_domain_event(&outcome.events[0]));
+        let notification = receiver.recv().await.unwrap();
+        assert_eq!(
+            notification,
+            GridInternalNotification::GridWriteCommitted {
+                grid_id: GridId::new("btc-core"),
+            }
+        );
     }
 
     #[tokio::test]
@@ -512,7 +362,7 @@ mod tests {
     async fn mutate_grid_rolls_back_and_does_not_broadcast_when_save_fails() {
         let repository = Arc::new(FailOnSaveRepository);
         let service = test_service(repository as Arc<dyn StateRepositoryPort>);
-        let mut receiver = service.subscribe_events();
+        let mut receiver = service.subscribe_notifications();
 
         let error = match service
             .mutate_grid("btc-core", |manager| {
@@ -540,36 +390,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutate_grid_broadcasts_snapshot_updated_when_state_changes_without_domain_events() {
+    async fn command_persists_transition_and_emits_grid_write_committed() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
-        let mut receiver = service.subscribe_events();
+        let mut receiver = service.subscribe_notifications();
 
         service
-            .mutate_grid("btc-core", |manager| {
-                manager.command(&GridId::new("btc-core"), GridCommand::Pause)
-            })
+            .command("btc-core", GridCommand::Pause)
             .await
             .unwrap();
 
-        let broadcast = receiver.recv().await.unwrap();
-        assert_eq!(broadcast.grid_id, "btc-core");
-        assert_eq!(broadcast.event, ProtocolDomainEvent::SnapshotUpdated);
+        let notification = receiver.recv().await.unwrap();
+        assert_eq!(
+            notification,
+            GridInternalNotification::GridWriteCommitted {
+                grid_id: GridId::new("btc-core"),
+            }
+        );
     }
 
     #[tokio::test]
-    async fn exposes_protocol_read_models_without_http_side_mapping() {
+    async fn exposes_internal_snapshots_without_protocol_mapping() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
 
-        let summaries: Vec<GridSummary> = service.list_grid_summaries().await;
-        let snapshot: ProtocolGridSnapshot = service.grid_snapshot("btc-core").await.unwrap();
+        let snapshots = service.list_grid_snapshots().await;
+        let snapshot = service.grid_snapshot("btc-core").await.unwrap();
 
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, "btc-core");
-        assert_eq!(summaries[0].status, ProtocolGridStatus::WaitingMarketData);
-        assert_eq!(snapshot.id, "btc-core");
-        assert_eq!(snapshot.status, ProtocolGridStatus::WaitingMarketData);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].grid_id.as_str(), "btc-core");
+        assert_eq!(snapshots[0].status, snapshot.status);
+        assert_eq!(snapshot.grid_id.as_str(), "btc-core");
     }
 
     #[tokio::test]
@@ -584,8 +435,8 @@ mod tests {
         assert_eq!(grid_id, Some("btc-core".to_string()));
     }
 
-    fn test_service(repository: Arc<dyn StateRepositoryPort>) -> GridPlatformService {
-        let (events, _) = tokio::sync::broadcast::channel(16);
+    fn test_service(repository: Arc<dyn StateRepositoryPort>) -> GridWriteService {
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mut manager = GridManager::new(Arc::new(FixedClock));
         manager
             .add_grid(
@@ -614,7 +465,7 @@ mod tests {
             )
             .unwrap();
 
-        GridPlatformService::new(manager, repository, events)
+        GridWriteService::new(manager, repository, notifications)
     }
 
     #[derive(Default)]

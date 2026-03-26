@@ -11,9 +11,9 @@ use grid_engine::ports::{
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::application::GridMutationError;
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
+use crate::write_service::GridMutationError;
 #[derive(Clone)]
 pub struct ServerRuntime {
     state: ServerState,
@@ -62,8 +62,8 @@ impl ServerRuntime {
     }
 
     async fn startup_sync(&self) -> Result<()> {
-        let repository = self.state.service.repository();
-        for grid in self.state.service.grid_instruments().await {
+        let repository = self.state.write_service.repository();
+        for grid in self.state.write_service.grid_instruments().await {
             let position = self.exchange.get_position(&grid.instrument).await?;
             let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
             let preserve_submitting_anchor = repository
@@ -74,17 +74,20 @@ impl ServerRuntime {
                 .unwrap_or(false);
 
             if !preserve_submitting_anchor {
-                self.state.service.clear_pending_order(&grid.id).await?;
+                self.state
+                    .write_service
+                    .clear_pending_order(&grid.id)
+                    .await?;
             }
             let _ = self
                 .state
-                .service
+                .write_service
                 .observe_position(&grid.id, position_observation(&position))
                 .await?;
             for order in &open_orders {
                 let _ = self
                     .state
-                    .service
+                    .write_service
                     .observe_order(&grid.id, order_observation(order))
                     .await?;
             }
@@ -108,7 +111,8 @@ impl ServerRuntime {
             if event.event_time > startup_cutoff {
                 let should_reconcile = should_reconcile_after_user_data(&event);
                 let instrument = event.instrument().clone();
-                let Some(grid_id) = self.state.service.resolve_grid_id(&instrument).await else {
+                let Some(grid_id) = self.state.write_service.resolve_grid_id(&instrument).await
+                else {
                     tracing::warn!(
                         "received user data for unknown instrument {}:{}",
                         instrument.venue.as_str(),
@@ -133,7 +137,7 @@ impl ServerRuntime {
         let market_data = Arc::clone(&self.market_data);
 
         tokio::spawn(async move {
-            let grids = state.service.grid_instruments().await;
+            let grids = state.write_service.grid_instruments().await;
             let mut workers = JoinSet::new();
 
             for grid in grids {
@@ -144,7 +148,7 @@ impl ServerRuntime {
                         workers.spawn(async move {
                             while let Some(tick) = receiver.recv().await {
                                 match state
-                                    .service
+                                    .write_service
                                     .observe_market(&grid.id, tick.reference_price)
                                     .await
                                 {
@@ -201,7 +205,7 @@ impl ServerRuntime {
 
                 let should_reconcile = should_reconcile_after_user_data(&event);
                 let instrument = event.instrument().clone();
-                let Some(grid_id) = state.service.resolve_grid_id(&instrument).await else {
+                let Some(grid_id) = state.write_service.resolve_grid_id(&instrument).await else {
                     tracing::warn!(
                         "received user data for unknown instrument {}:{}",
                         instrument.venue.as_str(),
@@ -246,14 +250,14 @@ async fn apply_user_data_event(
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
-                .service
+                .write_service
                 .observe_position(grid_id, position_observation(&position))
                 .await
                 .map_err(|error| GridMutationError::Persistence(anyhow!(error)))?;
         }
         UserDataPayload::OrderUpdate(order) => {
             let _ = state
-                .service
+                .write_service
                 .observe_order(grid_id, order_observation(&order))
                 .await
                 .map_err(|error| GridMutationError::Persistence(anyhow!(error)))?;
@@ -265,7 +269,7 @@ async fn apply_user_data_event(
 
 async fn command_reconcile(state: &ServerState, grid_id: &str) -> Result<()> {
     let _ = state
-        .service
+        .write_service
         .command(grid_id, GridCommand::Reconcile)
         .await?;
     Ok(())
@@ -317,13 +321,14 @@ mod tests {
         Position, PriceTick, StateRepositoryPort, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder, RiskState};
-    use grid_protocol::DomainEvent as ProtocolDomainEvent;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
-    use crate::application::GridPlatformService;
-    use crate::assembly::ServerState;
+    use crate::assembly::{NoopReadRepository, ServerState, build_server_state};
     use crate::effect_worker::EffectWorker;
+    use crate::projector::GridProjector;
+    use crate::query_service::GridQueryService;
+    use crate::write_service::GridWriteService;
 
     use super::{RuntimeHandles, ServerRuntime};
 
@@ -351,7 +356,7 @@ mod tests {
 
         let transition = fixture
             .state
-            .service
+            .write_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -399,7 +404,7 @@ mod tests {
 
         fixture
             .state
-            .service
+            .write_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -457,7 +462,11 @@ mod tests {
             market_data as Arc<dyn MarketDataPort>,
         );
 
-        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
         assert!(
             transition
                 .effects
@@ -504,7 +513,11 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
         assert!(
             transition
                 .effects
@@ -531,7 +544,7 @@ mod tests {
 
         let outcome = fixture
             .state
-            .service
+            .write_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -546,7 +559,7 @@ mod tests {
 
         fixture
             .state
-            .service
+            .write_service
             .command("BTCUSDT", GridCommand::Pause)
             .await
             .unwrap();
@@ -582,7 +595,11 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
         let (request, target_exposure) = match transition.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
@@ -594,7 +611,7 @@ mod tests {
         };
 
         state
-            .service
+            .write_service
             .record_pending_order(
                 "BTCUSDT",
                 PendingOrder {
@@ -654,7 +671,11 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let transition = state.service.observe_market("BTCUSDT", 90.0).await.unwrap();
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 90.0)
+            .await
+            .unwrap();
         assert!(matches!(
             transition.effects.as_slice(),
             [
@@ -701,7 +722,11 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        let transition = state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
         assert!(
             transition
                 .effects
@@ -750,7 +775,11 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        state.service.observe_market("BTCUSDT", 95.0).await.unwrap();
+        state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
 
         let task = tokio::spawn({
             let worker = worker.clone();
@@ -871,7 +900,7 @@ mod tests {
         .await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        let mut receiver = fixture.state.service.subscribe_events();
+        let mut receiver = fixture.state.write_service.subscribe_notifications();
         fixture
             .user_sender
             .send(position_event_at(
@@ -886,7 +915,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.event, ProtocolDomainEvent::SnapshotUpdated);
+        assert!(matches!(
+            event,
+            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+        ));
 
         shutdown(handles).await;
     }
@@ -1013,7 +1045,7 @@ mod tests {
         .await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        let mut receiver = fixture.state.service.subscribe_events();
+        let mut receiver = fixture.state.write_service.subscribe_notifications();
         fixture
             .user_sender
             .send(order_event_at(
@@ -1035,7 +1067,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.event, ProtocolDomainEvent::SnapshotUpdated);
+        assert!(matches!(
+            event,
+            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+        ));
 
         shutdown(handles).await;
     }
@@ -1223,13 +1258,17 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let state = ServerState {
-            service: Arc::new(GridPlatformService::new(
-                manager,
-                persistence.clone(),
-                events,
-            )),
-        };
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            persistence.clone(),
+            events.clone(),
+        ));
+        let state = build_server_state(
+            write_service,
+            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridProjector::new()),
+            events,
+        );
         let runtime = ServerRuntime::new(
             state,
             exchange as Arc<dyn ExchangePort>,
@@ -1345,13 +1384,17 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let state = ServerState {
-            service: Arc::new(GridPlatformService::new(
-                manager,
-                persistence.clone(),
-                events,
-            )),
-        };
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            persistence.clone(),
+            events.clone(),
+        ));
+        let state = build_server_state(
+            write_service,
+            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridProjector::new()),
+            events,
+        );
 
         let runtime = ServerRuntime::new(
             state,
@@ -1407,13 +1450,17 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let state = ServerState {
-            service: Arc::new(GridPlatformService::new(
-                manager,
-                persistence.clone(),
-                events,
-            )),
-        };
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            persistence.clone(),
+            events.clone(),
+        ));
+        let state = build_server_state(
+            write_service,
+            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridProjector::new()),
+            events,
+        );
 
         RuntimeFixture {
             runtime: ServerRuntime::new(
@@ -1454,13 +1501,17 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        ServerState {
-            service: Arc::new(GridPlatformService::new(manager, persistence, events)),
-        }
+        let write_service = Arc::new(GridWriteService::new(manager, persistence, events.clone()));
+        build_server_state(
+            write_service,
+            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridProjector::new()),
+            events,
+        )
     }
 
     async fn current_instance(state: &ServerState) -> GridRuntime {
-        let manager_handle = state.service.manager();
+        let manager_handle = state.write_service.manager();
         let manager = manager_handle.read().await;
         manager.get_grid("BTCUSDT").unwrap().clone()
     }

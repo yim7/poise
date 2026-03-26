@@ -7,8 +7,8 @@ pub use grid_protocol::{CommandRequest, CommandResponse, GridSnapshot, GridSumma
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
-use crate::application::GridMutationError;
 use crate::assembly::ServerState;
+use crate::write_service::GridMutationError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupportedCommand {
@@ -32,7 +32,15 @@ pub fn router(state: ServerState) -> Router {
 }
 
 async fn list_grids(State(state): State<ServerState>) -> Json<Vec<GridSummary>> {
-    Json(state.service.list_grid_summaries().await)
+    Json(
+        state
+            .write_service
+            .list_grid_snapshots()
+            .await
+            .into_iter()
+            .map(protocol_grid_summary)
+            .collect(),
+    )
 }
 
 async fn get_snapshot(
@@ -40,11 +48,11 @@ async fn get_snapshot(
     State(state): State<ServerState>,
 ) -> Result<Json<GridSnapshot>, (StatusCode, Json<ErrorResponse>)> {
     let snapshot = state
-        .service
+        .write_service
         .grid_snapshot(&id)
         .await
         .ok_or_else(|| not_found(format!("grid `{id}` not found")))?;
-    Ok(Json(snapshot))
+    Ok(Json(protocol_grid_snapshot(snapshot)))
 }
 
 async fn submit_command(
@@ -68,7 +76,7 @@ async fn submit_command(
         )
     })?;
 
-    if !state.service.has_grid(&id).await {
+    if !state.write_service.has_grid(&id).await {
         return Err(not_found(format!("grid `{id}` not found")));
     }
 
@@ -77,7 +85,7 @@ async fn submit_command(
         SupportedCommand::Resume => GridCommand::Resume,
     };
 
-    match state.service.command(&id, command).await {
+    match state.write_service.command(&id, command).await {
         Ok(_) => {}
         Err(error) => return Err(map_command_error(error)),
     }
@@ -118,6 +126,97 @@ fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) 
     }
 }
 
+fn protocol_grid_summary(snapshot: grid_engine::snapshot::GridRuntimeSnapshot) -> GridSummary {
+    GridSummary {
+        id: snapshot.grid_id.as_str().to_string(),
+        symbol: snapshot.instrument.symbol,
+        status: protocol_grid_status(snapshot.status),
+        reference_price: snapshot.observed.reference_price,
+    }
+}
+
+fn protocol_grid_snapshot(snapshot: grid_engine::snapshot::GridRuntimeSnapshot) -> GridSnapshot {
+    GridSnapshot {
+        id: snapshot.grid_id.as_str().to_string(),
+        symbol: snapshot.instrument.symbol.clone(),
+        status: protocol_grid_status(snapshot.status),
+        current_exposure: snapshot.current_exposure.0,
+        target_exposure: snapshot.target_exposure.map(|value| value.0),
+        reference_price: snapshot.observed.reference_price,
+        pending_order: snapshot
+            .pending_order
+            .as_ref()
+            .map(|pending| protocol_pending_order(&snapshot.instrument.symbol, pending)),
+        config: grid_protocol::GridConfig {
+            lower_price: snapshot.config.lower_price,
+            upper_price: snapshot.config.upper_price,
+            long_exposure_units: snapshot.config.long_exposure_units,
+            short_exposure_units: snapshot.config.short_exposure_units,
+            notional_per_unit: snapshot.config.notional_per_unit,
+            shape_family: match snapshot.config.shape_family {
+                grid_core::strategy::ShapeFamily::Linear => grid_protocol::ShapeFamily::Linear,
+                grid_core::strategy::ShapeFamily::Convex => grid_protocol::ShapeFamily::Convex,
+                grid_core::strategy::ShapeFamily::Concave => grid_protocol::ShapeFamily::Concave,
+            },
+            out_of_band_policy: match snapshot.config.out_of_band_policy {
+                grid_core::strategy::OutOfBandPolicy::Freeze => {
+                    grid_protocol::OutOfBandPolicy::Freeze
+                }
+                grid_core::strategy::OutOfBandPolicy::ReduceOnly => {
+                    grid_protocol::OutOfBandPolicy::ReduceOnly
+                }
+                grid_core::strategy::OutOfBandPolicy::Terminate => {
+                    grid_protocol::OutOfBandPolicy::Terminate
+                }
+                grid_core::strategy::OutOfBandPolicy::Hold => grid_protocol::OutOfBandPolicy::Hold,
+            },
+        },
+    }
+}
+
+fn protocol_grid_status(status: grid_engine::runtime::GridStatus) -> grid_protocol::GridStatus {
+    match status {
+        grid_engine::runtime::GridStatus::WaitingMarketData => {
+            grid_protocol::GridStatus::WaitingMarketData
+        }
+        grid_engine::runtime::GridStatus::Active => grid_protocol::GridStatus::Active,
+        grid_engine::runtime::GridStatus::Frozen => grid_protocol::GridStatus::Frozen,
+        grid_engine::runtime::GridStatus::ReducingOnly => grid_protocol::GridStatus::ReducingOnly,
+        grid_engine::runtime::GridStatus::Holding => grid_protocol::GridStatus::Holding,
+        grid_engine::runtime::GridStatus::Terminated => grid_protocol::GridStatus::Terminated,
+        grid_engine::runtime::GridStatus::Paused => grid_protocol::GridStatus::Paused,
+    }
+}
+
+fn protocol_pending_order(
+    symbol: &str,
+    pending: &grid_engine::runtime::PendingOrder,
+) -> grid_protocol::PendingOrder {
+    grid_protocol::PendingOrder {
+        symbol: symbol.to_string(),
+        order_id: pending.order_id.clone(),
+        client_order_id: pending.client_order_id.clone(),
+        side: match pending.side {
+            grid_core::types::Side::Buy => grid_protocol::Side::Buy,
+            grid_core::types::Side::Sell => grid_protocol::Side::Sell,
+        },
+        price: pending.price,
+        quantity: pending.quantity,
+        status: match pending.status {
+            grid_engine::ports::OrderStatus::Submitting => grid_protocol::OrderStatus::Submitting,
+            grid_engine::ports::OrderStatus::New => grid_protocol::OrderStatus::New,
+            grid_engine::ports::OrderStatus::PartiallyFilled => {
+                grid_protocol::OrderStatus::PartiallyFilled
+            }
+            grid_engine::ports::OrderStatus::Filled => grid_protocol::OrderStatus::Filled,
+            grid_engine::ports::OrderStatus::Canceling => grid_protocol::OrderStatus::Canceling,
+            grid_engine::ports::OrderStatus::Canceled => grid_protocol::OrderStatus::Canceled,
+            grid_engine::ports::OrderStatus::Rejected => grid_protocol::OrderStatus::Rejected,
+            grid_engine::ports::OrderStatus::Expired => grid_protocol::OrderStatus::Expired,
+        },
+    }
+}
+
 impl TryFrom<&str> for SupportedCommand {
     type Error = String;
 
@@ -151,9 +250,11 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    use crate::application::GridPlatformService;
-    use crate::assembly::ServerState;
-    use crate::websocket::WsEvent;
+    use crate::assembly::{NoopReadRepository, ServerState, build_server_state};
+    use crate::notifications::GridInternalNotification;
+    use crate::projector::GridProjector;
+    use crate::query_service::GridQueryService;
+    use crate::write_service::GridWriteService;
 
     use super::{CommandResponse, GridSnapshot, GridSummary, router};
 
@@ -289,11 +390,19 @@ mod tests {
                 },
             })
             .unwrap();
-        let (events, _) = tokio::sync::broadcast::channel::<WsEvent>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            repository,
+            notifications.clone(),
+        ));
 
-        ServerState {
-            service: Arc::new(GridPlatformService::new(manager, repository, events)),
-        }
+        build_server_state(
+            write_service,
+            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridProjector::new()),
+            notifications,
+        )
     }
 
     #[tokio::test]
