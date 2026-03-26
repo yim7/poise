@@ -12,7 +12,8 @@ use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
 use grid_engine::grid::{GridId, Instrument, Venue};
 use grid_engine::ports::{
-    CommittedGridWrite, EffectStatus, PersistedGridEffect, StateRepositoryPort,
+    CommittedGridWrite, EffectStatus, GridReadRepositoryPort, PersistedGridEffect,
+    StateRepositoryPort, StoredDomainEvent,
 };
 use grid_engine::runtime::{GridStatus, RiskState};
 use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
@@ -308,77 +309,99 @@ impl SqliteStorage {
                  FROM grid_snapshots
                  WHERE grid_id = ?1",
                 params![id],
-                |row| {
-                    let venue: String = row.get(1)?;
-                    let config_json: String = row.get(3)?;
-                    let status_json: String = row.get(4)?;
-                    let pending_order_json: Option<String> = row.get(7)?;
-                    let realized_pnl_day: Option<String> = row.get(8)?;
-                    let out_of_band_since: Option<String> = row.get(12)?;
-                    let config = Self::deserialize_grid_config(&config_json)?;
-                    let status = Self::deserialize_grid_status(&status_json)?;
-                    let venue = Self::deserialize_venue(&venue)?;
-                    let pending_order = pending_order_json
-                        .map(|json| {
-                            serde_json::from_str(&json).map_err(|err| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    7,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(err),
-                                )
-                            })
-                        })
-                        .transpose()?;
-                    let realized_pnl_day = realized_pnl_day
-                        .map(|value| {
-                            NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    8,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(err),
-                                )
-                            })
-                        })
-                        .transpose()?;
-                    let target_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
-                    let out_of_band_since = out_of_band_since
-                        .map(|value| {
-                            DateTime::parse_from_rfc3339(&value)
-                                .map(|parsed| parsed.with_timezone(&Utc))
-                                .map_err(|err| {
-                                    rusqlite::Error::FromSqlConversionFailure(
-                                        12,
-                                        rusqlite::types::Type::Text,
-                                        Box::new(err),
-                                    )
-                                })
-                        })
-                        .transpose()?;
-
-                    Ok(GridRuntimeSnapshot {
-                        grid_id: GridId::new(row.get::<_, String>(0)?),
-                        instrument: Instrument::new(venue, row.get::<_, String>(2)?),
-                        config,
-                        status,
-                        current_exposure: Exposure(row.get(5)?),
-                        target_exposure,
-                        pending_order,
-                        risk: RiskState {
-                            realized_pnl_day,
-                            realized_pnl_today: row.get(9)?,
-                            unrealized_pnl: row.get(10)?,
-                        },
-                        observed: ObservedState {
-                            reference_price: row.get(11)?,
-                            out_of_band_since,
-                        },
-                    })
-                },
+                Self::grid_snapshot_from_row,
             )
             .optional()
             .context("failed to load grid snapshot")?;
 
         Ok(snapshot)
+    }
+
+    fn grid_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridRuntimeSnapshot> {
+        let venue: String = row.get(1)?;
+        let config_json: String = row.get(3)?;
+        let status_json: String = row.get(4)?;
+        let pending_order_json: Option<String> = row.get(7)?;
+        let realized_pnl_day: Option<String> = row.get(8)?;
+        let out_of_band_since: Option<String> = row.get(12)?;
+        let config = Self::deserialize_grid_config(&config_json)?;
+        let status = Self::deserialize_grid_status(&status_json)?;
+        let venue = Self::deserialize_venue(&venue)?;
+        let pending_order = pending_order_json
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })
+            })
+            .transpose()?;
+        let realized_pnl_day = realized_pnl_day
+            .map(|value| {
+                NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })
+            })
+            .transpose()?;
+        let target_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
+        let out_of_band_since = out_of_band_since
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|parsed| parsed.with_timezone(&Utc))
+                    .map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            12,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })
+            })
+            .transpose()?;
+
+        Ok(GridRuntimeSnapshot {
+            grid_id: GridId::new(row.get::<_, String>(0)?),
+            instrument: Instrument::new(venue, row.get::<_, String>(2)?),
+            config,
+            status,
+            current_exposure: Exposure(row.get(5)?),
+            target_exposure,
+            pending_order,
+            risk: RiskState {
+                realized_pnl_day,
+                realized_pnl_today: row.get(9)?,
+                unrealized_pnl: row.get(10)?,
+            },
+            observed: ObservedState {
+                reference_price: row.get(11)?,
+                out_of_band_since,
+            },
+        })
+    }
+
+    fn list_grid_snapshots_blocking(conn: Arc<Mutex<Connection>>) -> Result<Vec<GridRuntimeSnapshot>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                        pending_order_json, realized_pnl_day, realized_pnl_today,
+                        unrealized_pnl, reference_price, out_of_band_since
+                 FROM grid_snapshots
+                 ORDER BY grid_id ASC",
+            )
+            .context("failed to prepare grid snapshot list query")?;
+
+        let snapshots = stmt
+            .query_map([], Self::grid_snapshot_from_row)
+            .context("failed to query grid snapshots")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize grid snapshots")?;
+        Ok(snapshots)
     }
 
     fn list_events_blocking(conn: Arc<Mutex<Connection>>, id: String) -> Result<Vec<DomainEvent>> {
@@ -403,6 +426,73 @@ impl SqliteStorage {
             .context("failed to deserialize domain events")?;
 
         Ok(events)
+    }
+
+    fn list_recent_grid_events_blocking(
+        conn: Arc<Mutex<Connection>>,
+        grid_id: GridId,
+        limit: usize,
+    ) -> Result<Vec<StoredDomainEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).context("event limit overflow")?;
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, grid_id, event_json, created_at
+                 FROM domain_events
+                 WHERE grid_id = ?1
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare recent domain event query")?;
+
+        let mut events = stmt
+            .query_map(params![grid_id.as_str(), limit], |row| {
+                let event_json: String = row.get(2)?;
+                let created_at: String = row.get(3)?;
+                Ok(StoredDomainEvent {
+                    id: row.get(0)?,
+                    grid_id: GridId::new(row.get::<_, String>(1)?),
+                    event: Self::deserialize_domain_event(&event_json)?,
+                    created_at: Self::deserialize_timestamp(&created_at, 3)?,
+                })
+            })
+            .context("failed to query recent domain events")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize recent domain events")?;
+        events.reverse();
+        Ok(events)
+    }
+
+    fn list_recent_grid_effects_blocking(
+        conn: Arc<Mutex<Connection>>,
+        grid_id: GridId,
+        limit: usize,
+    ) -> Result<Vec<PersistedGridEffect>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).context("effect limit overflow")?;
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM grid_effects
+                 WHERE grid_id = ?1
+                 ORDER BY created_at DESC, batch_id DESC, sequence DESC, effect_id DESC
+                 LIMIT ?2",
+            )
+            .context("failed to prepare recent grid effect query")?;
+
+        let mut effects = stmt
+            .query_map(params![grid_id.as_str(), limit], Self::persisted_effect_from_row)
+            .context("failed to query recent grid effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize recent grid effects")?;
+        effects.reverse();
+        Ok(effects)
     }
 
     fn list_pending_effects_blocking(
@@ -562,6 +652,56 @@ impl StateRepositoryPort for SqliteStorage {
     }
 }
 
+#[async_trait]
+impl GridReadRepositoryPort for SqliteStorage {
+    async fn list_grid_snapshots(&self) -> Result<Vec<GridRuntimeSnapshot>> {
+        let conn = Arc::clone(&self.conn);
+
+        tokio::task::spawn_blocking(move || Self::list_grid_snapshots_blocking(conn))
+            .await
+            .context("failed to join list_grid_snapshots blocking task")?
+    }
+
+    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<GridRuntimeSnapshot>> {
+        let conn = Arc::clone(&self.conn);
+        let grid_id = grid_id.as_str().to_owned();
+
+        tokio::task::spawn_blocking(move || Self::load_grid_state_blocking(conn, grid_id))
+            .await
+            .context("failed to join load_grid_snapshot blocking task")?
+    }
+
+    async fn list_recent_grid_events(
+        &self,
+        grid_id: &GridId,
+        limit: usize,
+    ) -> Result<Vec<StoredDomainEvent>> {
+        let conn = Arc::clone(&self.conn);
+        let grid_id = grid_id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_recent_grid_events_blocking(conn, grid_id, limit)
+        })
+        .await
+        .context("failed to join list_recent_grid_events blocking task")?
+    }
+
+    async fn list_recent_grid_effects(
+        &self,
+        grid_id: &GridId,
+        limit: usize,
+    ) -> Result<Vec<PersistedGridEffect>> {
+        let conn = Arc::clone(&self.conn);
+        let grid_id = grid_id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_recent_grid_effects_blocking(conn, grid_id, limit)
+        })
+        .await
+        .context("failed to join list_recent_grid_effects blocking task")?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,7 +718,9 @@ mod tests {
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
     use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::ports::{EffectStatus, OrderRequest, OrderStatus, StateRepositoryPort};
+    use grid_engine::ports::{
+        EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
+    };
     use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
@@ -640,6 +782,55 @@ mod tests {
             quantity: 0.25,
             client_order_id: "client-2".into(),
         }
+    }
+
+    fn test_snapshot_for(grid_id: &str, symbol: &str) -> GridRuntimeSnapshot {
+        let mut snapshot = test_snapshot();
+        snapshot.grid_id = GridId::new(grid_id);
+        snapshot.instrument = Instrument::new(Venue::Binance, symbol);
+        snapshot
+    }
+
+    async fn persist_two_events_for(grid_id: &str, storage: &SqliteStorage) {
+        let snapshot = test_snapshot_for(grid_id, "BTCUSDT");
+        let first_event = DomainEvent::BandBreached {
+            boundary: BandBoundary::Above,
+            price: 120.0,
+        };
+        let second_event = DomainEvent::BandReentered { price: 100.0 };
+
+        storage
+            .save_transition(grid_id, &snapshot, &[first_event], &[])
+            .await
+            .unwrap();
+        storage
+            .save_transition(grid_id, &snapshot, &[second_event], &[])
+            .await
+            .unwrap();
+    }
+
+    async fn persist_effect_batches_for_two_grids(storage: &SqliteStorage) {
+        let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+        let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
+        let submit_effect = GridEffect::SubmitOrder {
+            request: test_order_request(),
+            target_exposure: Exposure(6.0),
+        };
+
+        storage
+            .save_transition("btc-core", &btc_snapshot, &[], &[submit_effect.clone()])
+            .await
+            .unwrap();
+        storage
+            .save_transition("btc-core", &btc_snapshot, &[], &[GridEffect::CancelAll {
+                instrument: btc_snapshot.instrument.clone(),
+            }])
+            .await
+            .unwrap();
+        storage
+            .save_transition("eth-core", &eth_snapshot, &[], &[submit_effect])
+            .await
+            .unwrap();
     }
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -852,6 +1043,34 @@ mod tests {
 
         let pending = storage.list_pending_effects().await.unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_recent_grid_events_returns_timestamped_records_in_order() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        persist_two_events_for("btc-core", &storage).await;
+
+        let events = storage
+            .list_recent_grid_events(&GridId::new("btc-core"), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(events[0].created_at <= events[1].created_at);
+    }
+
+    #[tokio::test]
+    async fn list_recent_grid_effects_filters_by_grid_id_and_limit() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        persist_effect_batches_for_two_grids(&storage).await;
+
+        let effects = storage
+            .list_recent_grid_effects(&GridId::new("btc-core"), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].grid_id.as_str(), "btc-core");
     }
 
     #[tokio::test]
