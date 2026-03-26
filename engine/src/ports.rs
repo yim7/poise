@@ -172,6 +172,8 @@ pub trait GridReadRepositoryPort: Send + Sync {
         grid_id: &GridId,
         limit: usize,
     ) -> Result<Vec<StoredDomainEvent>>;
+    /// Returns effects selected from the most recent `updated_at` window,
+    /// ordered by `updated_at` ascending.
     async fn list_recent_grid_effects(
         &self,
         grid_id: &GridId,

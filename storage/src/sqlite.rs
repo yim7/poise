@@ -384,7 +384,9 @@ impl SqliteStorage {
         })
     }
 
-    fn list_grid_snapshots_blocking(conn: Arc<Mutex<Connection>>) -> Result<Vec<GridRuntimeSnapshot>> {
+    fn list_grid_snapshots_blocking(
+        conn: Arc<Mutex<Connection>>,
+    ) -> Result<Vec<GridRuntimeSnapshot>> {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
@@ -481,13 +483,16 @@ impl SqliteStorage {
                 "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
                  FROM grid_effects
                  WHERE grid_id = ?1
-                 ORDER BY created_at DESC, batch_id DESC, sequence DESC, effect_id DESC
+                 ORDER BY updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC
                  LIMIT ?2",
             )
             .context("failed to prepare recent grid effect query")?;
 
         let mut effects = stmt
-            .query_map(params![grid_id.as_str(), limit], Self::persisted_effect_from_row)
+            .query_map(
+                params![grid_id.as_str(), limit],
+                Self::persisted_effect_from_row,
+            )
             .context("failed to query recent grid effects")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to deserialize recent grid effects")?;
@@ -817,7 +822,9 @@ mod tests {
         ]
     }
 
-    async fn persist_effect_batches_for_two_grids(storage: &SqliteStorage) -> [PersistedGridEffect; 2] {
+    async fn persist_effect_batches_for_two_grids(
+        storage: &SqliteStorage,
+    ) -> [PersistedGridEffect; 2] {
         let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
         let submit_effect = GridEffect::SubmitOrder {
@@ -834,9 +841,14 @@ mod tests {
             .next()
             .unwrap();
         let second_btc = storage
-            .save_transition("btc-core", &btc_snapshot, &[], &[GridEffect::CancelAll {
-                instrument: btc_snapshot.instrument.clone(),
-            }])
+            .save_transition(
+                "btc-core",
+                &btc_snapshot,
+                &[],
+                &[GridEffect::CancelAll {
+                    instrument: btc_snapshot.instrument.clone(),
+                }],
+            )
             .await
             .unwrap()
             .effects
@@ -849,6 +861,74 @@ mod tests {
             .unwrap();
 
         [first_btc, second_btc]
+    }
+
+    async fn persist_three_effect_batches_for_grid(
+        storage: &SqliteStorage,
+        grid_id: &str,
+        symbol: &str,
+    ) -> [PersistedGridEffect; 3] {
+        let snapshot = test_snapshot_for(grid_id, symbol);
+
+        let first = storage
+            .save_transition(
+                grid_id,
+                &snapshot,
+                &[],
+                &[GridEffect::CancelAll {
+                    instrument: snapshot.instrument.clone(),
+                }],
+            )
+            .await
+            .unwrap()
+            .effects
+            .into_iter()
+            .next()
+            .unwrap();
+        let second = storage
+            .save_transition(
+                grid_id,
+                &snapshot,
+                &[],
+                &[GridEffect::SubmitOrder {
+                    request: test_order_request(),
+                    target_exposure: Exposure(6.0),
+                }],
+            )
+            .await
+            .unwrap()
+            .effects
+            .into_iter()
+            .next()
+            .unwrap();
+        let third = storage
+            .save_transition(
+                grid_id,
+                &snapshot,
+                &[],
+                &[GridEffect::CancelAll {
+                    instrument: snapshot.instrument.clone(),
+                }],
+            )
+            .await
+            .unwrap()
+            .effects
+            .into_iter()
+            .next()
+            .unwrap();
+
+        [first, second, third]
+    }
+
+    fn overwrite_effect_updated_at(storage: &SqliteStorage, effect_id: &str, updated_at: &str) {
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE grid_effects
+             SET updated_at = ?1
+             WHERE effect_id = ?2",
+            params![updated_at, effect_id],
+        )
+        .unwrap();
     }
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -1085,7 +1165,8 @@ mod tests {
     #[tokio::test]
     async fn list_recent_grid_effects_filters_by_grid_id_and_limit() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let [oldest_btc_effect, newest_btc_effect] = persist_effect_batches_for_two_grids(&storage).await;
+        let [oldest_btc_effect, newest_btc_effect] =
+            persist_effect_batches_for_two_grids(&storage).await;
 
         let effects = storage
             .list_recent_grid_effects(&GridId::new("btc-core"), 1)
@@ -1099,6 +1180,68 @@ mod tests {
         assert_eq!(effects[0].sequence, newest_btc_effect.sequence);
         assert_eq!(effects[0].effect, newest_btc_effect.effect);
         assert_ne!(effects[0].effect_id, oldest_btc_effect.effect_id);
+    }
+
+    #[tokio::test]
+    async fn list_recent_grid_effects_orders_results_by_updated_at() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let [first, second, third] =
+            persist_three_effect_batches_for_grid(&storage, "btc-core", "BTCUSDT").await;
+
+        overwrite_effect_updated_at(&storage, &first.effect_id, "2026-03-24T10:00:03+00:00");
+        overwrite_effect_updated_at(&storage, &second.effect_id, "2026-03-24T10:00:01+00:00");
+        overwrite_effect_updated_at(&storage, &third.effect_id, "2026-03-24T10:00:02+00:00");
+
+        let effects = storage
+            .list_recent_grid_effects(&GridId::new("btc-core"), 3)
+            .await
+            .unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert_eq!(
+            effects
+                .iter()
+                .map(|effect| effect.effect_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                second.effect_id.as_str(),
+                third.effect_id.as_str(),
+                first.effect_id.as_str(),
+            ]
+        );
+        assert!(effects[0].updated_at < effects[1].updated_at);
+        assert!(effects[1].updated_at < effects[2].updated_at);
+    }
+
+    #[tokio::test]
+    async fn list_recent_grid_effects_includes_status_updated_effect_in_recent_window() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let [first, second, third] =
+            persist_three_effect_batches_for_grid(&storage, "btc-core", "BTCUSDT").await;
+
+        overwrite_effect_updated_at(&storage, &first.effect_id, "2026-03-24T10:00:00+00:00");
+        overwrite_effect_updated_at(&storage, &second.effect_id, "2026-03-24T10:00:01+00:00");
+        overwrite_effect_updated_at(&storage, &third.effect_id, "2026-03-24T10:00:02+00:00");
+
+        storage
+            .mark_effect_failed(&first.effect_id, "submit order rejected")
+            .await
+            .unwrap();
+
+        let effects = storage
+            .list_recent_grid_effects(&GridId::new("btc-core"), 2)
+            .await
+            .unwrap();
+
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0].effect_id, third.effect_id);
+        assert_eq!(effects[1].effect_id, first.effect_id);
+        assert_eq!(effects[1].status, EffectStatus::Failed);
+        assert_eq!(effects[1].attempt_count, 1);
+        assert_eq!(
+            effects[1].last_error.as_deref(),
+            Some("submit order rejected")
+        );
     }
 
     #[tokio::test]

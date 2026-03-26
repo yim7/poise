@@ -44,9 +44,9 @@ mod tests {
 
     #[test]
     fn deserializes_grid_stream_list_item_changed() {
-        let event: GridStreamEvent = serde_json::from_str(
-            include_str!("../tests/fixtures/ws_grid_list_item_changed.json"),
-        )
+        let event: GridStreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_grid_list_item_changed.json"
+        ))
         .unwrap();
 
         assert_eq!(event.grid_id, "btc-core");
@@ -61,9 +61,9 @@ mod tests {
 
     #[test]
     fn deserializes_grid_stream_detail_changed() {
-        let event: GridStreamEvent = serde_json::from_str(
-            include_str!("../tests/fixtures/ws_grid_detail_changed.json"),
-        )
+        let event: GridStreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_grid_detail_changed.json"
+        ))
         .unwrap();
 
         assert_eq!(event.grid_id, "btc-core");
