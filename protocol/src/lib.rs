@@ -125,7 +125,18 @@ pub struct GridPositionView {
 pub struct GridExecutionView {
     pub state: ExecutionStateView,
     #[serde(default)]
-    pub pending_order: Option<PendingOrder>,
+    pub pending_order: Option<OrderExecutionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderExecutionView {
+    pub symbol: String,
+    pub order_id: Option<String>,
+    pub client_order_id: String,
+    pub side: Side,
+    pub price: f64,
+    pub quantity: f64,
+    pub status: OrderStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
