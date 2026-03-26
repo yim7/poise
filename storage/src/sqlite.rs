@@ -791,7 +791,7 @@ mod tests {
         snapshot
     }
 
-    async fn persist_two_events_for(grid_id: &str, storage: &SqliteStorage) {
+    async fn persist_two_events_for(grid_id: &str, storage: &SqliteStorage) -> [DomainEvent; 2] {
         let snapshot = test_snapshot_for(grid_id, "BTCUSDT");
         let first_event = DomainEvent::BandBreached {
             boundary: BandBoundary::Above,
@@ -807,9 +807,17 @@ mod tests {
             .save_transition(grid_id, &snapshot, &[second_event], &[])
             .await
             .unwrap();
+
+        [
+            DomainEvent::BandBreached {
+                boundary: BandBoundary::Above,
+                price: 120.0,
+            },
+            DomainEvent::BandReentered { price: 100.0 },
+        ]
     }
 
-    async fn persist_effect_batches_for_two_grids(storage: &SqliteStorage) {
+    async fn persist_effect_batches_for_two_grids(storage: &SqliteStorage) -> [PersistedGridEffect; 2] {
         let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
         let submit_effect = GridEffect::SubmitOrder {
@@ -817,20 +825,30 @@ mod tests {
             target_exposure: Exposure(6.0),
         };
 
-        storage
+        let first_btc = storage
             .save_transition("btc-core", &btc_snapshot, &[], &[submit_effect.clone()])
             .await
+            .unwrap()
+            .effects
+            .into_iter()
+            .next()
             .unwrap();
-        storage
+        let second_btc = storage
             .save_transition("btc-core", &btc_snapshot, &[], &[GridEffect::CancelAll {
                 instrument: btc_snapshot.instrument.clone(),
             }])
             .await
+            .unwrap()
+            .effects
+            .into_iter()
+            .next()
             .unwrap();
         storage
             .save_transition("eth-core", &eth_snapshot, &[], &[submit_effect])
             .await
             .unwrap();
+
+        [first_btc, second_btc]
     }
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -1048,7 +1066,7 @@ mod tests {
     #[tokio::test]
     async fn list_recent_grid_events_returns_timestamped_records_in_order() {
         let storage = SqliteStorage::in_memory().unwrap();
-        persist_two_events_for("btc-core", &storage).await;
+        let expected_events = persist_two_events_for("btc-core", &storage).await;
 
         let events = storage
             .list_recent_grid_events(&GridId::new("btc-core"), 10)
@@ -1056,13 +1074,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(events.len(), 2);
+        assert_eq!(events[0].grid_id.as_str(), "btc-core");
+        assert_eq!(events[1].grid_id.as_str(), "btc-core");
+        assert_eq!(events[0].event, expected_events[0]);
+        assert_eq!(events[1].event, expected_events[1]);
+        assert!(events[0].id < events[1].id);
         assert!(events[0].created_at <= events[1].created_at);
     }
 
     #[tokio::test]
     async fn list_recent_grid_effects_filters_by_grid_id_and_limit() {
         let storage = SqliteStorage::in_memory().unwrap();
-        persist_effect_batches_for_two_grids(&storage).await;
+        let [oldest_btc_effect, newest_btc_effect] = persist_effect_batches_for_two_grids(&storage).await;
 
         let effects = storage
             .list_recent_grid_effects(&GridId::new("btc-core"), 1)
@@ -1071,6 +1094,11 @@ mod tests {
 
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].grid_id.as_str(), "btc-core");
+        assert_eq!(effects[0].effect_id, newest_btc_effect.effect_id);
+        assert_eq!(effects[0].batch_id, newest_btc_effect.batch_id);
+        assert_eq!(effects[0].sequence, newest_btc_effect.sequence);
+        assert_eq!(effects[0].effect, newest_btc_effect.effect);
+        assert_ne!(effects[0].effect_id, oldest_btc_effect.effect_id);
     }
 
     #[tokio::test]
