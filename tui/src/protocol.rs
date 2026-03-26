@@ -1,8 +1,12 @@
 pub use grid_protocol::{
-    ActivityLevelView, BandBoundary, CommandRequest, CommandResponse, DomainEvent,
-    ExecutionStateView, GridCommandRequest, GridCommandType, GridConfig, GridDetailView,
-    GridListResponse, GridSnapshot, GridStatus, GridStreamEvent, GridStreamPayload, GridSummary,
-    OrderStatus, OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
+    CommandRequest, CommandResponse, GridSnapshot, GridStatus, GridSummary, WsEvent,
+};
+
+#[cfg(test)]
+pub use grid_protocol::{
+    ActivityLevelView, BandBoundary, DomainEvent, ExecutionStateView, GridCommandRequest,
+    GridCommandType, GridConfig, GridDetailView, GridListResponse, GridStreamEvent,
+    GridStreamPayload, OrderStatus, OutOfBandPolicy, PendingOrder, ShapeFamily, Side,
 };
 
 #[cfg(test)]
