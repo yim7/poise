@@ -13,7 +13,7 @@ use grid_core::types::Exposure;
 use grid_engine::grid::{GridId, Instrument, Venue};
 use grid_engine::ports::{
     CommittedGridWrite, EffectStatus, GridReadRepositoryPort, PersistedGridEffect,
-    StateRepositoryPort, StoredDomainEvent,
+    StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot,
 };
 use grid_engine::runtime::{GridStatus, RiskState};
 use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
@@ -317,6 +317,27 @@ impl SqliteStorage {
         Ok(snapshot)
     }
 
+    fn load_grid_snapshot_blocking(
+        conn: Arc<Mutex<Connection>>,
+        id: String,
+    ) -> Result<Option<StoredGridSnapshot>> {
+        let conn = Self::lock_connection(&conn)?;
+        let snapshot = conn
+            .query_row(
+                "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                        pending_order_json, realized_pnl_day, realized_pnl_today,
+                        unrealized_pnl, reference_price, out_of_band_since, updated_at
+                 FROM grid_snapshots
+                 WHERE grid_id = ?1",
+                params![id],
+                Self::stored_grid_snapshot_from_row,
+            )
+            .optional()
+            .context("failed to load grid snapshot record")?;
+
+        Ok(snapshot)
+    }
+
     fn grid_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridRuntimeSnapshot> {
         let venue: String = row.get(1)?;
         let config_json: String = row.get(3)?;
@@ -384,22 +405,33 @@ impl SqliteStorage {
         })
     }
 
+    fn stored_grid_snapshot_from_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<StoredGridSnapshot> {
+        let updated_at: String = row.get(13)?;
+
+        Ok(StoredGridSnapshot {
+            snapshot: Self::grid_snapshot_from_row(row)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 13)?,
+        })
+    }
+
     fn list_grid_snapshots_blocking(
         conn: Arc<Mutex<Connection>>,
-    ) -> Result<Vec<GridRuntimeSnapshot>> {
+    ) -> Result<Vec<StoredGridSnapshot>> {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
                 "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
                         pending_order_json, realized_pnl_day, realized_pnl_today,
-                        unrealized_pnl, reference_price, out_of_band_since
+                        unrealized_pnl, reference_price, out_of_band_since, updated_at
                  FROM grid_snapshots
                  ORDER BY grid_id ASC",
             )
             .context("failed to prepare grid snapshot list query")?;
 
         let snapshots = stmt
-            .query_map([], Self::grid_snapshot_from_row)
+            .query_map([], Self::stored_grid_snapshot_from_row)
             .context("failed to query grid snapshots")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to deserialize grid snapshots")?;
@@ -659,7 +691,7 @@ impl StateRepositoryPort for SqliteStorage {
 
 #[async_trait]
 impl GridReadRepositoryPort for SqliteStorage {
-    async fn list_grid_snapshots(&self) -> Result<Vec<GridRuntimeSnapshot>> {
+    async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
         let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || Self::list_grid_snapshots_blocking(conn))
@@ -667,11 +699,11 @@ impl GridReadRepositoryPort for SqliteStorage {
             .context("failed to join list_grid_snapshots blocking task")?
     }
 
-    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<GridRuntimeSnapshot>> {
+    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
         let conn = Arc::clone(&self.conn);
         let grid_id = grid_id.as_str().to_owned();
 
-        tokio::task::spawn_blocking(move || Self::load_grid_state_blocking(conn, grid_id))
+        tokio::task::spawn_blocking(move || Self::load_grid_snapshot_blocking(conn, grid_id))
             .await
             .context("failed to join load_grid_snapshot blocking task")?
     }
@@ -927,6 +959,17 @@ mod tests {
              SET updated_at = ?1
              WHERE effect_id = ?2",
             params![updated_at, effect_id],
+        )
+        .unwrap();
+    }
+
+    fn overwrite_snapshot_updated_at(storage: &SqliteStorage, grid_id: &str, updated_at: &str) {
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE grid_snapshots
+             SET updated_at = ?1
+             WHERE grid_id = ?2",
+            params![updated_at, grid_id],
         )
         .unwrap();
     }
@@ -1241,6 +1284,29 @@ mod tests {
         assert_eq!(
             effects[1].last_error.as_deref(),
             Some("submit order rejected")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_grid_snapshots_returns_persisted_updated_at() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+
+        storage
+            .save_transition("btc-core", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        overwrite_snapshot_updated_at(&storage, "btc-core", "2026-03-26T10:01:30+00:00");
+
+        let snapshots = storage.list_grid_snapshots().await.unwrap();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].snapshot.grid_id.as_str(), "btc-core");
+        assert_eq!(
+            snapshots[0].updated_at,
+            DateTime::parse_from_rfc3339("2026-03-26T10:01:30+00:00")
+                .unwrap()
+                .with_timezone(&Utc)
         );
     }
 

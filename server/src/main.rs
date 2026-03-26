@@ -3,6 +3,10 @@ mod assembly;
 mod config;
 mod effect_worker;
 mod http;
+#[allow(dead_code)]
+mod projector;
+#[allow(dead_code)]
+mod query_service;
 mod runtime;
 mod websocket;
 

@@ -163,10 +163,16 @@ pub struct StoredDomainEvent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredGridSnapshot {
+    pub snapshot: GridRuntimeSnapshot,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[async_trait]
 pub trait GridReadRepositoryPort: Send + Sync {
-    async fn list_grid_snapshots(&self) -> Result<Vec<GridRuntimeSnapshot>>;
-    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<GridRuntimeSnapshot>>;
+    async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>>;
+    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>>;
     async fn list_recent_grid_events(
         &self,
         grid_id: &GridId,

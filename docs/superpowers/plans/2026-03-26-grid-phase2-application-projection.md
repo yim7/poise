@@ -308,7 +308,7 @@ git commit -m "refactor: add grid read repository queries"
 - Test: `server/src/query_service.rs`
 - Test: `server/src/projector.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住列表项、详情和活动流投影**
+- [x] **Step 1: 先写失败测试，锁住列表项、详情和活动流投影**
 
 在 `server/src/projector.rs` 新增测试，至少覆盖：
 
@@ -355,7 +355,7 @@ async fn load_detail_source_reads_snapshot_events_and_effects() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认投影规则还不存在**
+- [x] **Step 2: 运行定向测试，确认投影规则还不存在**
 
 Run:
 
@@ -367,7 +367,7 @@ cargo test -p grid-server query_service::tests::load_detail_source_reads_snapsho
 
 Expected: 新模块不存在，编译失败。
 
-- [ ] **Step 3: 最小实现 `GridReadModelSource`、`GridQueryService` 和 `GridProjector`**
+- [x] **Step 3: 最小实现 `GridReadModelSource`、`GridQueryService` 和 `GridProjector`**
 
 在 `server/src/query_service.rs` 中实现：
 
@@ -401,7 +401,7 @@ impl GridProjector {
 - `activity` 由 `recent_domain_events + recent_effects` 合并投影
 - `available_commands` 由当前 lifecycle 和执行状态直接给出
 
-- [ ] **Step 4: 跑 `grid-server` 查询 / 投影定向测试**
+- [x] **Step 4: 跑 `grid-server` 查询 / 投影定向测试**
 
 Run:
 

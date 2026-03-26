@@ -215,8 +215,8 @@
 ```rust
 #[async_trait]
 pub trait GridReadRepositoryPort: Send + Sync {
-    async fn list_grid_snapshots(&self) -> Result<Vec<GridRuntimeSnapshot>>;
-    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<GridRuntimeSnapshot>>;
+    async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>>;
+    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>>;
     async fn list_recent_grid_events(
         &self,
         grid_id: &GridId,
@@ -235,6 +235,8 @@ pub trait GridReadRepositoryPort: Send + Sync {
 - query 侧通过只读接口拿事实
 - 不直接复用写侧事务接口
 - projector 不知道存储细节
+
+其中 `StoredGridSnapshot` 只是在 query 边界携带 `snapshot + updated_at` 的内部记录，不是 public DTO。
 
 ### 6.5 `grid-server/projector`
 
@@ -320,6 +322,7 @@ pub enum GridInternalNotification {
 ```rust
 pub struct GridReadModelSource {
     pub snapshot: GridRuntimeSnapshot,
+    pub snapshot_updated_at: DateTime<Utc>,
     pub recent_domain_events: Vec<StoredDomainEvent>,
     pub recent_effects: Vec<PersistedGridEffect>,
 }
@@ -343,6 +346,7 @@ pub trait GridProjector {
 - transport 不需要知道内部事实如何映射
 - TUI 不需要理解 outbox、pending order、领域事件之间的关系
 - `recent_domain_events` 与 `recent_effects` 只是投影材料，不直接等于活动流输出
+- 列表投影如果需要稳定 `updated_at` 或执行摘要，可以读取持久化 snapshot 时间和一个小的 recent effect 窗口
 
 ## 9. 新的对外协议
 
