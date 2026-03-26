@@ -401,7 +401,6 @@ mod tests {
             write_service,
             Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
             Arc::new(GridProjector::new()),
-            notifications,
         )
     }
 

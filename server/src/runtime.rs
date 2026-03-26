@@ -1267,7 +1267,6 @@ mod tests {
             write_service,
             Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
             Arc::new(GridProjector::new()),
-            events,
         );
         let runtime = ServerRuntime::new(
             state,
@@ -1393,7 +1392,6 @@ mod tests {
             write_service,
             Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
             Arc::new(GridProjector::new()),
-            events,
         );
 
         let runtime = ServerRuntime::new(
@@ -1459,7 +1457,6 @@ mod tests {
             write_service,
             Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
             Arc::new(GridProjector::new()),
-            events,
         );
 
         RuntimeFixture {
@@ -1506,7 +1503,6 @@ mod tests {
             write_service,
             Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
             Arc::new(GridProjector::new()),
-            events,
         )
     }
 

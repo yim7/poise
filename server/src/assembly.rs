@@ -14,7 +14,6 @@ use grid_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
 use crate::config::Config;
-use crate::notifications::GridInternalNotification;
 use crate::projector::GridProjector;
 use crate::query_service::GridQueryService;
 use crate::runtime::{RuntimeHandles, ServerRuntime};
@@ -26,7 +25,6 @@ pub struct ServerState {
     pub query_service: Arc<GridQueryService>,
     #[allow(dead_code)]
     pub projector: Arc<GridProjector>,
-    pub notifications: broadcast::Sender<GridInternalNotification>,
 }
 
 pub struct ServerPlatform {
@@ -155,7 +153,7 @@ async fn assemble_with_components_with_read_repository(
     ));
     let query_service = Arc::new(GridQueryService::new(read_repository));
     let projector = Arc::new(GridProjector::new());
-    let server_state = build_server_state(write_service, query_service, projector, notifications);
+    let server_state = build_server_state(write_service, query_service, projector);
 
     Ok(ServerPlatform {
         state: server_state.clone(),
@@ -194,13 +192,11 @@ pub(crate) fn build_server_state(
     write_service: Arc<GridWriteService>,
     query_service: Arc<GridQueryService>,
     projector: Arc<GridProjector>,
-    notifications: broadcast::Sender<GridInternalNotification>,
 ) -> ServerState {
     ServerState {
         write_service,
         query_service,
         projector,
-        notifications,
     }
 }
 
@@ -652,7 +648,6 @@ mod tests {
             write_service,
             Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
             Arc::new(GridProjector::new()),
-            events,
         );
 
         (

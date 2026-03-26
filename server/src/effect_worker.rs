@@ -269,12 +269,11 @@ impl EffectWorker {
     }
 
     fn notify_effect_state_changed(&self, grid_id: &grid_engine::grid::GridId) {
-        let _ = self
-            .state
-            .notifications
-            .send(GridInternalNotification::GridEffectStateChanged {
+        self.state.write_service.emit_internal_notification(
+            GridInternalNotification::GridEffectStateChanged {
                 grid_id: grid_id.clone(),
-            });
+            },
+        );
     }
 }
 

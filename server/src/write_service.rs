@@ -106,6 +106,10 @@ impl GridWriteService {
         self.notifications.subscribe()
     }
 
+    pub(crate) fn emit_internal_notification(&self, notification: GridInternalNotification) {
+        let _ = self.notifications.send(notification);
+    }
+
     pub async fn has_grid(&self, id: &str) -> bool {
         let manager = self.manager.read().await;
         manager.get_grid(id).is_some()
@@ -247,11 +251,9 @@ impl GridWriteService {
             return Err(GridMutationError::Persistence(error));
         }
 
-        let _ = self
-            .notifications
-            .send(GridInternalNotification::GridWriteCommitted {
-                grid_id: GridId::new(id),
-            });
+        self.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
+            grid_id: GridId::new(id),
+        });
 
         Ok(result)
     }
