@@ -96,6 +96,7 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/instance_snapshot.json")).unwrap();
 
         assert_eq!(snapshot.id, "btc-core");
+        assert_eq!(snapshot.symbol, "BTCUSDT");
         assert_eq!(snapshot.status, GridStatus::Holding);
         assert_eq!(snapshot.current_exposure, 3.5);
     }
@@ -110,6 +111,20 @@ mod tests {
             event.event,
             DomainEvent::ExposureTargetChanged { from: 0.0, to: 4.0 }
         );
+    }
+
+    #[test]
+    fn deserializes_legacy_snapshot_updated_ws_event() {
+        let event: WsEvent = serde_json::from_str(
+            r#"{
+                "grid_id": "btc-core",
+                "event": "snapshot_updated"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(event.grid_id, "btc-core");
+        assert_eq!(event.event, DomainEvent::SnapshotUpdated);
     }
 
     #[test]
