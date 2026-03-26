@@ -1,0 +1,61 @@
+{
+  "identity": {
+    "id": "btc-core",
+    "instrument": {
+      "venue": "binance_futures",
+      "symbol": "BTCUSDT"
+    }
+  },
+  "status": {
+    "lifecycle": {
+      "status": "active",
+      "updated_at": "2026-03-26T10:00:00Z"
+    },
+    "reference_price": 101.25
+  },
+  "strategy": {
+    "lower_price": 90.0,
+    "upper_price": 110.0,
+    "shape_family": "linear",
+    "out_of_band_policy": "freeze"
+  },
+  "market": {
+    "mark_price": 101.3,
+    "index_price": 101.2
+  },
+  "position": {
+    "current_exposure": 3.5,
+    "target_exposure": 4.0
+  },
+  "execution": {
+    "state": "open",
+    "pending_order": {
+      "symbol": "BTCUSDT",
+      "order_id": "order-1",
+      "client_order_id": "client-1",
+      "side": "buy",
+      "price": 100.5,
+      "quantity": 0.01,
+      "status": "new"
+    }
+  },
+  "activity": [
+    {
+      "ts": "2026-03-26T10:01:00Z",
+      "message": "target exposure 3.5000 -> 4.0000",
+      "level": "info"
+    }
+  ],
+  "available_commands": [
+    {
+      "command": "pause",
+      "enabled": true,
+      "disabled_reason": null
+    },
+    {
+      "command": "terminate",
+      "enabled": false,
+      "disabled_reason": "risk review pending"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "grid_id": "btc-core",
+  "payload": {
+    "type": "grid_detail_changed",
+    "detail": {
+      "identity": {
+        "id": "btc-core",
+        "instrument": {
+          "venue": "binance_futures",
+          "symbol": "BTCUSDT"
+        }
+      },
+      "status": {
+        "lifecycle": {
+          "status": "active",
+          "updated_at": "2026-03-26T10:03:00Z"
+        },
+        "reference_price": 101.5
+      },
+      "strategy": {
+        "lower_price": 90.0,
+        "upper_price": 110.0,
+        "shape_family": "linear",
+        "out_of_band_policy": "freeze"
+      },
+      "market": {
+        "mark_price": 101.5,
+        "index_price": 101.45
+      },
+      "position": {
+        "current_exposure": 3.7,
+        "target_exposure": 4.0
+      },
+      "execution": {
+        "state": "open",
+        "pending_order": null
+      },
+      "activity": [],
+      "available_commands": [
+        {
+          "command": "pause",
+          "enabled": true,
+          "disabled_reason": null
+        }
+      ]
+    }
+  }
+}
