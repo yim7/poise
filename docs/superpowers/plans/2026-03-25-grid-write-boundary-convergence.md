@@ -93,7 +93,8 @@ Expected: 因为当前没有 effect outbox 接口和表结构而失败。
 - `engine/src/ports.rs`
   - 扩展 `StateRepositoryPort::save_transition()`，接收 `effects: &[GridEffect]`
   - 新增 `PersistedGridEffect` 与 `EffectStatus`
-  - 新增 `list_pending_effects()`、`mark_effect_executing()`、`mark_effect_succeeded()`、`mark_effect_failed()`
+  - 新增 `list_pending_effects()`、`mark_effect_succeeded()`、`mark_effect_failed()`
+  - 预留 `mark_effect_executing()` 给后续 lease / timeout 恢复策略
 - `storage/src/schema.rs`
   - 新增 `grid_effects` 表与查询索引
 - `storage/src/sqlite.rs`
@@ -110,7 +111,7 @@ cargo test -p grid-storage
 
 Expected: `grid-storage` 全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add engine/src/execution_plan.rs engine/src/ports.rs storage/src/schema.rs storage/src/sqlite.rs
@@ -188,7 +189,7 @@ Expected:
 - application 测试通过
 - 旧的“立即补写 pending order”测试按新设计失败，需要在下一任务改写
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add server/src/application.rs server/src/runtime.rs
@@ -244,7 +245,7 @@ Expected: 当前没有 effect worker，测试失败。
 
 - 新建 `server/src/effect_worker.rs`
   - 轮询 `list_pending_effects()`
-  - 执行前标记 `Executing`
+  - `SubmitOrder` 先把 `pending_order=Submitting` 写回快照，作为恢复锚点
   - 成功后标记 `Succeeded`
   - 失败后标记 `Failed` 并记录错误
 - `server/src/runtime.rs`
@@ -280,7 +281,7 @@ Expected: 工作区全绿。
 - 更新 `docs/superpowers/specs/2026-03-25-grid-write-boundary-convergence-design.md`
 - 把本计划已完成项改成 `- [x]`
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add server/src/effect_worker.rs server/src/runtime.rs server/src/assembly.rs server/src/main.rs docs/superpowers/specs/2026-03-25-grid-write-boundary-convergence-design.md docs/superpowers/plans/2026-03-25-grid-write-boundary-convergence.md

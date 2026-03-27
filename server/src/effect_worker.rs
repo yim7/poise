@@ -2,14 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use grid_engine::ports::{ExchangePort, OrderRequest, OrderStatus, PersistedGridEffect};
-use grid_engine::runtime::PendingOrder;
+use grid_engine::manager::SubmitRecoveryResolution;
+use grid_engine::ports::{ExchangePort, OrderRequest, PersistedGridEffect};
 use grid_engine::transition::GridEffect;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::assembly::ServerState;
-use crate::notifications::GridInternalNotification;
 
 #[derive(Clone)]
 pub struct EffectWorker {
@@ -44,8 +43,7 @@ impl EffectWorker {
     }
 
     pub async fn run_once(&self) -> Result<()> {
-        let repository = self.state.write_service.repository();
-        let effects = repository.list_pending_effects().await?;
+        let effects = self.state.effect_service.list_pending_effects().await?;
         for effect in effects {
             if let Err(error) = self.process_effect(effect).await {
                 tracing::warn!("failed to process persisted effect: {error}");
@@ -87,11 +85,9 @@ impl EffectWorker {
             }
             GridEffect::NoOp => {
                 self.state
-                    .write_service
-                    .repository()
-                    .mark_effect_succeeded(&persisted.effect_id)
+                    .effect_service
+                    .complete_effect_succeeded(persisted.grid_id.as_str(), &persisted.effect_id)
                     .await?;
-                self.notify_effect_state_changed(&persisted.grid_id);
                 Ok(())
             }
         }
@@ -103,77 +99,67 @@ impl EffectWorker {
         request: OrderRequest,
         target_exposure: grid_core::types::Exposure,
     ) -> Result<()> {
-        let repository = self.state.write_service.repository();
-        match self.handle_recovered_submit(persisted, &request).await? {
+        match self
+            .handle_recovered_submit(persisted, &request, target_exposure.clone())
+            .await?
+        {
             SubmitRecovery::Proceed => {}
-            SubmitRecovery::Recovered => return Ok(()),
-            SubmitRecovery::AwaitingExchangeState => return Ok(()),
+            SubmitRecovery::Recovered | SubmitRecovery::AwaitExchangeState => return Ok(()),
         }
-
-        self.state
-            .write_service
-            .record_pending_order(
-                persisted.grid_id.as_str(),
-                PendingOrder {
-                    order_id: None,
-                    client_order_id: request.client_order_id.clone(),
-                    side: request.side,
-                    price: request.price,
-                    quantity: request.quantity,
-                    target_exposure: target_exposure.clone(),
-                    status: OrderStatus::Submitting,
-                },
-            )
-            .await?;
 
         match self.exchange.submit_order(request.clone()).await {
             Ok(receipt) => {
-                let submitted = PendingOrder {
-                    order_id: Some(receipt.order_id),
-                    client_order_id: receipt.client_order_id,
-                    side: request.side,
-                    price: request.price,
-                    quantity: request.quantity,
-                    target_exposure,
-                    status: receipt.status,
-                };
-
                 if let Err(error) = self
                     .state
                     .write_service
-                    .record_pending_order(persisted.grid_id.as_str(), submitted)
+                    .record_submit_receipt(
+                        persisted.grid_id.as_str(),
+                        &request,
+                        target_exposure,
+                        &receipt,
+                    )
                     .await
                 {
-                    repository
-                        .mark_effect_failed(&persisted.effect_id, &error.to_string())
+                    self.state
+                        .effect_service
+                        .complete_effect_failed(
+                            persisted.grid_id.as_str(),
+                            &persisted.effect_id,
+                            &error.to_string(),
+                        )
                         .await?;
                     return Err(error);
                 }
 
-                repository
-                    .mark_effect_succeeded(&persisted.effect_id)
+                self.state
+                    .effect_service
+                    .complete_effect_succeeded(persisted.grid_id.as_str(), &persisted.effect_id)
                     .await?;
-                self.notify_effect_state_changed(&persisted.grid_id);
                 Ok(())
             }
             Err(error) => {
-                let failure_message = match self
+                match self
                     .state
                     .write_service
-                    .clear_pending_order(persisted.grid_id.as_str())
+                    .clear_pending_submit(persisted.grid_id.as_str(), &request.client_order_id)
                     .await
                 {
-                    Ok(()) => error.to_string(),
-                    Err(clear_error) => format!(
+                    Ok(()) => {
+                        let failure_message = error.to_string();
+                        self.state
+                            .effect_service
+                            .complete_effect_failed(
+                                persisted.grid_id.as_str(),
+                                &persisted.effect_id,
+                                &failure_message,
+                            )
+                            .await?;
+                        Err(anyhow!(failure_message))
+                    }
+                    Err(clear_error) => Err(anyhow!(
                         "submit order failed: {error}; failed to clear submitting pending order: {clear_error}"
-                    ),
-                };
-
-                repository
-                    .mark_effect_failed(&persisted.effect_id, &failure_message)
-                    .await?;
-                self.notify_effect_state_changed(&persisted.grid_id);
-                Err(anyhow!(failure_message))
+                    )),
+                }
             }
         }
     }
@@ -182,58 +168,52 @@ impl EffectWorker {
         &self,
         persisted: &PersistedGridEffect,
         request: &OrderRequest,
+        target_exposure: grid_core::types::Exposure,
     ) -> Result<SubmitRecovery> {
-        let repository = self.state.write_service.repository();
-        let Some(snapshot) = repository
+        let Some(snapshot) = self
+            .state
+            .effect_service
             .load_grid_state(persisted.grid_id.as_str())
             .await?
         else {
             return Ok(SubmitRecovery::Proceed);
         };
-        let Some(pending) = snapshot.pending_order else {
-            return Ok(SubmitRecovery::Proceed);
-        };
-        if pending.client_order_id != request.client_order_id {
-            return Ok(SubmitRecovery::Proceed);
-        }
+        let restored_pending = snapshot
+            .pending_order
+            .as_ref()
+            .filter(|pending| pending.client_order_id == request.client_order_id);
 
-        if pending.order_id.is_some() || pending.status != OrderStatus::Submitting {
-            repository
-                .mark_effect_succeeded(&persisted.effect_id)
-                .await?;
-            return Ok(SubmitRecovery::Recovered);
-        }
-
-        if let Some(order) = self
-            .exchange
-            .get_open_orders(&request.instrument)
-            .await?
-            .into_iter()
-            .find(|order| order.client_order_id == request.client_order_id)
+        let live_order = if restored_pending
+            .and_then(|pending| pending.order_id.as_ref())
+            .is_some()
         {
-            self.state
-                .write_service
-                .record_pending_order(
-                    persisted.grid_id.as_str(),
-                    PendingOrder {
-                        order_id: Some(order.order_id),
-                        client_order_id: order.client_order_id,
-                        side: order.side,
-                        price: order.price,
-                        quantity: order.qty,
-                        target_exposure: pending.target_exposure,
-                        status: order.status,
-                    },
-                )
-                .await?;
-            repository
-                .mark_effect_succeeded(&persisted.effect_id)
-                .await?;
-            self.notify_effect_state_changed(&persisted.grid_id);
-            return Ok(SubmitRecovery::Recovered);
-        }
+            self.exchange
+                .get_open_orders(&request.instrument)
+                .await?
+                .into_iter()
+                .find(|order| order.client_order_id == request.client_order_id)
+        } else {
+            None
+        };
 
-        Ok(SubmitRecovery::AwaitingExchangeState)
+        match self
+            .state
+            .write_service
+            .recover_submit_effect(
+                persisted.grid_id.as_str(),
+                &persisted.effect_id,
+                request,
+                target_exposure,
+                live_order.as_ref(),
+            )
+            .await?
+        {
+            SubmitRecoveryResolution::Proceed => Ok(SubmitRecovery::Proceed),
+            SubmitRecoveryResolution::AwaitExchangeState => Ok(SubmitRecovery::AwaitExchangeState),
+            SubmitRecoveryResolution::Succeeded | SubmitRecoveryResolution::Superseded => {
+                Ok(SubmitRecovery::Recovered)
+            }
+        }
     }
 
     async fn execute_cancellation(
@@ -241,7 +221,6 @@ impl EffectWorker {
         persisted: &PersistedGridEffect,
         cancellation: Cancellation,
     ) -> Result<()> {
-        let repository = self.state.write_service.repository();
         let result = match cancellation {
             Cancellation::One {
                 instrument,
@@ -252,28 +231,24 @@ impl EffectWorker {
 
         match result {
             Ok(()) => {
-                repository
-                    .mark_effect_succeeded(&persisted.effect_id)
+                self.state
+                    .effect_service
+                    .complete_effect_succeeded(persisted.grid_id.as_str(), &persisted.effect_id)
                     .await?;
-                self.notify_effect_state_changed(&persisted.grid_id);
                 Ok(())
             }
             Err(error) => {
-                repository
-                    .mark_effect_failed(&persisted.effect_id, &error.to_string())
+                self.state
+                    .effect_service
+                    .complete_effect_failed(
+                        persisted.grid_id.as_str(),
+                        &persisted.effect_id,
+                        &error.to_string(),
+                    )
                     .await?;
-                self.notify_effect_state_changed(&persisted.grid_id);
                 Err(error)
             }
         }
-    }
-
-    fn notify_effect_state_changed(&self, grid_id: &grid_engine::grid::GridId) {
-        self.state.write_service.emit_internal_notification(
-            GridInternalNotification::GridEffectStateChanged {
-                grid_id: grid_id.clone(),
-            },
-        );
     }
 }
 
@@ -290,5 +265,5 @@ enum Cancellation {
 enum SubmitRecovery {
     Proceed,
     Recovered,
-    AwaitingExchangeState,
+    AwaitExchangeState,
 }

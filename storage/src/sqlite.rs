@@ -12,8 +12,8 @@ use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
 use grid_engine::grid::{GridId, Instrument, Venue};
 use grid_engine::ports::{
-    CommittedGridWrite, EffectStatus, GridReadRepositoryPort, PersistedGridEffect,
-    StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot,
+    CommittedGridWrite, EffectStatus, EffectStatusUpdate, GridReadRepositoryPort,
+    PersistedGridEffect, StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot,
 };
 use grid_engine::runtime::{GridStatus, RiskState};
 use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
@@ -90,6 +90,7 @@ impl SqliteStorage {
             "pending" => Ok(EffectStatus::Pending),
             "executing" => Ok(EffectStatus::Executing),
             "succeeded" => Ok(EffectStatus::Succeeded),
+            "superseded" => Ok(EffectStatus::Superseded),
             "failed" => Ok(EffectStatus::Failed),
             other => Err(rusqlite::Error::FromSqlConversionFailure(
                 3,
@@ -157,6 +158,7 @@ impl SqliteStorage {
         state: GridRuntimeSnapshot,
         events: Vec<DomainEvent>,
         effects: Vec<GridEffect>,
+        effect_status_update: Option<EffectStatusUpdate>,
     ) -> Result<CommittedGridWrite> {
         let config_json =
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
@@ -285,6 +287,30 @@ impl SqliteStorage {
                 created_at: updated_at,
                 updated_at,
             });
+        }
+
+        if let Some(effect_status_update) = effect_status_update {
+            let changed = tx
+                .execute(
+                    "UPDATE grid_effects
+                     SET status = ?1,
+                         attempt_count = attempt_count + ?2,
+                         last_error = ?3,
+                         updated_at = ?4
+                     WHERE effect_id = ?5",
+                    params![
+                        effect_status_update.status.as_str(),
+                        i64::from(effect_status_update.attempt_delta),
+                        effect_status_update.last_error,
+                        updated_at_text,
+                        effect_status_update.effect_id
+                    ],
+                )
+                .context("failed to update grid effect status in transition transaction")?;
+            ensure!(
+                changed == 1,
+                "effect status update affected {changed} rows in transition transaction"
+            );
         }
 
         tx.commit()
@@ -547,7 +573,7 @@ impl SqliteStorage {
                        WHERE prior.grid_id = ge.grid_id
                          AND prior.batch_id = ge.batch_id
                          AND prior.sequence < ge.sequence
-                         AND prior.status != ?2
+                         AND prior.status NOT IN (?2, ?3)
                    )
                  ORDER BY ge.created_at ASC, ge.batch_id ASC, ge.sequence ASC, ge.effect_id ASC",
             )
@@ -557,7 +583,8 @@ impl SqliteStorage {
             .query_map(
                 params![
                     EffectStatus::Pending.as_str(),
-                    EffectStatus::Succeeded.as_str()
+                    EffectStatus::Succeeded.as_str(),
+                    EffectStatus::Superseded.as_str()
                 ],
                 Self::persisted_effect_from_row,
             )
@@ -602,12 +629,13 @@ impl SqliteStorage {
 
 #[async_trait]
 impl StateRepositoryPort for SqliteStorage {
-    async fn save_transition(
+    async fn save_transition_with_effect_status(
         &self,
         id: &str,
         state: &GridRuntimeSnapshot,
         events: &[DomainEvent],
         effects: &[GridEffect],
+        effect_status_update: Option<&EffectStatusUpdate>,
     ) -> Result<CommittedGridWrite> {
         ensure!(
             id == state.grid_id.as_str(),
@@ -620,12 +648,13 @@ impl StateRepositoryPort for SqliteStorage {
         let state = state.clone();
         let events = events.to_vec();
         let effects = effects.to_vec();
+        let effect_status_update = effect_status_update.cloned();
 
         tokio::task::spawn_blocking(move || {
-            Self::save_transition_blocking(conn, id, state, events, effects)
+            Self::save_transition_blocking(conn, id, state, events, effects, effect_status_update)
         })
         .await
-        .context("failed to join save_transition blocking task")?
+        .context("failed to join save_transition_with_effect_status blocking task")?
     }
 
     async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>> {
@@ -674,6 +703,17 @@ impl StateRepositoryPort for SqliteStorage {
         })
         .await
         .context("failed to join mark_effect_succeeded blocking task")?
+    }
+
+    async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let effect_id = effect_id.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Superseded, 0, None)
+        })
+        .await
+        .context("failed to join mark_effect_superseded blocking task")?
     }
 
     async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
@@ -1150,6 +1190,35 @@ mod tests {
 
         storage
             .mark_effect_succeeded(&persisted.effects[0].effect_id)
+            .await
+            .unwrap();
+
+        let pending = storage.list_pending_effects().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
+    }
+
+    #[tokio::test]
+    async fn list_pending_effects_advances_after_prior_effect_is_superseded() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+        let effects = vec![
+            GridEffect::CancelAll {
+                instrument: snapshot.instrument.clone(),
+            },
+            GridEffect::SubmitOrder {
+                request: test_order_request(),
+                target_exposure: Exposure(6.0),
+            },
+        ];
+
+        let persisted = storage
+            .save_transition("test-1", &snapshot, &[], &effects)
+            .await
+            .unwrap();
+
+        storage
+            .mark_effect_superseded(&persisted.effects[0].effect_id)
             .await
             .unwrap();
 

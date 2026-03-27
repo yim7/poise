@@ -1,5 +1,5 @@
 use grid_core::events::DomainEvent;
-use grid_core::risk::{self, CapacityBudget, ExposureIntent, RiskDecision};
+use grid_core::risk::{self, ExposureIntent, RiskDecision};
 use grid_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use grid_core::types::{Exposure, Side};
 
@@ -21,7 +21,7 @@ pub struct ReconcileResult {
 /// 2. 根据状态决定目标占用
 /// 3. 调用 core::evaluate_risk 风控拦截
 /// 4. 生成 effect 列表（数据，不是 IO）
-pub fn reconcile(grid: &GridRuntime, price: f64, budget: &CapacityBudget) -> ReconcileResult {
+pub fn reconcile(grid: &GridRuntime, price: f64) -> ReconcileResult {
     let band = strategy::band_status(price, &grid.config);
 
     let (target, new_status) = match &band {
@@ -37,7 +37,7 @@ pub fn reconcile(grid: &GridRuntime, price: f64, budget: &CapacityBudget) -> Rec
         unrealized_pnl: grid.risk_state.unrealized_pnl,
     };
 
-    let decision = risk::evaluate_risk(&intent, budget);
+    let decision = risk::evaluate_risk(&intent, &grid.budget);
 
     let (approved_target, mut events) = match decision {
         RiskDecision::Allow(t) => (t, vec![]),
@@ -193,6 +193,7 @@ fn apply_out_of_band(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grid_core::risk::CapacityBudget;
     use grid_core::strategy::*;
 
     fn test_runtime() -> GridRuntime {
@@ -208,6 +209,7 @@ mod tests {
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
+            test_budget(),
             grid_core::types::ExchangeRules {
                 price_tick: 0.1,
                 quantity_step: 0.1,
@@ -244,7 +246,7 @@ mod tests {
         grid.current_exposure = Exposure(0.0);
         grid.reference_price = Some(100.0);
 
-        let result = reconcile(&grid, 100.0, &test_budget());
+        let result = reconcile(&grid, 100.0);
         assert!(
             !result
                 .effects
@@ -259,7 +261,7 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(0.0);
 
-        let result = reconcile(&grid, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0);
         assert!((result.target_exposure.0 - 8.0).abs() < 0.001);
         assert!(
             result
@@ -275,7 +277,7 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&grid, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0);
         assert_eq!(result.new_status, Some(GridStatus::Frozen));
     }
 
@@ -284,7 +286,7 @@ mod tests {
         let grid = test_runtime();
         assert_eq!(grid.status, GridStatus::WaitingMarketData);
 
-        let result = reconcile(&grid, 100.0, &test_budget());
+        let result = reconcile(&grid, 100.0);
         assert_eq!(result.new_status, Some(GridStatus::Active));
     }
 
@@ -294,7 +296,7 @@ mod tests {
         grid.status = GridStatus::Frozen;
         grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&grid, 100.0, &test_budget());
+        let result = reconcile(&grid, 100.0);
         assert_eq!(result.new_status, Some(GridStatus::Active));
     }
 
@@ -305,7 +307,7 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&grid, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0);
         assert_eq!(result.new_status, Some(GridStatus::ReducingOnly));
         assert!((result.target_exposure.0).abs() < 0.001);
     }
@@ -317,7 +319,7 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(8.0);
 
-        let result = reconcile(&grid, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0);
         assert_eq!(result.new_status, Some(GridStatus::Terminated));
         assert!((result.target_exposure.0).abs() < 0.001);
     }
@@ -327,13 +329,12 @@ mod tests {
         let mut grid = test_runtime();
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(0.0);
-
-        let budget = CapacityBudget {
+        grid.budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile(&grid, 90.0, &budget);
+        let result = reconcile(&grid, 90.0);
 
         assert_eq!(result.target_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
@@ -350,13 +351,12 @@ mod tests {
         let mut grid = test_runtime();
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(4.0);
-
-        let budget = CapacityBudget {
+        grid.budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile(&grid, 90.0, &budget);
+        let result = reconcile(&grid, 90.0);
 
         assert!(
             !result
@@ -388,7 +388,7 @@ mod tests {
         grid.risk_state.realized_pnl_today = -100.0;
         grid.risk_state.unrealized_pnl = -25.0;
 
-        let result = reconcile(&grid, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0);
 
         assert_eq!(result.target_exposure, Exposure(0.0));
         assert!(result.events.iter().any(|event| matches!(
@@ -407,7 +407,7 @@ mod tests {
         grid.current_exposure = Exposure(0.0);
         grid.reference_price = Some(90.0);
 
-        let result = reconcile(&grid, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0);
 
         assert!(matches!(
             result.effects.as_slice(),
@@ -421,7 +421,7 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.pending_order = Some(test_pending_order(Exposure(8.0)));
 
-        let result = reconcile(&grid, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0);
         assert!(
             !result
                 .effects
@@ -438,7 +438,7 @@ mod tests {
         grid.target_exposure = Some(Exposure(6.0));
         grid.config.out_of_band_policy = OutOfBandPolicy::Freeze;
 
-        let result = reconcile(&grid, 85.0, &test_budget());
+        let result = reconcile(&grid, 85.0);
 
         assert_eq!(result.target_exposure.0, 6.0);
         assert!(
@@ -456,8 +456,35 @@ mod tests {
         grid.current_exposure = Exposure(0.0);
         grid.pending_order = Some(test_pending_order(Exposure(4.0)));
 
-        let result = reconcile(&grid, 90.0, &test_budget());
+        let result = reconcile(&grid, 90.0);
 
+        assert!(matches!(
+            result.effects.as_slice(),
+            [
+                ExecutionAction::CancelAll { .. },
+                ExecutionAction::SubmitOrder { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn reconcile_replans_when_submit_recovery_anchor_target_differs() {
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
+        grid.pending_order = Some(crate::runtime::PendingOrder {
+            order_id: None,
+            client_order_id: "recover-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: crate::ports::OrderStatus::Submitting,
+        });
+
+        let result = reconcile(&grid, 95.0);
+
+        assert_eq!(result.target_exposure, Exposure(4.0));
         assert!(matches!(
             result.effects.as_slice(),
             [
@@ -481,7 +508,7 @@ mod tests {
             min_notional: 0.0,
         };
 
-        let result = reconcile(&grid, 99.09, &test_budget());
+        let result = reconcile(&grid, 99.09);
 
         match result.effects.as_slice() {
             [
@@ -512,12 +539,34 @@ mod tests {
             min_notional: 999999.0,
         };
 
-        let result = reconcile(&grid, 99.09, &test_budget());
+        let result = reconcile(&grid, 99.09);
         assert!(
             !result
                 .effects
                 .iter()
                 .any(|effect| !matches!(effect, ExecutionAction::NoOp))
         );
+    }
+
+    #[test]
+    fn reconcile_uses_budget_from_runtime() {
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(0.0);
+        grid.budget = CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        };
+
+        let result = reconcile(&grid, 90.0);
+
+        assert_eq!(result.target_exposure, Exposure(4.0));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::RiskCapApplied {
+                intended,
+                capped,
+            } if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+        )));
     }
 }

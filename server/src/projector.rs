@@ -277,6 +277,7 @@ fn project_effect_message(effect: &grid_engine::ports::PersistedGridEffect) -> S
                 .clone()
                 .unwrap_or_else(|| "submit order failed".into()),
             EffectStatus::Succeeded => "submit order succeeded".into(),
+            EffectStatus::Superseded => "submit order superseded by newer grid state".into(),
             EffectStatus::Executing => "submit order executing".into(),
             EffectStatus::Pending => "submit order pending".into(),
         },
@@ -286,6 +287,7 @@ fn project_effect_message(effect: &grid_engine::ports::PersistedGridEffect) -> S
                 .clone()
                 .unwrap_or_else(|| format!("cancel {order_id} failed")),
             EffectStatus::Succeeded => format!("cancel {order_id} succeeded"),
+            EffectStatus::Superseded => format!("cancel {order_id} superseded"),
             EffectStatus::Executing => format!("cancel {order_id} executing"),
             EffectStatus::Pending => format!("cancel {order_id} pending"),
         },
@@ -295,6 +297,7 @@ fn project_effect_message(effect: &grid_engine::ports::PersistedGridEffect) -> S
                 .clone()
                 .unwrap_or_else(|| format!("cancel all {} failed", instrument.symbol)),
             EffectStatus::Succeeded => format!("cancel all {} succeeded", instrument.symbol),
+            EffectStatus::Superseded => format!("cancel all {} superseded", instrument.symbol),
             EffectStatus::Executing => format!("cancel all {} executing", instrument.symbol),
             EffectStatus::Pending => format!("cancel all {} pending", instrument.symbol),
         },
@@ -371,6 +374,21 @@ mod tests {
                 .get("client_order_id")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn project_activity_distinguishes_superseded_submit_from_success() {
+        let mut source = source_with_submitting_effect();
+        source.recent_effects = vec![test_effect(EffectStatus::Superseded, None)];
+
+        let activity = GridProjector::new().project_activity(&source);
+
+        assert_eq!(activity.len(), 1);
+        assert_eq!(
+            activity[0].message,
+            "submit order superseded by newer grid state"
+        );
+        assert_eq!(activity[0].level, ActivityLevelView::Info);
     }
 
     fn source_with_submitting_effect() -> GridReadModelSource {

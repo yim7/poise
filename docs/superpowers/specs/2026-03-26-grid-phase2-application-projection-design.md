@@ -382,7 +382,8 @@ pub struct GridCommandRequest {
 pub enum GridCommandType {
     Pause,
     Resume,
-    Reconcile,
+    Terminate,
+    Flatten,
 }
 ```
 
@@ -399,6 +400,10 @@ pub struct GridCommandAccepted {
 这样写侧接口只回答：
 
 - 命令是否被接受
+- 第一版对外协议先暴露 `pause`、`resume`、`terminate`、`flatten`
+- 当前 HTTP 实际只实现 `pause` 和 `resume`
+- `terminate` 与 `flatten` 先作为稳定 contract 的保留命令，对未实现命令返回 `400`
+- `reconcile` 继续保留为内部 runtime 命令，不作为 TUI 对外 contract
 
 最新读模型仍通过 `GET` 或 `WS` 获取。
 

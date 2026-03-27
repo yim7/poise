@@ -4,12 +4,12 @@ use anyhow::{Result, anyhow};
 use grid_core::events::DomainEvent;
 use grid_engine::command::GridCommand;
 use grid_engine::grid::{GridId, Instrument};
-use grid_engine::manager::GridManager;
-use grid_engine::observation::{
-    GridObservation, MarketObservation, OrderObservation, PositionObservation,
+use grid_engine::manager::{GridManager, SubmitRecoveryPlan, SubmitRecoveryResolution};
+use grid_engine::observation::{GridObservation, MarketObservation, OrderObservation, PositionObservation};
+use grid_engine::ports::{
+    EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
 };
-use grid_engine::ports::StateRepositoryPort;
-use grid_engine::runtime::PendingOrder;
+use grid_engine::runtime::SubmitRecoveryAnchor;
 use grid_engine::transition::{GridEffect, GridTransition};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -78,6 +78,16 @@ impl TransitionResult for GridTransition {
     }
 }
 
+impl TransitionResult for SubmitRecoveryPlan {
+    fn domain_events(&self) -> &[DomainEvent] {
+        &[]
+    }
+
+    fn effects(&self) -> &[GridEffect] {
+        &self.effects
+    }
+}
+
 impl GridWriteService {
     pub fn new(
         manager: GridManager,
@@ -95,10 +105,6 @@ impl GridWriteService {
     #[cfg(test)]
     pub fn manager(&self) -> SharedManager {
         Arc::clone(&self.manager)
-    }
-
-    pub(crate) fn repository(&self) -> Arc<dyn StateRepositoryPort> {
-        Arc::clone(&self.repository)
     }
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<GridInternalNotification> {
@@ -182,19 +188,104 @@ impl GridWriteService {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn record_pending_order(&self, id: &str, pending: PendingOrder) -> Result<()> {
+    pub async fn sync_exchange_state(
+        &self,
+        id: &str,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+        submit_recovery_anchor: Option<SubmitRecoveryAnchor>,
+    ) -> Result<GridTransition> {
         self.mutate_grid(id, |manager| {
-            manager.record_submitted_order(&GridId::new(id), pending.clone())?;
+            manager.sync_exchange_state(
+                &GridId::new(id),
+                position.clone(),
+                open_orders.clone(),
+                submit_recovery_anchor.clone(),
+            )
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn record_submit_receipt(
+        &self,
+        id: &str,
+        request: &OrderRequest,
+        target_exposure: grid_core::types::Exposure,
+        receipt: &OrderReceipt,
+    ) -> Result<()> {
+        self.mutate_grid(id, |manager| {
+            manager.record_submit_receipt(
+                &GridId::new(id),
+                request,
+                target_exposure.clone(),
+                receipt,
+            )?;
             Ok(())
         })
         .await
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn clear_pending_order(&self, id: &str) -> Result<()> {
-        self.mutate_grid(id, |manager| manager.clear_pending_order(&GridId::new(id)))
+    pub async fn clear_pending_submit(&self, id: &str, client_order_id: &str) -> Result<()> {
+        self.mutate_grid(id, |manager| {
+            manager.clear_pending_submit(&GridId::new(id), client_order_id)?;
+            Ok(())
+        })
             .await
             .map_err(anyhow::Error::new)
+    }
+
+    pub async fn recover_submit_effect(
+        &self,
+        id: &str,
+        effect_id: &str,
+        request: &OrderRequest,
+        target_exposure: grid_core::types::Exposure,
+        live_order: Option<&ExchangeOrder>,
+    ) -> Result<SubmitRecoveryResolution> {
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let (previous_snapshot, plan, next_snapshot) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+            let plan = manager
+                .recover_submit_effect(
+                    &GridId::new(id),
+                    request,
+                    target_exposure.clone(),
+                    live_order,
+                )
+                .map_err(GridMutationError::Mutation)?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+            (previous_snapshot, plan, next_snapshot)
+        };
+
+        let effect_status_update = match plan.resolution {
+            SubmitRecoveryResolution::Succeeded => {
+                Some(EffectStatusUpdate::succeeded(effect_id.to_string()))
+            }
+            SubmitRecoveryResolution::Superseded => {
+                Some(EffectStatusUpdate::superseded(effect_id.to_string()))
+            }
+            SubmitRecoveryResolution::Proceed | SubmitRecoveryResolution::AwaitExchangeState => None,
+        };
+
+        self.commit_grid_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &plan,
+            effect_status_update.as_ref(),
+            true,
+        )
+        .await
+        .map_err(anyhow::Error::new)?;
+
+        Ok(plan.resolution)
     }
 
     async fn mutate_grid<R, F>(
@@ -205,9 +296,9 @@ impl GridWriteService {
     where
         F: FnOnce(&mut GridManager) -> Result<R>,
         R: TransitionResult,
-    {
-        let _mutation_guard = self.mutation_lock.lock().await;
-        let (previous_snapshot, result, next_snapshot) = {
+        {
+            let _mutation_guard = self.mutation_lock.lock().await;
+            let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
@@ -219,14 +310,46 @@ impl GridWriteService {
             (previous_snapshot, result, next_snapshot)
         };
 
+        self.commit_grid_mutation(id, &previous_snapshot, &next_snapshot, &result, None, false)
+            .await?;
+
+        Ok(result)
+    }
+
+    async fn commit_grid_mutation<R>(
+        &self,
+        id: &str,
+        previous_snapshot: &grid_engine::snapshot::GridRuntimeSnapshot,
+        next_snapshot: &grid_engine::snapshot::GridRuntimeSnapshot,
+        result: &R,
+        effect_status_update: Option<&EffectStatusUpdate>,
+        skip_when_noop: bool,
+    ) -> std::result::Result<(), GridMutationError>
+    where
+        R: TransitionResult,
+    {
+        let has_persistence_work = previous_snapshot != next_snapshot
+            || !result.domain_events().is_empty()
+            || !result.effects().is_empty()
+            || effect_status_update.is_some();
+        if skip_when_noop && !has_persistence_work {
+            return Ok(());
+        }
+
         if let Err(error) = self
             .repository
-            .save_transition(id, &next_snapshot, result.domain_events(), result.effects())
+            .save_transition_with_effect_status(
+                id,
+                next_snapshot,
+                result.domain_events(),
+                result.effects(),
+                effect_status_update,
+            )
             .await
         {
             let rollback_result = {
                 let mut manager = self.manager.write().await;
-                manager.restore_grid_state(&previous_snapshot)
+                manager.restore_grid_state(previous_snapshot)
             };
             if let Err(rollback_error) = rollback_result {
                 return Err(GridMutationError::Persistence(anyhow!(
@@ -239,8 +362,13 @@ impl GridWriteService {
         self.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
             grid_id: GridId::new(id),
         });
+        if effect_status_update.is_some() {
+            self.emit_internal_notification(GridInternalNotification::GridEffectStateChanged {
+                grid_id: GridId::new(id),
+            });
+        }
 
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -254,14 +382,18 @@ mod tests {
     use grid_core::events::DomainEvent;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::ExchangeRules;
+    use grid_core::types::{ExchangeRules, Exposure, Side};
     use grid_engine::command::GridCommand;
     use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
-    use grid_engine::observation::{GridObservation, MarketObservation};
-    use grid_engine::ports::{
-        ClockPort, CommittedGridWrite, EffectStatus, PersistedGridEffect, StateRepositoryPort,
+    use grid_engine::manager::{GridManager, SubmitRecoveryResolution};
+    use grid_engine::observation::{
+        GridObservation, MarketObservation, OrderObservation, PositionObservation,
     };
+    use grid_engine::ports::{
+        ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, OrderRequest, OrderStatus,
+        PersistedGridEffect, StateRepositoryPort,
+    };
+    use grid_engine::runtime::PendingOrder;
     use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_engine::transition::GridEffect;
 
@@ -399,6 +531,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_exchange_state_persists_single_startup_snapshot_write() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        service
+            .sync_exchange_state(
+                "btc-core",
+                PositionObservation {
+                    qty: 7.5,
+                    unrealized_pnl: 3.0,
+                },
+                vec![OrderObservation {
+                    order_id: "live-1".into(),
+                    client_order_id: "restore-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    realized_pnl: 0.0,
+                    status: grid_engine::ports::OrderStatus::New,
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .snapshot_for("btc-core")
+                .and_then(|snapshot| snapshot.pending_order)
+                .and_then(|pending| pending.order_id),
+            Some("live-1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_submit_effect_proceed_persists_submitting_anchor_before_returning() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        let transition = service.observe_market("btc-core", 95.0).await.unwrap();
+        let (request, target_exposure) = match transition.effects.as_slice() {
+            [GridEffect::SubmitOrder {
+                request,
+                target_exposure,
+            }] => (request.clone(), target_exposure.clone()),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+        let effect_id = repository.pending_effects()[0].effect_id.clone();
+
+        let resolution = service
+            .recover_submit_effect(
+                "btc-core",
+                &effect_id,
+                &request,
+                target_exposure.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolution, SubmitRecoveryResolution::Proceed);
+        assert_eq!(
+            repository
+                .snapshot_for("btc-core")
+                .and_then(|snapshot| snapshot.pending_order),
+            Some(PendingOrder::from_submit_request(
+                &request,
+                target_exposure.clone()
+            ))
+        );
+        let manager_handle = service.manager();
+        let manager = manager_handle.read().await;
+        assert_eq!(
+            manager
+                .snapshot("btc-core")
+                .and_then(|snapshot| snapshot.pending_order),
+            Some(PendingOrder::from_submit_request(&request, target_exposure))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_submit_effect_supersedes_old_effect_in_same_persisted_write() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let request = OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            client_order_id: "btc-core-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: snapshot.config.base_qty_per_unit() * 6.0,
+        };
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: None,
+            client_order_id: request.client_order_id.clone(),
+            side: request.side,
+            price: request.price,
+            quantity: request.quantity,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::Submitting,
+        });
+        snapshot.observed.reference_price = Some(95.0);
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot.clone());
+
+        let transition = service
+            .observe_position(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        repository.seed_effect(PersistedGridEffect {
+            effect_id: "btc-core:recovery:0".into(),
+            grid_id: GridId::new("btc-core"),
+            batch_id: "recovery".into(),
+            sequence: 0,
+            effect: GridEffect::SubmitOrder {
+                request: request.clone(),
+                target_exposure: Exposure(6.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        let resolution = service
+            .recover_submit_effect(
+                "btc-core",
+                "btc-core:recovery:0",
+                &request,
+                Exposure(6.0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolution, SubmitRecoveryResolution::Superseded);
+        let effects = repository.all_effects();
+        assert_eq!(effects.len(), 2);
+        assert_eq!(
+            effects
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:recovery:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+        let replacement = effects
+            .iter()
+            .find(|effect| effect.effect_id != "btc-core:recovery:0")
+            .expect("replacement submit effect should be persisted");
+        assert_eq!(replacement.status, EffectStatus::Pending);
+        assert!(matches!(
+            &replacement.effect,
+            GridEffect::SubmitOrder {
+                request,
+                target_exposure,
+            } if request.side == Side::Buy
+                && (request.price - 95.0).abs() < f64::EPSILON
+                && (request.quantity - snapshot.config.base_qty_per_unit() * 4.0).abs() < f64::EPSILON
+                && *target_exposure == Exposure(4.0)
+        ));
+    }
+
+    #[tokio::test]
     async fn resolves_grid_id_from_instrument() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
@@ -474,16 +786,33 @@ mod tests {
                 .cloned()
                 .collect()
         }
+
+        fn all_effects(&self) -> Vec<PersistedGridEffect> {
+            self.effects.lock().unwrap().clone()
+        }
+
+        fn seed_snapshot(&self, id: &str, snapshot: GridRuntimeSnapshot) {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), snapshot);
+        }
+
+        fn seed_effect(&self, effect: PersistedGridEffect) {
+            self.effects.lock().unwrap().push(effect);
+        }
+
     }
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for MemoryRepository {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             id: &str,
             state: &GridRuntimeSnapshot,
             events: &[DomainEvent],
             effects: &[GridEffect],
+            effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
             self.snapshots
                 .lock()
@@ -521,6 +850,17 @@ mod tests {
                 };
                 effect_store.push(persisted.clone());
                 persisted_effects.push(persisted);
+            }
+
+            if let Some(effect_status_update) = effect_status_update {
+                let effect = effect_store
+                    .iter_mut()
+                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
+                    .ok_or_else(|| anyhow!("effect `{}` not found", effect_status_update.effect_id))?;
+                effect.status = effect_status_update.status;
+                effect.attempt_count += effect_status_update.attempt_delta;
+                effect.last_error = effect_status_update.last_error.clone();
+                effect.updated_at = now;
             }
 
             Ok(CommittedGridWrite {
@@ -564,6 +904,18 @@ mod tests {
             Ok(())
         }
 
+        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().unwrap();
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Superseded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
         async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
             let mut effects = self.effects.lock().unwrap();
             let effect = effects
@@ -583,12 +935,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for FailOnSaveRepository {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             _id: &str,
             _state: &GridRuntimeSnapshot,
             _events: &[DomainEvent],
             _effects: &[GridEffect],
+            _effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
             Err(anyhow!("injected save failure"))
         }
@@ -610,6 +963,10 @@ mod tests {
         }
 
         async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_superseded(&self, _effect_id: &str) -> Result<()> {
             Ok(())
         }
 
