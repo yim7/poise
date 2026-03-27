@@ -65,7 +65,7 @@
 - Test: `engine/src/manager.rs`
 - Test: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 先写失败测试，覆盖累计收益不按日切丢失**
+- [x] **Step 1: 先写失败测试，覆盖累计收益不按日切丢失**
 
 在 `engine/src/manager.rs` 新增一个专用测试，建议命名：
 
@@ -85,7 +85,7 @@ fn observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes() {
 assert!((loaded.risk.realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前红灯**
+- [x] **Step 2: 运行定向测试，确认当前红灯**
 
 Run: `cargo test -p grid-engine observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes -- --exact`
 Expected: FAIL，原因是 `RiskState` 里还没有 `realized_pnl_cumulative`
@@ -93,7 +93,7 @@ Expected: FAIL，原因是 `RiskState` 里还没有 `realized_pnl_cumulative`
 Run: `cargo test -p grid-storage save_and_load_grid_runtime_snapshot_roundtrip -- --exact`
 Expected: FAIL，原因是 snapshot / sqlite 还没有累计收益字段
 
-- [ ] **Step 3: 最小实现累计收益字段**
+- [x] **Step 3: 最小实现累计收益字段**
 
 在 `engine/src/runtime.rs` 把 `RiskState` 扩成：
 
@@ -131,7 +131,7 @@ SQLite 插入和读取都要带上该列。
 
 `server/src/query_service.rs` 与 `server/src/projector.rs` 中只要有 `RiskState { ... }` 测试夹具，也同步补 `realized_pnl_cumulative: 0.0`，保证 workspace 仍可编译。
 
-- [ ] **Step 4: 重新运行定向测试，确认转绿**
+- [x] **Step 4: 重新运行定向测试，确认转绿**
 
 Run: `cargo test -p grid-engine observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes -- --exact`
 Expected: PASS
@@ -139,7 +139,7 @@ Expected: PASS
 Run: `cargo test -p grid-storage save_and_load_grid_runtime_snapshot_roundtrip -- --exact`
 Expected: PASS
 
-- [ ] **Step 5: 运行本 task 的回归测试**
+- [x] **Step 5: 运行本 task 的回归测试**
 
 Run: `cargo test -p grid-engine`
 Expected: PASS
@@ -147,16 +147,16 @@ Expected: PASS
 Run: `cargo test -p grid-storage`
 Expected: PASS
 
-- [ ] **Step 6: 提交本 task**
+- [x] **Step 6: 提交本 task**
 
 ```bash
 git add engine/src/runtime.rs engine/src/manager.rs engine/src/snapshot.rs storage/src/schema.rs storage/src/sqlite.rs server/src/query_service.rs server/src/projector.rs
 git commit -m "feat: persist cumulative realized pnl"
 ```
 
-- [ ] **Step 7: 回写 commit SHA 到本任务**
+- [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `待执行时填写`
+Commit SHA: `850a06365ee97fcf2d16c9c108be18143b8ec647`
 
 ---
 
