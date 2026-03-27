@@ -12,11 +12,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
+            Constraint::Length(6),
             Constraint::Length(4),
             Constraint::Length(6),
             Constraint::Length(5),
-            Constraint::Length(4),
+            Constraint::Length(6),
             Constraint::Min(0),
         ])
         .split(area);
@@ -32,23 +32,22 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
 
     let summary_lines = vec![
-        Line::from(format!("id: {}", detail.identity.id)),
-        Line::from(format!("symbol: {}", detail.identity.instrument.symbol)),
+        Line::from(format!(
+            "id/symbol: {} / {}",
+            detail.identity.id, detail.identity.instrument.symbol
+        )),
         Line::from(format!("lifecycle: {}", detail.status.lifecycle.status)),
         Line::from(format!(
             "updated at: {}",
             detail.status.lifecycle.updated_at
         )),
         Line::from(format!(
-            "reference price: {}",
+            "reference/exposure: {} / {:.4} -> {}",
             detail
                 .status
                 .reference_price
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "-".to_string()),
-        )),
-        Line::from(format!(
-            "exposure: {:.4} / {}",
             detail.position.current_exposure,
             detail
                 .position
@@ -193,7 +192,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::GridDetailView;
+    use crate::protocol::{GridCommandType, GridCommandView, GridDetailView};
 
     use super::render;
 
@@ -216,9 +215,19 @@ mod tests {
                 .unwrap();
         let mut app = App::new(response.items);
         app.current_view = View::Instance;
-        let detail: GridDetailView =
+        let mut detail: GridDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
                 .unwrap();
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Resume,
+            enabled: false,
+            disabled_reason: Some("grid is not paused".to_string()),
+        });
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Flatten,
+            enabled: false,
+            disabled_reason: Some("no position to flatten".to_string()),
+        });
         app.apply_grid_detail(detail);
         app.show_instance_for_selected();
 
@@ -238,6 +247,9 @@ mod tests {
         assert!(text.contains("+1245.30"));
         assert!(text.contains("+980.10"));
         assert!(text.contains("pause"));
+        assert!(text.contains("terminate"));
+        assert!(text.contains("resume"));
+        assert!(text.contains("flatten"));
         assert!(text.contains("risk review pending"));
         assert!(!text.contains("client-1"));
     }
