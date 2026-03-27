@@ -293,9 +293,9 @@ git add protocol/src/lib.rs server/src/projector.rs server/src/http.rs tui/src/p
 git commit -m "feat: project grid statistics"
 ```
 
-- [ ] **Step 7: 回写 commit SHA 到本任务**
+- [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `待执行时填写`
+Commit SHA: `0ee6c4b4077ca71f261f9615f3e2097126e16ee2`
 
 ---
 
