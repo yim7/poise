@@ -2,11 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use grid_engine::command::GridCommand;
 use grid_engine::observation::{OrderObservation, PositionObservation};
 use grid_engine::ports::{
-    ExchangeOrder, ExchangePort, MarketDataPort, OrderStatus, Position, UserDataEvent,
-    UserDataPayload,
+    ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
 };
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
@@ -62,35 +60,24 @@ impl ServerRuntime {
     }
 
     async fn startup_sync(&self) -> Result<()> {
-        let repository = self.state.write_service.repository();
         for grid in self.state.write_service.grid_instruments().await {
             let position = self.exchange.get_position(&grid.instrument).await?;
             let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
-            let preserve_submitting_anchor = repository
-                .load_grid_state(&grid.id)
-                .await?
-                .and_then(|snapshot| snapshot.pending_order)
-                .map(|pending| pending.status == OrderStatus::Submitting)
-                .unwrap_or(false);
-
-            if !preserve_submitting_anchor {
-                self.state
-                    .write_service
-                    .clear_pending_order(&grid.id)
-                    .await?;
-            }
+            let submit_recovery_anchor = self
+                .state
+                .effect_service
+                .submit_recovery_anchor(&grid.id)
+                .await?;
             let _ = self
                 .state
                 .write_service
-                .observe_position(&grid.id, position_observation(&position))
+                .sync_exchange_state(
+                    &grid.id,
+                    position_observation(&position),
+                    open_orders.iter().map(order_observation).collect(),
+                    submit_recovery_anchor,
+                )
                 .await?;
-            for order in &open_orders {
-                let _ = self
-                    .state
-                    .write_service
-                    .observe_order(&grid.id, order_observation(order))
-                    .await?;
-            }
         }
 
         Ok(())
@@ -109,7 +96,6 @@ impl ServerRuntime {
         buffered_events.sort_by_key(|event| event.event_time);
         for event in buffered_events {
             if event.event_time > startup_cutoff {
-                let should_reconcile = should_reconcile_after_user_data(&event);
                 let instrument = event.instrument().clone();
                 let Some(grid_id) = self.state.write_service.resolve_grid_id(&instrument).await
                 else {
@@ -123,9 +109,6 @@ impl ServerRuntime {
                 apply_user_data_event(&self.state, &grid_id, event)
                     .await
                     .map_err(mutate_error)?;
-                if should_reconcile {
-                    command_reconcile(&self.state, &grid_id).await?;
-                }
             }
         }
 
@@ -203,7 +186,6 @@ impl ServerRuntime {
                     continue;
                 }
 
-                let should_reconcile = should_reconcile_after_user_data(&event);
                 let instrument = event.instrument().clone();
                 let Some(grid_id) = state.write_service.resolve_grid_id(&instrument).await else {
                     tracing::warn!(
@@ -221,24 +203,8 @@ impl ServerRuntime {
                     );
                     continue;
                 }
-
-                if should_reconcile && let Err(error) = command_reconcile(&state, &grid_id).await {
-                    tracing::warn!(
-                        "failed to reconcile after user data update for {}: {error}",
-                        instrument.symbol
-                    );
-                }
             }
         })
-    }
-}
-
-fn should_reconcile_after_user_data(event: &UserDataEvent) -> bool {
-    match &event.payload {
-        UserDataPayload::PositionUpdate(_) => true,
-        // FILLED / PARTIALLY_FILLED 需要等待随后到达的仓位更新提供真实 exposure，
-        // 否则会在旧仓位上提前补单。撤单/拒单/过期不会改仓位，可以立刻重算。
-        UserDataPayload::OrderUpdate(order) => order.status.should_reconcile_after_order_update(),
     }
 }
 
@@ -272,14 +238,6 @@ fn preserve_grid_mutation_error(error: anyhow::Error) -> GridMutationError {
         Ok(error) => error,
         Err(other) => GridMutationError::Persistence(other),
     }
-}
-
-async fn command_reconcile(state: &ServerState, grid_id: &str) -> Result<()> {
-    let _ = state
-        .write_service
-        .command(grid_id, GridCommand::Reconcile)
-        .await?;
-    Ok(())
 }
 
 fn mutate_error(error: GridMutationError) -> anyhow::Error {
@@ -323,9 +281,10 @@ mod tests {
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::GridManager;
     use grid_engine::ports::{
-        ClockPort, CommittedGridWrite, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
-        GridReadRepositoryPort, GridSnapshot, MarketDataPort, OrderReceipt, OrderRequest,
-        OrderStatus, PersistedGridEffect, Position, PriceTick, StateRepositoryPort,
+        ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
+        ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot, MarketDataPort,
+        OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect, Position, PriceTick,
+        StateRepositoryPort,
         StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder, RiskState};
@@ -333,6 +292,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use crate::assembly::{ServerState, build_server_state};
+    use crate::effect_service::EffectService;
     use crate::effect_worker::EffectWorker;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
@@ -547,23 +507,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_worker_keeps_action_target_when_instance_changes_before_receipt_recording() {
+    async fn effect_worker_skips_stale_submit_when_grid_is_paused_before_execution() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
-        let outcome = fixture
+        let transition = fixture
             .state
             .write_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
-        let target_exposure = match outcome.effects.as_slice() {
-            [
-                ExecutionAction::SubmitOrder {
-                    target_exposure, ..
-                },
-            ] => target_exposure.clone(),
-            other => panic!("unexpected actions: {other:?}"),
-        };
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [ExecutionAction::SubmitOrder { .. }]
+        ));
 
         fixture
             .state
@@ -572,78 +528,469 @@ mod tests {
             .await
             .unwrap();
         let handles = fixture.runtime.start().await.unwrap();
-        wait_until_instance(&fixture.state, |instance| instance.pending_order.is_some()).await;
+        wait_until_async(|| {
+            let persistence = fixture.persistence.clone();
+            async move {
+                persistence.all_effects().await.iter().any(|effect| {
+                    effect.status == EffectStatus::Superseded
+                        && matches!(effect.effect, ExecutionAction::SubmitOrder { .. })
+                })
+            }
+        })
+        .await;
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.target_exposure, None);
-        assert_eq!(
-            instance
-                .pending_order
-                .map(|pending| pending.target_exposure),
-            Some(target_exposure)
+        assert_eq!(instance.pending_order, None);
+        assert!(
+            fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
+            "paused grid should not execute stale submit effects"
         );
 
         shutdown(handles).await;
     }
 
     #[tokio::test]
-    async fn effect_worker_does_not_resubmit_when_matching_pending_order_is_already_restored() {
+    async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.pending_order = None;
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
-            None,
+            Some(snapshot.clone()),
             test_budget(),
         )
         .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:stale:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "stale".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: test_config().base_qty_per_unit() * 4.0,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(4.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
         let worker = EffectWorker::new(
             state.clone(),
             exchange.clone() as Arc<dyn ExchangePort>,
             Duration::from_millis(10),
         );
 
-        let transition = state
-            .write_service
-            .observe_market("BTCUSDT", 95.0)
-            .await
-            .unwrap();
-        let (request, target_exposure) = match transition.effects.as_slice() {
-            [
-                ExecutionAction::SubmitOrder {
-                    request,
-                    target_exposure,
-                },
-            ] => (request.clone(), target_exposure.clone()),
-            other => panic!("unexpected actions: {other:?}"),
-        };
+        worker.run_once().await.unwrap();
 
-        state
-            .write_service
-            .record_pending_order(
-                "BTCUSDT",
-                PendingOrder {
-                    order_id: Some("order-restored".into()),
-                    client_order_id: request.client_order_id.clone(),
-                    side: request.side,
-                    price: request.price,
-                    quantity: request.quantity,
-                    target_exposure,
-                    status: OrderStatus::New,
-                },
-            )
+        assert!(
+            exchange.submitted_orders.lock().unwrap().is_empty(),
+            "submit planned for an older exposure should be discarded"
+        );
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 2);
+        assert_eq!(
+            effects
+                .iter()
+                .find(|effect| effect.effect_id == "BTCUSDT:stale:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+        let replacement = effects
+            .iter()
+            .find(|effect| effect.effect_id != "BTCUSDT:stale:0")
+            .expect("replacement submit should be persisted for the current target");
+        assert_eq!(replacement.status, EffectStatus::Pending);
+        assert!(matches!(
+            &replacement.effect,
+            ExecutionAction::SubmitOrder {
+                request,
+                target_exposure,
+            } if request.side == Side::Buy
+                && (request.price - 95.0).abs() < f64::EPSILON
+                && (request.quantity - test_config().base_qty_per_unit() * 2.0).abs() < f64::EPSILON
+                && *target_exposure == Exposure(4.0)
+        ));
+    }
+
+    #[tokio::test]
+    async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_reverse_exposure_math()
+    {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let config = rounded_submit_test_config();
+        let mut snapshot = test_snapshot_with_config(config.clone());
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.target_exposure = Some(Exposure(3.0));
+        snapshot.pending_order = None;
+        snapshot.observed.reference_price = Some(95.0);
+        let state = test_state_with_config(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+            config,
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
             .await
             .unwrap();
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:rounded:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "rounded".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 95.0,
+                        quantity: 3.3,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(3.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        worker.run_once().await.unwrap();
+
+        let submitted_orders = exchange.submitted_orders.lock().unwrap().clone();
+        assert_eq!(submitted_orders.len(), 1);
+        assert!((submitted_orders[0].quantity - 3.3).abs() < 1e-9);
+
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn effect_worker_waits_for_exchange_state_when_receipt_snapshot_has_no_live_order_and_target_not_reached()
+    {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: Some("order-restored".into()),
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::New,
+        });
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
 
         worker.run_once().await.unwrap();
 
         assert!(
             exchange.submitted_orders.lock().unwrap().is_empty(),
-            "worker should not resubmit when the same client order is already restored"
+            "receipt-backed recovery should wait for live exchange state instead of resubmitting"
         );
         let effects = persistence.all_effects().await;
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].status, EffectStatus::Succeeded);
+        assert_eq!(effects[0].status, EffectStatus::Pending);
+        let instance = current_instance(&state).await;
+        assert_eq!(
+            instance
+                .pending_order
+                .as_ref()
+                .and_then(|pending| pending.order_id.as_deref()),
+            Some("order-restored")
+        );
+    }
+
+    #[tokio::test]
+    async fn superseded_recovery_submit_enqueues_replacement_plan_without_waiting_for_new_observation()
+    {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: None,
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: test_config().base_qty_per_unit() * 6.0,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::Submitting,
+        });
+        snapshot.observed.reference_price = Some(95.0);
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let transition = state
+            .write_service
+            .observe_position("BTCUSDT", super::position_observation(&btc_position(0.0, 0.0)))
+            .await
+            .unwrap();
+        assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(
+            current_instance(&state).await.target_exposure,
+            Some(Exposure(4.0))
+        );
+
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: test_config().base_qty_per_unit() * 6.0,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        worker.run_once().await.unwrap();
+
+        assert!(
+            exchange.submitted_orders.lock().unwrap().is_empty(),
+            "stale recovery effect should be replaced in persistence before any new submit"
+        );
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 2);
+        assert_eq!(
+            effects
+                .iter()
+                .find(|effect| effect.effect_id == "BTCUSDT:recovery:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+        let replacement = effects
+            .iter()
+            .find(|effect| effect.effect_id != "BTCUSDT:recovery:0")
+            .expect("replacement submit effect should be persisted immediately");
+        assert_eq!(replacement.status, EffectStatus::Pending);
+        assert!(matches!(
+            &replacement.effect,
+            ExecutionAction::SubmitOrder {
+                request,
+                target_exposure,
+            } if request.side == Side::Buy
+                && (request.price - 95.0).abs() < f64::EPSILON
+                && (request.quantity - test_config().base_qty_per_unit() * 4.0).abs() < f64::EPSILON
+                && *target_exposure == Exposure(4.0)
+        ));
+    }
+
+    #[tokio::test]
+    async fn effect_worker_completes_submit_without_retry_when_receipt_snapshot_has_no_live_order_and_target_reached()
+    {
+        let mut snapshot = test_snapshot();
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: Some("order-restored".into()),
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::New,
+        });
+        snapshot.current_exposure = Exposure(6.0);
+        let fixture = runtime_fixture(Some(snapshot), btc_position(22.5, 0.0), vec![], test_budget()).await;
+        fixture.persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = fixture.persistence.clone();
+            async move {
+                persistence.all_effects().await.iter().any(|effect| {
+                    effect.effect_id == "BTCUSDT:recovery:0"
+                        && effect.status == EffectStatus::Succeeded
+                })
+            }
+        })
+        .await;
+
+        assert!(
+            fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
+            "when target exposure is already reached, recovery should complete without a duplicate submit"
+        );
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(instance.pending_order, None);
+        assert_eq!(instance.current_exposure, Exposure(6.0));
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn effect_worker_supersedes_submit_when_target_is_reached_without_receipt_evidence() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(22.5, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.pending_order = None;
+        snapshot.current_exposure = Exposure(6.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.observed.reference_price = Some(92.5);
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 92.5,
+                        quantity: test_config().base_qty_per_unit() * 6.0,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        worker.run_once().await.unwrap();
+
+        assert!(
+            exchange.submitted_orders.lock().unwrap().is_empty(),
+            "recovered submit without receipt evidence should not resubmit"
+        );
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Superseded);
     }
 
     #[tokio::test]
@@ -710,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_worker_marks_effect_failed_even_if_submit_cleanup_persistence_fails() {
+    async fn effect_worker_keeps_effect_pending_when_submit_cleanup_persistence_fails() {
         let exchange = Arc::new(FakeExchange::with_submit_error(
             btc_position(0.0, 0.0),
             vec![],
@@ -746,8 +1093,8 @@ mod tests {
 
         let effects = persistence.all_effects().await;
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].status, EffectStatus::Failed);
-        assert_eq!(effects[0].attempt_count, 1);
+        assert_eq!(effects[0].status, EffectStatus::Pending);
+        assert_eq!(effects[0].attempt_count, 0);
 
         let instance = current_instance(&state).await;
         assert_eq!(
@@ -757,6 +1104,151 @@ mod tests {
                 .map(|pending| pending.status),
             Some(OrderStatus::Submitting)
         );
+    }
+
+    #[tokio::test]
+    async fn recovered_submit_emits_effect_state_changed_notification() {
+        let exchange = Arc::new(FakeExchange::new(
+            btc_position(0.0, 0.0),
+            vec![btc_exchange_order(
+                "order-restored",
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                0.0,
+                OrderStatus::New,
+            )],
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let restored_snapshot = GridSnapshot {
+            pending_order: Some(PendingOrder {
+                order_id: Some("order-restored".into()),
+                client_order_id: "BTCUSDT-reconcile".into(),
+                side: Side::Buy,
+                price: 94.0,
+                quantity: 0.25,
+                target_exposure: Exposure(6.0),
+                status: OrderStatus::New,
+            }),
+            ..test_snapshot()
+        };
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(restored_snapshot),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition(
+                "BTCUSDT",
+                &current_instance(&state).await.snapshot(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+        let mut receiver = state.write_service.subscribe_notifications();
+
+        worker.run_once().await.unwrap();
+
+        let mut saw_effect_state_changed = false;
+        for _ in 0..3 {
+            let event = timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(
+                event,
+                crate::notifications::GridInternalNotification::GridEffectStateChanged { .. }
+            ) {
+                saw_effect_state_changed = true;
+                break;
+            }
+        }
+
+        assert!(saw_effect_state_changed);
+    }
+
+    #[tokio::test]
+    async fn receipt_persistence_failure_emits_effect_state_changed_notification() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(FailOnReceiptPersistence::default());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+        let mut receiver = state.write_service.subscribe_notifications();
+
+        state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        let committed = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            committed,
+            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+        ));
+        worker.run_once().await.unwrap();
+
+        let committed = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            committed,
+            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+        ));
+
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            crate::notifications::GridInternalNotification::GridEffectStateChanged { .. }
+        ));
     }
 
     #[tokio::test]
@@ -844,6 +1336,96 @@ mod tests {
         assert!((instance.risk_state.unrealized_pnl - 11.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn position_update_reconciles_without_runtime_follow_up_command() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        drop(price_sender);
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::without_user_receiver(price_receiver));
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+
+        let mut manager = GridManager::new(clock);
+        manager
+            .add_grid(
+                GridId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                test_config(),
+                test_budget(),
+                exchange.exchange_info.rules.clone(),
+            )
+            .unwrap();
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.pending_order = None;
+        snapshot.observed.reference_price = Some(95.0);
+        manager.restore_grid_state(&snapshot).unwrap();
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let (events, _) = broadcast::channel(16);
+        let effect_service = Arc::new(EffectService::new(
+            persistence.clone(),
+            events.clone(),
+        ));
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            persistence.clone(),
+            events.clone(),
+        ));
+        let state = build_server_state(
+            write_service,
+            effect_service,
+            Arc::new(GridQueryService::new(
+                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            )),
+            Arc::new(GridProjector::new()),
+        );
+        let runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        let user_task = runtime.spawn_user_task(user_receiver, test_server_time());
+        let save_count_before_event = persistence.save_transition_count();
+        user_sender
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                7.5,
+                11.0,
+            ))
+            .await
+            .unwrap();
+
+        wait_until_async(|| {
+            let persistence = persistence.clone();
+            async move { persistence.save_transition_count() == save_count_before_event + 1 }
+        })
+        .await;
+
+        assert_eq!(
+            persistence.save_transition_count() - save_count_before_event,
+            1
+        );
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            effects[0].effect,
+            ExecutionAction::SubmitOrder { .. }
+        ));
+        assert!(exchange.submitted_orders.lock().unwrap().is_empty());
+
+        user_task.abort();
+        let _ = user_task.await;
     }
 
     #[tokio::test]
@@ -1102,8 +1684,14 @@ mod tests {
             test_budget(),
         )
         .await;
+        let save_count_before_start = fixture.persistence.save_transition_count();
 
         let handles = fixture.runtime.start().await.unwrap();
+        assert_eq!(
+            fixture.persistence.save_transition_count() - save_count_before_start,
+            1,
+            "startup sync should persist live exchange state through a single write path"
+        );
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
@@ -1174,8 +1762,31 @@ mod tests {
             test_budget(),
         )
         .await;
-
-        let handles = fixture.runtime.start().await.unwrap();
+        fixture
+            .persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:startup:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "startup".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        fixture.runtime.startup_sync().await.unwrap();
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
@@ -1186,15 +1797,92 @@ mod tests {
             Some(OrderStatus::Submitting)
         );
 
-        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
-        sleep(Duration::from_millis(100)).await;
+        let transition = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
+    }
+
+    #[tokio::test]
+    async fn startup_sync_clears_orphaned_submitting_anchor_without_pending_effect() {
+        let mut snapshot = test_snapshot();
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: None,
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::Submitting,
+        });
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(7.5, 3.0),
+            vec![],
+            test_budget(),
+        )
+        .await;
+
+        fixture.runtime.startup_sync().await.unwrap();
+
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(instance.pending_order, None);
+
+        let transition = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_sync_rejects_multiple_live_open_orders_in_sorted_order() {
+        let fixture = runtime_fixture(
+            Some(test_snapshot()),
+            btc_position(7.5, 3.0),
+            vec![
+                btc_exchange_order(
+                    "order-z",
+                    "zeta",
+                    Side::Buy,
+                    94.5,
+                    0.25,
+                    0.0,
+                    OrderStatus::New,
+                ),
+                btc_exchange_order(
+                    "order-a",
+                    "alpha",
+                    Side::Buy,
+                    94.0,
+                    0.25,
+                    0.0,
+                    OrderStatus::New,
+                ),
+            ],
+            test_budget(),
+        )
+        .await;
+
+        let error = match fixture.runtime.start().await {
+            Ok(_) => panic!("startup sync should reject multiple live open orders"),
+            Err(error) => error,
+        };
 
         assert!(
-            fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
-            "submitting recovery anchor should suppress duplicate submit before exchange state arrives"
+            error.to_string().contains("alpha/order-a, zeta/order-z"),
+            "unexpected error: {error}"
         );
-
-        shutdown(handles).await;
     }
 
     #[tokio::test]
@@ -1266,6 +1954,10 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
+        let effect_service = Arc::new(EffectService::new(
+            persistence.clone(),
+            events.clone(),
+        ));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1273,6 +1965,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
+            effect_service,
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -1303,12 +1996,17 @@ mod tests {
         )));
         let persistence = Arc::new(MemoryPersistence::default());
         let (events, _) = broadcast::channel(16);
+        let effect_service = Arc::new(EffectService::new(
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            events.clone(),
+        ));
         let state = build_server_state(
             Arc::new(GridWriteService::new(
                 manager,
                 persistence.clone() as Arc<dyn StateRepositoryPort>,
-                events,
+                events.clone(),
             )),
+            effect_service,
             Arc::new(GridQueryService::new(
                 persistence as Arc<dyn GridReadRepositoryPort>,
             )),
@@ -1430,6 +2128,10 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
+        let effect_service = Arc::new(EffectService::new(
+            persistence.clone(),
+            events.clone(),
+        ));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1437,6 +2139,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
+            effect_service,
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -1497,6 +2200,10 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
+        let effect_service = Arc::new(EffectService::new(
+            persistence.clone(),
+            events.clone(),
+        ));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1504,6 +2211,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
+            effect_service,
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -1554,6 +2262,10 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
+        let effect_service = Arc::new(EffectService::new(
+            state_repository.clone(),
+            events.clone(),
+        ));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -1561,6 +2273,55 @@ mod tests {
         ));
         build_server_state(
             write_service,
+            effect_service,
+            Arc::new(GridQueryService::new(read_repository)),
+            Arc::new(GridProjector::new()),
+        )
+    }
+
+    async fn test_state_with_config<R>(
+        exchange: Arc<dyn ExchangePort>,
+        persistence: Arc<R>,
+        restored_snapshot: Option<GridSnapshot>,
+        budget: CapacityBudget,
+        config: GridConfig,
+    ) -> ServerState
+    where
+        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+    {
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+        let mut manager = GridManager::new(clock);
+        let instrument = btc_instrument();
+        manager
+            .add_grid(
+                GridId::new("BTCUSDT"),
+                instrument.clone(),
+                config,
+                budget,
+                exchange.get_exchange_info(&instrument).await.unwrap().rules,
+            )
+            .unwrap();
+        if let Some(snapshot) = restored_snapshot {
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+
+        let (events, _) = broadcast::channel(16);
+        let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
+        let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
+        let effect_service = Arc::new(EffectService::new(
+            state_repository.clone(),
+            events.clone(),
+        ));
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            state_repository,
+            events.clone(),
+        ));
+        build_server_state(
+            write_service,
+            effect_service,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )
@@ -1639,11 +2400,30 @@ mod tests {
                         prior.grid_id == effect.grid_id
                             && prior.batch_id == effect.batch_id
                             && prior.sequence < effect.sequence
-                            && prior.status != EffectStatus::Succeeded
+                            && !prior.status.unblocks_follow_up()
                     })
             })
             .cloned()
             .collect()
+    }
+
+    fn apply_effect_status_update(
+        effects: &mut [PersistedGridEffect],
+        effect_status_update: Option<&EffectStatusUpdate>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let Some(effect_status_update) = effect_status_update else {
+            return Ok(());
+        };
+        let effect = effects
+            .iter_mut()
+            .find(|effect| effect.effect_id == effect_status_update.effect_id)
+            .ok_or_else(|| anyhow!("effect `{}` not found", effect_status_update.effect_id))?;
+        effect.status = effect_status_update.status;
+        effect.attempt_count += effect_status_update.attempt_delta;
+        effect.last_error = effect_status_update.last_error.clone();
+        effect.updated_at = now;
+        Ok(())
     }
 
     fn test_config() -> GridConfig {
@@ -1653,6 +2433,18 @@ mod tests {
             long_exposure_units: 8.0,
             short_exposure_units: 8.0,
             notional_per_unit: 375.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
+
+    fn rounded_submit_test_config() -> GridConfig {
+        GridConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 6.0,
+            short_exposure_units: 6.0,
+            notional_per_unit: 333.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
         }
@@ -1732,10 +2524,14 @@ mod tests {
     }
 
     fn test_snapshot() -> GridSnapshot {
+        test_snapshot_with_config(test_config())
+    }
+
+    fn test_snapshot_with_config(config: GridConfig) -> GridSnapshot {
         GridSnapshot {
             grid_id: GridId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: test_config(),
+            config,
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
@@ -1894,17 +2690,20 @@ mod tests {
         snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
         effects: AsyncMutex<Vec<PersistedGridEffect>>,
         next_effect_batch: AtomicUsize,
+        save_transition_count: AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for MemoryPersistence {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             id: &str,
             state: &GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
             effects: &[ExecutionAction],
+            effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
+            self.save_transition_count.fetch_add(1, Ordering::SeqCst);
             self.snapshots
                 .lock()
                 .await
@@ -1934,6 +2733,7 @@ mod tests {
                 effect_store.push(persisted.clone());
                 persisted_effects.push(persisted);
             }
+            apply_effect_status_update(&mut effect_store, effect_status_update, now)?;
 
             Ok(CommittedGridWrite {
                 grid_id: GridId::new(id),
@@ -1977,6 +2777,18 @@ mod tests {
             Ok(())
         }
 
+        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Superseded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
         async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
             let mut effects = self.effects.lock().await;
             let effect = effects
@@ -1992,8 +2804,16 @@ mod tests {
     }
 
     impl MemoryPersistence {
+        fn save_transition_count(&self) -> usize {
+            self.save_transition_count.load(Ordering::SeqCst)
+        }
+
         async fn all_effects(&self) -> Vec<PersistedGridEffect> {
             self.effects.lock().await.clone()
+        }
+
+        async fn seed_effect(&self, effect: PersistedGridEffect) {
+            self.effects.lock().await.push(effect);
         }
     }
 
@@ -2059,12 +2879,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for FailOnReceiptPersistence {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             id: &str,
             state: &GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
             effects: &[ExecutionAction],
+            effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
             if state
                 .pending_order
@@ -2104,6 +2925,7 @@ mod tests {
                 effect_store.push(persisted.clone());
                 persisted_effects.push(persisted);
             }
+            apply_effect_status_update(&mut effect_store, effect_status_update, now)?;
 
             Ok(CommittedGridWrite {
                 grid_id: GridId::new(id),
@@ -2142,6 +2964,18 @@ mod tests {
                 .find(|effect| effect.effect_id == effect_id)
                 .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
             effect.status = EffectStatus::Succeeded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Superseded;
             effect.last_error = None;
             effect.updated_at = Utc::now();
             Ok(())
@@ -2246,12 +3080,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for FailOnSavePersistence {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             id: &str,
             state: &GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
             effects: &[ExecutionAction],
+            effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
             let save_number = self.save_count.fetch_add(1, Ordering::SeqCst) + 1;
             if save_number == self.fail_on {
@@ -2287,6 +3122,7 @@ mod tests {
                 effect_store.push(persisted.clone());
                 persisted_effects.push(persisted);
             }
+            apply_effect_status_update(&mut effect_store, effect_status_update, now)?;
 
             Ok(CommittedGridWrite {
                 grid_id: GridId::new(id),
@@ -2325,6 +3161,18 @@ mod tests {
                 .find(|effect| effect.effect_id == effect_id)
                 .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
             effect.status = EffectStatus::Succeeded;
+            effect.last_error = None;
+            effect.updated_at = Utc::now();
+            Ok(())
+        }
+
+        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
+            let mut effects = self.effects.lock().await;
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
+            effect.status = EffectStatus::Superseded;
             effect.last_error = None;
             effect.updated_at = Utc::now();
             Ok(())

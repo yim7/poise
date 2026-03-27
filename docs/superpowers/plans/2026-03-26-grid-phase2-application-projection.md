@@ -412,7 +412,7 @@ cargo test -p grid-server query_service::tests::
 
 Expected: projector 与 query service 新测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add server/src/query_service.rs server/src/projector.rs

@@ -158,6 +158,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::assembly::{ServerState, build_server_state};
+    use crate::effect_service::EffectService;
     use crate::notifications::GridInternalNotification;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
@@ -202,6 +203,10 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
+        let effect_service = Arc::new(EffectService::new(
+            state_repository.clone(),
+            notifications.clone(),
+        ));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -210,6 +215,7 @@ mod tests {
 
         build_server_state(
             write_service,
+            effect_service,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )
@@ -429,12 +435,17 @@ mod tests {
                 .expect("seeded manager should expose runtime snapshot"),
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
+        let effect_service = Arc::new(EffectService::new(
+            repository.clone() as Arc<dyn StateRepositoryPort>,
+            notifications.clone(),
+        ));
         let app = router(build_server_state(
             Arc::new(GridWriteService::new(
                 manager,
                 repository.clone() as Arc<dyn StateRepositoryPort>,
                 notifications,
             )),
+            effect_service,
             Arc::new(GridQueryService::new(
                 repository as Arc<dyn GridReadRepositoryPort>,
             )),
@@ -605,12 +616,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for FailingRepository {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             _id: &str,
             _state: &grid_engine::ports::GridSnapshot,
             _events: &[grid_core::events::DomainEvent],
             _effects: &[grid_engine::transition::GridEffect],
+            _effect_status_update: Option<&grid_engine::ports::EffectStatusUpdate>,
         ) -> anyhow::Result<grid_engine::ports::CommittedGridWrite> {
             Err(anyhow!("persistence unavailable"))
         }
@@ -640,6 +652,10 @@ mod tests {
         }
 
         async fn mark_effect_succeeded(&self, _effect_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_effect_superseded(&self, _effect_id: &str) -> anyhow::Result<()> {
             Ok(())
         }
 

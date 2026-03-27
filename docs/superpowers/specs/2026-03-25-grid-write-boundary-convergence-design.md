@@ -173,6 +173,8 @@ pub enum EffectStatus {
 这里的关键不是字段名字，而是 ownership：
 
 - effect 的生命周期从“函数返回值”变成“仓储中的事实”
+- 第一阶段实际只使用 `Pending / Succeeded / Failed`
+- `Executing` 只保留给未来引入 lease / timeout 恢复策略时扩展；当前实现不会在交易所调用前把 effect 提前改成 `Executing`
 - `server/runtime` 不再拥有 effect 的存在性，只拥有 effect 的执行职责
 
 ### 5.3 写侧提交接口
@@ -229,16 +231,18 @@ pub trait GridWriteRepositoryPort: Send + Sync {
 3. 原子保存 `snapshot + events + effects`
 4. 写侧服务只广播“已提交事件”
 5. effect 执行器从仓储读取 `Pending` effect
-6. 执行器标记 `Executing`
+6. `SubmitOrder` 先把 `pending_order=Submitting` 写回快照，作为崩溃恢复锚点
 7. 执行交易所调用
-8. 根据结果标记 `Succeeded` / `Failed`
-9. 交易所结果通过 observation / command 回流写侧
+8. 成功时写回订单回执并标记 `Succeeded`；失败时标记 `Failed`
+9. 在没有 lease / timeout 恢复策略前，effect 保持 `Pending`，不提前标记 `Executing`
+10. 交易所结果通过 observation / command 回流写侧
 
 设计约束：
 
 - 执行器只能执行已提交 effect
 - 任何 effect 执行失败都不能回滚已提交快照
 - 状态修正只能通过新的写侧输入推进，不能绕过写侧服务直接改 manager
+- `Submitting` pending order 是第一阶段的恢复锚点；只要对应 submit effect 还未终态，就不能在启动对齐时提前清掉
 
 ## 7. `pending_order` 的第一阶段处理
 

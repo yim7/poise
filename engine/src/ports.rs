@@ -140,18 +140,31 @@ pub trait MarketDataPort: Send + Sync {
 
 #[async_trait]
 pub trait StateRepositoryPort: Send + Sync {
+    async fn save_transition_with_effect_status(
+        &self,
+        id: &str,
+        state: &GridRuntimeSnapshot,
+        events: &[DomainEvent],
+        effects: &[GridEffect],
+        effect_status_update: Option<&EffectStatusUpdate>,
+    ) -> Result<CommittedGridWrite>;
+
     async fn save_transition(
         &self,
         id: &str,
         state: &GridRuntimeSnapshot,
         events: &[DomainEvent],
         effects: &[GridEffect],
-    ) -> Result<CommittedGridWrite>;
+    ) -> Result<CommittedGridWrite> {
+        self.save_transition_with_effect_status(id, state, events, effects, None)
+            .await
+    }
     async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>>;
     async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
     async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>>;
     async fn mark_effect_executing(&self, effect_id: &str) -> Result<()>;
     async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()>;
+    async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()>;
     async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()>;
 }
 
@@ -197,6 +210,34 @@ pub struct CommittedGridWrite {
     pub effects: Vec<PersistedGridEffect>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectStatusUpdate {
+    pub effect_id: String,
+    pub status: EffectStatus,
+    pub attempt_delta: u32,
+    pub last_error: Option<String>,
+}
+
+impl EffectStatusUpdate {
+    pub fn succeeded(effect_id: impl Into<String>) -> Self {
+        Self {
+            effect_id: effect_id.into(),
+            status: EffectStatus::Succeeded,
+            attempt_delta: 0,
+            last_error: None,
+        }
+    }
+
+    pub fn superseded(effect_id: impl Into<String>) -> Self {
+        Self {
+            effect_id: effect_id.into(),
+            status: EffectStatus::Superseded,
+            attempt_delta: 0,
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedGridEffect {
     pub effect_id: String,
@@ -217,6 +258,7 @@ pub enum EffectStatus {
     Pending,
     Executing,
     Succeeded,
+    Superseded,
     Failed,
 }
 
@@ -226,7 +268,12 @@ impl EffectStatus {
             Self::Pending => "pending",
             Self::Executing => "executing",
             Self::Succeeded => "succeeded",
+            Self::Superseded => "superseded",
             Self::Failed => "failed",
         }
+    }
+
+    pub fn unblocks_follow_up(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Superseded)
     }
 }

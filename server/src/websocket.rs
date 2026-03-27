@@ -124,6 +124,7 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::assembly::{ServerState, build_server_state};
+    use crate::effect_service::EffectService;
     use crate::effect_worker::EffectWorker;
     use crate::notifications::GridInternalNotification;
     use crate::projector::GridProjector;
@@ -151,6 +152,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
+        let effect_service = Arc::new(EffectService::new(
+            repository.clone() as Arc<dyn StateRepositoryPort>,
+            notifications.clone(),
+        ));
         let service = Arc::new(GridWriteService::new(
             test_manager(),
             repository.clone() as Arc<dyn StateRepositoryPort>,
@@ -158,6 +163,7 @@ mod tests {
         ));
         let state = build_server_state(
             Arc::clone(&service),
+            effect_service,
             Arc::new(GridQueryService::new(
                 repository.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -485,12 +491,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for TestRepository {
-        async fn save_transition(
+        async fn save_transition_with_effect_status(
             &self,
             id: &str,
             state: &grid_engine::ports::GridSnapshot,
             events: &[grid_core::events::DomainEvent],
             effects: &[GridEffect],
+            effect_status_update: Option<&grid_engine::ports::EffectStatusUpdate>,
         ) -> Result<grid_engine::ports::CommittedGridWrite> {
             let now = Utc::now();
             self.snapshots.lock().unwrap().insert(
@@ -536,6 +543,20 @@ mod tests {
                 .lock()
                 .unwrap()
                 .extend(persisted_effects.iter().cloned());
+            if let Some(effect_status_update) = effect_status_update {
+                if let Some(effect) = self
+                    .effects
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
+                {
+                    effect.status = effect_status_update.status;
+                    effect.attempt_count += effect_status_update.attempt_delta;
+                    effect.last_error = effect_status_update.last_error.clone();
+                    effect.updated_at = now;
+                }
+            }
 
             Ok(grid_engine::ports::CommittedGridWrite {
                 grid_id: GridId::new(id),
@@ -603,6 +624,20 @@ mod tests {
                 .find(|effect| effect.effect_id == effect_id)
             {
                 effect.status = EffectStatus::Succeeded;
+                effect.updated_at = Utc::now();
+            }
+            Ok(())
+        }
+
+        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
+            if let Some(effect) = self
+                .effects
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+            {
+                effect.status = EffectStatus::Superseded;
                 effect.updated_at = Utc::now();
             }
             Ok(())
