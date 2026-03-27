@@ -375,4 +375,4 @@ git commit -m "feat: render statistics in tui detail"
 
 - [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `18d1c5a3af2476498e2bfa9f6a03fba30c819a03`
+Commit SHA: `42ed2c252e4011addaafe2c6b07f9406838b6e5d`
