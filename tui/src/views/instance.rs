@@ -206,8 +206,7 @@ mod tests {
             .collect::<String>()
     }
 
-    #[test]
-    fn renders_grid_detail_execution_activity_and_commands() {
+    fn render_text(detail: GridDetailView) -> String {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let response: crate::protocol::GridListResponse =
@@ -215,11 +214,21 @@ mod tests {
                 .unwrap();
         let mut app = App::new(response.items);
         app.current_view = View::Instance;
+        app.apply_grid_detail(detail);
+        app.show_instance_for_selected();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+
+        buffer_text(&terminal)
+    }
+
+    #[test]
+    fn renders_grid_detail_execution_activity_and_commands() {
         let mut detail: GridDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
                 .unwrap();
-        detail.statistics.total_pnl = -123456789.12;
-        detail.statistics.realized_pnl = 987654321.99;
         detail.available_commands.push(GridCommandView {
             command: GridCommandType::Resume,
             enabled: false,
@@ -230,13 +239,7 @@ mod tests {
             enabled: false,
             disabled_reason: Some("no position to flatten".to_string()),
         });
-        app.apply_grid_detail(detail);
-        app.show_instance_for_selected();
-
-        terminal
-            .draw(|frame| render(frame, frame.area(), &app))
-            .unwrap();
-        let text = buffer_text(&terminal);
+        let text = render_text(detail);
 
         assert!(text.contains("Overview"));
         assert!(text.contains("Strategy"));
@@ -246,8 +249,8 @@ mod tests {
         assert!(text.contains("Commands"));
         assert!(text.contains("Total PnL"));
         assert!(text.contains("Realized PnL"));
-        assert!(text.contains("Total PnL | Realized PnL"));
-        assert!(text.contains("-123456789.12 | +987654321.99"));
+        assert!(text.contains("+1245.30"));
+        assert!(text.contains("+980.10"));
         assert!(text.contains("lower: 90.0000"));
         assert!(text.contains("upper: 110.0000"));
         assert!(text.contains("shape: linear"));
@@ -258,5 +261,20 @@ mod tests {
         assert!(text.contains("flatten"));
         assert!(text.contains("risk review pending"));
         assert!(!text.contains("client-1"));
+    }
+
+    #[test]
+    fn renders_statistics_with_explicit_separator_for_large_pnl_values() {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+                .unwrap();
+        detail.statistics.total_pnl = -123456789.12;
+        detail.statistics.realized_pnl = 987654321.99;
+
+        let text = render_text(detail);
+
+        assert!(text.contains("Total PnL | Realized PnL"));
+        assert!(text.contains("-123456789.12 | +987654321.99"));
+        assert!(!text.contains("-123456789.12+987654321.99"));
     }
 }
