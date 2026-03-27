@@ -305,7 +305,7 @@ Commit SHA: `0ee6c4b4077ca71f261f9615f3e2097126e16ee2`
 - Modify: `tui/src/views/instance.rs`
 - Test: `tui/src/views/instance.rs`
 
-- [ ] **Step 1: 先写失败测试，覆盖 Statistics 区块**
+- [x] **Step 1: 先写失败测试，覆盖 Statistics 区块**
 
 扩展 `tui/src/views/instance.rs` 里的现有测试 `renders_grid_detail_execution_activity_and_commands`，补这些断言：
 
@@ -317,12 +317,12 @@ assert!(text.contains("+1245.30"));
 assert!(text.contains("+980.10"));
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前红灯**
+- [x] **Step 2: 运行定向测试，确认当前红灯**
 
 Run: `cargo test -p grid-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact`
 Expected: FAIL，原因是当前视图还没有 `Statistics` 区块
 
-- [ ] **Step 3: 最小实现双列强调样式**
+- [x] **Step 3: 最小实现双列强调样式**
 
 在 `tui/src/views/instance.rs`：
 
@@ -353,12 +353,12 @@ fn format_pnl(value: f64) -> String {
 
 区块标题固定为 `Statistics`。
 
-- [ ] **Step 4: 重新运行定向测试，确认转绿**
+- [x] **Step 4: 重新运行定向测试，确认转绿**
 
 Run: `cargo test -p grid-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact`
 Expected: PASS
 
-- [ ] **Step 5: 运行最终回归测试**
+- [x] **Step 5: 运行最终回归测试**
 
 Run: `cargo test -p grid-tui`
 Expected: PASS
@@ -366,13 +366,13 @@ Expected: PASS
 Run: `cargo test`
 Expected: PASS
 
-- [ ] **Step 6: 提交本 task**
+- [x] **Step 6: 提交本 task**
 
 ```bash
 git add tui/src/views/instance.rs
 git commit -m "feat: render statistics in tui detail"
 ```
 
-- [ ] **Step 7: 回写 commit SHA 到本任务**
+- [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `待执行时填写`
+Commit SHA: `6c18e4456be4d009b8c7a3367000f0e3c20a2e22`
