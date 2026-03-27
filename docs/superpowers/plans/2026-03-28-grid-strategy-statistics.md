@@ -376,3 +376,53 @@ git commit -m "feat: render statistics in tui detail"
 - [x] **Step 7: 回写 commit SHA 到本任务**
 
 Commit SHA: `2d9e7cd31eba84e5464179b6c2456ee36016c1d2`
+
+---
+
+### 审查跟进：补 detail statistics 的协议向后兼容
+
+**Files:**
+- Modify: `protocol/src/lib.rs`
+- Modify: `tui/src/protocol.rs`
+
+- [x] **Step 1: 先写失败测试，覆盖旧 detail payload 缺少 statistics**
+
+新增两个反序列化回归测试：
+
+- `tui/src/protocol.rs:deserializes_grid_detail_view_without_statistics`
+- `tui/src/protocol.rs:deserializes_grid_stream_detail_changed_without_statistics`
+
+两者都使用不带 `statistics` 的旧 payload，并断言新 TUI 会把统计值默认解成 `0.0`。
+
+- [x] **Step 2: 运行定向测试，确认当前红灯**
+
+Run: `cargo test -p grid-tui without_statistics -- --nocapture`
+Expected: FAIL，原因是 `GridDetailView.statistics` 还是必填字段
+
+- [x] **Step 3: 最小实现协议默认值**
+
+在 `protocol/src/lib.rs`：
+
+- 给 `GridDetailView.statistics` 增加 `#[serde(default)]`
+- 给 `GridStatisticsView` 增加 `Default`，默认 `total_pnl = 0.0`、`realized_pnl = 0.0`
+
+- [x] **Step 4: 重新运行定向测试，确认转绿**
+
+Run: `cargo test -p grid-tui without_statistics -- --nocapture`
+Expected: PASS
+
+- [x] **Step 5: 运行最终回归测试**
+
+Run: `cargo test`
+Expected: PASS
+
+- [x] **Step 6: 提交审查跟进补丁**
+
+```bash
+git add protocol/src/lib.rs tui/src/protocol.rs
+git commit -m "fix: keep detail protocol backward compatible"
+```
+
+- [x] **Step 7: 回写 commit SHA 到本任务**
+
+Commit SHA: `879262cb2ca14eb339de1728a2b87f132946d572`
