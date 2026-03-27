@@ -61,9 +61,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(summary, sections[0]);
 
     let statistics_lines = vec![
-        Line::from("Total PnL      Realized PnL"),
+        Line::from("Total PnL | Realized PnL"),
         Line::from(format!(
-            "{:<14}{}",
+            "{} | {}",
             format_pnl(detail.statistics.total_pnl),
             format_pnl(detail.statistics.realized_pnl),
         )),
@@ -218,6 +218,8 @@ mod tests {
         let mut detail: GridDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
                 .unwrap();
+        detail.statistics.total_pnl = -123456789.12;
+        detail.statistics.realized_pnl = 987654321.99;
         detail.available_commands.push(GridCommandView {
             command: GridCommandType::Resume,
             enabled: false,
@@ -244,8 +246,12 @@ mod tests {
         assert!(text.contains("Commands"));
         assert!(text.contains("Total PnL"));
         assert!(text.contains("Realized PnL"));
-        assert!(text.contains("+1245.30"));
-        assert!(text.contains("+980.10"));
+        assert!(text.contains("Total PnL | Realized PnL"));
+        assert!(text.contains("-123456789.12 | +987654321.99"));
+        assert!(text.contains("lower: 90.0000"));
+        assert!(text.contains("upper: 110.0000"));
+        assert!(text.contains("shape: linear"));
+        assert!(text.contains("out of band policy: freeze"));
         assert!(text.contains("pause"));
         assert!(text.contains("terminate"));
         assert!(text.contains("resume"));
