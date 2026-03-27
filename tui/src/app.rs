@@ -1,9 +1,6 @@
-use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crate::protocol::{GridSnapshot, GridSummary, WsEvent};
-
-const MAX_RECENT_EVENTS: usize = 20;
+use crate::protocol::{GridCommandType, GridDetailView, GridListItemView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -14,13 +11,11 @@ pub enum View {
 
 #[derive(Debug, Clone)]
 pub struct App {
-    pub instances: Vec<GridSummary>,
-    pub current_instance: Option<GridSnapshot>,
+    pub grids: Vec<GridListItemView>,
+    pub current_grid: Option<GridDetailView>,
     pub selected_index: usize,
     pub current_view: View,
     pub should_quit: bool,
-    snapshot_cache: HashMap<String, GridSnapshot>,
-    recent_events: HashMap<String, VecDeque<WsEvent>>,
     status_message: Option<String>,
     initial_load_pending: bool,
     next_http_retry_at: Instant,
@@ -28,17 +23,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mut instances: Vec<GridSummary>) -> Self {
-        instances.sort_by(|left, right| left.id.cmp(&right.id));
+    pub fn new(mut grids: Vec<GridListItemView>) -> Self {
+        grids.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
-            instances,
-            current_instance: None,
+            grids,
+            current_grid: None,
             selected_index: 0,
             current_view: View::Dashboard,
             should_quit: false,
-            snapshot_cache: HashMap::new(),
-            recent_events: HashMap::new(),
             status_message: None,
             initial_load_pending: false,
             next_http_retry_at: Instant::now(),
@@ -46,52 +39,33 @@ impl App {
         }
     }
 
-    pub fn selected_instance_id(&self) -> Option<&str> {
-        self.instances
+    pub fn selected_grid_id(&self) -> Option<&str> {
+        self.grids
             .get(self.selected_index)
-            .map(|instance| instance.id.as_str())
+            .map(|grid| grid.id.as_str())
     }
 
-    pub fn selected_snapshot(&self) -> Option<&GridSnapshot> {
-        self.selected_instance_id()
-            .and_then(|id| self.snapshot_cache.get(id))
-    }
-
-    pub fn cached_snapshot(&self, id: &str) -> Option<&GridSnapshot> {
-        self.snapshot_cache.get(id)
-    }
-
-    pub fn recent_events_for_current(&self) -> Vec<WsEvent> {
-        let Some(grid_id) = self
-            .current_instance
+    pub fn current_grid_detail(&self) -> Option<&GridDetailView> {
+        self.current_grid
             .as_ref()
-            .map(|snapshot| snapshot.id.as_str())
-            .or_else(|| self.selected_instance_id())
-        else {
-            return vec![];
-        };
-
-        self.recent_events
-            .get(grid_id)
-            .map(|events| events.iter().cloned().collect())
-            .unwrap_or_default()
+            .filter(|detail| self.selected_grid_id() == Some(detail.identity.id.as_str()))
     }
 
     pub fn select_next(&mut self) {
-        if self.instances.is_empty() {
+        if self.grids.is_empty() {
             return;
         }
 
-        self.selected_index = (self.selected_index + 1) % self.instances.len();
+        self.selected_index = (self.selected_index + 1) % self.grids.len();
     }
 
     pub fn select_previous(&mut self) {
-        if self.instances.is_empty() {
+        if self.grids.is_empty() {
             return;
         }
 
         self.selected_index = if self.selected_index == 0 {
-            self.instances.len() - 1
+            self.grids.len() - 1
         } else {
             self.selected_index - 1
         };
@@ -107,47 +81,58 @@ impl App {
 
     pub fn show_dashboard(&mut self) {
         self.current_view = View::Dashboard;
-        self.current_instance = None;
     }
 
     pub fn show_instance_for_selected(&mut self) {
         self.current_view = View::Instance;
-        self.current_instance = self.selected_snapshot().cloned();
-    }
-
-    pub fn has_current_instance(&self) -> bool {
-        self.current_instance.is_some()
-    }
-
-    pub fn apply_snapshot(&mut self, snapshot: GridSnapshot) {
-        if let Some(summary) = self
-            .instances
-            .iter_mut()
-            .find(|item| item.id == snapshot.id)
+        if self
+            .current_grid
+            .as_ref()
+            .is_some_and(|detail| self.selected_grid_id() != Some(detail.identity.id.as_str()))
         {
-            summary.status = snapshot.status.clone();
-            summary.reference_price = snapshot.reference_price;
+            self.current_grid = None;
         }
-
-        let selected_matches = self.selected_instance_id() == Some(snapshot.id.as_str());
-        let should_refresh_current = (selected_matches && self.current_view == View::Instance)
-            || self
-                .current_instance
-                .as_ref()
-                .is_some_and(|current| current.id == snapshot.id);
-        if should_refresh_current {
-            self.current_instance = Some(snapshot.clone());
-        }
-
-        self.snapshot_cache.insert(snapshot.id.clone(), snapshot);
     }
 
-    pub fn record_event(&mut self, event: WsEvent) {
-        let events = self.recent_events.entry(event.grid_id.clone()).or_default();
-        events.push_front(event);
-        while events.len() > MAX_RECENT_EVENTS {
-            events.pop_back();
+    pub fn apply_grid_list_item(&mut self, item: GridListItemView) {
+        if let Some(existing) = self.grids.iter_mut().find(|grid| grid.id == item.id) {
+            *existing = item;
+            return;
         }
+
+        let selected_id = self.selected_grid_id().map(ToOwned::to_owned);
+        self.grids.push(item);
+        self.grids.sort_by(|left, right| left.id.cmp(&right.id));
+        if let Some(selected_id) = selected_id {
+            if let Some(index) = self.grids.iter().position(|grid| grid.id == selected_id) {
+                self.selected_index = index;
+            }
+        } else if !self.grids.is_empty() {
+            self.selected_index = self.selected_index.min(self.grids.len() - 1);
+        }
+    }
+
+    pub fn apply_grid_detail(&mut self, detail: GridDetailView) {
+        let selected_matches = self.selected_grid_id() == Some(detail.identity.id.as_str());
+        let should_refresh_current = selected_matches
+            || self
+                .current_grid
+                .as_ref()
+                .is_some_and(|current| current.identity.id == detail.identity.id);
+        if should_refresh_current {
+            self.current_grid = Some(detail);
+        }
+    }
+
+    pub fn is_command_enabled(&self, command: GridCommandType) -> bool {
+        self.current_grid_detail()
+            .and_then(|detail| {
+                detail
+                    .available_commands
+                    .iter()
+                    .find(|candidate| candidate.command == command)
+            })
+            .is_some_and(|candidate| candidate.enabled)
     }
 
     pub fn set_status_message(&mut self, message: impl Into<String>) {
@@ -188,84 +173,66 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary, OrderStatus,
-        OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
+        ExecutionStateView, GridDetailView, GridListItemView, GridStreamEvent, GridStreamPayload,
     };
 
     use super::{App, View};
 
-    fn summary(id: &str) -> GridSummary {
-        GridSummary {
-            id: id.into(),
-            symbol: id.into(),
-            status: GridStatus::WaitingMarketData,
-            reference_price: None,
-        }
+    fn grid_list_items() -> Vec<GridListItemView> {
+        let mut response: crate::protocol::GridListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+                .unwrap();
+        let mut eth = response.items[0].clone();
+        eth.id = "eth-core".into();
+        eth.instrument.symbol = "ETHUSDT".into();
+        eth.reference_price = Some(2200.0);
+        response.items.push(eth);
+        response.items
     }
 
-    fn snapshot(id: &str, exposure: f64) -> GridSnapshot {
-        GridSnapshot {
-            id: id.into(),
-            symbol: id.into(),
-            status: GridStatus::Active,
-            current_exposure: exposure,
-            target_exposure: Some(exposure + 1.0),
-            reference_price: Some(100.0),
-            pending_order: Some(PendingOrder {
-                symbol: id.into(),
-                order_id: Some(format!("{id}-order")),
-                client_order_id: format!("{id}-client"),
-                side: Side::Buy,
-                price: 99.0,
-                quantity: 0.25,
-                status: OrderStatus::New,
-            }),
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
-        }
+    fn detail_view(id: &str) -> GridDetailView {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
+        detail.identity.id = id.into();
+        detail.identity.instrument.symbol = if id == "eth-core" {
+            "ETHUSDT".into()
+        } else {
+            "BTCUSDT".into()
+        };
+        detail
     }
 
     #[test]
-    fn applies_snapshot_to_summary_and_selected_instance() {
-        let mut app = App::new(vec![summary("BTCUSDT")]);
+    fn apply_grid_detail_updates_current_detail_without_snapshot_cache() {
+        let mut app = App::new(grid_list_items());
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        app.apply_snapshot(snapshot("BTCUSDT", 3.5));
+        app.apply_grid_detail(detail_view("btc-core"));
 
-        assert_eq!(app.instances[0].status, GridStatus::Active);
-        assert_eq!(app.instances[0].reference_price, Some(100.0));
-        assert_eq!(app.current_instance.unwrap().current_exposure, 3.5);
+        assert_eq!(app.current_grid_detail().unwrap().identity.id, "btc-core");
+        assert_eq!(
+            app.current_grid_detail().unwrap().position.current_exposure,
+            3.5
+        );
     }
 
     #[test]
-    fn records_recent_events_with_limit() {
-        let mut app = App::new(vec![summary("BTCUSDT")]);
+    fn apply_grid_list_item_updates_dashboard_item() {
+        let mut app = App::new(grid_list_items());
+        let mut updated = app.grids[0].clone();
+        updated.reference_price = Some(102.5);
+        updated.execution.state = ExecutionStateView::Paused;
 
-        for index in 0..25 {
-            app.record_event(WsEvent {
-                grid_id: "BTCUSDT".into(),
-                event: DomainEvent::BandReentered {
-                    price: index as f64,
-                },
-            });
-        }
+        app.apply_grid_list_item(updated);
 
-        let events = app.recent_events_for_current();
-        assert_eq!(events.len(), 20);
-        assert_eq!(events[0].event, DomainEvent::BandReentered { price: 24.0 });
+        assert_eq!(app.grids[0].reference_price, Some(102.5));
+        assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
     }
 
     #[test]
     fn help_view_restores_previous_view() {
-        let mut app = App::new(vec![summary("BTCUSDT")]);
+        let mut app = App::new(grid_list_items());
         app.current_view = View::Instance;
 
         app.enter_help();
@@ -276,15 +243,40 @@ mod tests {
     }
 
     #[test]
-    fn show_instance_for_selected_clears_stale_snapshot_when_missing() {
-        let mut app = App::new(vec![summary("BTCUSDT"), summary("ETHUSDT")]);
+    fn show_instance_for_selected_uses_current_list_selection_and_detail() {
+        let mut app = App::new(grid_list_items());
         app.current_view = View::Instance;
-        app.apply_snapshot(snapshot("BTCUSDT", 3.5));
+        app.apply_grid_detail(detail_view("btc-core"));
         app.show_instance_for_selected();
+
+        assert_eq!(app.current_grid_detail().unwrap().identity.id, "btc-core");
 
         app.select_next();
         app.show_instance_for_selected();
 
-        assert!(app.current_instance.is_none());
+        assert!(app.current_grid_detail().is_none());
+    }
+
+    #[test]
+    fn apply_grid_detail_event_updates_current_grid() {
+        let mut app = App::new(grid_list_items());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_grid_detail(detail_view("btc-core"));
+
+        let event: GridStreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_grid_detail_changed.json"
+        ))
+        .unwrap();
+        let GridStreamPayload::GridDetailChanged { detail } = event.payload else {
+            panic!("unexpected payload variant");
+        };
+
+        app.apply_grid_detail(detail);
+
+        assert_eq!(
+            app.current_grid_detail().unwrap().status.reference_price,
+            Some(101.5)
+        );
     }
 }

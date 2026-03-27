@@ -9,12 +9,22 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
-use crate::protocol::{CommandRequest, CommandResponse, GridSnapshot, GridSummary, WsEvent};
+use crate::protocol::{
+    GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
+    GridStreamEvent,
+};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
     base_url: String,
     http: reqwest::Client,
+}
+
+#[derive(Debug)]
+enum WsMessageOutcome {
+    Event(GridStreamEvent),
+    Closed,
+    Ignore,
 }
 
 impl ApiClient {
@@ -33,38 +43,40 @@ impl ApiClient {
         }
     }
 
-    pub async fn list_instances(&self) -> Result<Vec<GridSummary>> {
+    pub async fn list_grids(&self) -> Result<GridListResponse> {
         let response = self
             .http
             .get(self.endpoint("/grids"))
             .send()
             .await
-            .context("failed to request instance list")?;
+            .context("failed to request grid list")?;
 
-        decode_json(response, "list instances").await
+        decode_json(response, "list grids").await
     }
 
-    pub async fn get_snapshot(&self, id: &str) -> Result<GridSnapshot> {
+    pub async fn get_grid_detail(&self, id: &str) -> Result<GridDetailView> {
         let response = self
             .http
-            .get(self.endpoint(&format!("/grids/{id}/snapshot")))
+            .get(self.endpoint(&format!("/grids/{id}")))
             .send()
             .await
-            .with_context(|| format!("failed to request snapshot for `{id}`"))?;
+            .with_context(|| format!("failed to request grid detail for `{id}`"))?;
 
-        decode_json(response, "get snapshot").await
+        decode_json(response, "get grid detail").await
     }
 
-    pub async fn submit_command(&self, id: &str, cmd: &str) -> Result<CommandResponse> {
+    pub async fn submit_command(
+        &self,
+        id: &str,
+        cmd: GridCommandType,
+    ) -> Result<GridCommandAccepted> {
         let response = self
             .http
             .post(self.endpoint(&format!("/grids/{id}/commands")))
-            .json(&CommandRequest {
-                command: cmd.to_string(),
-            })
+            .json(&GridCommandRequest { command: cmd })
             .send()
             .await
-            .with_context(|| format!("failed to submit `{cmd}` for `{id}`"))?;
+            .with_context(|| format!("failed to submit `{:?}` for `{id}`", cmd))?;
 
         decode_json(response, "submit command").await
     }
@@ -87,7 +99,7 @@ fn should_bypass_proxy(base_url: &str) -> bool {
     }
 }
 
-pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<WsEvent>> {
+pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<GridStreamEvent>> {
     let (stream, _) = connect_async(url)
         .await
         .with_context(|| format!("failed to connect websocket `{url}`"))?;
@@ -97,33 +109,42 @@ pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<WsEvent>> {
     tokio::spawn(async move {
         while let Some(message) = read.next().await {
             match message {
-                Ok(Message::Text(text)) => {
-                    let Ok(event) = serde_json::from_str::<WsEvent>(&text) else {
-                        continue;
-                    };
-                    if sender.send(event).await.is_err() {
-                        break;
+                Ok(message) => match decode_ws_message(message) {
+                    Ok(WsMessageOutcome::Event(event)) => {
+                        if sender.send(event).await.is_err() {
+                            break;
+                        }
                     }
+                    Ok(WsMessageOutcome::Closed) => break,
+                    Ok(WsMessageOutcome::Ignore) => {}
+                    Err(error) => tracing::warn!("discard invalid websocket payload: {error}"),
+                },
+                Err(error) => {
+                    tracing::warn!("websocket stream read failed: {error}");
+                    break;
                 }
-                Ok(Message::Binary(bytes)) => {
-                    let Ok(text) = String::from_utf8(bytes.to_vec()) else {
-                        continue;
-                    };
-                    let Ok(event) = serde_json::from_str::<WsEvent>(&text) else {
-                        continue;
-                    };
-                    if sender.send(event).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Close(_)) => break,
-                Ok(_) => {}
-                Err(_) => break,
             }
         }
     });
 
     Ok(receiver)
+}
+
+fn decode_ws_message(message: Message) -> Result<WsMessageOutcome> {
+    match message {
+        Message::Text(text) => Ok(WsMessageOutcome::Event(decode_ws_event_text(&text)?)),
+        Message::Binary(bytes) => {
+            let text = String::from_utf8(bytes.to_vec())
+                .context("websocket message was not valid UTF-8")?;
+            Ok(WsMessageOutcome::Event(decode_ws_event_text(&text)?))
+        }
+        Message::Close(_) => Ok(WsMessageOutcome::Closed),
+        _ => Ok(WsMessageOutcome::Ignore),
+    }
+}
+
+fn decode_ws_event_text(text: &str) -> Result<GridStreamEvent> {
+    serde_json::from_str(text).context("invalid websocket event json")
 }
 
 async fn decode_json<T>(response: reqwest::Response, action: &str) -> Result<T>
@@ -145,69 +166,53 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use axum::extract::State;
     use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
     use axum::response::Response;
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
 
     use crate::protocol::{
-        CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary,
-        OutOfBandPolicy, ShapeFamily, WsEvent,
+        GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
+        GridStreamEvent,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
 
     const BTC_GRID_ID: &str = "btc-core";
-    const BTC_SYMBOL: &str = "BTCUSDT";
 
-    #[derive(Clone)]
-    struct StubState {
-        snapshots: Arc<Mutex<HashMap<String, GridSnapshot>>>,
+    fn grid_list_response() -> GridListResponse {
+        serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json")).unwrap()
     }
 
-    async fn list_instances(State(state): State<StubState>) -> Json<Vec<GridSummary>> {
-        let snapshots = state.snapshots.lock().await;
-        Json(
-            snapshots
-                .values()
-                .map(|snapshot| GridSummary {
-                    id: snapshot.id.clone(),
-                    symbol: snapshot.symbol.clone(),
-                    status: snapshot.status.clone(),
-                    reference_price: snapshot.reference_price,
-                })
-                .collect(),
-        )
+    fn grid_detail_view() -> GridDetailView {
+        serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap()
     }
 
-    async fn get_snapshot(
+    fn grid_stream_event() -> GridStreamEvent {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_grid_detail_changed.json"
+        ))
+        .unwrap()
+    }
+
+    async fn list_grids() -> Json<GridListResponse> {
+        Json(grid_list_response())
+    }
+
+    async fn get_grid_detail(
         axum::extract::Path(id): axum::extract::Path<String>,
-        State(state): State<StubState>,
-    ) -> Json<GridSnapshot> {
-        Json(state.snapshots.lock().await.get(&id).unwrap().clone())
+    ) -> Json<GridDetailView> {
+        let detail = grid_detail_view();
+        assert_eq!(detail.identity.id, id);
+        Json(detail)
     }
 
     async fn submit_command(
         axum::extract::Path(id): axum::extract::Path<String>,
-        State(state): State<StubState>,
-        Json(command): Json<crate::protocol::CommandRequest>,
-    ) -> Json<CommandResponse> {
-        let mut snapshots = state.snapshots.lock().await;
-        if let Some(snapshot) = snapshots.get_mut(&id) {
-            if command.command == "pause" {
-                snapshot.status = GridStatus::Paused;
-            } else if command.command == "resume" {
-                snapshot.status = GridStatus::Active;
-            }
-        }
-
-        Json(CommandResponse {
+        Json(command): Json<GridCommandRequest>,
+    ) -> Json<GridCommandAccepted> {
+        Json(GridCommandAccepted {
             grid_id: id,
             command: command.command,
             accepted: true,
@@ -219,46 +224,18 @@ mod tests {
     }
 
     async fn handle_socket(mut socket: WebSocket) {
-        let payload = serde_json::to_string(&WsEvent {
-            grid_id: BTC_GRID_ID.into(),
-            event: DomainEvent::BandReentered { price: 99.0 },
-        })
-        .unwrap();
+        let payload = serde_json::to_string(&grid_stream_event()).unwrap();
         socket.send(AxumMessage::Text(payload)).await.unwrap();
     }
 
     async fn spawn_stub_server() -> (String, String) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let state = StubState {
-            snapshots: Arc::new(Mutex::new(HashMap::from([(
-                BTC_GRID_ID.to_string(),
-                GridSnapshot {
-                    id: BTC_GRID_ID.into(),
-                    symbol: BTC_SYMBOL.into(),
-                    status: GridStatus::Active,
-                    current_exposure: 2.5,
-                    target_exposure: None,
-                    reference_price: Some(100.0),
-                    pending_order: None,
-                    config: GridConfig {
-                        lower_price: 90.0,
-                        upper_price: 110.0,
-                        long_exposure_units: 8.0,
-                        short_exposure_units: 8.0,
-                        notional_per_unit: 375.0,
-                        shape_family: ShapeFamily::Linear,
-                        out_of_band_policy: OutOfBandPolicy::Freeze,
-                    },
-                },
-            )]))),
-        };
         let app = Router::new()
-            .route("/grids", get(list_instances))
-            .route("/grids/:id/snapshot", get(get_snapshot))
+            .route("/grids", get(list_grids))
+            .route("/grids/:id", get(get_grid_detail))
             .route("/grids/:id/commands", post(submit_command))
-            .route("/ws", get(ws_handler))
-            .with_state(state);
+            .route("/ws", get(ws_handler));
 
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -268,41 +245,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lists_instances_from_http() {
+    async fn list_grids_decodes_grid_list_response() {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let items = client.list_instances().await.unwrap();
+        let response = client.list_grids().await.unwrap();
 
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].id, BTC_GRID_ID);
-        assert_eq!(items[0].symbol, BTC_SYMBOL);
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].id, BTC_GRID_ID);
+        assert_eq!(response.items[0].instrument.symbol, "BTCUSDT");
     }
 
     #[tokio::test]
-    async fn gets_snapshot_from_http() {
+    async fn get_grid_detail_decodes_projected_detail() {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let snapshot = client.get_snapshot(BTC_GRID_ID).await.unwrap();
+        let detail = client.get_grid_detail(BTC_GRID_ID).await.unwrap();
 
-        assert_eq!(snapshot.current_exposure, 2.5);
-        assert_eq!(snapshot.status, GridStatus::Active);
-        assert_eq!(snapshot.id, BTC_GRID_ID);
-        assert_eq!(snapshot.symbol, BTC_SYMBOL);
+        assert_eq!(detail.identity.id, BTC_GRID_ID);
+        assert_eq!(detail.position.current_exposure, 3.5);
+        assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
     }
 
     #[tokio::test]
-    async fn submits_commands_over_http() {
+    async fn submits_typed_commands_over_http() {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let response = client.submit_command(BTC_GRID_ID, "pause").await.unwrap();
-        let snapshot = client.get_snapshot(BTC_GRID_ID).await.unwrap();
+        let response = client
+            .submit_command(BTC_GRID_ID, GridCommandType::Pause)
+            .await
+            .unwrap();
 
         assert!(response.accepted);
         assert_eq!(response.grid_id, BTC_GRID_ID);
-        assert_eq!(snapshot.status, GridStatus::Paused);
+        assert_eq!(response.command, GridCommandType::Pause);
     }
 
     #[test]
@@ -314,13 +292,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receives_events_from_websocket() {
+    async fn receives_grid_stream_events_from_websocket() {
         let (_, ws_url) = spawn_stub_server().await;
         let mut receiver = connect_ws(&ws_url).await.unwrap();
 
         let event = receiver.recv().await.unwrap();
 
         assert_eq!(event.grid_id, BTC_GRID_ID);
-        assert_eq!(event.event, DomainEvent::BandReentered { price: 99.0 });
+        assert_eq!(event.payload, grid_stream_event().payload);
+    }
+
+    #[test]
+    fn decode_ws_message_rejects_invalid_json_text() {
+        let error = super::decode_ws_message(tokio_tungstenite::tungstenite::Message::Text(
+            "{not-json".into(),
+        ))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid websocket event json"));
     }
 }

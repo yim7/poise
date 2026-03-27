@@ -64,8 +64,9 @@ mod tests {
     use grid_engine::grid::{Instrument, Venue};
     use grid_engine::ports::{
         ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
-        OrderStatus, Position, PriceTick, StateRepositoryPort,
+        OrderStatus, Position, PriceTick,
     };
+    use grid_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
     use super::parse_config_path;
@@ -92,7 +93,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_flow_serves_grids_and_snapshots() {
+    async fn startup_flow_serves_grid_list_and_detail() {
         let suffix = format!(
             "test-{}",
             std::time::SystemTime::now()
@@ -130,11 +131,13 @@ notional_per_unit = 375.0
         .unwrap();
 
         let config = crate::config::load_config(config_path.to_str().unwrap()).unwrap();
+        fs::create_dir_all(config.default_db_path().parent().unwrap()).unwrap();
+        let storage = Arc::new(SqliteStorage::new(config.default_db_path()).unwrap());
         let platform = crate::assembly::assemble_with_components(
             &config,
             Arc::new(FakeExchange),
             Arc::new(FakeMarketData::default()),
-            Arc::new(FakePersistence),
+            storage,
             Arc::new(FakeClock),
         )
         .await
@@ -152,19 +155,19 @@ notional_per_unit = 375.0
             .await
             .unwrap();
         assert!(grids.status().is_success());
-        let list: Vec<crate::http::GridSummary> = grids.json().await.unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "btc-core");
+        let list: grid_protocol::GridListResponse = grids.json().await.unwrap();
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].id, "btc-core");
 
-        let snapshot = client
-            .get(format!("http://{bind_address}/grids/btc-core/snapshot"))
+        let detail = client
+            .get(format!("http://{bind_address}/grids/btc-core"))
             .send()
             .await
             .unwrap();
-        assert!(snapshot.status().is_success());
-        let payload: crate::http::GridSnapshot = snapshot.json().await.unwrap();
-        assert_eq!(payload.id, "btc-core");
-        assert_eq!(payload.symbol, "BTCUSDT");
+        assert!(detail.status().is_success());
+        let payload: grid_protocol::GridDetailView = detail.json().await.unwrap();
+        assert_eq!(payload.identity.id, "btc-core");
+        assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
 
         server.abort();
         let _ = server.await;
@@ -250,53 +253,6 @@ notional_per_unit = 375.0
         ) -> Result<mpsc::Receiver<grid_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
-        }
-    }
-
-    struct FakePersistence;
-
-    #[async_trait::async_trait]
-    impl StateRepositoryPort for FakePersistence {
-        async fn save_transition(
-            &self,
-            id: &str,
-            _state: &grid_engine::ports::GridSnapshot,
-            _events: &[grid_core::events::DomainEvent],
-            _effects: &[grid_engine::transition::GridEffect],
-        ) -> Result<grid_engine::ports::CommittedGridWrite> {
-            Ok(grid_engine::ports::CommittedGridWrite {
-                grid_id: grid_engine::grid::GridId::new(id),
-                effects: Vec::new(),
-            })
-        }
-
-        async fn load_grid_state(
-            &self,
-            _id: &str,
-        ) -> Result<Option<grid_engine::ports::GridSnapshot>> {
-            Ok(None)
-        }
-
-        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pending_effects(
-            &self,
-        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
-            Ok(())
         }
     }
 

@@ -1,20 +1,17 @@
 pub use grid_protocol::{
-    CommandRequest, CommandResponse, GridSnapshot, GridStatus, GridSummary, WsEvent,
+    ActivityLevelView, ExecutionStateView, GridCommandAccepted, GridCommandRequest,
+    GridCommandType, GridCommandView, GridDetailView, GridExecutionView, GridListItemView,
+    GridListResponse, GridStatus, GridStreamEvent, GridStreamPayload,
 };
 
 #[cfg(test)]
-pub use grid_protocol::{
-    ActivityLevelView, BandBoundary, DomainEvent, ExecutionStateView, GridCommandRequest,
-    GridCommandType, GridConfig, GridDetailView, GridListResponse, GridStreamEvent,
-    GridStreamPayload, OrderStatus, OutOfBandPolicy, PendingOrder, ShapeFamily, Side,
-};
+pub use grid_protocol::{ExecutionBadgeView, ExposureSummaryView};
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityLevelView, CommandResponse, DomainEvent, ExecutionStateView, GridCommandRequest,
-        GridCommandType, GridDetailView, GridListResponse, GridSnapshot, GridStatus,
-        GridStreamEvent, GridStreamPayload, GridSummary, WsEvent,
+        ActivityLevelView, ExecutionStateView, GridCommandAccepted, GridCommandRequest,
+        GridCommandType, GridDetailView, GridListResponse, GridStreamEvent, GridStreamPayload,
     };
 
     #[test]
@@ -84,59 +81,13 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_legacy_grid_summary_list() {
-        let grids: Vec<GridSummary> =
-            serde_json::from_str(include_str!("../tests/fixtures/instance_summaries.json"))
+    fn deserializes_grid_command_accepted() {
+        let response: GridCommandAccepted =
+            serde_json::from_str(r#"{"grid_id":"btc-core","command":"pause","accepted":true}"#)
                 .unwrap();
 
-        assert_eq!(grids.len(), 1);
-        assert_eq!(grids[0].id, "btc-core");
-        assert_eq!(grids[0].status, GridStatus::Active);
-    }
-
-    #[test]
-    fn deserializes_legacy_grid_snapshot() {
-        let snapshot: GridSnapshot =
-            serde_json::from_str(include_str!("../tests/fixtures/instance_snapshot.json")).unwrap();
-
-        assert_eq!(snapshot.id, "btc-core");
-        assert_eq!(snapshot.symbol, "BTCUSDT");
-        assert_eq!(snapshot.status, GridStatus::Holding);
-        assert_eq!(snapshot.current_exposure, 3.5);
-    }
-
-    #[test]
-    fn deserializes_legacy_ws_event() {
-        let event: WsEvent =
-            serde_json::from_str(include_str!("../tests/fixtures/ws_event.json")).unwrap();
-
-        assert_eq!(event.grid_id, "btc-core");
-        assert_eq!(
-            event.event,
-            DomainEvent::ExposureTargetChanged { from: 0.0, to: 4.0 }
-        );
-    }
-
-    #[test]
-    fn deserializes_legacy_snapshot_updated_ws_event() {
-        let event: WsEvent = serde_json::from_str(
-            r#"{
-                "grid_id": "btc-core",
-                "event": "snapshot_updated"
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(event.grid_id, "btc-core");
-        assert_eq!(event.event, DomainEvent::SnapshotUpdated);
-    }
-
-    #[test]
-    fn deserializes_legacy_command_response() {
-        let response: CommandResponse =
-            serde_json::from_str(include_str!("../tests/fixtures/command_response.json")).unwrap();
-
         assert_eq!(response.grid_id, "btc-core");
+        assert_eq!(response.command, GridCommandType::Pause);
         assert!(response.accepted);
     }
 }

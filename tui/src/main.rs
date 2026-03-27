@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::api_client::{ApiClient, connect_ws};
 use crate::app::{App, View};
 use crate::input::{Action, CommandKind, handle_key_event};
-use crate::protocol::{CommandResponse, WsEvent};
+use crate::protocol::{GridCommandAccepted, GridStreamEvent, GridStreamPayload};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -80,6 +80,7 @@ impl Drop for TerminalGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     let config = RuntimeConfig::from_env()?;
     let mut terminal = TerminalGuard::new()?;
     let client = ApiClient::new(config.base_url.clone());
@@ -93,6 +94,10 @@ async fn main() -> Result<()> {
         &mut ws_receiver,
     )
     .await
+}
+
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt::try_init();
 }
 
 impl RuntimeConfig {
@@ -135,16 +140,11 @@ fn derive_ws_url(base_url: &str) -> Result<String> {
 }
 
 async fn load_initial_state(client: &ApiClient) -> Result<App> {
-    let grids = client.list_instances().await?;
-    let ids = grids
-        .iter()
-        .map(|instance| instance.id.clone())
-        .collect::<Vec<_>>();
-    let mut app = App::new(grids);
-
-    for id in ids {
-        let snapshot = client.get_snapshot(&id).await?;
-        app.apply_snapshot(snapshot);
+    let response = client.list_grids().await?;
+    let mut app = App::new(response.items);
+    if let Some(grid_id) = app.selected_grid_id().map(ToOwned::to_owned) {
+        let detail = client.get_grid_detail(&grid_id).await?;
+        app.apply_grid_detail(detail);
     }
 
     Ok(app)
@@ -153,7 +153,7 @@ async fn load_initial_state(client: &ApiClient) -> Result<App> {
 async fn bootstrap_runtime_state(
     client: &ApiClient,
     ws_url: &str,
-) -> (App, Option<tokio::sync::mpsc::Receiver<WsEvent>>) {
+) -> (App, Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>) {
     let mut app = match load_initial_state(client).await {
         Ok(app) => app,
         Err(error) => {
@@ -166,7 +166,7 @@ async fn bootstrap_runtime_state(
 
     let ws_receiver = match connect_ws(ws_url).await {
         Ok(receiver) => {
-            app.mark_websocket_connected();
+            finalize_websocket_connection(client, &mut app, "websocket connected").await;
             Some(receiver)
         }
         Err(error) => {
@@ -184,7 +184,7 @@ async fn run_loop(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<WsEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
 ) -> Result<()> {
     loop {
         maybe_load_initial_state(client, app).await;
@@ -238,10 +238,10 @@ async fn process_ws_event(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<WsEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
 ) {
     if ws_receiver.is_none() {
-        maybe_reconnect_websocket(ws_url, app, ws_receiver).await;
+        maybe_reconnect_websocket(client, ws_url, app, ws_receiver).await;
         return;
     }
 
@@ -249,34 +249,33 @@ async fn process_ws_event(
 
     match receiver.try_recv() {
         Ok(event) => {
-            if let Err(error) = handle_ws_event(client, app, event).await {
-                app.set_status_message(format!("ws refresh failed: {error}"));
-            }
+            handle_ws_event(app, event).await;
         }
         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-            reconnect_websocket(ws_url, app, ws_receiver).await;
+            reconnect_websocket(client, ws_url, app, ws_receiver).await;
         }
     }
 }
 
 async fn maybe_reconnect_websocket(
+    client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<WsEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
 ) {
     if !app.should_retry_websocket() {
         return;
     }
 
-    connect_websocket(ws_url, app, ws_receiver, "websocket connected").await;
+    connect_websocket(client, ws_url, app, ws_receiver, "websocket connected").await;
 }
 
 async fn handle_action(client: &ApiClient, app: &mut App, action: Action) -> Result<()> {
     match action {
         Action::None => Ok(()),
         Action::OpenSelectedInstance | Action::RefreshSelectedInstance => {
-            refresh_selected_snapshot(client, app).await?;
+            refresh_selected_grid_detail(client, app).await?;
             app.show_instance_for_selected();
             Ok(())
         }
@@ -290,69 +289,68 @@ async fn submit_selected_command(
     command: CommandKind,
 ) -> Result<()> {
     let grid_id = app
-        .selected_instance_id()
+        .selected_grid_id()
         .context("no instance selected for command")?
         .to_string();
     let response = client
-        .submit_command(&grid_id, command.as_str())
+        .submit_command(&grid_id, command.as_grid_command())
         .await
         .with_context(|| format!("failed to submit command for `{grid_id}`"))?;
     if !response.accepted {
         anyhow::bail!(
-            "command `{}` rejected for `{}`",
+            "command `{:?}` rejected for `{}`",
             response.command,
             response.grid_id
         );
     }
+    sync_projected_state(client, app).await?;
     app.set_status_message(format_command_response(&response));
-    refresh_selected_snapshot(client, app).await?;
     if app.current_view == View::Instance {
         app.show_instance_for_selected();
     }
     Ok(())
 }
 
-fn format_command_response(response: &CommandResponse) -> String {
+fn format_command_response(response: &GridCommandAccepted) -> String {
     format!(
-        "command `{}` accepted for `{}`",
+        "command `{:?}` accepted for `{}`",
         response.command, response.grid_id
     )
+    .to_ascii_lowercase()
 }
 
-async fn refresh_selected_snapshot(client: &ApiClient, app: &mut App) -> Result<()> {
+async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Result<()> {
     let grid_id = app
-        .selected_instance_id()
+        .selected_grid_id()
         .context("no instance selected")?
         .to_string();
-    let snapshot = client.get_snapshot(&grid_id).await?;
-    app.apply_snapshot(snapshot);
+    let detail = client.get_grid_detail(&grid_id).await?;
+    app.apply_grid_detail(detail);
     Ok(())
 }
 
-async fn handle_ws_event(client: &ApiClient, app: &mut App, event: WsEvent) -> Result<()> {
-    let grid_id = event.grid_id.clone();
-    app.record_event(event);
-    let snapshot = client
-        .get_snapshot(&grid_id)
-        .await
-        .with_context(|| format!("failed to refresh snapshot after ws event for `{grid_id}`"))?;
-    app.apply_snapshot(snapshot);
-    Ok(())
+async fn handle_ws_event(app: &mut App, event: GridStreamEvent) {
+    match event.payload {
+        GridStreamPayload::GridListItemChanged { item } => app.apply_grid_list_item(item),
+        GridStreamPayload::GridDetailChanged { detail } => app.apply_grid_detail(detail),
+    }
 }
 
 async fn reconnect_websocket(
+    client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<WsEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
 ) {
     app.set_status_message("websocket disconnected, reconnecting");
-    connect_websocket(ws_url, app, ws_receiver, "websocket reconnected").await;
+    connect_websocket(client, ws_url, app, ws_receiver, "websocket reconnected").await;
 }
 
 async fn connect_websocket(
+    client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<WsEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
     success_message: &str,
 ) {
     *ws_receiver = match connect_ws(ws_url).await {
@@ -364,9 +362,48 @@ async fn connect_websocket(
         }
     };
     if ws_receiver.is_some() {
-        app.mark_websocket_connected();
-        app.set_status_message(success_message);
+        finalize_websocket_connection(client, app, success_message).await;
     }
+}
+
+async fn finalize_websocket_connection(client: &ApiClient, app: &mut App, success_message: &str) {
+    app.mark_websocket_connected();
+    match sync_projected_state(client, app).await {
+        Ok(()) => app.set_status_message(success_message),
+        Err(error) => {
+            app.set_status_message(format!("{success_message}; refresh failed: {error}"));
+            app.schedule_initial_load_retry(INITIAL_LOAD_RETRY_DELAY);
+        }
+    }
+}
+
+async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
+    let selected_grid_id = app.selected_grid_id().map(ToOwned::to_owned);
+    let current_view = app.current_view;
+    let should_quit = app.should_quit;
+
+    let response = client.list_grids().await?;
+    let mut refreshed = App::new(response.items);
+    if let Some(selected_grid_id) = selected_grid_id {
+        if let Some(index) = refreshed
+            .grids
+            .iter()
+            .position(|grid| grid.id == selected_grid_id)
+        {
+            refreshed.selected_index = index;
+        }
+    }
+
+    if let Some(grid_id) = refreshed.selected_grid_id().map(ToOwned::to_owned) {
+        let detail = client.get_grid_detail(&grid_id).await?;
+        refreshed.apply_grid_detail(detail);
+    }
+
+    refreshed.current_view = current_view;
+    refreshed.should_quit = should_quit;
+    refreshed.mark_initial_load_complete();
+    *app = refreshed;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -396,8 +433,9 @@ mod tests {
     use crate::api_client::connect_ws;
     use crate::app::App;
     use crate::protocol::{
-        CommandRequest, CommandResponse, DomainEvent, GridConfig, GridSnapshot, GridStatus,
-        GridSummary, OutOfBandPolicy, ShapeFamily, WsEvent,
+        ExecutionStateView, GridCommandAccepted, GridCommandRequest, GridCommandType,
+        GridDetailView, GridListItemView, GridListResponse, GridStatus, GridStreamEvent,
+        GridStreamPayload,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -405,89 +443,175 @@ mod tests {
     const ETH_GRID_ID: &str = "eth-core";
     const ETH_SYMBOL: &str = "ETHUSDT";
 
+    fn grid_list_response() -> GridListResponse {
+        let mut response: GridListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+                .unwrap();
+        let mut eth = response.items[0].clone();
+        eth.id = ETH_GRID_ID.into();
+        eth.instrument.symbol = ETH_SYMBOL.into();
+        eth.reference_price = Some(2200.0);
+        response.items.push(eth);
+        response
+    }
+
+    fn detail_view(grid_id: &str, symbol: &str) -> GridDetailView {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
+        detail.identity.id = grid_id.into();
+        detail.identity.instrument.symbol = symbol.into();
+        detail.status.reference_price = Some(if symbol == ETH_SYMBOL { 2200.0 } else { 100.0 });
+        detail.position.current_exposure = if symbol == ETH_SYMBOL { -1.0 } else { 2.0 };
+        detail.execution.state = if symbol == ETH_SYMBOL {
+            ExecutionStateView::Paused
+        } else {
+            ExecutionStateView::Open
+        };
+        detail.available_commands = if symbol == ETH_SYMBOL {
+            vec![crate::protocol::GridCommandView {
+                command: GridCommandType::Resume,
+                enabled: true,
+                disabled_reason: None,
+            }]
+        } else {
+            vec![crate::protocol::GridCommandView {
+                command: GridCommandType::Pause,
+                enabled: true,
+                disabled_reason: None,
+            }]
+        };
+        detail
+    }
+
+    fn grid_list_item_changed_event() -> GridStreamEvent {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_grid_list_item_changed.json"
+        ))
+        .unwrap()
+    }
+
+    fn grid_detail_changed_event() -> GridStreamEvent {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_grid_detail_changed.json"
+        ))
+        .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct ProjectionStubState {
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn list_projected_grids(
+        State(state): State<ProjectionStubState>,
+    ) -> Json<GridListResponse> {
+        state.requests.lock().await.push("/grids".into());
+        Json(grid_list_response())
+    }
+
+    async fn get_projected_detail(
+        Path(id): Path<String>,
+        State(state): State<ProjectionStubState>,
+    ) -> Json<GridDetailView> {
+        state.requests.lock().await.push(format!("/grids/{id}"));
+        Json(match id.as_str() {
+            BTC_GRID_ID => detail_view(BTC_GRID_ID, BTC_SYMBOL),
+            ETH_GRID_ID => detail_view(ETH_GRID_ID, ETH_SYMBOL),
+            _ => panic!("unexpected grid id: {id}"),
+        })
+    }
+
+    async fn spawn_projection_stub_server() -> (ApiClient, ProjectionStubState) {
+        let state = ProjectionStubState {
+            requests: Arc::new(Mutex::new(vec![])),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/grids", get(list_projected_grids))
+            .route("/grids/:id", get(get_projected_detail))
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (ApiClient::new(format!("http://{address}")), state)
+    }
+
     #[derive(Clone)]
     struct StubState {
-        snapshots: Arc<Mutex<HashMap<String, GridSnapshot>>>,
+        list: Arc<Mutex<GridListResponse>>,
+        details: Arc<Mutex<HashMap<String, GridDetailView>>>,
     }
 
-    fn btc_snapshot(exposure: f64, status: GridStatus) -> GridSnapshot {
-        GridSnapshot {
-            id: BTC_GRID_ID.into(),
-            symbol: BTC_SYMBOL.into(),
-            status,
-            current_exposure: exposure,
-            target_exposure: None,
-            reference_price: Some(100.0),
-            pending_order: None,
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
+    fn list_item_from_detail(detail: &GridDetailView) -> GridListItemView {
+        GridListItemView {
+            id: detail.identity.id.clone(),
+            instrument: detail.identity.instrument.clone(),
+            lifecycle: detail.status.lifecycle.clone(),
+            reference_price: detail.status.reference_price,
+            exposure: crate::protocol::ExposureSummaryView {
+                current: detail.position.current_exposure,
+                target: detail.position.target_exposure,
+            },
+            execution: crate::protocol::ExecutionBadgeView {
+                state: detail.execution.state,
+                pending_order_count: u32::from(detail.execution.pending_order.is_some()),
             },
         }
     }
 
-    fn eth_snapshot() -> GridSnapshot {
-        GridSnapshot {
-            id: ETH_GRID_ID.into(),
-            symbol: ETH_SYMBOL.into(),
-            status: GridStatus::Paused,
-            current_exposure: -1.0,
-            target_exposure: None,
-            reference_price: Some(2200.0),
-            pending_order: None,
-            config: GridConfig {
-                lower_price: 2000.0,
-                upper_price: 2600.0,
-                long_exposure_units: 5.0,
-                short_exposure_units: 4.0,
-                notional_per_unit: 2000.0,
-                shape_family: ShapeFamily::Concave,
-                out_of_band_policy: OutOfBandPolicy::Hold,
-            },
+    fn stub_state() -> StubState {
+        let btc = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        let eth = detail_view(ETH_GRID_ID, ETH_SYMBOL);
+        StubState {
+            list: Arc::new(Mutex::new(GridListResponse {
+                items: vec![list_item_from_detail(&btc), list_item_from_detail(&eth)],
+            })),
+            details: Arc::new(Mutex::new(HashMap::from([
+                (BTC_GRID_ID.to_string(), btc),
+                (ETH_GRID_ID.to_string(), eth),
+            ]))),
         }
     }
 
-    async fn list_instances(State(state): State<StubState>) -> Json<Vec<GridSummary>> {
-        let snapshots = state.snapshots.lock().await;
-        Json(
-            snapshots
-                .values()
-                .map(|snapshot| GridSummary {
-                    id: snapshot.id.clone(),
-                    symbol: snapshot.symbol.clone(),
-                    status: snapshot.status.clone(),
-                    reference_price: snapshot.reference_price,
-                })
-                .collect(),
-        )
+    async fn list_grids(State(state): State<StubState>) -> Json<GridListResponse> {
+        Json(state.list.lock().await.clone())
     }
 
-    async fn get_snapshot(
+    async fn get_grid_detail(
         Path(id): Path<String>,
         State(state): State<StubState>,
-    ) -> Json<GridSnapshot> {
-        Json(state.snapshots.lock().await.get(&id).unwrap().clone())
+    ) -> Json<GridDetailView> {
+        Json(state.details.lock().await.get(&id).unwrap().clone())
     }
 
     async fn submit_command(
         Path(id): Path<String>,
         State(state): State<StubState>,
-        Json(command): Json<CommandRequest>,
-    ) -> Json<CommandResponse> {
-        let mut snapshots = state.snapshots.lock().await;
-        let snapshot = snapshots.get_mut(&id).unwrap();
-        snapshot.status = match command.command.as_str() {
-            "pause" => GridStatus::Paused,
-            "resume" => GridStatus::Active,
-            _ => snapshot.status.clone(),
-        };
+        Json(command): Json<GridCommandRequest>,
+    ) -> Json<GridCommandAccepted> {
+        let mut details = state.details.lock().await;
+        let detail = details.get_mut(&id).unwrap();
+        match command.command {
+            GridCommandType::Pause => {
+                detail.status.lifecycle.status = GridStatus::Paused;
+                detail.execution.state = ExecutionStateView::Paused;
+            }
+            GridCommandType::Resume => {
+                detail.status.lifecycle.status = GridStatus::Active;
+                detail.execution.state = ExecutionStateView::Open;
+            }
+            _ => {}
+        }
+        let list_item = list_item_from_detail(detail);
+        let mut list = state.list.lock().await;
+        if let Some(item) = list.items.iter_mut().find(|item| item.id == id) {
+            *item = list_item;
+        }
 
-        Json(CommandResponse {
+        Json(GridCommandAccepted {
             grid_id: id,
             command: command.command,
             accepted: true,
@@ -499,12 +623,16 @@ mod tests {
     }
 
     async fn handle_ws_socket(mut socket: WebSocket) {
-        let payload = serde_json::to_string(&WsEvent {
-            grid_id: BTC_GRID_ID.into(),
-            event: DomainEvent::BandReentered { price: 101.0 },
-        })
-        .unwrap();
+        let payload = serde_json::to_string(&grid_detail_changed_event()).unwrap();
         socket.send(AxumMessage::Text(payload)).await.unwrap();
+    }
+
+    async fn silent_ws_handler(ws: WebSocketUpgrade) -> Response {
+        ws.on_upgrade(handle_silent_ws_socket)
+    }
+
+    async fn handle_silent_ws_socket(mut socket: WebSocket) {
+        while socket.recv().await.is_some() {}
     }
 
     async fn exchange_ws_handler(Path(stream): Path<String>, ws: WebSocketUpgrade) -> Response {
@@ -645,20 +773,12 @@ mod tests {
     }
 
     async fn spawn_stub_server() -> (ApiClient, String, StubState) {
-        let state = StubState {
-            snapshots: Arc::new(Mutex::new(HashMap::from([
-                (
-                    BTC_GRID_ID.to_string(),
-                    btc_snapshot(2.0, GridStatus::Active),
-                ),
-                (ETH_GRID_ID.to_string(), eth_snapshot()),
-            ]))),
-        };
+        let state = stub_state();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/grids", get(list_instances))
-            .route("/grids/:id/snapshot", get(get_snapshot))
+            .route("/grids", get(list_grids))
+            .route("/grids/:id", get(get_grid_detail))
             .route("/grids/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
@@ -677,19 +797,11 @@ mod tests {
     async fn spawn_stub_server_on(
         address: std::net::SocketAddr,
     ) -> (ApiClient, String, StubState, tokio::task::JoinHandle<()>) {
-        let state = StubState {
-            snapshots: Arc::new(Mutex::new(HashMap::from([
-                (
-                    BTC_GRID_ID.to_string(),
-                    btc_snapshot(2.0, GridStatus::Active),
-                ),
-                (ETH_GRID_ID.to_string(), eth_snapshot()),
-            ]))),
-        };
+        let state = stub_state();
         let listener = TcpListener::bind(address).await.unwrap();
         let app = Router::new()
-            .route("/grids", get(list_instances))
-            .route("/grids/:id/snapshot", get(get_snapshot))
+            .route("/grids", get(list_grids))
+            .route("/grids/:id", get(get_grid_detail))
             .route("/grids/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
@@ -729,9 +841,9 @@ mod tests {
 
     #[test]
     fn formats_command_response_message() {
-        let text = format_command_response(&CommandResponse {
+        let text = format_command_response(&GridCommandAccepted {
             grid_id: BTC_GRID_ID.into(),
-            command: "pause".into(),
+            command: crate::protocol::GridCommandType::Pause,
             accepted: true,
         });
 
@@ -739,62 +851,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loads_initial_state_with_snapshots() {
+    async fn load_initial_state_fetches_list_then_selected_detail() {
+        let (client, state) = spawn_projection_stub_server().await;
+
+        let app = load_initial_state(&client).await.unwrap();
+
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec!["/grids".to_string(), format!("/grids/{BTC_GRID_ID}")]
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_ws_event_applies_projected_updates_without_refetch() {
+        let mut app = App::new(grid_list_response().items);
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_grid_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
+
+        handle_ws_event(&mut app, grid_list_item_changed_event()).await;
+        handle_ws_event(&mut app, grid_detail_changed_event()).await;
+
+        assert_eq!(app.grids[0].reference_price, Some(101.4));
+        assert_eq!(
+            app.current_grid.as_ref().unwrap().status.reference_price,
+            Some(101.5)
+        );
+        assert!(matches!(
+            grid_detail_changed_event().payload,
+            GridStreamPayload::GridDetailChanged { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn loads_initial_state_with_selected_detail() {
         let (client, _, _) = spawn_stub_server().await;
 
         let app = load_initial_state(&client).await.unwrap();
 
-        assert_eq!(app.instances.len(), 2);
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert_eq!(
-            app.cached_snapshot(BTC_GRID_ID).unwrap().current_exposure,
+            app.current_grid.as_ref().unwrap().position.current_exposure,
             2.0
-        );
-        assert_eq!(
-            app.cached_snapshot(ETH_GRID_ID).unwrap().status,
-            GridStatus::Paused
         );
     }
 
     #[tokio::test]
-    async fn websocket_event_refreshes_cached_snapshot() {
-        let (client, _, state) = spawn_stub_server().await;
+    async fn websocket_event_applies_projected_detail() {
+        let (client, _, _) = spawn_stub_server().await;
         let mut app = load_initial_state(&client).await.unwrap();
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        state
-            .snapshots
-            .lock()
-            .await
-            .insert(BTC_GRID_ID.into(), btc_snapshot(4.0, GridStatus::Frozen));
-
-        handle_ws_event(
-            &client,
-            &mut app,
-            WsEvent {
-                grid_id: BTC_GRID_ID.into(),
-                event: DomainEvent::BandBreached {
-                    boundary: crate::protocol::BandBoundary::Above,
-                    price: 120.0,
-                },
-            },
-        )
-        .await
-        .unwrap();
+        handle_ws_event(&mut app, grid_detail_changed_event()).await;
 
         assert_eq!(
-            app.cached_snapshot(BTC_GRID_ID).unwrap().current_exposure,
-            4.0
+            app.current_grid.as_ref().unwrap().status.reference_price,
+            Some(101.5)
         );
-        assert_eq!(
-            app.current_instance.as_ref().unwrap().status,
-            GridStatus::Frozen
-        );
-        assert_eq!(app.recent_events_for_current().len(), 1);
     }
 
     #[tokio::test]
-    async fn submits_pause_command_and_refreshes_snapshot() {
+    async fn submits_pause_command_and_refreshes_detail() {
         let (client, _, _) = spawn_stub_server().await;
         let mut app = load_initial_state(&client).await.unwrap();
         app.current_view = View::Instance;
@@ -805,7 +926,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.cached_snapshot(BTC_GRID_ID).unwrap().status,
+            app.current_grid_detail().unwrap().status.lifecycle.status,
             GridStatus::Paused
         );
         assert!(
@@ -816,12 +937,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submits_pause_command_refreshes_dashboard_when_websocket_is_unavailable() {
+        let (client, _, _) = spawn_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        assert_eq!(app.grids[0].lifecycle.status, GridStatus::Active);
+
+        submit_selected_command(&client, &mut app, CommandKind::Pause)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.current_grid_detail().unwrap().status.lifecycle.status,
+            GridStatus::Paused
+        );
+        assert_eq!(app.grids[0].lifecycle.status, GridStatus::Paused);
+        assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
+    }
+
+    #[tokio::test]
     async fn startup_failure_still_returns_a_tui_state() {
         let client = ApiClient::new("http://127.0.0.1:1");
 
         let (app, ws_receiver) = bootstrap_runtime_state(&client, "ws://127.0.0.1:1/ws").await;
 
-        assert!(app.instances.is_empty());
+        assert!(app.grids.is_empty());
         assert!(app.status_message().unwrap().contains("startup failed"));
         assert!(ws_receiver.is_none());
     }
@@ -835,7 +977,7 @@ mod tests {
         let ws_url = format!("ws://{bind_address}/ws");
 
         let (mut app, mut ws_receiver) = bootstrap_runtime_state(&client, &ws_url).await;
-        assert!(app.instances.is_empty());
+        assert!(app.grids.is_empty());
         assert!(app.status_message().unwrap().contains("startup failed"));
 
         let (_, _, _, server) = spawn_stub_server_on(bind_address).await;
@@ -843,15 +985,14 @@ mod tests {
         for _ in 0..20 {
             maybe_load_initial_state(&client, &mut app).await;
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if app.instances.len() == 2 && app.cached_snapshot(BTC_GRID_ID).is_some() {
+            if app.grids.len() == 2 && app.current_grid.is_some() {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert_eq!(app.instances.len(), 2);
-        assert!(app.cached_snapshot(BTC_GRID_ID).is_some());
-        assert!(app.cached_snapshot(ETH_GRID_ID).is_some());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
 
         server.abort();
         let _ = server.await;
@@ -873,14 +1014,72 @@ mod tests {
 
         for _ in 0..20 {
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if !app.recent_events_for_current().is_empty() {
+            if app
+                .current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price)
+                == Some(101.5)
+            {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
         assert!(ws_receiver.is_some());
-        assert_eq!(app.recent_events_for_current().len(), 1);
+        assert_eq!(
+            app.current_grid.as_ref().unwrap().status.reference_price,
+            Some(101.5)
+        );
+
+        ws_server.abort();
+        let _ = ws_server.await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_resyncs_http_state_even_when_websocket_pushes_nothing() {
+        let (client, _, state) = spawn_stub_server().await;
+        let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_address = bind_listener.local_addr().unwrap();
+        drop(bind_listener);
+        let ws_url = format!("ws://{bind_address}/ws");
+
+        let (mut app, mut ws_receiver) = bootstrap_runtime_state(&client, &ws_url).await;
+        assert!(app.status_message().unwrap().contains("ws connect failed"));
+        assert_eq!(
+            app.current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price),
+            Some(100.0)
+        );
+
+        let mut updated = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        updated.status.reference_price = Some(111.5);
+        updated.position.current_exposure = 4.5;
+        replace_grid_detail(&state, updated).await;
+
+        let ws_server = spawn_silent_ws_server_on(bind_address).await;
+
+        for _ in 0..20 {
+            process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
+            if app
+                .current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price)
+                == Some(111.5)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(ws_receiver.is_some());
+        assert_eq!(
+            app.current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price),
+            Some(111.5)
+        );
+        assert_eq!(app.grids[0].reference_price, Some(111.5));
 
         ws_server.abort();
         let _ = ws_server.await;
@@ -925,14 +1124,22 @@ mod tests {
 
         for _ in 0..20 {
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if !app.recent_events_for_current().is_empty() {
+            if app
+                .current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price)
+                == Some(101.5)
+            {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
         assert!(ws_receiver.is_some());
-        assert_eq!(app.recent_events_for_current().len(), 1);
+        assert_eq!(
+            app.current_grid.as_ref().unwrap().status.reference_price,
+            Some(101.5)
+        );
 
         ws_server.abort();
         let _ = ws_server.await;
@@ -987,6 +1194,31 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         })
+    }
+
+    async fn spawn_silent_ws_server_on(
+        address: std::net::SocketAddr,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = TcpListener::bind(address).await.unwrap();
+        let app = Router::new().route("/ws", get(silent_ws_handler));
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        })
+    }
+
+    async fn replace_grid_detail(state: &StubState, detail: GridDetailView) {
+        let grid_id = detail.identity.id.clone();
+        state
+            .details
+            .lock()
+            .await
+            .insert(grid_id.clone(), detail.clone());
+        let list_item = list_item_from_detail(&detail);
+        let mut list = state.list.lock().await;
+        if let Some(item) = list.items.iter_mut().find(|item| item.id == grid_id) {
+            *item = list_item;
+        }
     }
 
     fn workspace_root() -> PathBuf {
@@ -1144,16 +1376,16 @@ mod tests {
         panic!("server did not become ready");
     }
 
-    async fn wait_for_snapshot_price(client: &ApiClient, id: &str) {
+    async fn wait_for_detail_price(client: &ApiClient, id: &str) {
         for _ in 0..50 {
-            let snapshot = client.get_snapshot(id).await.unwrap();
-            if snapshot.reference_price.is_some() {
+            let detail = client.get_grid_detail(id).await.unwrap();
+            if detail.status.reference_price.is_some() {
                 return;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        panic!("snapshot `{id}` never received market price");
+        panic!("detail `{id}` never received market price");
     }
 
     #[tokio::test]
@@ -1219,47 +1451,52 @@ out_of_band_policy = "hold"
         let mut ws_receiver = Some(connect_ws(&ws_url).await.unwrap());
 
         let client = ApiClient::new(base_url);
-        wait_for_snapshot_price(&client, BTC_GRID_ID).await;
-        wait_for_snapshot_price(&client, ETH_GRID_ID).await;
+        wait_for_detail_price(&client, BTC_GRID_ID).await;
+        wait_for_detail_price(&client, ETH_GRID_ID).await;
 
         let mut app = load_initial_state(&client).await.unwrap();
-        assert_eq!(app.instances.len(), 2);
-        assert!(
-            app.cached_snapshot(BTC_GRID_ID)
-                .unwrap()
-                .reference_price
-                .is_some()
-        );
-        assert!(
-            app.cached_snapshot(ETH_GRID_ID)
-                .unwrap()
-                .reference_price
-                .is_some()
-        );
+        assert_eq!(app.grids.len(), 2);
+        assert!(app.grids.iter().all(|grid| grid.reference_price.is_some()));
 
         let action = crate::input::handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_instance.as_ref().unwrap().id, BTC_GRID_ID);
+        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
 
         let action = crate::input::handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_instance.as_ref().unwrap().id, ETH_GRID_ID);
+        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, ETH_GRID_ID);
 
         for _ in 0..30 {
+            let before = app
+                .current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price);
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if !app.recent_events_for_current().is_empty() {
+            if app
+                .current_grid
+                .as_ref()
+                .and_then(|detail| detail.status.reference_price)
+                != before
+            {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert!(!app.recent_events_for_current().is_empty());
+        assert!(
+            app.current_grid
+                .as_ref()
+                .unwrap()
+                .status
+                .reference_price
+                .is_some()
+        );
 
         let _ = server.kill();
         let _ = server.wait();
@@ -1344,19 +1581,12 @@ out_of_band_policy = "hold"
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
-            eth_view.contains("capacity notional: 2000.0000"),
+            eth_view.contains("out of band policy: hold"),
             "eth view:\n{eth_view}"
         );
 
-        let event_view = wait_for_pane_text(&session, "snapshot updated").await;
-        assert!(
-            event_view.contains("Recent Events"),
-            "event view:\n{event_view}"
-        );
-        assert!(
-            event_view.contains("snapshot updated"),
-            "event view:\n{event_view}"
-        );
+        let event_view = wait_for_pane_text(&session, "Activity").await;
+        assert!(event_view.contains("Activity"), "event view:\n{event_view}");
 
         session.send_keys(&["q"]);
         for _ in 0..30 {

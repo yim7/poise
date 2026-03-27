@@ -253,18 +253,25 @@ async fn apply_user_data_event(
                 .write_service
                 .observe_position(grid_id, position_observation(&position))
                 .await
-                .map_err(|error| GridMutationError::Persistence(anyhow!(error)))?;
+                .map_err(preserve_grid_mutation_error)?;
         }
         UserDataPayload::OrderUpdate(order) => {
             let _ = state
                 .write_service
                 .observe_order(grid_id, order_observation(&order))
                 .await
-                .map_err(|error| GridMutationError::Persistence(anyhow!(error)))?;
+                .map_err(preserve_grid_mutation_error)?;
         }
     }
 
     Ok(())
+}
+
+fn preserve_grid_mutation_error(error: anyhow::Error) -> GridMutationError {
+    match error.downcast::<GridMutationError>() {
+        Ok(error) => error,
+        Err(other) => GridMutationError::Persistence(other),
+    }
 }
 
 async fn command_reconcile(state: &ServerState, grid_id: &str) -> Result<()> {
@@ -317,14 +324,15 @@ mod tests {
     use grid_engine::manager::GridManager;
     use grid_engine::ports::{
         ClockPort, CommittedGridWrite, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
-        GridSnapshot, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect,
-        Position, PriceTick, StateRepositoryPort, UserDataEvent, UserDataPayload,
+        GridReadRepositoryPort, GridSnapshot, MarketDataPort, OrderReceipt, OrderRequest,
+        OrderStatus, PersistedGridEffect, Position, PriceTick, StateRepositoryPort,
+        StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder, RiskState};
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
-    use crate::assembly::{NoopReadRepository, ServerState, build_server_state};
+    use crate::assembly::{ServerState, build_server_state};
     use crate::effect_worker::EffectWorker;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
@@ -451,7 +459,7 @@ mod tests {
         let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone(),
             None,
             test_budget(),
         )
@@ -502,7 +510,7 @@ mod tests {
         let persistence = Arc::new(FailOnReceiptPersistence::default());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone(),
             None,
             test_budget(),
         )
@@ -584,7 +592,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone(),
             None,
             test_budget(),
         )
@@ -660,7 +668,7 @@ mod tests {
         });
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone(),
             Some(snapshot),
             test_budget(),
         )
@@ -711,7 +719,7 @@ mod tests {
         let persistence = Arc::new(FailOnSavePersistence::new(3));
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone(),
             None,
             test_budget(),
         )
@@ -764,7 +772,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone(),
             None,
             test_budget(),
         )
@@ -1265,7 +1273,9 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridQueryService::new(
+                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            )),
             Arc::new(GridProjector::new()),
         );
         let runtime = ServerRuntime::new(
@@ -1284,6 +1294,43 @@ mod tests {
 
         let error = runtime.start().await.err().unwrap();
         assert!(error.to_string().contains("injected save failure"));
+    }
+
+    #[tokio::test]
+    async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
+        let manager = GridManager::new(Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        )));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (events, _) = broadcast::channel(16);
+        let state = build_server_state(
+            Arc::new(GridWriteService::new(
+                manager,
+                persistence.clone() as Arc<dyn StateRepositoryPort>,
+                events,
+            )),
+            Arc::new(GridQueryService::new(
+                persistence as Arc<dyn GridReadRepositoryPort>,
+            )),
+            Arc::new(GridProjector::new()),
+        );
+
+        let error = super::apply_user_data_event(
+            &state,
+            "missing-grid",
+            position_event_at(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 1).unwrap(),
+                1.0,
+                0.0,
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::write_service::GridMutationError::Mutation(_)
+        ));
     }
 
     #[tokio::test]
@@ -1390,7 +1437,9 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridQueryService::new(
+                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            )),
             Arc::new(GridProjector::new()),
         );
 
@@ -1455,7 +1504,9 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridQueryService::new(
+                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            )),
             Arc::new(GridProjector::new()),
         );
 
@@ -1473,12 +1524,15 @@ mod tests {
         }
     }
 
-    async fn test_state(
+    async fn test_state<R>(
         exchange: Arc<dyn ExchangePort>,
-        persistence: Arc<dyn StateRepositoryPort>,
+        persistence: Arc<R>,
         restored_snapshot: Option<GridSnapshot>,
         budget: CapacityBudget,
-    ) -> ServerState {
+    ) -> ServerState
+    where
+        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+    {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
@@ -1498,10 +1552,16 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(manager, persistence, events.clone()));
+        let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
+        let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            state_repository,
+            events.clone(),
+        ));
         build_server_state(
             write_service,
-            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )
     }
@@ -1937,6 +1997,59 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl GridReadRepositoryPort for MemoryPersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .map(|snapshot| StoredGridSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .get(grid_id.as_str())
+                .cloned()
+                .map(|snapshot| StoredGridSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                }))
+        }
+
+        async fn list_recent_grid_events(
+            &self,
+            _grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<StoredDomainEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_recent_grid_effects(
+            &self,
+            grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .cloned()
+                .collect())
+        }
+    }
+
     #[derive(Default)]
     struct FailOnReceiptPersistence {
         snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
@@ -2051,6 +2164,59 @@ mod tests {
     impl FailOnReceiptPersistence {
         async fn all_effects(&self) -> Vec<PersistedGridEffect> {
             self.effects.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GridReadRepositoryPort for FailOnReceiptPersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .map(|snapshot| StoredGridSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .get(grid_id.as_str())
+                .cloned()
+                .map(|snapshot| StoredGridSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                }))
+        }
+
+        async fn list_recent_grid_events(
+            &self,
+            _grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<StoredDomainEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_recent_grid_effects(
+            &self,
+            grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .cloned()
+                .collect())
         }
     }
 
@@ -2175,6 +2341,59 @@ mod tests {
             effect.last_error = Some(error.to_string());
             effect.updated_at = Utc::now();
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GridReadRepositoryPort for FailOnSavePersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .map(|snapshot| StoredGridSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .get(grid_id.as_str())
+                .cloned()
+                .map(|snapshot| StoredGridSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                }))
+        }
+
+        async fn list_recent_grid_events(
+            &self,
+            _grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<StoredDomainEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_recent_grid_effects(
+            &self,
+            grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .cloned()
+                .collect())
         }
     }
 

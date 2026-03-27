@@ -3,29 +3,37 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::widgets::{Block, Borders, Row, Table, TableState};
 
 use crate::app::App;
+use crate::protocol::ExecutionStateView;
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let header =
-        Row::new(["ID", "Symbol", "Status", "Exposure", "Last Price"]).style(Theme::table_header());
-    let rows = app.instances.iter().map(|item| {
-        let exposure = app
-            .cached_snapshot(&item.id)
-            .map(|snapshot| format!("{:.4}", snapshot.current_exposure))
-            .unwrap_or_else(|| "-".to_string());
+    let header = Row::new([
+        "ID",
+        "Symbol",
+        "Lifecycle",
+        "Execution",
+        "Exposure",
+        "Last Price",
+    ])
+    .style(Theme::table_header());
+    let rows = app.grids.iter().map(|item| {
+        let exposure = format!("{:.4}", item.exposure.current);
         let reference_price = item
             .reference_price
             .map(|value| format!("{value:.4}"))
             .unwrap_or_else(|| "-".to_string());
+        let execution =
+            format_execution_badge(item.execution.state, item.execution.pending_order_count);
 
         Row::new(vec![
             item.id.clone(),
-            item.symbol.clone(),
-            item.status.to_string(),
+            item.instrument.symbol.clone(),
+            item.lifecycle.status.to_string(),
+            execution,
             exposure,
             reference_price,
         ])
-        .style(Theme::status(&item.status))
+        .style(Theme::status(&item.lifecycle.status))
     });
 
     let table = Table::new(
@@ -33,6 +41,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         [
             Constraint::Length(14),
             Constraint::Length(14),
+            Constraint::Length(16),
             Constraint::Length(16),
             Constraint::Length(16),
             Constraint::Length(16),
@@ -44,10 +53,24 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     .block(Block::default().title("Dashboard").borders(Borders::ALL));
 
     let mut state = TableState::default();
-    if !app.instances.is_empty() {
+    if !app.grids.is_empty() {
         state.select(Some(app.selected_index));
     }
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn format_execution_badge(state: ExecutionStateView, pending_order_count: u32) -> String {
+    let state = match state {
+        ExecutionStateView::Open => "open",
+        ExecutionStateView::Paused => "paused",
+        ExecutionStateView::Closed => "closed",
+    };
+
+    if pending_order_count == 0 {
+        state.to_string()
+    } else {
+        format!("{state} ({pending_order_count})")
+    }
 }
 
 #[cfg(test)]
@@ -56,9 +79,6 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::App;
-    use crate::protocol::{
-        GridConfig, GridSnapshot, GridStatus, GridSummary, OutOfBandPolicy, ShapeFamily,
-    };
 
     use super::render;
 
@@ -73,33 +93,13 @@ mod tests {
     }
 
     #[test]
-    fn renders_dashboard_rows() {
+    fn renders_dashboard_rows_from_grid_list_items() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(vec![GridSummary {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
-            status: GridStatus::Active,
-            reference_price: Some(100.0),
-        }]);
-        app.apply_snapshot(GridSnapshot {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
-            status: GridStatus::Active,
-            current_exposure: 1.25,
-            target_exposure: None,
-            reference_price: Some(100.0),
-            pending_order: None,
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
-        });
+        let response: crate::protocol::GridListResponse =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_list_response.json"))
+                .unwrap();
+        let app = App::new(response.items);
 
         terminal
             .draw(|frame| render(frame, frame.area(), &app))
@@ -109,5 +109,7 @@ mod tests {
         assert!(text.contains("Dashboard"));
         assert!(text.contains("BTCUSDT"));
         assert!(text.contains("1.2500"));
+        assert!(text.contains("Execution"));
+        assert!(text.contains("open (1)"));
     }
 }

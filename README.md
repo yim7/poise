@@ -90,13 +90,13 @@ export GRID_PLATFORM_WS_URL=ws://127.0.0.1:9000/ws
 cargo run -p grid-tui
 ```
 
-`grid-tui` 会先请求 `/grids`，再加载当前网格快照，并订阅 `/ws`。
+`grid-tui` 会先请求 `/grids`，再加载当前网格详情，并订阅 `/ws`。
 
 ### 4. 用 HTTP 快速确认
 
 ```bash
 curl http://127.0.0.1:8000/grids
-curl http://127.0.0.1:8000/grids/btc-core/snapshot
+curl http://127.0.0.1:8000/grids/btc-core
 ```
 
 ## 当前协议
@@ -104,7 +104,7 @@ curl http://127.0.0.1:8000/grids/btc-core/snapshot
 当前对外接口只有 4 个入口：
 
 - `GET /grids`
-- `GET /grids/:id/snapshot`
+- `GET /grids/:id`
 - `POST /grids/:id/commands`
 - `GET /ws`
 
@@ -131,6 +131,6 @@ cargo test
 
 - [`docs/protocol-contract.md`](docs/protocol-contract.md)：当前 HTTP / WebSocket 协议
 - [`docs/grid-strategy-product-theory-research.md`](docs/grid-strategy-product-theory-research.md)：当前策略研究与产品侧约束
-- [`docs/superpowers/specs/2026-03-24-grid-platform-architecture-design.md`](docs/superpowers/specs/2026-03-24-grid-platform-architecture-design.md)：当前架构 spec
+- [`docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md`](docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md)：当前架构 spec
 - [`docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md`](docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md)：当前策略族模型设计
 - [`docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md`](docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md)：当前收敛计划与验收标准

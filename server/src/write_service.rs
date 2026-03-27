@@ -10,7 +10,6 @@ use grid_engine::observation::{
 };
 use grid_engine::ports::StateRepositoryPort;
 use grid_engine::runtime::PendingOrder;
-use grid_engine::snapshot::GridRuntimeSnapshot;
 use grid_engine::transition::{GridEffect, GridTransition};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -113,20 +112,6 @@ impl GridWriteService {
     pub async fn has_grid(&self, id: &str) -> bool {
         let manager = self.manager.read().await;
         manager.get_grid(id).is_some()
-    }
-
-    pub async fn list_grid_snapshots(&self) -> Vec<GridRuntimeSnapshot> {
-        let manager = self.manager.read().await;
-        manager
-            .list_grids()
-            .into_iter()
-            .map(|grid| grid.snapshot())
-            .collect()
-    }
-
-    pub async fn grid_snapshot(&self, id: &str) -> Option<GridRuntimeSnapshot> {
-        let manager = self.manager.read().await;
-        manager.snapshot(id)
     }
 
     pub async fn grid_instruments(&self) -> Vec<GridInstrument> {
@@ -382,7 +367,9 @@ mod tests {
         };
         assert!(matches!(error, super::GridMutationError::Persistence(_)));
 
-        let snapshot = service.grid_snapshot("btc-core").await.unwrap();
+        let manager_handle = service.manager();
+        let manager = manager_handle.read().await;
+        let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(snapshot.target_exposure, None);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
@@ -409,20 +396,6 @@ mod tests {
                 grid_id: GridId::new("btc-core"),
             }
         );
-    }
-
-    #[tokio::test]
-    async fn exposes_internal_snapshots_without_protocol_mapping() {
-        let service =
-            test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
-
-        let snapshots = service.list_grid_snapshots().await;
-        let snapshot = service.grid_snapshot("btc-core").await.unwrap();
-
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].grid_id.as_str(), "btc-core");
-        assert_eq!(snapshots[0].status, snapshot.status);
-        assert_eq!(snapshot.grid_id.as_str(), "btc-core");
     }
 
     #[tokio::test]

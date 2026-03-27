@@ -32,7 +32,6 @@
     "pending_order": {
       "symbol": "BTCUSDT",
       "order_id": "order-1",
-      "client_order_id": "client-1",
       "side": "buy",
       "price": 100.5,
       "quantity": 0.01,

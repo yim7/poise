@@ -84,48 +84,35 @@ pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
     let db_path = config.default_db_path();
     ensure_parent_dir(&db_path)?;
     let storage = Arc::new(SqliteStorage::new(&db_path)?);
-    let repository: Arc<dyn StateRepositoryPort> = storage.clone();
-    let read_repository: Arc<dyn GridReadRepositoryPort> = storage;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_components_with_read_repository(
-        config,
-        exchange,
-        market_data,
-        repository,
-        read_repository,
-        clock,
-    )
-    .await
+    assemble_with_components_with_repository(config, exchange, market_data, storage, clock).await
 }
 
 #[cfg(test)]
-pub(crate) async fn assemble_with_components(
+pub(crate) async fn assemble_with_components<R>(
     config: &Config,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
-    repository: Arc<dyn StateRepositoryPort>,
+    repository: Arc<R>,
     clock: Arc<dyn ClockPort>,
-) -> Result<ServerPlatform> {
-    assemble_with_components_with_read_repository(
-        config,
-        exchange,
-        market_data,
-        repository,
-        Arc::new(NoopReadRepository),
-        clock,
-    )
-    .await
+) -> Result<ServerPlatform>
+where
+    R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+{
+    assemble_with_components_with_repository(config, exchange, market_data, repository, clock).await
 }
 
-async fn assemble_with_components_with_read_repository(
+async fn assemble_with_components_with_repository<R>(
     config: &Config,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
-    repository: Arc<dyn StateRepositoryPort>,
-    read_repository: Arc<dyn GridReadRepositoryPort>,
+    repository: Arc<R>,
     clock: Arc<dyn ClockPort>,
-) -> Result<ServerPlatform> {
+) -> Result<ServerPlatform>
+where
+    R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+{
     validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
 
@@ -146,9 +133,11 @@ async fn assemble_with_components_with_read_repository(
     }
 
     let (notifications, _) = broadcast::channel(256);
+    let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
+    let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
     let write_service = Arc::new(GridWriteService::new(
         manager,
-        repository,
+        state_repository,
         notifications.clone(),
     ));
     let query_service = Arc::new(GridQueryService::new(read_repository));
@@ -201,40 +190,6 @@ pub(crate) fn build_server_state(
 }
 
 #[cfg(test)]
-pub(crate) struct NoopReadRepository;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl GridReadRepositoryPort for NoopReadRepository {
-    async fn list_grid_snapshots(&self) -> Result<Vec<grid_engine::ports::StoredGridSnapshot>> {
-        Ok(Vec::new())
-    }
-
-    async fn load_grid_snapshot(
-        &self,
-        _grid_id: &GridId,
-    ) -> Result<Option<grid_engine::ports::StoredGridSnapshot>> {
-        Ok(None)
-    }
-
-    async fn list_recent_grid_events(
-        &self,
-        _grid_id: &GridId,
-        _limit: usize,
-    ) -> Result<Vec<grid_engine::ports::StoredDomainEvent>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_recent_grid_effects(
-        &self,
-        _grid_id: &GridId,
-        _limit: usize,
-    ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
-        Ok(Vec::new())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -248,10 +203,10 @@ mod tests {
     use grid_engine::manager::GridManager;
     use grid_engine::observation::{GridObservation, MarketObservation};
     use grid_engine::ports::{
-        ExchangeInfo, ExchangeOrder, ExchangePort, GridSnapshot, OrderReceipt, OrderRequest,
-        Position, PriceTick, StateRepositoryPort,
+        ExchangeInfo, ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot,
+        OrderReceipt, OrderRequest, Position, PriceTick, StateRepositoryPort,
     };
-    use grid_protocol::DomainEvent as ProtocolDomainEvent;
+    use grid_protocol::{GridStreamEvent, GridStreamPayload};
     use grid_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -261,12 +216,11 @@ mod tests {
     use crate::http::router;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
-    use crate::websocket::WsEvent;
     use crate::write_service::GridWriteService;
 
     use super::{
-        NoopReadRepository, ServerPlatform, SystemClock, assemble, build_server_state,
-        validate_unique_grid_ids, validate_unique_instruments,
+        ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_grid_ids,
+        validate_unique_instruments,
     };
 
     fn test_exchange_rules() -> grid_core::types::ExchangeRules {
@@ -436,10 +390,13 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        let payload: WsEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        let payload: GridStreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
 
         assert_eq!(payload.grid_id, "btc-core");
-        assert_eq!(payload.event, ProtocolDomainEvent::SnapshotUpdated);
+        assert!(matches!(
+            payload.payload,
+            GridStreamPayload::GridListItemChanged { .. }
+        ));
 
         server.abort();
         let _ = server.await;
@@ -512,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn newer_tick_snapshot_is_not_overwritten_by_older_command_snapshot() {
         let persistence = Arc::new(BlockingPersistence::default());
-        let (platform, _btc_sender) = test_platform_with_persistence(persistence.clone());
+        let (platform, _btc_sender) = test_platform_with_repository(persistence.clone());
         let app = router(platform.state());
 
         {
@@ -592,13 +549,14 @@ mod tests {
     }
 
     fn test_platform() -> (ServerPlatform, mpsc::Sender<PriceTick>) {
-        test_platform_with_persistence(Arc::new(FakePersistence))
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        test_platform_with_repository(storage)
     }
 
     async fn assemble_with_fake_ports(config: &Config) -> Result<ServerPlatform> {
         let db_path = config.default_db_path();
         super::ensure_parent_dir(&db_path)?;
-        let repository: Arc<dyn StateRepositoryPort> = Arc::new(SqliteStorage::new(&db_path)?);
+        let repository = Arc::new(SqliteStorage::new(&db_path)?);
         super::assemble_with_components(
             config,
             Arc::new(FakeExchange),
@@ -609,9 +567,12 @@ mod tests {
         .await
     }
 
-    fn test_platform_with_persistence(
-        repository: Arc<dyn StateRepositoryPort>,
-    ) -> (ServerPlatform, mpsc::Sender<PriceTick>) {
+    fn test_platform_with_repository<R>(
+        repository: Arc<R>,
+    ) -> (ServerPlatform, mpsc::Sender<PriceTick>)
+    where
+        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+    {
         let (btc_sender, btc_receiver) = mpsc::channel(8);
         let mut receivers = HashMap::new();
         receivers.insert("BTCUSDT".to_string(), btc_receiver);
@@ -643,10 +604,16 @@ mod tests {
             )
             .unwrap();
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(manager, repository, events.clone()));
+        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
+        let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            state_repository,
+            events.clone(),
+        ));
         let state = build_server_state(
             write_service,
-            Arc::new(GridQueryService::new(Arc::new(NoopReadRepository))),
+            Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         );
 
@@ -697,53 +664,6 @@ mod tests {
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
-        }
-    }
-
-    struct FakePersistence;
-
-    #[async_trait::async_trait]
-    impl StateRepositoryPort for FakePersistence {
-        async fn save_transition(
-            &self,
-            id: &str,
-            _state: &grid_engine::ports::GridSnapshot,
-            _events: &[EngineDomainEvent],
-            _effects: &[grid_engine::transition::GridEffect],
-        ) -> Result<grid_engine::ports::CommittedGridWrite> {
-            Ok(grid_engine::ports::CommittedGridWrite {
-                grid_id: grid_engine::grid::GridId::new(id),
-                effects: Vec::new(),
-            })
-        }
-
-        async fn load_grid_state(
-            &self,
-            _id: &str,
-        ) -> Result<Option<grid_engine::ports::GridSnapshot>> {
-            Ok(None)
-        }
-
-        async fn list_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pending_effects(
-            &self,
-        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
-            Ok(())
         }
     }
 
@@ -832,6 +752,55 @@ mod tests {
 
         async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GridReadRepositoryPort for BlockingPersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<grid_engine::ports::StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .map(|snapshot| grid_engine::ports::StoredGridSnapshot {
+                    snapshot,
+                    updated_at: chrono::Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn load_grid_snapshot(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Option<grid_engine::ports::StoredGridSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .await
+                .get(grid_id.as_str())
+                .cloned()
+                .map(|snapshot| grid_engine::ports::StoredGridSnapshot {
+                    snapshot,
+                    updated_at: chrono::Utc::now(),
+                }))
+        }
+
+        async fn list_recent_grid_events(
+            &self,
+            _grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<grid_engine::ports::StoredDomainEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_recent_grid_effects(
+            &self,
+            _grid_id: &GridId,
+            _limit: usize,
+        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
         }
     }
 

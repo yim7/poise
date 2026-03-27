@@ -39,7 +39,7 @@ impl GridProjector {
             },
             execution: ExecutionBadgeView {
                 state: project_execution_state(source),
-                pending_order_count: u32::from(has_pending_execution(source)),
+                pending_order_count: pending_order_count(source),
             },
         }
     }
@@ -83,7 +83,6 @@ impl GridProjector {
                     OrderExecutionView {
                         symbol: source.snapshot.instrument.symbol.clone(),
                         order_id: order.order_id.clone(),
-                        client_order_id: order.client_order_id.clone(),
                         side: project_side(order.side),
                         price: order.price,
                         quantity: order.quantity,
@@ -192,14 +191,16 @@ fn project_execution_state(source: &GridReadModelSource) -> ExecutionStateView {
     }
 }
 
-fn has_pending_execution(source: &GridReadModelSource) -> bool {
-    source.snapshot.pending_order.is_some()
-        || source.recent_effects.iter().any(|effect| {
-            matches!(
-                effect.status,
-                EffectStatus::Pending | EffectStatus::Executing
-            )
-        })
+fn pending_order_count(source: &GridReadModelSource) -> u32 {
+    u32::from(
+        source.snapshot.pending_order.is_some()
+            || source.recent_effects.iter().any(|effect| {
+                matches!(
+                    effect.status,
+                    EffectStatus::Pending | EffectStatus::Executing
+                )
+            }),
+    )
 }
 
 fn project_available_commands(status: &EngineGridStatus) -> Vec<GridCommandView> {
@@ -270,14 +271,14 @@ fn project_domain_event_level(event: &DomainEvent) -> ActivityLevelView {
 
 fn project_effect_message(effect: &grid_engine::ports::PersistedGridEffect) -> String {
     match &effect.effect {
-        GridEffect::SubmitOrder { request, .. } => match effect.status {
+        GridEffect::SubmitOrder { .. } => match effect.status {
             EffectStatus::Failed => effect
                 .last_error
                 .clone()
-                .unwrap_or_else(|| format!("submit {} failed", request.client_order_id)),
-            EffectStatus::Succeeded => format!("submit {} succeeded", request.client_order_id),
-            EffectStatus::Executing => format!("submit {} executing", request.client_order_id),
-            EffectStatus::Pending => format!("submit {} pending", request.client_order_id),
+                .unwrap_or_else(|| "submit order failed".into()),
+            EffectStatus::Succeeded => "submit order succeeded".into(),
+            EffectStatus::Executing => "submit order executing".into(),
+            EffectStatus::Pending => "submit order pending".into(),
         },
         GridEffect::CancelOrder { order_id, .. } => match effect.status {
             EffectStatus::Failed => effect
@@ -341,6 +342,7 @@ mod tests {
     fn project_detail_includes_available_commands_and_activity() {
         let source = source_with_failed_effect_and_recent_event();
         let detail = GridProjector::new().project_detail(&source);
+        let detail_json = serde_json::to_value(&detail).unwrap();
 
         assert!(!detail.available_commands.is_empty());
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
@@ -358,6 +360,17 @@ mod tests {
         assert_eq!(detail.activity.len(), 2);
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);
         assert_eq!(detail.activity[1].level, ActivityLevelView::Error);
+        assert!(
+            detail
+                .activity
+                .iter()
+                .all(|item| !item.message.contains("client-1"))
+        );
+        assert!(
+            detail_json["execution"]["pending_order"]
+                .get("client_order_id")
+                .is_none()
+        );
     }
 
     fn source_with_submitting_effect() -> GridReadModelSource {

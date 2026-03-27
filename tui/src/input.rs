@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, View};
+use crate::protocol::GridCommandType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
@@ -9,10 +10,10 @@ pub enum CommandKind {
 }
 
 impl CommandKind {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_grid_command(self) -> GridCommandType {
         match self {
-            Self::Pause => "pause",
-            Self::Resume => "resume",
+            Self::Pause => GridCommandType::Pause,
+            Self::Resume => GridCommandType::Resume,
         }
     }
 }
@@ -70,14 +71,16 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::Char('p') | KeyCode::Char('P') => {
-            if app.current_view == View::Instance && app.has_current_instance() {
+            if app.current_view == View::Instance && app.is_command_enabled(GridCommandType::Pause)
+            {
                 Action::SubmitCommand(CommandKind::Pause)
             } else {
                 Action::None
             }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            if app.current_view == View::Instance && app.has_current_instance() {
+            if app.current_view == View::Instance && app.is_command_enabled(GridCommandType::Resume)
+            {
                 Action::SubmitCommand(CommandKind::Resume)
             } else {
                 Action::None
@@ -92,27 +95,30 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::app::{App, View};
-    use crate::protocol::{
-        GridConfig, GridSnapshot, GridStatus, GridSummary, OutOfBandPolicy, ShapeFamily,
-    };
+    use crate::protocol::{GridCommandType, GridCommandView, GridDetailView, GridListResponse};
 
     use super::{Action, CommandKind, handle_key_event};
 
     fn app() -> App {
-        App::new(vec![
-            GridSummary {
-                id: "BTCUSDT".into(),
-                symbol: "BTCUSDT".into(),
-                status: GridStatus::Active,
-                reference_price: Some(100.0),
-            },
-            GridSummary {
-                id: "ETHUSDT".into(),
-                symbol: "ETHUSDT".into(),
-                status: GridStatus::Paused,
-                reference_price: Some(2000.0),
-            },
-        ])
+        let mut response: GridListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+                .unwrap();
+        let mut eth = response.items[0].clone();
+        eth.id = "eth-core".into();
+        eth.instrument.symbol = "ETHUSDT".into();
+        response.items.push(eth);
+        App::new(response.items)
+    }
+
+    fn detail_view() -> GridDetailView {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Resume,
+            enabled: true,
+            disabled_reason: None,
+        });
+        detail
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -188,24 +194,7 @@ mod tests {
     fn pause_and_resume_are_available_in_instance_view() {
         let mut app = app();
         app.current_view = View::Instance;
-        app.current_instance = Some(GridSnapshot {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
-            status: GridStatus::Active,
-            current_exposure: 1.0,
-            target_exposure: None,
-            reference_price: Some(100.0),
-            pending_order: None,
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
-        });
+        app.current_grid = Some(detail_view());
 
         assert_eq!(
             handle_key_event(&mut app, key(KeyCode::Char('p'))),
@@ -221,7 +210,7 @@ mod tests {
     fn commands_are_disabled_without_loaded_instance() {
         let mut app = app();
         app.current_view = View::Instance;
-        app.current_instance = None;
+        app.current_grid = None;
 
         assert_eq!(
             handle_key_event(&mut app, key(KeyCode::Char('p'))),

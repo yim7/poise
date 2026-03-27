@@ -484,16 +484,15 @@ pub struct GridDetailView {
 ```rust
 pub struct GridExecutionView {
     pub state: ExecutionStateView,
-    pub summary: String,
-    pub order: Option<OrderExecutionView>,
-    pub last_error: Option<String>,
+    pub pending_order: Option<OrderExecutionView>,
 }
 ```
 
 这里的关键是：
 
-- 内部的 `pending_order + persisted_effect + order observation`
-- 对外收敛成一个稳定执行块
+- 内部的 `pending_order + persisted_effect`
+- 对外先收敛成一个稳定执行块
+- TUI 只展示高层执行语义，不直接暴露内部追踪字段
 
 ### 10.4 `GridActivityItemView`
 
@@ -501,11 +500,9 @@ pub struct GridExecutionView {
 
 ```rust
 pub struct GridActivityItemView {
-    pub id: String,
-    pub time: DateTime<Utc>,
-    pub kind: ActivityKindView,
-    pub title: String,
-    pub detail: String,
+    pub ts: String,
+    pub message: String,
+    pub level: ActivityLevelView,
 }
 ```
 
@@ -513,7 +510,7 @@ pub struct GridActivityItemView {
 
 - 领域事件
 - effect 执行成功 / 失败
-- 关键订单或仓位观察更新
+- 后续如果需要，再继续吸收关键订单或仓位观察更新
 
 活动流不再直接等于 `DomainEvent`。
 
@@ -534,7 +531,7 @@ pub struct GridActivityItemView {
 设计原则：
 
 - “当前没有参考价”不是错误，而是合法空值
-- “当前没有执行动作”不是错误，而是 `execution.state = idle`
+- “当前没有待处理委托”不是错误，而是 `execution.pending_order = None`
 - “命令不可用”优先由 `available_commands` 表达，而不是让 TUI 自己推断
 
 ## 12. 测试策略

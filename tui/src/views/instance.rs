@@ -1,101 +1,173 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
+use crate::protocol::{
+    ActivityLevelView, ExecutionStateView, GridCommandType, GridCommandView, GridExecutionView,
+};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9),
-            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Length(7),
+            Constraint::Length(7),
             Constraint::Min(0),
         ])
         .split(area);
 
-    let Some(snapshot) = app
-        .current_instance
-        .as_ref()
-        .or_else(|| app.selected_snapshot())
+    let Some(detail) = app
+        .current_grid_detail()
+        .or_else(|| app.current_grid.as_ref())
     else {
-        let empty = Paragraph::new("No instance snapshot loaded")
+        let empty = Paragraph::new("No grid detail loaded")
             .block(Block::default().title("Instance").borders(Borders::ALL));
         frame.render_widget(empty, area);
         return;
     };
 
     let summary_lines = vec![
-        Line::from(format!("id: {}", snapshot.id)),
-        Line::from(format!("symbol: {}", snapshot.symbol)),
-        Line::from(format!("status: {}", snapshot.status)),
-        Line::from(format!("actual exposure: {:.4}", snapshot.current_exposure)),
+        Line::from(format!("id: {}", detail.identity.id)),
+        Line::from(format!("symbol: {}", detail.identity.instrument.symbol)),
+        Line::from(format!("lifecycle: {}", detail.status.lifecycle.status)),
         Line::from(format!(
-            "target exposure: {}",
-            snapshot
-                .target_exposure()
+            "updated at: {}",
+            detail.status.lifecycle.updated_at
+        )),
+        Line::from(format!(
+            "reference price: {}",
+            detail
+                .status
+                .reference_price
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "-".to_string()),
+        )),
+        Line::from(format!(
+            "exposure: {:.4} / {}",
+            detail.position.current_exposure,
+            detail
+                .position
+                .target_exposure
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "-".to_string())
         )),
-        Line::from(format!(
-            "pending order: {}",
-            snapshot
-                .pending_order
-                .as_ref()
-                .map(|order| format!(
-                    "{} {:.4} @ {:.4} ({})",
-                    order.side, order.quantity, order.price, order.client_order_id
-                ))
-                .unwrap_or_else(|| "none".to_string())
-        )),
-        Line::from(format!("band state: {}", snapshot.band_state())),
     ];
     let summary = Paragraph::new(summary_lines)
         .block(Block::default().title("Overview").borders(Borders::ALL));
     frame.render_widget(summary, sections[0]);
 
-    let config_lines = vec![
-        Line::from(format!("lower: {:.4}", snapshot.config.lower_price)),
-        Line::from(format!("upper: {:.4}", snapshot.config.upper_price)),
-        Line::from(format!(
-            "long cap: {:.4}",
-            snapshot.config.long_exposure_units
-        )),
-        Line::from(format!(
-            "short cap: {:.4}",
-            snapshot.config.short_exposure_units
-        )),
-        Line::from(format!(
-            "capacity notional: {:.4}",
-            snapshot.config.notional_per_unit
-        )),
-        Line::from(format!("shape: {}", snapshot.config.shape_family)),
+    let strategy_lines = vec![
+        Line::from(format!("lower: {:.4}", detail.strategy.lower_price)),
+        Line::from(format!("upper: {:.4}", detail.strategy.upper_price)),
+        Line::from(format!("shape: {}", detail.strategy.shape_family)),
         Line::from(format!(
             "out of band policy: {}",
-            snapshot.config.out_of_band_policy
+            detail.strategy.out_of_band_policy
         )),
     ];
-    let config =
-        Paragraph::new(config_lines).block(Block::default().title("Config").borders(Borders::ALL));
-    frame.render_widget(config, sections[1]);
+    let strategy = Paragraph::new(strategy_lines)
+        .block(Block::default().title("Strategy").borders(Borders::ALL));
+    frame.render_widget(strategy, sections[1]);
 
-    let items: Vec<ListItem<'_>> = app
-        .recent_events_for_current()
-        .into_iter()
-        .map(|event| ListItem::new(event.event.to_string()))
-        .collect();
-    let items = if items.is_empty() {
-        vec![ListItem::new("No events yet")]
-    } else {
-        items
-    };
-    let events = List::new(items).block(
-        Block::default()
-            .title("Recent Events")
-            .borders(Borders::ALL),
+    let execution_lines = execution_lines(
+        &detail.execution,
+        detail.market.mark_price,
+        detail.market.index_price,
     );
-    frame.render_widget(events, sections[2]);
+    let execution = Paragraph::new(execution_lines)
+        .block(Block::default().title("Execution").borders(Borders::ALL));
+    frame.render_widget(execution, sections[2]);
+
+    let command_lines: Vec<Line<'_>> = if detail.available_commands.is_empty() {
+        vec![Line::from("No commands available")]
+    } else {
+        detail
+            .available_commands
+            .iter()
+            .map(|command| Line::from(format_command(command)))
+            .collect()
+    };
+    let commands = Paragraph::new(command_lines)
+        .block(Block::default().title("Commands").borders(Borders::ALL));
+    frame.render_widget(commands, sections[3]);
+
+    let activity_lines: Vec<Line<'_>> = if detail.activity.is_empty() {
+        vec![Line::from("No activity yet")]
+    } else {
+        detail
+            .activity
+            .iter()
+            .map(|item| {
+                let level = match item.level {
+                    ActivityLevelView::Info => "info",
+                    ActivityLevelView::Warn => "warn",
+                    ActivityLevelView::Error => "error",
+                };
+                Line::from(format!("{} [{}] {}", item.ts, level, item.message))
+            })
+            .collect()
+    };
+    let activity = Paragraph::new(activity_lines)
+        .block(Block::default().title("Activity").borders(Borders::ALL));
+    frame.render_widget(activity, sections[4]);
+}
+
+fn execution_lines(
+    execution: &GridExecutionView,
+    mark_price: Option<f64>,
+    index_price: Option<f64>,
+) -> Vec<Line<'static>> {
+    let state = match execution.state {
+        ExecutionStateView::Open => "open",
+        ExecutionStateView::Paused => "paused",
+        ExecutionStateView::Closed => "closed",
+    };
+
+    let pending_order = execution
+        .pending_order
+        .as_ref()
+        .map(|order| {
+            format!(
+                "{} {:.4} @ {:.4} ({})",
+                order.side, order.quantity, order.price, order.status
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+
+    vec![
+        Line::from(format!("state: {state}")),
+        Line::from(format!(
+            "mark/index: {}/{}",
+            format_optional_price(mark_price),
+            format_optional_price(index_price)
+        )),
+        Line::from(format!("pending order: {pending_order}")),
+    ]
+}
+
+fn format_optional_price(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_command(command: &GridCommandView) -> String {
+    let name = match command.command {
+        GridCommandType::Pause => "pause",
+        GridCommandType::Resume => "resume",
+        GridCommandType::Terminate => "terminate",
+        GridCommandType::Flatten => "flatten",
+    };
+
+    match (command.enabled, command.disabled_reason.as_deref()) {
+        (true, _) => format!("{name}: enabled"),
+        (false, Some(reason)) => format!("{name}: disabled - {reason}"),
+        (false, None) => format!("{name}: disabled"),
+    }
 }
 
 #[cfg(test)]
@@ -104,10 +176,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::{
-        DomainEvent, GridConfig, GridSnapshot, GridStatus, GridSummary, OrderStatus,
-        OutOfBandPolicy, PendingOrder, ShapeFamily, Side, WsEvent,
-    };
+    use crate::protocol::GridDetailView;
 
     use super::render;
 
@@ -122,47 +191,19 @@ mod tests {
     }
 
     #[test]
-    fn renders_instance_details_and_events() {
+    fn renders_grid_detail_execution_activity_and_commands() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(vec![GridSummary {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
-            status: GridStatus::Active,
-            reference_price: Some(100.0),
-        }]);
+        let response: crate::protocol::GridListResponse =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_list_response.json"))
+                .unwrap();
+        let mut app = App::new(response.items);
         app.current_view = View::Instance;
-        app.apply_snapshot(GridSnapshot {
-            id: "BTCUSDT".into(),
-            symbol: "BTCUSDT".into(),
-            status: GridStatus::Active,
-            current_exposure: 1.0,
-            target_exposure: Some(4.0),
-            reference_price: Some(100.0),
-            pending_order: Some(PendingOrder {
-                symbol: "BTCUSDT".into(),
-                order_id: Some("12345".into()),
-                client_order_id: "btc-grid-1".into(),
-                side: Side::Buy,
-                price: 90.0,
-                quantity: 0.5,
-                status: OrderStatus::New,
-            }),
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Concave,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
-        });
+        let detail: GridDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+                .unwrap();
+        app.apply_grid_detail(detail);
         app.show_instance_for_selected();
-        app.record_event(WsEvent {
-            grid_id: "BTCUSDT".into(),
-            event: DomainEvent::BandReentered { price: 99.0 },
-        });
 
         terminal
             .draw(|frame| render(frame, frame.area(), &app))
@@ -170,11 +211,12 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Overview"));
-        assert!(text.contains("actual exposure"));
-        assert!(text.contains("target exposure"));
-        assert!(text.contains("pending order"));
-        assert!(text.contains("band state"));
-        assert!(text.contains("capacity notional"));
-        assert!(text.contains("band reentered"));
+        assert!(text.contains("Strategy"));
+        assert!(text.contains("Execution"));
+        assert!(text.contains("Activity"));
+        assert!(text.contains("Commands"));
+        assert!(text.contains("pause"));
+        assert!(text.contains("risk review pending"));
+        assert!(!text.contains("client-1"));
     }
 }
