@@ -156,7 +156,7 @@ git commit -m "feat: persist cumulative realized pnl"
 
 - [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `850a06365ee97fcf2d16c9c108be18143b8ec647`
+Commit SHA: `8c7b611bf1c01f2892ed2ea9ae4930c8f337f604`
 
 ---
 
