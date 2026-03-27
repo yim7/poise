@@ -43,6 +43,27 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_grid_detail_view_without_statistics() {
+        let detail: GridDetailView = serde_json::from_str(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"target_exposure":0.75},
+                "execution":{"state":"open","pending_order":null},
+                "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Grid activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(detail.identity.id, "btc-core");
+        assert!((detail.statistics.realized_pnl - 0.0).abs() < f64::EPSILON);
+        assert!((detail.statistics.total_pnl - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn deserializes_grid_stream_list_item_changed() {
         let event: GridStreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_grid_list_item_changed.json"
@@ -73,6 +94,38 @@ mod tests {
                 assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
                 assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
                 assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
+            }
+            _ => panic!("unexpected payload variant"),
+        }
+    }
+
+    #[test]
+    fn deserializes_grid_stream_detail_changed_without_statistics() {
+        let event: GridStreamEvent = serde_json::from_str(
+            r#"{
+                "grid_id":"btc-core",
+                "payload":{
+                    "type":"grid_detail_changed",
+                    "detail":{
+                        "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                        "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
+                        "strategy":{"lower_price":60000.0,"upper_price":68000.0,"shape_family":"linear","out_of_band_policy":"freeze"},
+                        "market":{"mark_price":64123.4,"index_price":64120.1},
+                        "position":{"current_exposure":0.5,"target_exposure":0.75},
+                        "execution":{"state":"open","pending_order":null},
+                        "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Grid activated","level":"info"}],
+                        "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        match event.payload {
+            GridStreamPayload::GridDetailChanged { detail } => {
+                assert_eq!(detail.identity.id, "btc-core");
+                assert!((detail.statistics.realized_pnl - 0.0).abs() < f64::EPSILON);
+                assert!((detail.statistics.total_pnl - 0.0).abs() < f64::EPSILON);
             }
             _ => panic!("unexpected payload variant"),
         }
