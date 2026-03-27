@@ -56,6 +56,7 @@ fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
@@ -70,6 +71,15 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::parse_config_path;
+
+    fn unique_test_environment() -> String {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        format!(
+            "main-test-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
 
     #[test]
     fn parse_config_path_requires_config_flag() {
@@ -94,13 +104,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_flow_serves_grid_list_and_detail() {
-        let suffix = format!(
-            "test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let suffix = unique_test_environment();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = listener.local_addr().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();

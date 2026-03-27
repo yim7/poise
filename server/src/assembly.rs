@@ -232,15 +232,18 @@ mod tests {
         }
     }
 
+    fn unique_test_environment() -> String {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        format!(
+            "assembly-test-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     #[tokio::test]
     async fn assembles_platform_with_all_instances_registered() {
-        let suffix = format!(
-            "test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let suffix = unique_test_environment();
 
         let config = Config {
             environment: suffix.clone(),
@@ -312,13 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn assemble_rejects_duplicate_symbols() {
-        let suffix = format!(
-            "test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let suffix = unique_test_environment();
 
         let config = Config {
             environment: suffix,
@@ -410,13 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn pause_command_persists_across_reassembly() {
-        let suffix = format!(
-            "test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let suffix = unique_test_environment();
         let config = Config {
             environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
