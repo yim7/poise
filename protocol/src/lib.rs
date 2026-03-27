@@ -61,6 +61,7 @@ pub struct GridDetailView {
     pub strategy: GridStrategyView,
     pub market: GridMarketView,
     pub position: GridPositionView,
+    pub statistics: GridStatisticsView,
     pub execution: GridExecutionView,
     pub activity: Vec<GridActivityItemView>,
     pub available_commands: Vec<GridCommandView>,
@@ -97,6 +98,12 @@ pub struct GridPositionView {
     pub current_exposure: f64,
     #[serde(default)]
     pub target_exposure: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridStatisticsView {
+    pub total_pnl: f64,
+    pub realized_pnl: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

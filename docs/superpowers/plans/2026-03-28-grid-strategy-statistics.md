@@ -175,7 +175,7 @@ Commit SHA: `8c7b611bf1c01f2892ed2ea9ae4930c8f337f604`
 - Test: `tui/src/protocol.rs`
 - Test: `tui/src/api_client.rs`
 
-- [ ] **Step 1: 先写失败测试，覆盖 statistics 读模型**
+- [x] **Step 1: 先写失败测试，覆盖 statistics 读模型**
 
 在 `server/src/projector.rs` 新增专用测试，建议命名：
 
@@ -205,7 +205,7 @@ fixture 里的 `statistics` 先写成：
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前红灯**
+- [x] **Step 2: 运行定向测试，确认当前红灯**
 
 Run: `cargo test -p grid-server project_detail_projects_statistics_from_risk_state -- --exact`
 Expected: FAIL，原因是 `GridDetailView` 里还没有 `statistics`
@@ -213,7 +213,7 @@ Expected: FAIL，原因是 `GridDetailView` 里还没有 `statistics`
 Run: `cargo test -p grid-tui deserializes_grid_detail_view -- --exact`
 Expected: FAIL，原因是 fixture 新增 `statistics` 后协议结构还没接上
 
-- [ ] **Step 3: 最小实现 protocol 和 projector**
+- [x] **Step 3: 最小实现 protocol 和 projector**
 
 在 `protocol/src/lib.rs` 新增：
 
@@ -258,7 +258,7 @@ statistics: GridStatisticsView {
 - `tui/src/api_client.rs` 的 detail 解码断言
 - 两个 JSON fixture
 
-- [ ] **Step 4: 重新运行定向测试，确认转绿**
+- [x] **Step 4: 重新运行定向测试，确认转绿**
 
 Run: `cargo test -p grid-server project_detail_projects_statistics_from_risk_state -- --exact`
 Expected: PASS
@@ -275,7 +275,7 @@ Expected: PASS
 Run: `cargo test -p grid-tui get_grid_detail_decodes_projected_detail -- --exact`
 Expected: PASS
 
-- [ ] **Step 5: 运行本 task 的回归测试**
+- [x] **Step 5: 运行本 task 的回归测试**
 
 Run: `cargo test -p grid-server projector::tests -- --nocapture`
 Expected: PASS
@@ -286,7 +286,7 @@ Expected: PASS
 Run: `cargo test -p grid-tui api_client::tests -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: 提交本 task**
+- [x] **Step 6: 提交本 task**
 
 ```bash
 git add protocol/src/lib.rs server/src/projector.rs server/src/http.rs tui/src/protocol.rs tui/src/api_client.rs tui/tests/fixtures/grid_detail_view.json tui/tests/fixtures/ws_grid_detail_changed.json

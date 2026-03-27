@@ -1,7 +1,8 @@
+#[allow(unused_imports)]
 pub use grid_protocol::{
     ActivityLevelView, ExecutionStateView, GridCommandAccepted, GridCommandRequest,
     GridCommandType, GridCommandView, GridDetailView, GridExecutionView, GridListItemView,
-    GridListResponse, GridStatus, GridStreamEvent, GridStreamPayload,
+    GridListResponse, GridStatisticsView, GridStatus, GridStreamEvent, GridStreamPayload,
 };
 
 #[cfg(test)]
@@ -33,6 +34,8 @@ mod tests {
 
         assert_eq!(detail.identity.id, "btc-core");
         assert_eq!(detail.identity.instrument.venue, "binance_futures");
+        assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert_eq!(detail.execution.state, ExecutionStateView::Open);
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
@@ -67,6 +70,8 @@ mod tests {
         match event.payload {
             GridStreamPayload::GridDetailChanged { detail } => {
                 assert_eq!(detail.identity.instrument.symbol, "BTCUSDT");
+                assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
+                assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
                 assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
             }
             _ => panic!("unexpected payload variant"),
