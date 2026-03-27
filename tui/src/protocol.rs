@@ -1,7 +1,7 @@
 pub use grid_protocol::{
     ActivityLevelView, ExecutionStateView, GridCommandAccepted, GridCommandRequest,
     GridCommandType, GridCommandView, GridDetailView, GridExecutionView, GridListItemView,
-    GridListResponse, GridStatus, GridStreamEvent, GridStreamPayload,
+    GridListResponse, GridStatus, GridStreamEvent, GridStreamPayload, ReplacementGateView,
 };
 
 #[cfg(test)]

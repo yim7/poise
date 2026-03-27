@@ -13,7 +13,7 @@ use grid_engine::ports::{
 use grid_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
-use crate::config::Config;
+use crate::config::{Config, ExchangeConfig};
 use crate::effect_service::EffectService;
 use crate::projector::GridProjector;
 use crate::query_service::GridQueryService;
@@ -32,6 +32,13 @@ pub struct ServerState {
 pub struct ServerPlatform {
     state: ServerState,
     pub runtime: ServerRuntime,
+}
+
+struct ValidatedExchangeRuntimeConfig {
+    api_key: String,
+    api_secret: String,
+    rest_base_url: String,
+    ws_base_url: String,
 }
 
 fn validate_unique_instruments(
@@ -62,23 +69,41 @@ fn validate_unique_grid_ids(
     Ok(())
 }
 
+fn required_exchange_field(value: Option<&str>, field_name: &str) -> Result<String> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing required {field_name}"))?;
+    Ok(value.to_string())
+}
+
+fn validate_exchange_runtime_config(
+    exchange: &ExchangeConfig,
+) -> Result<ValidatedExchangeRuntimeConfig> {
+    Ok(ValidatedExchangeRuntimeConfig {
+        rest_base_url: required_exchange_field(
+            exchange.rest_base_url.as_deref(),
+            "exchange.rest_base_url",
+        )?,
+        ws_base_url: required_exchange_field(
+            exchange.ws_base_url.as_deref(),
+            "exchange.ws_base_url",
+        )?,
+        api_key: required_exchange_field(exchange.api_key.as_deref(), "exchange.api_key")?,
+        api_secret: required_exchange_field(exchange.api_secret.as_deref(), "exchange.api_secret")?,
+    })
+}
+
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
     validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
+    let exchange_config = validate_exchange_runtime_config(&config.exchange)?;
 
     let adapter = Arc::new(BinanceAdapter::new(
-        config.exchange.api_key.clone().unwrap_or_default(),
-        config.exchange.api_secret.clone().unwrap_or_default(),
-        config
-            .exchange
-            .rest_base_url
-            .clone()
-            .unwrap_or_else(|| "https://fapi.binance.com".to_string()),
-        config
-            .exchange
-            .ws_base_url
-            .clone()
-            .unwrap_or_else(|| "wss://fstream.binance.com".to_string()),
+        exchange_config.api_key,
+        exchange_config.api_secret,
+        exchange_config.rest_base_url,
+        exchange_config.ws_base_url,
     ));
     let exchange: Arc<dyn ExchangePort> = adapter.clone();
     let market_data: Arc<dyn MarketDataPort> = adapter;
@@ -369,6 +394,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assemble_requires_exchange_credentials_for_real_runtime() {
+        let suffix = unique_test_environment();
+        let config = Config {
+            environment: suffix,
+            bind_address: "127.0.0.1:0".into(),
+            grids: vec![GridDefinition {
+                grid_id: "btc-core".into(),
+                venue: Venue::Binance,
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                shape_family: grid_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+            }],
+            exchange: ExchangeConfig {
+                rest_base_url: Some("https://demo-fapi.binance.com".into()),
+                ws_base_url: Some("wss://fstream.binancefuture.com".into()),
+                ..Default::default()
+            },
+        };
+
+        let error = assemble(&config).await.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("missing required exchange.api_key")
+        );
+    }
+
+    #[tokio::test]
+    async fn assemble_requires_explicit_exchange_urls_for_real_runtime() {
+        let suffix = unique_test_environment();
+        let config = Config {
+            environment: suffix,
+            bind_address: "127.0.0.1:0".into(),
+            grids: vec![GridDefinition {
+                grid_id: "btc-core".into(),
+                venue: Venue::Binance,
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                shape_family: grid_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+            }],
+            exchange: ExchangeConfig {
+                api_key: Some("demo-key".into()),
+                api_secret: Some("demo-secret".into()),
+                ..Default::default()
+            },
+        };
+
+        let error = assemble(&config).await.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("missing required exchange.rest_base_url")
+        );
+    }
+
+    #[tokio::test]
     async fn start_market_data_tasks_broadcasts_events_to_ws_clients() {
         let (platform, btc_sender) = test_platform();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -608,10 +699,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let effect_service = Arc::new(EffectService::new(
-            state_repository.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,

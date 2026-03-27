@@ -104,6 +104,8 @@ pub struct GridExecutionView {
     pub state: ExecutionStateView,
     #[serde(default)]
     pub pending_order: Option<OrderExecutionView>,
+    #[serde(default)]
+    pub replacement_gate: Option<ReplacementGateView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +116,16 @@ pub struct OrderExecutionView {
     pub price: f64,
     pub quantity: f64,
     pub status: OrderStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplacementGateView {
+    RoundedMatch,
+    ImprovementBelowThreshold {
+        improvement_bps: f64,
+        threshold_bps: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

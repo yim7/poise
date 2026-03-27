@@ -1405,6 +1405,8 @@ environment = "tui-e2e"
 bind_address = "{bind_address}"
 
 [exchange]
+api_key = "demo-key"
+api_secret = "demo-secret"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
@@ -1520,6 +1522,8 @@ environment = "tui-binary-e2e"
 bind_address = "{bind_address}"
 
 [exchange]
+api_key = "demo-key"
+api_secret = "demo-secret"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 

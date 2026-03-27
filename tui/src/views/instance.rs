@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::App;
 use crate::protocol::{
     ActivityLevelView, ExecutionStateView, GridCommandType, GridCommandView, GridExecutionView,
+    ReplacementGateView,
 };
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -137,6 +138,11 @@ fn execution_lines(
             )
         })
         .unwrap_or_else(|| "none".to_string());
+    let replacement_gate = execution
+        .replacement_gate
+        .as_ref()
+        .map(format_replacement_gate)
+        .unwrap_or_else(|| "-".to_string());
 
     vec![
         Line::from(format!("state: {state}")),
@@ -146,7 +152,18 @@ fn execution_lines(
             format_optional_price(index_price)
         )),
         Line::from(format!("pending order: {pending_order}")),
+        Line::from(format!("replacement gate: {replacement_gate}")),
     ]
+}
+
+fn format_replacement_gate(value: &ReplacementGateView) -> String {
+    match value {
+        ReplacementGateView::RoundedMatch => "rounded match".to_string(),
+        ReplacementGateView::ImprovementBelowThreshold {
+            improvement_bps,
+            threshold_bps,
+        } => format!("{improvement_bps:.1} bps < {threshold_bps:.1} bps"),
+    }
 }
 
 fn format_optional_price(value: Option<f64>) -> String {
@@ -217,6 +234,8 @@ mod tests {
         assert!(text.contains("Commands"));
         assert!(text.contains("pause"));
         assert!(text.contains("risk review pending"));
+        assert!(text.contains("replacement gate"));
+        assert!(text.contains("9.0 bps < 13.0 bps"));
         assert!(!text.contains("client-1"));
     }
 }

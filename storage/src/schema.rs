@@ -12,6 +12,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             current_exposure REAL NOT NULL,
             target_exposure REAL,
             pending_order_json TEXT,
+            replacement_gate_reason_json TEXT,
             realized_pnl_day TEXT,
             realized_pnl_today REAL NOT NULL DEFAULT 0,
             unrealized_pnl REAL NOT NULL DEFAULT 0,
@@ -41,6 +42,34 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    add_column_if_missing(
+        conn,
+        "grid_snapshots",
+        "replacement_gate_reason_json",
+        "TEXT",
+    )?;
+
+    ensure_columns_present(
+        &conn,
+        "grid_snapshots",
+        &[
+            "grid_id",
+            "venue",
+            "symbol",
+            "config_json",
+            "status",
+            "current_exposure",
+            "target_exposure",
+            "pending_order_json",
+            "replacement_gate_reason_json",
+            "realized_pnl_day",
+            "realized_pnl_today",
+            "unrealized_pnl",
+            "reference_price",
+            "out_of_band_since",
+            "updated_at",
+        ],
+    )?;
     ensure_columns_present(&conn, "domain_events", &["grid_id"])?;
     ensure_columns_present(
         &conn,
@@ -73,12 +102,24 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_sql: &str,
+) -> Result<()> {
+    let columns = table_columns(conn, table)?;
+    if columns.iter().any(|existing| existing == column) {
+        return Ok(());
+    }
+
+    let statement = format!("ALTER TABLE {table} ADD COLUMN {column} {column_sql}");
+    conn.execute(&statement, [])?;
+    Ok(())
+}
+
 fn ensure_columns_present(conn: &Connection, table: &str, required: &[&str]) -> Result<()> {
-    let pragma = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&pragma)?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let columns = table_columns(conn, table)?;
 
     for column in required {
         ensure!(
@@ -88,6 +129,15 @@ fn ensure_columns_present(conn: &Connection, table: &str, required: &[&str]) -> 
     }
 
     Ok(())
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns)
 }
 
 #[cfg(test)]
@@ -163,7 +213,42 @@ mod tests {
     }
 
     #[test]
-    fn initialize_does_not_upgrade_existing_snapshot_table() {
+    fn initialize_upgrades_snapshot_table_missing_only_replacement_gate_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE grid_snapshots (
+                grid_id TEXT PRIMARY KEY,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                target_exposure REAL,
+                pending_order_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        initialize(&conn).unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(columns.contains(&"replacement_gate_reason_json".to_string()));
+    }
+
+    #[test]
+    fn initialize_rejects_legacy_snapshot_table_missing_columns() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE grid_snapshots (
@@ -179,21 +264,7 @@ mod tests {
         )
         .unwrap();
 
-        initialize(&conn).unwrap();
-
-        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
-        let columns: Vec<String> = stmt
-            .query_map([], |row| row.get(1))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-
-        assert!(!columns.contains(&"target_exposure".to_string()));
-        assert!(!columns.contains(&"pending_order_json".to_string()));
-        assert!(!columns.contains(&"realized_pnl_day".to_string()));
-        assert!(!columns.contains(&"realized_pnl_today".to_string()));
-        assert!(!columns.contains(&"unrealized_pnl".to_string()));
-        assert!(!columns.contains(&"out_of_band_since".to_string()));
+        assert!(initialize(&conn).is_err());
     }
 
     #[test]

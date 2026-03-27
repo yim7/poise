@@ -261,4 +261,21 @@ notional_per_unit = 375.0
         assert_eq!(config.grids[0].symbol, "BTCUSDT");
         assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
     }
+
+    #[test]
+    fn parses_binance_testnet_example_config() {
+        let config = parse_config(include_str!("../../configs/binance-testnet.toml")).unwrap();
+
+        assert_eq!(config.environment, "testnet");
+        assert_eq!(
+            config.exchange.rest_base_url.as_deref(),
+            Some("https://demo-fapi.binance.com")
+        );
+        assert_eq!(
+            config.exchange.ws_base_url.as_deref(),
+            Some("wss://fstream.binancefuture.com")
+        );
+        assert_eq!(config.grids.len(), 1);
+        assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
+    }
 }

@@ -12,6 +12,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
 use crate::write_service::GridMutationError;
+
+const STARTUP_CANCEL_ALL_POLL_ATTEMPTS: usize = 10;
+const STARTUP_CANCEL_ALL_POLL_DELAY: Duration = Duration::from_millis(100);
 #[derive(Clone)]
 pub struct ServerRuntime {
     state: ServerState,
@@ -62,7 +65,19 @@ impl ServerRuntime {
     async fn startup_sync(&self) -> Result<()> {
         for grid in self.state.write_service.grid_instruments().await {
             let position = self.exchange.get_position(&grid.instrument).await?;
-            let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
+            let mut open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
+            if open_orders.len() > 1 {
+                tracing::warn!(
+                    "grid {}:{} has {} live open orders during startup; canceling all before sync",
+                    grid.instrument.venue.as_str(),
+                    grid.instrument.symbol,
+                    open_orders.len()
+                );
+                self.exchange.cancel_all(&grid.instrument).await?;
+                open_orders = self
+                    .wait_for_startup_open_orders_to_clear(&grid.instrument)
+                    .await?;
+            }
             let submit_recovery_anchor = self
                 .state
                 .effect_service
@@ -81,6 +96,34 @@ impl ServerRuntime {
         }
 
         Ok(())
+    }
+
+    async fn wait_for_startup_open_orders_to_clear(
+        &self,
+        instrument: &grid_engine::grid::Instrument,
+    ) -> Result<Vec<ExchangeOrder>> {
+        for attempt in 0..STARTUP_CANCEL_ALL_POLL_ATTEMPTS {
+            let open_orders = self.exchange.get_open_orders(instrument).await?;
+            if open_orders.is_empty() {
+                return Ok(open_orders);
+            }
+
+            if attempt + 1 < STARTUP_CANCEL_ALL_POLL_ATTEMPTS {
+                tokio::time::sleep(STARTUP_CANCEL_ALL_POLL_DELAY).await;
+            }
+        }
+
+        let open_orders = self.exchange.get_open_orders(instrument).await?;
+        let summary = open_orders
+            .iter()
+            .map(|order| format!("{}/{}", order.client_order_id, order.order_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(anyhow!(
+            "grid `{}` still has live open orders after startup cancel_all: {}",
+            instrument.symbol,
+            summary
+        ))
     }
 
     async fn replay_startup_user_data(
@@ -284,8 +327,7 @@ mod tests {
         ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot, MarketDataPort,
         OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect, Position, PriceTick,
-        StateRepositoryPort,
-        StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
+        StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{GridRuntime, GridStatus, PendingOrder, RiskState};
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -632,7 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_reverse_exposure_math()
-    {
+     {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let config = rounded_submit_test_config();
@@ -695,7 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn effect_worker_waits_for_exchange_state_when_receipt_snapshot_has_no_live_order_and_target_not_reached()
-    {
+     {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
@@ -770,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn superseded_recovery_submit_enqueues_replacement_plan_without_waiting_for_new_observation()
-    {
+     {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
@@ -800,7 +842,10 @@ mod tests {
 
         let transition = state
             .write_service
-            .observe_position("BTCUSDT", super::position_observation(&btc_position(0.0, 0.0)))
+            .observe_position(
+                "BTCUSDT",
+                super::position_observation(&btc_position(0.0, 0.0)),
+            )
             .await
             .unwrap();
         assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
@@ -872,7 +917,7 @@ mod tests {
 
     #[tokio::test]
     async fn effect_worker_completes_submit_without_retry_when_receipt_snapshot_has_no_live_order_and_target_reached()
-    {
+     {
         let mut snapshot = test_snapshot();
         snapshot.pending_order = Some(PendingOrder {
             order_id: Some("order-restored".into()),
@@ -884,8 +929,15 @@ mod tests {
             status: OrderStatus::New,
         });
         snapshot.current_exposure = Exposure(6.0);
-        let fixture = runtime_fixture(Some(snapshot), btc_position(22.5, 0.0), vec![], test_budget()).await;
-        fixture.persistence
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(22.5, 0.0),
+            vec![],
+            test_budget(),
+        )
+        .await;
+        fixture
+            .persistence
             .seed_effect(PersistedGridEffect {
                 effect_id: "BTCUSDT:recovery:0".into(),
                 grid_id: GridId::new("BTCUSDT"),
@@ -1372,10 +1424,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(
-            persistence.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1610,6 +1659,7 @@ mod tests {
                 target_exposure: Exposure(0.0),
                 status: OrderStatus::New,
             }),
+            replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
                 reference_price: Some(100.0),
@@ -1846,7 +1896,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_rejects_multiple_live_open_orders_in_sorted_order() {
+    async fn startup_sync_cancels_multiple_live_open_orders_before_continuing() {
         let fixture = runtime_fixture(
             Some(test_snapshot()),
             btc_position(7.5, 3.0),
@@ -1874,15 +1924,23 @@ mod tests {
         )
         .await;
 
-        let error = match fixture.runtime.start().await {
-            Ok(_) => panic!("startup sync should reject multiple live open orders"),
-            Err(error) => error,
-        };
+        let handles = fixture.runtime.start().await.unwrap();
 
-        assert!(
-            error.to_string().contains("alpha/order-a, zeta/order-z"),
-            "unexpected error: {error}"
+        assert_eq!(
+            fixture
+                .exchange
+                .cancel_all_symbols
+                .lock()
+                .unwrap()
+                .as_slice(),
+            ["BTCUSDT"]
         );
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(instance.current_exposure, Exposure(2.0));
+        assert_eq!(instance.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(instance.pending_order, None);
+
+        shutdown(handles).await;
     }
 
     #[tokio::test]
@@ -1954,10 +2012,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(
-            persistence.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2128,10 +2183,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(
-            persistence.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2200,10 +2252,7 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(
-            persistence.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2262,10 +2311,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let effect_service = Arc::new(EffectService::new(
-            state_repository.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -2310,10 +2356,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let effect_service = Arc::new(EffectService::new(
-            state_repository.clone(),
-            events.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone(), events.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -2544,6 +2587,7 @@ mod tests {
                 target_exposure: Exposure(6.0),
                 status: OrderStatus::New,
             }),
+            replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
                 reference_price: Some(95.0),
@@ -2665,6 +2709,7 @@ mod tests {
             if let Some(error) = self.cancel_all_error.lock().unwrap().clone() {
                 return Err(anyhow!(error));
             }
+            self.open_orders.lock().unwrap().clear();
             Ok(())
         }
 

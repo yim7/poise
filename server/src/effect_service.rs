@@ -136,7 +136,10 @@ mod tests {
         );
 
         repository.clear_effects();
-        assert_eq!(service.submit_recovery_anchor("btc-core").await.unwrap(), None);
+        assert_eq!(
+            service.submit_recovery_anchor("btc-core").await.unwrap(),
+            None
+        );
 
         repository.seed_snapshot(snapshot_with_pending(PendingOrder {
             order_id: Some("order-1".into()),
@@ -211,6 +214,7 @@ mod tests {
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
             pending_order: Some(pending_order),
+            replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {
                 reference_price: Some(95.0),

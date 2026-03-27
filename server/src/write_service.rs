@@ -5,7 +5,9 @@ use grid_core::events::DomainEvent;
 use grid_engine::command::GridCommand;
 use grid_engine::grid::{GridId, Instrument};
 use grid_engine::manager::{GridManager, SubmitRecoveryPlan, SubmitRecoveryResolution};
-use grid_engine::observation::{GridObservation, MarketObservation, OrderObservation, PositionObservation};
+use grid_engine::observation::{
+    GridObservation, MarketObservation, OrderObservation, PositionObservation,
+};
 use grid_engine::ports::{
     EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
 };
@@ -232,8 +234,8 @@ impl GridWriteService {
             manager.clear_pending_submit(&GridId::new(id), client_order_id)?;
             Ok(())
         })
-            .await
-            .map_err(anyhow::Error::new)
+        .await
+        .map_err(anyhow::Error::new)
     }
 
     pub async fn recover_submit_effect(
@@ -271,7 +273,9 @@ impl GridWriteService {
             SubmitRecoveryResolution::Superseded => {
                 Some(EffectStatusUpdate::superseded(effect_id.to_string()))
             }
-            SubmitRecoveryResolution::Proceed | SubmitRecoveryResolution::AwaitExchangeState => None,
+            SubmitRecoveryResolution::Proceed | SubmitRecoveryResolution::AwaitExchangeState => {
+                None
+            }
         };
 
         self.commit_grid_mutation(
@@ -296,9 +300,9 @@ impl GridWriteService {
     where
         F: FnOnce(&mut GridManager) -> Result<R>,
         R: TransitionResult,
-        {
-            let _mutation_guard = self.mutation_lock.lock().await;
-            let (previous_snapshot, result, next_snapshot) = {
+    {
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
@@ -572,10 +576,12 @@ mod tests {
 
         let transition = service.observe_market("btc-core", 95.0).await.unwrap();
         let (request, target_exposure) = match transition.effects.as_slice() {
-            [GridEffect::SubmitOrder {
-                request,
-                target_exposure,
-            }] => (request.clone(), target_exposure.clone()),
+            [
+                GridEffect::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] => (request.clone(), target_exposure.clone()),
             other => panic!("expected one submit effect, got {other:?}"),
         };
         let effect_id = repository.pending_effects()[0].effect_id.clone();
@@ -801,7 +807,6 @@ mod tests {
         fn seed_effect(&self, effect: PersistedGridEffect) {
             self.effects.lock().unwrap().push(effect);
         }
-
     }
 
     #[async_trait::async_trait]
@@ -856,7 +861,9 @@ mod tests {
                 let effect = effect_store
                     .iter_mut()
                     .find(|effect| effect.effect_id == effect_status_update.effect_id)
-                    .ok_or_else(|| anyhow!("effect `{}` not found", effect_status_update.effect_id))?;
+                    .ok_or_else(|| {
+                        anyhow!("effect `{}` not found", effect_status_update.effect_id)
+                    })?;
                 effect.status = effect_status_update.status;
                 effect.attempt_count += effect_status_update.attempt_delta;
                 effect.last_error = effect_status_update.last_error.clone();

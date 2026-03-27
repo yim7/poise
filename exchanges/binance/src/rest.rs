@@ -17,6 +17,7 @@ use crate::types::{
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
 const MAX_RETRIES: usize = 3;
+const MAX_DECIMAL_SCALE: u32 = 16;
 
 #[derive(Debug, Clone, Copy)]
 enum AuthMode {
@@ -150,8 +151,8 @@ impl BinanceRestClient {
                     ("side", side_to_binance(req.side).to_string()),
                     ("type", "LIMIT".to_string()),
                     ("timeInForce", "GTC".to_string()),
-                    ("quantity", req.quantity.to_string()),
-                    ("price", req.price.to_string()),
+                    ("quantity", format_decimal(req.quantity)),
+                    ("price", format_decimal(req.price)),
                     ("newClientOrderId", req.client_order_id.clone()),
                 ],
                 AuthMode::Signed,
@@ -307,6 +308,42 @@ fn encode_query(params: &[(&str, String)]) -> String {
     serializer.finish()
 }
 
+fn format_decimal(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+
+    for scale in 0..=MAX_DECIMAL_SCALE {
+        let factor = 10_f64.powi(scale as i32);
+        let scaled = value * factor;
+        let rounded = scaled.round();
+        let tolerance = scaled.abs().max(1.0) * f64::EPSILON * 16.0;
+        if (scaled - rounded).abs() <= tolerance {
+            let normalized = rounded / factor;
+            return trim_decimal_string(format!("{normalized:.scale$}", scale = scale as usize));
+        }
+    }
+
+    value.to_string()
+}
+
+fn trim_decimal_string(mut value: String) -> String {
+    if value.contains('.') {
+        while value.ends_with('0') {
+            value.pop();
+        }
+        if value.ends_with('.') {
+            value.pop();
+        }
+    }
+
+    if value == "-0" {
+        "0".to_string()
+    } else {
+        value
+    }
+}
+
 fn side_to_binance(side: grid_core::types::Side) -> &'static str {
     match side {
         grid_core::types::Side::Buy => "BUY",
@@ -364,6 +401,14 @@ mod tests {
             signature,
             "8060b5a3659c282a31f2af0a1f52a97899704f79df4ef332ad3ba05390884195"
         );
+    }
+
+    #[test]
+    fn format_decimal_trims_binary_float_noise() {
+        assert_eq!(format_decimal(0.1 + 0.2), "0.3");
+        assert_eq!(format_decimal(0.024000000000000004), "0.024");
+        assert_eq!(format_decimal(65_853.7 + 0.1), "65853.8");
+        assert_eq!(format_decimal(1.23456789), "1.23456789");
     }
 
     #[tokio::test]
@@ -478,6 +523,44 @@ mod tests {
         assert!(requests[0].path.contains("timestamp=1700000000000"));
         assert!(requests[1].path.contains("timestamp=1700000006000"));
         assert_ne!(requests[0].path, requests[1].path);
+    }
+
+    #[tokio::test]
+    async fn new_order_serializes_price_and_quantity_without_float_noise() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{
+                "orderId": 1004,
+                "clientOrderId": "grid-open-006",
+                "status": "NEW"
+            }"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+        let request = OrderRequest {
+            instrument: grid_engine::grid::Instrument::new(
+                grid_engine::grid::Venue::Binance,
+                "BTCUSDT",
+            ),
+            side: grid_core::types::Side::Buy,
+            price: 0.1 + 0.2,
+            quantity: 0.024000000000000004,
+            client_order_id: "grid-open-006".to_string(),
+        };
+
+        let _ = client.new_order(&request).await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].path.contains("price=0.3"));
+        assert!(requests[0].path.contains("quantity=0.024"));
+        assert!(!requests[0].path.contains("price=0.30000000000000004"));
+        assert!(!requests[0].path.contains("quantity=0.024000000000000004"));
     }
 
     #[derive(Debug, Clone)]

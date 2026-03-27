@@ -9,7 +9,10 @@ use tokio::{
     sync::mpsc,
     time::{Duration, Instant, interval_at, sleep},
 };
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    Connector, MaybeTlsStream, WebSocketStream, connect_async, connect_async_tls_with_config,
+    tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
+};
 
 use grid_engine::grid::{Instrument, Venue};
 use grid_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
@@ -101,7 +104,7 @@ async fn run_market_stream(
     let mut attempt = 0_u32;
 
     loop {
-        match connect_async(&url).await {
+        match connect_websocket(&url).await {
             Ok((mut websocket, _)) => {
                 attempt = 0;
 
@@ -121,7 +124,7 @@ async fn run_market_stream(
                         Ok(Message::Close(_)) => break,
                         Ok(_) => {}
                         Err(error) => {
-                            tracing::warn!("market data websocket error: {error}");
+                            log_websocket_error("market data", &error);
                             break;
                         }
                     }
@@ -161,6 +164,7 @@ async fn run_user_stream(
         match connection {
             Ok(mut websocket) => {
                 attempt = 0;
+                let mut diagnostics = UserStreamDiagnostics::new(Instant::now());
                 let mut keepalive = interval_at(
                     Instant::now() + Duration::from_secs(30 * 60),
                     Duration::from_secs(30 * 60),
@@ -171,32 +175,83 @@ async fn run_user_stream(
                         message = websocket.next() => {
                             match message {
                                 Some(Ok(Message::Text(text))) => {
+                                    diagnostics.record_message(Instant::now());
                                     match parse_user_data_message(&text) {
                                         Ok(UserStreamMessage::Events(events)) => {
                                             for event in events {
+                                                let send_started = Instant::now();
                                                 if sender.send(event).await.is_err() {
                                                     return;
                                                 }
+                                                diagnostics.record_send_wait(send_started.elapsed());
                                             }
                                         }
-                                        Ok(UserStreamMessage::ListenKeyExpired) => break,
+                                        Ok(UserStreamMessage::ListenKeyExpired) => {
+                                            log_user_stream_disconnect(
+                                                "listen_key_expired",
+                                                diagnostics.disconnect_snapshot(Instant::now()),
+                                            );
+                                            break;
+                                        }
                                         Err(error) => {
                                             tracing::warn!("failed to parse user data message: {error}");
                                         }
                                     }
                                 }
-                                Some(Ok(Message::Close(_))) | None => break,
-                                Some(Ok(_)) => {}
+                                Some(Ok(Message::Close(_))) => {
+                                    log_user_stream_disconnect(
+                                        "close_frame",
+                                        diagnostics.disconnect_snapshot(Instant::now()),
+                                    );
+                                    break;
+                                }
+                                Some(Ok(_)) => {
+                                    diagnostics.record_message(Instant::now());
+                                }
+                                None => {
+                                    log_user_stream_disconnect(
+                                        "stream_ended",
+                                        diagnostics.disconnect_snapshot(Instant::now()),
+                                    );
+                                    break;
+                                }
                                 Some(Err(error)) => {
-                                    tracing::warn!("user data websocket error: {error}");
+                                    log_user_stream_error(
+                                        &error,
+                                        diagnostics.disconnect_snapshot(Instant::now()),
+                                    );
                                     break;
                                 }
                             }
                         }
                         _ = keepalive.tick() => {
-                            if let Err(error) = rest.keepalive_user_stream(&listen_key).await {
-                                tracing::warn!("failed to keepalive listen key: {error}");
-                                break;
+                            let started_at = Instant::now();
+                            match rest.keepalive_user_stream(&listen_key).await {
+                                Ok(()) => diagnostics.record_keepalive_result(
+                                    started_at,
+                                    Instant::now(),
+                                    KeepaliveStatus::Ok,
+                                ),
+                                Err(error) => {
+                                    diagnostics.record_keepalive_result(
+                                        started_at,
+                                        Instant::now(),
+                                        KeepaliveStatus::Failed,
+                                    );
+                                    let snapshot = diagnostics.disconnect_snapshot(Instant::now());
+                                    tracing::warn!(
+                                        error = %error,
+                                        connection_age = ?snapshot.connection_age,
+                                        idle_for = ?snapshot.idle_for,
+                                        last_keepalive_age = ?snapshot.last_keepalive_age,
+                                        last_keepalive_latency = ?snapshot.last_keepalive_latency,
+                                        last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
+                                        last_send_wait = ?snapshot.last_send_wait,
+                                        max_send_wait = ?snapshot.max_send_wait,
+                                        "failed to keepalive listen key; reconnecting"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
@@ -227,10 +282,188 @@ async fn run_user_stream(
 
 async fn connect_user_stream(ws_base_url: &str, listen_key: &str) -> Result<UserWebSocket> {
     let url = format!("{ws_base_url}/ws/{listen_key}");
-    let (websocket, _) = connect_async(&url)
+    let (websocket, _) = connect_websocket(&url)
         .await
         .with_context(|| format!("failed to connect user data websocket `{url}`"))?;
     Ok(websocket)
+}
+
+async fn connect_websocket(
+    url: &str,
+) -> Result<(
+    WebSocketStream<MaybeTlsStream<TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    let connector = websocket_connector(url)?;
+    let result = match connector {
+        Some(connector) => connect_async_tls_with_config(url, None, false, Some(connector)).await,
+        None => connect_async(url).await,
+    };
+
+    result.with_context(|| format!("failed to connect websocket `{url}`"))
+}
+
+fn websocket_connector(url: &str) -> Result<Option<Connector>> {
+    if !url.starts_with("wss://") {
+        return Ok(None);
+    }
+
+    let connector = native_tls::TlsConnector::builder()
+        .build()
+        .context("failed to build native TLS websocket connector")?;
+
+    Ok(Some(Connector::NativeTls(connector)))
+}
+
+fn log_websocket_error(stream_name: &str, error: &WebSocketError) {
+    if is_expected_disconnect(error) {
+        tracing::info!("{stream_name} websocket disconnected: {error}; reconnecting");
+    } else {
+        tracing::warn!("{stream_name} websocket error: {error}");
+    }
+}
+
+fn is_expected_disconnect(error: &WebSocketError) -> bool {
+    matches!(
+        error,
+        WebSocketError::ConnectionClosed
+            | WebSocketError::AlreadyClosed
+            | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepaliveStatus {
+    Ok,
+    Failed,
+}
+
+impl KeepaliveStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeepaliveObservation {
+    finished_at: Instant,
+    latency: Duration,
+    status: KeepaliveStatus,
+}
+
+#[derive(Debug, Clone)]
+struct UserStreamDiagnostics {
+    connected_at: Instant,
+    last_message_at: Instant,
+    last_keepalive: Option<KeepaliveObservation>,
+    last_send_wait: Option<Duration>,
+    max_send_wait: Duration,
+}
+
+impl UserStreamDiagnostics {
+    fn new(now: Instant) -> Self {
+        Self {
+            connected_at: now,
+            last_message_at: now,
+            last_keepalive: None,
+            last_send_wait: None,
+            max_send_wait: Duration::ZERO,
+        }
+    }
+
+    fn record_message(&mut self, now: Instant) {
+        self.last_message_at = now;
+    }
+
+    fn record_send_wait(&mut self, wait: Duration) {
+        self.last_send_wait = Some(wait);
+        if wait > self.max_send_wait {
+            self.max_send_wait = wait;
+        }
+    }
+
+    fn record_keepalive_result(
+        &mut self,
+        started_at: Instant,
+        finished_at: Instant,
+        status: KeepaliveStatus,
+    ) {
+        self.last_keepalive = Some(KeepaliveObservation {
+            finished_at,
+            latency: finished_at.saturating_duration_since(started_at),
+            status,
+        });
+    }
+
+    fn disconnect_snapshot(&self, now: Instant) -> UserStreamDisconnectSnapshot {
+        UserStreamDisconnectSnapshot {
+            connection_age: now.saturating_duration_since(self.connected_at),
+            idle_for: now.saturating_duration_since(self.last_message_at),
+            last_keepalive_age: self
+                .last_keepalive
+                .map(|observation| now.saturating_duration_since(observation.finished_at)),
+            last_keepalive_latency: self.last_keepalive.map(|observation| observation.latency),
+            last_keepalive_status: self.last_keepalive.map(|observation| observation.status),
+            last_send_wait: self.last_send_wait,
+            max_send_wait: self.max_send_wait,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UserStreamDisconnectSnapshot {
+    connection_age: Duration,
+    idle_for: Duration,
+    last_keepalive_age: Option<Duration>,
+    last_keepalive_latency: Option<Duration>,
+    last_keepalive_status: Option<KeepaliveStatus>,
+    last_send_wait: Option<Duration>,
+    max_send_wait: Duration,
+}
+
+fn log_user_stream_disconnect(reason: &str, snapshot: UserStreamDisconnectSnapshot) {
+    tracing::info!(
+        reason,
+        connection_age = ?snapshot.connection_age,
+        idle_for = ?snapshot.idle_for,
+        last_keepalive_age = ?snapshot.last_keepalive_age,
+        last_keepalive_latency = ?snapshot.last_keepalive_latency,
+        last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
+        last_send_wait = ?snapshot.last_send_wait,
+        max_send_wait = ?snapshot.max_send_wait,
+        "user data websocket disconnected; reconnecting"
+    );
+}
+
+fn log_user_stream_error(error: &WebSocketError, snapshot: UserStreamDisconnectSnapshot) {
+    if is_expected_disconnect(error) {
+        tracing::info!(
+            error = %error,
+            connection_age = ?snapshot.connection_age,
+            idle_for = ?snapshot.idle_for,
+            last_keepalive_age = ?snapshot.last_keepalive_age,
+            last_keepalive_latency = ?snapshot.last_keepalive_latency,
+            last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
+            last_send_wait = ?snapshot.last_send_wait,
+            max_send_wait = ?snapshot.max_send_wait,
+            "user data websocket disconnected; reconnecting"
+        );
+    } else {
+        tracing::warn!(
+            error = %error,
+            connection_age = ?snapshot.connection_age,
+            idle_for = ?snapshot.idle_for,
+            last_keepalive_age = ?snapshot.last_keepalive_age,
+            last_keepalive_latency = ?snapshot.last_keepalive_latency,
+            last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
+            last_send_wait = ?snapshot.last_send_wait,
+            max_send_wait = ?snapshot.max_send_wait,
+            "user data websocket error"
+        );
+    }
 }
 
 fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
@@ -401,7 +634,10 @@ mod tests {
         sync::{Mutex, Notify},
         time::timeout,
     };
-    use tokio_tungstenite::{accept_async, tungstenite::Message};
+    use tokio_tungstenite::{
+        accept_async,
+        tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
+    };
 
     use grid_core::types::Side;
     use grid_engine::grid::{Instrument, Venue};
@@ -640,6 +876,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconnects_user_data_stream_after_reset_without_close_handshake() {
+        let rest_server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#"{"listenKey":"listen-key-1"}"#),
+            MockResponse::json(200, r#"{"listenKey":"listen-key-2"}"#),
+        ])
+        .await;
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_address = ws_listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (first_stream, _) = ws_listener.accept().await.unwrap();
+            let first_ws = accept_async(first_stream).await.unwrap();
+            drop(first_ws);
+
+            let (second_stream, _) = ws_listener.accept().await.unwrap();
+            let mut second_ws = accept_async(second_stream).await.unwrap();
+            second_ws
+                .send(
+                    Message::Text(
+                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                            .to_string()
+                    ),
+                )
+                .await
+                .unwrap();
+            second_ws.close(None).await.unwrap();
+        });
+
+        let rest = Arc::new(BinanceRestClient::new(
+            rest_server.base_url(),
+            "api-key",
+            "secret-key",
+        ));
+        let client = BinanceWsClient::with_reconnect_delay(
+            rest,
+            format!("ws://{}", ws_address),
+            Duration::from_millis(10),
+        );
+
+        let mut receiver = client.subscribe_user_data().await.unwrap();
+        let event = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = rest_server.requests().await;
+
+        assert_eq!(
+            event,
+            UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::PositionUpdate(Position {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    qty: 0.015,
+                    avg_price: 64200.0,
+                    unrealized_pnl: 12.3,
+                }),
+            }
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path == "/fapi/v1/listenKey" && request.method == "POST")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn subscribe_user_data_waits_for_initial_connection_before_returning() {
         let rest_server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
@@ -708,6 +1012,60 @@ mod tests {
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
                 }),
+            }
+        );
+    }
+
+    #[test]
+    fn websocket_connector_uses_native_tls_for_secure_urls() {
+        let connector = super::websocket_connector("wss://example.com/ws").unwrap();
+
+        assert!(matches!(
+            connector,
+            Some(tokio_tungstenite::Connector::NativeTls(_))
+        ));
+    }
+
+    #[test]
+    fn websocket_connector_skips_tls_for_plain_urls() {
+        let connector = super::websocket_connector("ws://127.0.0.1:18081/ws").unwrap();
+
+        assert!(connector.is_none());
+    }
+
+    #[test]
+    fn treats_reset_without_close_handshake_as_expected_disconnect() {
+        let error = WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake);
+
+        assert!(super::is_expected_disconnect(&error));
+    }
+
+    #[test]
+    fn user_stream_diagnostics_snapshot_tracks_keepalive_and_send_wait() {
+        let base = Instant::now();
+        let mut diagnostics = super::UserStreamDiagnostics::new(base);
+
+        diagnostics.record_message(base + Duration::from_secs(5));
+        diagnostics.record_send_wait(Duration::from_millis(250));
+        diagnostics.record_send_wait(Duration::from_millis(100));
+        diagnostics.record_keepalive_result(
+            base + Duration::from_secs(6),
+            base + Duration::from_secs(8),
+            super::KeepaliveStatus::Ok,
+        );
+
+        let snapshot = diagnostics.disconnect_snapshot(base + Duration::from_secs(20));
+
+        assert_eq!(
+            snapshot,
+            super::UserStreamDisconnectSnapshot {
+                connection_age: Duration::from_secs(20),
+                idle_for: Duration::from_secs(15),
+                last_keepalive_age: Some(Duration::from_secs(12)),
+                last_keepalive_latency: Some(Duration::from_secs(2)),
+                last_keepalive_status: Some(super::KeepaliveStatus::Ok),
+                last_send_wait: Some(Duration::from_millis(100)),
+                max_send_wait: Duration::from_millis(250),
             }
         );
     }

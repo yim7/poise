@@ -8,7 +8,7 @@ use grid_protocol::{
     GridIdentityView, GridLifecycleView, GridListItemView, GridMarketView, GridPositionView,
     GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView, InstrumentView,
     OrderExecutionView, OrderStatus as ProtocolOrderStatus, OutOfBandPolicy as ProtocolPolicy,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
+    ReplacementGateView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
 };
 
 use crate::query_service::GridReadModelSource;
@@ -89,6 +89,11 @@ impl GridProjector {
                         status: project_order_status(order.status),
                     }
                 }),
+                replacement_gate: source
+                    .snapshot
+                    .replacement_gate_reason
+                    .as_ref()
+                    .map(project_replacement_gate_reason),
             },
             activity: self.project_activity(source),
             available_commands: project_available_commands(&source.snapshot.status),
@@ -183,6 +188,21 @@ fn project_order_status(value: EngineOrderStatus) -> ProtocolOrderStatus {
     }
 }
 
+fn project_replacement_gate_reason(
+    reason: &grid_core::events::ReplacementGateReason,
+) -> ReplacementGateView {
+    match reason {
+        grid_core::events::ReplacementGateReason::RoundedMatch => ReplacementGateView::RoundedMatch,
+        grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
+            improvement_bps,
+            threshold_bps,
+        } => ReplacementGateView::ImprovementBelowThreshold {
+            improvement_bps: *improvement_bps,
+            threshold_bps: *threshold_bps,
+        },
+    }
+}
+
 fn project_execution_state(source: &GridReadModelSource) -> ExecutionStateView {
     match source.snapshot.status {
         EngineGridStatus::Paused => ExecutionStateView::Paused,
@@ -259,6 +279,18 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
             format!("risk cap {:.4} -> {:.4}", intended.0, capped.0)
         }
         DomainEvent::RiskDenied { reason } => format!("risk denied: {reason}"),
+        DomainEvent::PendingOrderKept { reason } => match reason {
+            grid_core::events::ReplacementGateReason::RoundedMatch => {
+                "kept pending order: candidate matches pending order after rounding".into()
+            }
+            grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
+                improvement_bps,
+                threshold_bps,
+            } => format!(
+                "kept pending order: improvement {:.1} bps < threshold {:.1} bps",
+                improvement_bps, threshold_bps
+            ),
+        },
     }
 }
 
@@ -377,6 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn project_detail_includes_replacement_gate_reason() {
+        let mut source = source_with_submitting_effect();
+        source.snapshot.replacement_gate_reason = Some(
+            grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
+                improvement_bps: 9.0,
+                threshold_bps: 13.0,
+            },
+        );
+
+        let detail = GridProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.replacement_gate,
+            Some(
+                grid_protocol::ReplacementGateView::ImprovementBelowThreshold {
+                    improvement_bps: 9.0,
+                    threshold_bps: 13.0,
+                }
+            )
+        );
+    }
+
+    #[test]
     fn project_activity_distinguishes_superseded_submit_from_success() {
         let mut source = source_with_submitting_effect();
         source.recent_effects = vec![test_effect(EffectStatus::Superseded, None)];
@@ -387,6 +442,28 @@ mod tests {
         assert_eq!(
             activity[0].message,
             "submit order superseded by newer grid state"
+        );
+        assert_eq!(activity[0].level, ActivityLevelView::Info);
+    }
+
+    #[test]
+    fn project_activity_renders_replacement_gate_event_message() {
+        let mut source = source_with_submitting_effect();
+        source.recent_domain_events = vec![StoredDomainEvent {
+            id: 1,
+            grid_id: GridId::new("btc-core"),
+            event: DomainEvent::PendingOrderKept {
+                reason: grid_core::events::ReplacementGateReason::RoundedMatch,
+            },
+            created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
+        }];
+
+        let activity = GridProjector::new().project_activity(&source);
+
+        assert_eq!(activity.len(), 2);
+        assert_eq!(
+            activity[0].message,
+            "kept pending order: candidate matches pending order after rounding"
         );
         assert_eq!(activity[0].level, ActivityLevelView::Info);
     }
@@ -469,6 +546,7 @@ mod tests {
                 target_exposure: Exposure(4.0),
                 status: OrderStatus::New,
             }),
+            replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,

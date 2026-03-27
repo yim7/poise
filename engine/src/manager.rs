@@ -9,7 +9,9 @@ use grid_core::types::ExchangeRules;
 
 use crate::command::GridCommand;
 use crate::grid::{GridId, Instrument};
-use crate::observation::{GridObservation, MarketObservation, OrderObservation, PositionObservation};
+use crate::observation::{
+    GridObservation, MarketObservation, OrderObservation, PositionObservation,
+};
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
 use crate::runtime::{GridRuntime, GridStatus, PendingOrder, SubmitRecoveryAnchor};
@@ -180,6 +182,7 @@ impl GridManager {
                     Some((
                         result.new_status.unwrap_or(GridStatus::Active),
                         result.target_exposure,
+                        result.replacement_gate_reason,
                     ))
                 }
                 None => None,
@@ -191,13 +194,15 @@ impl GridManager {
             .get_mut(&GridId::from(id))
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
         match resumed_state {
-            Some((status, exposure)) => {
+            Some((status, exposure, replacement_gate_reason)) => {
                 grid.status = status;
                 grid.target_exposure = Some(exposure);
+                grid.replacement_gate_reason = replacement_gate_reason;
             }
             None => {
                 grid.status = GridStatus::WaitingMarketData;
                 grid.target_exposure = None;
+                grid.replacement_gate_reason = None;
             }
         }
 
@@ -238,6 +243,7 @@ impl GridManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         grid.pending_order = Some(PendingOrder::from_submit_request(request, target_exposure));
+        grid.replacement_gate_reason = None;
         Ok(())
     }
 
@@ -252,8 +258,12 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        grid.pending_order =
-            Some(PendingOrder::from_submit_receipt(request, target_exposure, receipt));
+        grid.pending_order = Some(PendingOrder::from_submit_receipt(
+            request,
+            target_exposure,
+            receipt,
+        ));
+        grid.replacement_gate_reason = None;
         Ok(())
     }
 
@@ -269,6 +279,7 @@ impl GridManager {
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         if order.status.keeps_pending_order() {
             grid.pending_order = Some(PendingOrder::from_exchange_order(order, target_exposure));
+            grid.replacement_gate_reason = None;
         }
         Ok(())
     }
@@ -285,6 +296,7 @@ impl GridManager {
             .unwrap_or(false)
         {
             grid.pending_order = None;
+            grid.replacement_gate_reason = None;
         }
         Ok(())
     }
@@ -453,8 +465,11 @@ impl GridManager {
 
         if observation.status.keeps_pending_order() {
             let target_exposure = Self::resolve_pending_target_exposure(grid);
-            grid.pending_order =
-                Some(PendingOrder::from_order_observation(&observation, target_exposure));
+            grid.pending_order = Some(PendingOrder::from_order_observation(
+                &observation,
+                target_exposure,
+            ));
+            grid.replacement_gate_reason = None;
             return Ok(());
         }
 
@@ -470,6 +485,7 @@ impl GridManager {
 
             if should_clear {
                 grid.pending_order = None;
+                grid.replacement_gate_reason = None;
             }
         }
 
@@ -536,6 +552,7 @@ impl GridManager {
             &observation,
             target_exposure,
         ));
+        grid.replacement_gate_reason = None;
 
         Ok(())
     }
@@ -557,6 +574,7 @@ impl GridManager {
             let grid = self.grids.get_mut(id).unwrap();
             grid.reference_price = Some(reference_price);
             grid.target_exposure = None;
+            grid.replacement_gate_reason = None;
             return Ok((vec![], vec![]));
         }
 
@@ -578,13 +596,24 @@ impl GridManager {
         };
 
         let grid = self.grids.get_mut(id).unwrap();
+        let replacement_gate_event = (grid.replacement_gate_reason
+            != result.replacement_gate_reason)
+            .then(|| result.replacement_gate_reason.clone())
+            .flatten()
+            .map(|reason| DomainEvent::PendingOrderKept { reason });
         if let Some(new_status) = result.new_status {
             grid.status = new_status;
         }
         grid.target_exposure = Some(result.target_exposure);
         grid.reference_price = Some(reference_price);
+        grid.replacement_gate_reason = result.replacement_gate_reason;
 
-        Ok((result.events, effects))
+        let mut events = result.events;
+        if let Some(event) = replacement_gate_event {
+            events.push(event);
+        }
+
+        Ok((events, effects))
     }
 
     fn clear_pending_order(&mut self, id: &GridId) -> Result<()> {
@@ -593,6 +622,7 @@ impl GridManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         grid.pending_order = None;
+        grid.replacement_gate_reason = None;
         Ok(())
     }
 
@@ -707,6 +737,7 @@ mod tests {
     use crate::ports::*;
     use crate::runtime::{GridStatus, PendingOrder, RiskState};
     use chrono::{TimeZone, Utc};
+    use grid_core::events::ReplacementGateReason;
     use grid_core::strategy::*;
 
     struct FakeClock;
@@ -1195,6 +1226,155 @@ mod tests {
     }
 
     #[test]
+    fn observe_market_replacement_gate_emits_event_when_reason_first_appears() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = grid_core::types::Exposure(2.0);
+        grid.exchange_rules = grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.5,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
+        grid.pending_order = Some(PendingOrder {
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Sell,
+            price: 99.9,
+            quantity: 7.0,
+            target_exposure: grid_core::types::Exposure(0.5),
+            status: OrderStatus::New,
+        });
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 99.95,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            transition.snapshot.replacement_gate_reason,
+            Some(ReplacementGateReason::RoundedMatch)
+        );
+        assert!(transition.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::PendingOrderKept {
+                reason: ReplacementGateReason::RoundedMatch,
+            }
+        )));
+    }
+
+    #[test]
+    fn observe_market_replacement_gate_deduplicates_same_reason_across_ticks() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = grid_core::types::Exposure(2.0);
+        grid.exchange_rules = grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.5,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
+        grid.pending_order = Some(PendingOrder {
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Sell,
+            price: 99.9,
+            quantity: 7.0,
+            target_exposure: grid_core::types::Exposure(0.5),
+            status: OrderStatus::New,
+        });
+
+        let first = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 99.95,
+                }),
+            )
+            .unwrap();
+        let second = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 99.95,
+                }),
+            )
+            .unwrap();
+
+        assert!(first.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::PendingOrderKept {
+                reason: ReplacementGateReason::RoundedMatch,
+            }
+        )));
+        assert!(
+            !second
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::PendingOrderKept { .. }))
+        );
+        assert_eq!(
+            second.snapshot.replacement_gate_reason,
+            Some(ReplacementGateReason::RoundedMatch)
+        );
+    }
+
+    #[test]
+    fn observe_market_replacement_gate_emits_event_when_reason_changes() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.pending_order = Some(PendingOrder {
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 100.0,
+            quantity: 0.1,
+            target_exposure: grid_core::types::Exposure(0.4),
+            status: OrderStatus::New,
+        });
+        grid.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 99.95,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            transition.snapshot.replacement_gate_reason,
+            Some(ReplacementGateReason::ImprovementBelowThreshold {
+                improvement_bps: 10.0,
+                threshold_bps: 13.0,
+            })
+        );
+        assert!(transition.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::PendingOrderKept {
+                reason:
+                    ReplacementGateReason::ImprovementBelowThreshold {
+                        improvement_bps,
+                        threshold_bps,
+                    },
+            } if (*improvement_bps - 10.0).abs() < f64::EPSILON
+                && (*threshold_bps - 13.0).abs() < f64::EPSILON
+        )));
+    }
+
+    #[test]
     fn resume_grid_rejects_non_paused_status() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
@@ -1226,6 +1406,41 @@ mod tests {
         assert_eq!(
             grid.target_exposure.as_ref().map(|target| target.0),
             Some(4.0)
+        );
+    }
+
+    #[test]
+    fn resume_grid_recomputes_replacement_gate_reason_from_last_price() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Paused;
+        grid.current_exposure = grid_core::types::Exposure(2.0);
+        grid.reference_price = Some(99.95);
+        grid.exchange_rules = grid_core::types::ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.5,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
+        grid.pending_order = Some(PendingOrder {
+            order_id: Some("order-1".into()),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Sell,
+            price: 99.9,
+            quantity: 7.0,
+            target_exposure: grid_core::types::Exposure(0.5),
+            status: OrderStatus::New,
+        });
+
+        manager.resume_grid("btc1").unwrap();
+
+        let grid = manager.get_grid("btc1").unwrap();
+        assert_eq!(grid.status, GridStatus::Active);
+        assert_eq!(
+            grid.replacement_gate_reason,
+            Some(ReplacementGateReason::RoundedMatch)
         );
     }
 
@@ -1322,7 +1537,13 @@ mod tests {
 
         assert_eq!(recovery.resolution, SubmitRecoveryResolution::Superseded);
         assert!(recovery.effects.is_empty());
-        assert!(manager.get_grid("btc-core").unwrap().pending_order.is_none());
+        assert!(
+            manager
+                .get_grid("btc-core")
+                .unwrap()
+                .pending_order
+                .is_none()
+        );
     }
 
     #[test]
@@ -1357,7 +1578,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(recovery.resolution, SubmitRecoveryResolution::Superseded);
-        assert!(manager.get_grid("btc-core").unwrap().pending_order.is_none());
+        assert!(
+            manager
+                .get_grid("btc-core")
+                .unwrap()
+                .pending_order
+                .is_none()
+        );
         assert!(matches!(
             recovery.effects.as_slice(),
             [GridEffect::SubmitOrder {
@@ -1617,9 +1844,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            error
-                .to_string()
-                .contains("a/order-a, b/order-b"),
+            error.to_string().contains("a/order-a, b/order-b"),
             "unexpected error: {error}"
         );
     }

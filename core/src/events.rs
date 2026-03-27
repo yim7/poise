@@ -4,6 +4,16 @@ use crate::strategy::{BandBoundary, OutOfBandPolicy};
 use crate::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplacementGateReason {
+    RoundedMatch,
+    ImprovementBelowThreshold {
+        improvement_bps: f64,
+        threshold_bps: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainEvent {
     ExposureTargetChanged {
@@ -26,5 +36,8 @@ pub enum DomainEvent {
     },
     RiskDenied {
         reason: String,
+    },
+    PendingOrderKept {
+        reason: ReplacementGateReason,
     },
 }

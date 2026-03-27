@@ -29,6 +29,11 @@
   },
   "execution": {
     "state": "open",
+    "replacement_gate": {
+      "kind": "improvement_below_threshold",
+      "improvement_bps": 9.0,
+      "threshold_bps": 13.0
+    },
     "pending_order": {
       "symbol": "BTCUSDT",
       "order_id": "order-1",

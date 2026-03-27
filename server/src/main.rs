@@ -32,7 +32,6 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
 fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
     let mut config_path = None;
 

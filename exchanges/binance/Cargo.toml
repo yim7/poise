@@ -20,3 +20,4 @@ hex.workspace = true
 url.workspace = true
 futures-util = "0.3"
 tracing = "0.1"
+native-tls.workspace = true

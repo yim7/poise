@@ -30,22 +30,29 @@
 
 ### 1. 准备配置
 
-服务端只接受 `--config <path>` 方式启动。可以直接参考 [`configs/test.toml`](configs/test.toml)，最小示例如下：
+服务端只接受 `--config <path>` 方式启动。
+
+- 手工联调 Binance USDⓈ-M Futures 测试网时，直接复制或修改 [`configs/binance-testnet.toml`](configs/binance-testnet.toml)
+- [`configs/test.toml`](configs/test.toml) 只给仓库内自动化测试使用，里面是本地假地址，不能直接拿来连 Binance
+
+测试网最小示例如下：
 
 ```toml
-environment = "paper"
+environment = "testnet"
 bind_address = "127.0.0.1:8000"
 
 [exchange]
-rest_base_url = "https://testnet.binancefuture.com"
-ws_base_url = "wss://stream.binancefuture.com"
+api_key = ""
+api_secret = ""
+rest_base_url = "https://demo-fapi.binance.com"
+ws_base_url = "wss://fstream.binancefuture.com"
 
 [[grids]]
 grid_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
-lower_price = 90000.0
-upper_price = 110000.0
+lower_price = 50000.0
+upper_price = 73000.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
@@ -56,12 +63,14 @@ notional_per_unit = 375.0
 - 可以继续追加 `[[grids]]`，每个网格都要配置唯一的 `grid_id`
 - 当前同一交易所内每个 `symbol` 只能出现一次
 - `environment` 只决定数据目录和环境名，不自动切换交易所地址
-- 需要用户流时，在 `[exchange]` 里补 `api_key` 和 `api_secret`
+- 真实启动时必须显式配置 `exchange.rest_base_url`、`exchange.ws_base_url`、`exchange.api_key`、`exchange.api_secret`
+- 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
+- 网格区间只是示例，联调前要按当前测试网价格改成合理范围
 
 ### 2. 启动服务端
 
 ```bash
-cargo run -p grid-server -- --config configs/test.toml
+cargo run -p grid-server -- --config configs/binance-testnet.toml
 ```
 
 服务端启动后会：
@@ -69,7 +78,7 @@ cargo run -p grid-server -- --config configs/test.toml
 - 读取配置中的全部网格
 - 初始化 SQLite
 - 建立 HTTP / WebSocket 控制面
-- 在配置了 Binance 地址时接入市场数据
+- 接入 Binance 市场数据和用户流
 
 ### 3. 启动 TUI
 

@@ -1,0 +1,18 @@
+environment = "testnet"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+api_key = ""
+api_secret = ""
+rest_base_url = "https://demo-fapi.binance.com"
+ws_base_url = "wss://fstream.binancefuture.com"
+
+[[grids]]
+grid_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 50000.0
+upper_price = 73000.0
+long_exposure_units = 4
+short_exposure_units = 4
+notional_per_unit = 1000

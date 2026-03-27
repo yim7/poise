@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use grid_core::events::ReplacementGateReason;
 use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
 
@@ -22,6 +23,8 @@ pub struct GridRuntimeSnapshot {
     pub current_exposure: Exposure,
     pub target_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
+    #[serde(default)]
+    pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk: RiskState,
     pub observed: ObservedState,
 }

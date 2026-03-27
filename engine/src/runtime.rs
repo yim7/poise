@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
+use grid_core::events::ReplacementGateReason;
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 use grid_core::types::{ExchangeRules, Exposure, Side};
@@ -133,12 +134,12 @@ impl SubmitRecoveryAnchor {
             });
         }
 
-        (pending_order.order_id.is_some() && pending_order.status.keeps_pending_order()).then(|| {
-            Self {
+        (pending_order.order_id.is_some() && pending_order.status.keeps_pending_order()).then(
+            || Self {
                 client_order_id: pending_order.client_order_id.clone(),
                 kind: SubmitRecoveryKind::ReceiptBacked,
-            }
-        })
+            },
+        )
     }
 
     pub fn matches(&self, pending_order: &PendingOrder) -> bool {
@@ -171,6 +172,7 @@ pub struct GridRuntime {
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
+    pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk_state: RiskState,
     pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
@@ -194,6 +196,7 @@ impl GridRuntime {
             current_exposure: Exposure(0.0),
             target_exposure: None,
             pending_order: None,
+            replacement_gate_reason: None,
             risk_state: RiskState::default(),
             reference_price: None,
             out_of_band_since: None,
@@ -213,6 +216,7 @@ impl GridRuntime {
             current_exposure: self.current_exposure.clone(),
             target_exposure: self.target_exposure.clone(),
             pending_order: self.pending_order.clone(),
+            replacement_gate_reason: self.replacement_gate_reason.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
                 reference_price: self.reference_price,
@@ -247,6 +251,7 @@ impl GridRuntime {
         self.current_exposure = snapshot.current_exposure.clone();
         self.target_exposure = snapshot.target_exposure.clone();
         self.pending_order = snapshot.pending_order.clone();
+        self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.risk_state = snapshot.risk.clone();
         self.reference_price = snapshot.observed.reference_price;
         self.out_of_band_since = snapshot.observed.out_of_band_since;
@@ -347,8 +352,10 @@ mod tests {
             client_order_id: "client-1".into(),
             status: OrderStatus::New,
         };
-        assert!(!PendingOrder::from_submit_receipt(&request, Exposure(6.0), &receipt)
-            .is_submit_recovery_anchor());
+        assert!(
+            !PendingOrder::from_submit_receipt(&request, Exposure(6.0), &receipt)
+                .is_submit_recovery_anchor()
+        );
 
         let observation = OrderObservation {
             order_id: "live-1".into(),
@@ -359,8 +366,10 @@ mod tests {
             realized_pnl: 0.0,
             status: OrderStatus::PartiallyFilled,
         };
-        assert!(!PendingOrder::from_order_observation(&observation, Exposure(-2.0))
-            .is_submit_recovery_anchor());
+        assert!(
+            !PendingOrder::from_order_observation(&observation, Exposure(-2.0))
+                .is_submit_recovery_anchor()
+        );
     }
 
     #[test]
@@ -369,7 +378,10 @@ mod tests {
         assert!(PendingOrder::target_reached(Exposure(6.5), Exposure(6.0)));
         assert!(!PendingOrder::target_reached(Exposure(5.5), Exposure(6.0)));
         assert!(PendingOrder::target_reached(Exposure(-3.0), Exposure(-2.0)));
-        assert!(!PendingOrder::target_reached(Exposure(-1.5), Exposure(-2.0)));
+        assert!(!PendingOrder::target_reached(
+            Exposure(-1.5),
+            Exposure(-2.0)
+        ));
         assert!(PendingOrder::target_reached(Exposure(0.0), Exposure(0.0)));
         assert!(!PendingOrder::target_reached(Exposure(2.0), Exposure(0.0)));
         assert!(!PendingOrder::target_reached(Exposure(-2.0), Exposure(0.0)));

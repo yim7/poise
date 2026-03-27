@@ -274,6 +274,7 @@ mod tests {
                 target_exposure: Exposure(4.0),
                 status: OrderStatus::New,
             }),
+            replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,
