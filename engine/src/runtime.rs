@@ -156,6 +156,7 @@ impl SubmitRecoveryAnchor {
 pub struct RiskState {
     pub realized_pnl_day: Option<NaiveDate>,
     pub realized_pnl_today: f64,
+    pub realized_pnl_cumulative: f64,
     pub unrealized_pnl: f64,
 }
 

@@ -449,6 +449,7 @@ impl GridManager {
         }
         if observation.realized_pnl.abs() > f64::EPSILON {
             grid.risk_state.realized_pnl_today += observation.realized_pnl;
+            grid.risk_state.realized_pnl_cumulative += observation.realized_pnl;
         }
 
         if observation.status.keeps_pending_order() {
@@ -812,6 +813,7 @@ mod tests {
                     .date_naive(),
             ),
             realized_pnl_today: 12.5,
+            realized_pnl_cumulative: 17.5,
             unrealized_pnl: -3.0,
         };
         grid.reference_price = Some(95.0);
@@ -1545,6 +1547,7 @@ mod tests {
                     .date_naive(),
             ),
             realized_pnl_today: 20.0,
+            realized_pnl_cumulative: 20.0,
             unrealized_pnl: 0.0,
         };
 
@@ -1838,6 +1841,7 @@ mod tests {
                     .date_naive(),
             ),
             realized_pnl_today: 20.0,
+            realized_pnl_cumulative: 20.0,
             unrealized_pnl: 0.0,
         };
 
@@ -1866,5 +1870,55 @@ mod tests {
             )
         );
         assert!((grid.risk_state.realized_pnl_today + 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes() {
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 25, 1, 0, 0).unwrap(),
+        ));
+        let mut manager = test_manager_with_clock(clock);
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        manager
+            .grids
+            .get_mut(&GridId::new("btc1"))
+            .unwrap()
+            .risk_state = RiskState {
+            realized_pnl_day: Some(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
+                    .unwrap()
+                    .date_naive(),
+            ),
+            realized_pnl_today: 20.0,
+            realized_pnl_cumulative: 20.0,
+            unrealized_pnl: 0.0,
+        };
+
+        manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Order(OrderObservation {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    realized_pnl: -5.0,
+                    status: OrderStatus::PartiallyFilled,
+                }),
+            )
+            .unwrap();
+
+        let grid = manager.get_grid("btc1").unwrap();
+        assert_eq!(
+            grid.risk_state.realized_pnl_day,
+            Some(
+                Utc.with_ymd_and_hms(2026, 3, 25, 1, 0, 0)
+                    .unwrap()
+                    .date_naive()
+            )
+        );
+        assert!((grid.risk_state.realized_pnl_today + 5.0).abs() < f64::EPSILON);
+        assert!((grid.risk_state.realized_pnl_cumulative - 15.0).abs() < f64::EPSILON);
     }
 }

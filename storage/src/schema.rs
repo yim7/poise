@@ -14,6 +14,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             pending_order_json TEXT,
             realized_pnl_day TEXT,
             realized_pnl_today REAL NOT NULL DEFAULT 0,
+            realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
             unrealized_pnl REAL NOT NULL DEFAULT 0,
             reference_price REAL,
             out_of_band_since TEXT,
