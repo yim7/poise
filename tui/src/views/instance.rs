@@ -255,11 +255,10 @@ mod tests {
         assert!(text.contains("upper: 110.0000"));
         assert!(text.contains("shape: linear"));
         assert!(text.contains("out of band policy: freeze"));
-        assert!(text.contains("pause"));
-        assert!(text.contains("terminate"));
-        assert!(text.contains("resume"));
-        assert!(text.contains("flatten"));
-        assert!(text.contains("risk review pending"));
+        assert!(text.contains("pause: enabled"));
+        assert!(text.contains("terminate: disabled - risk review pending"));
+        assert!(text.contains("resume: disabled - grid is not paused"));
+        assert!(text.contains("flatten: disabled - no position to flatten"));
         assert!(!text.contains("client-1"));
     }
 
