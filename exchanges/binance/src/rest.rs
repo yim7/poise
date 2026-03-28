@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
@@ -32,6 +35,7 @@ pub struct BinanceRestClient {
     api_secret: String,
     base_url: String,
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    timestamp_offset_ms: AtomicI64,
 }
 
 impl BinanceRestClient {
@@ -46,6 +50,7 @@ impl BinanceRestClient {
             api_secret: api_secret.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             timestamp_provider: Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            timestamp_offset_ms: AtomicI64::new(0),
         }
     }
 
@@ -62,6 +67,7 @@ impl BinanceRestClient {
             api_secret: api_secret.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             timestamp_provider,
+            timestamp_offset_ms: AtomicI64::new(0),
         }
     }
 
@@ -92,19 +98,7 @@ impl BinanceRestClient {
     }
 
     pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-        #[derive(serde::Deserialize)]
-        struct ServerTimeResponse {
-            #[serde(rename = "serverTime")]
-            server_time: i64,
-        }
-
-        let response: ServerTimeResponse = self
-            .send_request(Method::GET, "/fapi/v1/time", Vec::new(), AuthMode::None)
-            .await?;
-
-        Utc.timestamp_millis_opt(response.server_time)
-            .single()
-            .context("invalid server time timestamp")
+        self.sync_server_time_offset().await
     }
 
     pub async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -236,7 +230,7 @@ impl BinanceRestClient {
         for attempt in 0..MAX_RETRIES {
             let mut request_params = params.clone();
             if matches!(auth_mode, AuthMode::Signed) {
-                request_params.push(("timestamp", (self.timestamp_provider)().to_string()));
+                request_params.push(("timestamp", self.signed_timestamp_ms().to_string()));
                 request_params.push(("recvWindow", DEFAULT_RECV_WINDOW_MS.to_string()));
             }
 
@@ -268,6 +262,15 @@ impl BinanceRestClient {
                     let status = response.status();
                     let retry_after = retry_after_delay(response.headers());
                     let body = response.text().await.unwrap_or_default();
+
+                    if matches!(auth_mode, AuthMode::Signed)
+                        && is_timestamp_out_of_window(status, &body)
+                        && attempt + 1 < MAX_RETRIES
+                    {
+                        self.sync_server_time_offset().await?;
+                        continue;
+                    }
+
                     let error = anyhow!(
                         "request {} {} failed with status {}: {}",
                         method,
@@ -298,6 +301,76 @@ impl BinanceRestClient {
 
         Err(last_error.unwrap_or_else(|| anyhow!("request {} {} failed", method, path)))
     }
+
+    fn signed_timestamp_ms(&self) -> i64 {
+        (self.timestamp_provider)() + self.timestamp_offset_ms.load(Ordering::Relaxed)
+    }
+
+    async fn sync_server_time_offset(&self) -> Result<chrono::DateTime<Utc>> {
+        let requested_at = (self.timestamp_provider)();
+        let response = self.send_server_time_request().await?;
+        let received_at = (self.timestamp_provider)();
+        let midpoint = requested_at + ((received_at - requested_at) / 2);
+        self.timestamp_offset_ms
+            .store(response.server_time - midpoint, Ordering::Relaxed);
+
+        Utc.timestamp_millis_opt(response.server_time)
+            .single()
+            .context("invalid server time timestamp")
+    }
+
+    async fn send_server_time_request(&self) -> Result<ServerTimeResponse> {
+        let mut last_error = None;
+        let url = format!("{}{}", self.base_url, "/fapi/v1/time");
+
+        for attempt in 0..MAX_RETRIES {
+            match self.http.request(Method::GET, &url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    return response
+                        .json::<ServerTimeResponse>()
+                        .await
+                        .context("failed to deserialize response for /fapi/v1/time");
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let retry_after = retry_after_delay(response.headers());
+                    let body = response.text().await.unwrap_or_default();
+                    let error = anyhow!(
+                        "request GET /fapi/v1/time failed with status {}: {}",
+                        status,
+                        body
+                    );
+
+                    if !is_retryable_status(status) || attempt + 1 == MAX_RETRIES {
+                        return Err(error);
+                    }
+
+                    last_error = Some(error);
+                    sleep(retry_delay(retry_after, attempt)).await;
+                }
+                Err(error) => {
+                    if attempt + 1 == MAX_RETRIES {
+                        return Err(error).context("request GET /fapi/v1/time failed");
+                    }
+                    last_error = Some(error.into());
+                    sleep(retry_delay(None, attempt)).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("request GET /fapi/v1/time failed")))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ServerTimeResponse {
+    #[serde(rename = "serverTime")]
+    server_time: i64,
+}
+
+#[derive(serde::Deserialize)]
+struct BinanceErrorResponse {
+    code: i64,
 }
 
 fn encode_query(params: &[(&str, String)]) -> String {
@@ -365,6 +438,13 @@ fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 
 fn retry_delay(retry_after: Option<Duration>, attempt: usize) -> Duration {
     retry_after.unwrap_or_else(|| Duration::from_millis(50 * (1_u64 << attempt)))
+}
+
+fn is_timestamp_out_of_window(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::BAD_REQUEST
+        && serde_json::from_str::<BinanceErrorResponse>(body)
+            .map(|error| error.code == -1021)
+            .unwrap_or_else(|_| body.contains(r#""code":-1021"#))
 }
 
 #[cfg(test)]
@@ -523,6 +603,83 @@ mod tests {
         assert!(requests[0].path.contains("timestamp=1700000000000"));
         assert!(requests[1].path.contains("timestamp=1700000006000"));
         assert_ne!(requests[0].path, requests[1].path);
+    }
+
+    #[tokio::test]
+    async fn get_server_time_calibrates_future_signed_requests() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#"{"serverTime":1700000005000}"#),
+            MockResponse::json(
+                200,
+                r#"[{
+                    "symbol": "BTCUSDT",
+                    "orderId": 1005,
+                    "clientOrderId": "grid-open-007",
+                    "side": "BUY",
+                    "price": "64020.1",
+                    "origQty": "0.035",
+                    "status": "NEW"
+                }]"#,
+            ),
+        ])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let server_time = client.get_server_time().await.unwrap();
+        let _ = client.get_open_orders("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(
+            server_time,
+            Utc.timestamp_millis_opt(1_700_000_005_000).unwrap()
+        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "/fapi/v1/time");
+        assert!(requests[1].path.contains("timestamp=1700000005000"));
+    }
+
+    #[tokio::test]
+    async fn retries_after_syncing_server_time_when_timestamp_is_outside_recv_window() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                400,
+                r#"{"code":-1021,"msg":"Timestamp for this request is outside of the recvWindow."}"#,
+            ),
+            MockResponse::json(200, r#"{"serverTime":1700000005000}"#),
+            MockResponse::json(
+                200,
+                r#"[{
+                    "symbol": "BTCUSDT",
+                    "orderId": 1006,
+                    "clientOrderId": "grid-open-008",
+                    "side": "SELL",
+                    "price": "64030.1",
+                    "origQty": "0.045",
+                    "status": "NEW"
+                }]"#,
+            ),
+        ])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let orders = client.get_open_orders("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(orders.len(), 1);
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].path.contains("timestamp=1700000000000"));
+        assert_eq!(requests[1].path, "/fapi/v1/time");
+        assert!(requests[2].path.contains("timestamp=1700000005000"));
     }
 
     #[tokio::test]
