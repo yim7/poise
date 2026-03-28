@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,12 +44,26 @@ impl EffectWorker {
     }
 
     pub async fn run_once(&self) -> Result<()> {
-        let effects = self.state.effect_service.list_pending_effects().await?;
-        for effect in effects {
+        let mut seen_effects = HashSet::new();
+
+        loop {
+            let Some(effect) = self
+                .state
+                .effect_service
+                .list_pending_effects()
+                .await?
+                .into_iter()
+                .find(|effect| !seen_effects.contains(&effect.effect_id))
+            else {
+                break;
+            };
+            let effect_id = effect.effect_id.clone();
             if let Err(error) = self.process_effect(effect).await {
                 tracing::warn!("failed to process persisted effect: {error}");
             }
+            seen_effects.insert(effect_id);
         }
+
         Ok(())
     }
 

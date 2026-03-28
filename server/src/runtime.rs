@@ -642,10 +642,22 @@ mod tests {
 
         worker.run_once().await.unwrap();
 
-        assert!(
-            exchange.submitted_orders.lock().unwrap().is_empty(),
-            "submit planned for an older exposure should be discarded"
+        let submitted = exchange.submitted_orders.lock().unwrap().clone();
+        assert_eq!(
+            submitted.len(),
+            1,
+            "replacement submit should run in the same worker iteration"
         );
+        assert!(matches!(
+            submitted.as_slice(),
+            [OrderRequest {
+                side: Side::Buy,
+                price,
+                quantity,
+                ..
+            }] if (*price - 95.0).abs() < f64::EPSILON
+                && (*quantity - test_config().base_qty_per_unit() * 2.0).abs() < f64::EPSILON
+        ));
         let effects = persistence.all_effects().await;
         assert_eq!(effects.len(), 2);
         assert_eq!(
@@ -659,7 +671,7 @@ mod tests {
             .iter()
             .find(|effect| effect.effect_id != "BTCUSDT:stale:0")
             .expect("replacement submit should be persisted for the current target");
-        assert_eq!(replacement.status, EffectStatus::Pending);
+        assert_eq!(replacement.status, EffectStatus::Succeeded);
         assert!(matches!(
             &replacement.effect,
             ExecutionAction::SubmitOrder {
@@ -811,8 +823,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn superseded_recovery_submit_enqueues_replacement_plan_without_waiting_for_new_observation()
-     {
+    async fn superseded_recovery_submit_executes_replacement_without_waiting_for_next_poll() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
@@ -885,10 +896,22 @@ mod tests {
 
         worker.run_once().await.unwrap();
 
-        assert!(
-            exchange.submitted_orders.lock().unwrap().is_empty(),
-            "stale recovery effect should be replaced in persistence before any new submit"
+        let submitted = exchange.submitted_orders.lock().unwrap().clone();
+        assert_eq!(
+            submitted.len(),
+            1,
+            "replacement submit should run in the same worker iteration"
         );
+        assert!(matches!(
+            submitted.as_slice(),
+            [OrderRequest {
+                side: Side::Buy,
+                price,
+                quantity,
+                ..
+            }] if (*price - 95.0).abs() < f64::EPSILON
+                && (*quantity - test_config().base_qty_per_unit() * 4.0).abs() < f64::EPSILON
+        ));
         let effects = persistence.all_effects().await;
         assert_eq!(effects.len(), 2);
         assert_eq!(
@@ -902,7 +925,7 @@ mod tests {
             .iter()
             .find(|effect| effect.effect_id != "BTCUSDT:recovery:0")
             .expect("replacement submit effect should be persisted immediately");
-        assert_eq!(replacement.status, EffectStatus::Pending);
+        assert_eq!(replacement.status, EffectStatus::Succeeded);
         assert!(matches!(
             &replacement.effect,
             ExecutionAction::SubmitOrder {
