@@ -58,3 +58,51 @@ git commit -m "chore: narrow binance testnet grid bandwidth"
   - `cargo test -p grid-server`
   - `cargo fmt --all --check` 仍提示与本次任务无关的 `server/src/projector.rs` 既有格式差异
 - 实现 commit SHA：`babcc9d`
+
+### Task 2: 将等效每格宽度调整为 100 美金
+
+**Files:**
+- Modify: `server/src/config.rs`
+- Modify: `configs/binance-testnet.toml`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-03-28-grid-bandwidth-2000.md`
+- Test: `server/src/config.rs`
+
+- [x] **Step 1: 写失败测试，约束示例配置的等效每格宽度为 `100 USD`**
+
+- [x] **Step 2: 运行单测确认红灯**
+
+Run: `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
+Expected: FAIL，原因是当前等效每格宽度还是 `250 USD`
+
+- [x] **Step 3: 修改示例配置为线性模式下等效每格 `100 USD`**
+
+要求：
+- 保持总带宽 `2000 USD`
+- 维持中性对称，改为 `long_exposure_units = 10`、`short_exposure_units = 10`
+
+- [x] **Step 4: 同步更新 README 示例与说明**
+
+- [x] **Step 5: 重新运行单测确认转绿**
+
+Run: `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
+Expected: PASS
+
+- [x] **Step 6: 运行相关回归验证**
+
+Run: `cargo test -p grid-server`
+
+- [ ] **Step 7: 提交代码并回写 commit SHA**
+
+Run:
+```bash
+git add server/src/config.rs configs/binance-testnet.toml README.md docs/superpowers/plans/2026-03-28-grid-bandwidth-2000.md
+git commit -m "chore: tighten equivalent grid step to 100 usd"
+```
+
+**Task 记录：**
+- 状态：验收通过，待提交
+- 验收：
+  - `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
+  - `cargo test -p grid-server`
+- commit SHA：待回写

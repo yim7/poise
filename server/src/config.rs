@@ -265,6 +265,9 @@ notional_per_unit = 375.0
     #[test]
     fn parses_binance_testnet_example_config() {
         let config = parse_config(include_str!("../../configs/binance-testnet.toml")).unwrap();
+        let grid = &config.grids[0];
+        let equivalent_grid_step =
+            (grid.upper_price - grid.lower_price) / (grid.long_exposure_units + grid.short_exposure_units);
 
         assert_eq!(config.environment, "testnet");
         assert_eq!(
@@ -276,10 +279,8 @@ notional_per_unit = 375.0
             Some("wss://fstream.binancefuture.com")
         );
         assert_eq!(config.grids.len(), 1);
-        assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
-        assert_eq!(
-            config.grids[0].upper_price - config.grids[0].lower_price,
-            2000.0
-        );
+        assert_eq!(grid.grid_id().as_str(), "btc-core");
+        assert_eq!(grid.upper_price - grid.lower_price, 2000.0);
+        assert!((equivalent_grid_step - 100.0).abs() < f64::EPSILON);
     }
 }
