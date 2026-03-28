@@ -6,10 +6,10 @@ use grid_protocol::{
     ActivityLevelView, ExecutionBadgeView, ExecutionStateView, ExposureSummaryView,
     GridActivityItemView, GridCommandType, GridCommandView, GridDetailView, GridExecutionView,
     GridIdentityView, GridLifecycleView, GridListItemView, GridMarketView, GridPositionView,
-    GridStatisticsView, GridStatus as ProtocolGridStatus, GridStatusPanelView,
-    GridStrategyView, InstrumentView, OrderExecutionView, OrderStatus as ProtocolOrderStatus,
-    OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
+    GridStatisticsView, GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView,
+    InstrumentView, OrderExecutionView, OrderStatus as ProtocolOrderStatus,
+    OutOfBandPolicy as ProtocolPolicy, ReplacementGateView, ShapeFamily as ProtocolShapeFamily,
+    Side as ProtocolSide,
 };
 
 use crate::query_service::GridReadModelSource;

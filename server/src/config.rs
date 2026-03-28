@@ -266,8 +266,8 @@ notional_per_unit = 375.0
     fn parses_binance_testnet_example_config() {
         let config = parse_config(include_str!("../../configs/binance-testnet.toml")).unwrap();
         let grid = &config.grids[0];
-        let equivalent_grid_step =
-            (grid.upper_price - grid.lower_price) / (grid.long_exposure_units + grid.short_exposure_units);
+        let equivalent_grid_step = (grid.upper_price - grid.lower_price)
+            / (grid.long_exposure_units + grid.short_exposure_units);
 
         assert_eq!(config.environment, "testnet");
         assert_eq!(
