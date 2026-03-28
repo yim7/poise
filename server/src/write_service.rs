@@ -714,6 +714,29 @@ mod tests {
                 && (request.quantity - snapshot.config.base_qty_per_unit() * 4.0).abs() < f64::EPSILON
                 && *target_exposure == Exposure(4.0)
         ));
+        let replacement_pending = match &replacement.effect {
+            GridEffect::SubmitOrder {
+                request,
+                target_exposure,
+            } => Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            )),
+            _ => None,
+        };
+        assert_eq!(
+            repository
+                .snapshot_for("btc-core")
+                .and_then(|snapshot| snapshot.pending_order),
+            replacement_pending
+        );
+
+        let follow_up = service.observe_market("btc-core", 94.9).await.unwrap();
+        assert_eq!(
+            follow_up.effects,
+            vec![GridEffect::NoOp],
+            "replacement submit should keep suppressing duplicate submit plans before worker pickup"
+        );
     }
 
     #[tokio::test]

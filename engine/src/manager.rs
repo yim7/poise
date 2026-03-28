@@ -646,7 +646,22 @@ impl GridManager {
         client_order_id: &str,
     ) -> Result<Vec<GridEffect>> {
         self.clear_pending_submit(id, client_order_id)?;
-        self.plan_effects_for_current_state(id)
+        let effects = self.plan_effects_for_current_state(id)?;
+        if let [GridEffect::SubmitOrder {
+            request,
+            target_exposure,
+        }] = effects.as_slice()
+        {
+            let grid = self
+                .grids
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+            grid.pending_order = Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            ));
+        }
+        Ok(effects)
     }
 
     fn plan_effects_for_current_state(&self, id: &GridId) -> Result<Vec<GridEffect>> {
@@ -1628,13 +1643,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(recovery.resolution, SubmitRecoveryResolution::Superseded);
-        assert!(
-            manager
-                .get_grid("btc-core")
-                .unwrap()
-                .pending_order
-                .is_none()
-        );
         assert!(matches!(
             recovery.effects.as_slice(),
             [GridEffect::SubmitOrder {
@@ -1649,6 +1657,23 @@ mod tests {
                 )
                 && *target_exposure == grid_core::types::Exposure(4.0)
         ));
+        let replacement_pending = match recovery.effects.as_slice() {
+            [GridEffect::SubmitOrder {
+                request,
+                target_exposure,
+            }] => Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            )),
+            _ => None,
+        };
+        assert_eq!(
+            manager
+                .get_grid("btc-core")
+                .unwrap()
+                .pending_order,
+            replacement_pending
+        );
     }
 
     #[test]
