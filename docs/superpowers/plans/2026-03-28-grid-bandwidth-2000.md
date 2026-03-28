@@ -43,7 +43,7 @@ Expected: PASS
 
 Run: `cargo test -p grid-server`
 
-- [ ] **Step 7: 提交代码并回写 commit SHA**
+- [x] **Step 7: 提交代码并回写 commit SHA**
 
 Run:
 ```bash
@@ -52,9 +52,9 @@ git commit -m "chore: narrow binance testnet grid bandwidth"
 ```
 
 **Task 记录：**
-- 状态：验收通过，待提交
+- 状态：已完成
 - 验收：
   - `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
   - `cargo test -p grid-server`
   - `cargo fmt --all --check` 仍提示与本次任务无关的 `server/src/projector.rs` 既有格式差异
-- commit SHA：待回写
+- 实现 commit SHA：`babcc9d`
