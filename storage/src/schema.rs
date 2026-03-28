@@ -15,6 +15,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             replacement_gate_reason_json TEXT,
             realized_pnl_day TEXT,
             realized_pnl_today REAL NOT NULL DEFAULT 0,
+            realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
             unrealized_pnl REAL NOT NULL DEFAULT 0,
             reference_price REAL,
             out_of_band_since TEXT,
@@ -64,6 +65,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "replacement_gate_reason_json",
             "realized_pnl_day",
             "realized_pnl_today",
+            "realized_pnl_cumulative",
             "unrealized_pnl",
             "reference_price",
             "out_of_band_since",
@@ -98,7 +100,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_grid_effects_batch_sequence
          ON grid_effects(grid_id, batch_id, sequence, status);",
     )?;
-
     Ok(())
 }
 
@@ -227,6 +228,7 @@ mod tests {
                 pending_order_json TEXT,
                 realized_pnl_day TEXT,
                 realized_pnl_today REAL NOT NULL DEFAULT 0,
+                realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,
                 reference_price REAL,
                 out_of_band_since TEXT,
@@ -248,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_legacy_snapshot_table_missing_columns() {
+    fn initialize_rejects_legacy_grid_snapshots_table_without_required_columns() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE grid_snapshots (
@@ -259,6 +261,47 @@ mod tests {
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 reference_price REAL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        assert!(initialize(&conn).is_err());
+
+        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(!columns.contains(&"target_exposure".to_string()));
+        assert!(!columns.contains(&"pending_order_json".to_string()));
+        assert!(!columns.contains(&"realized_pnl_day".to_string()));
+        assert!(!columns.contains(&"realized_pnl_today".to_string()));
+        assert!(!columns.contains(&"realized_pnl_cumulative".to_string()));
+        assert!(!columns.contains(&"unrealized_pnl".to_string()));
+        assert!(!columns.contains(&"out_of_band_since".to_string()));
+    }
+
+    #[test]
+    fn initialize_rejects_legacy_grid_snapshots_table_without_realized_pnl_cumulative() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE grid_snapshots (
+                grid_id TEXT PRIMARY KEY,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                target_exposure REAL,
+                pending_order_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
                 updated_at TEXT NOT NULL
             );",
         )

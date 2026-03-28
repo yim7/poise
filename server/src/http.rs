@@ -193,9 +193,11 @@ mod tests {
         R: StateRepositoryPort + GridReadRepositoryPort + 'static,
     {
         let manager = test_manager();
-        let snapshot = manager
+        let mut snapshot = manager
             .snapshot("btc-core")
             .expect("seeded manager should expose runtime snapshot");
+        snapshot.risk.realized_pnl_cumulative = 980.1;
+        snapshot.risk.unrealized_pnl = 265.2;
         repository
             .save_transition("btc-core", &snapshot, &[], &[])
             .await
@@ -327,6 +329,8 @@ mod tests {
 
         assert_eq!(payload.identity.id, "btc-core");
         assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
+        assert!((payload.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((payload.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert!(!payload.available_commands.is_empty());
         assert_eq!(
             payload

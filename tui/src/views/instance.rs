@@ -13,10 +13,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
             Constraint::Length(6),
-            Constraint::Length(7),
-            Constraint::Length(7),
+            Constraint::Length(4),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(6),
             Constraint::Min(0),
         ])
         .split(area);
@@ -32,23 +33,22 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
 
     let summary_lines = vec![
-        Line::from(format!("id: {}", detail.identity.id)),
-        Line::from(format!("symbol: {}", detail.identity.instrument.symbol)),
+        Line::from(format!(
+            "id/symbol: {} / {}",
+            detail.identity.id, detail.identity.instrument.symbol
+        )),
         Line::from(format!("lifecycle: {}", detail.status.lifecycle.status)),
         Line::from(format!(
             "updated at: {}",
             detail.status.lifecycle.updated_at
         )),
         Line::from(format!(
-            "reference price: {}",
+            "reference/exposure: {} / {:.4} -> {}",
             detail
                 .status
                 .reference_price
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "-".to_string()),
-        )),
-        Line::from(format!(
-            "exposure: {:.4} / {}",
             detail.position.current_exposure,
             detail
                 .position
@@ -61,6 +61,18 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .block(Block::default().title("Overview").borders(Borders::ALL));
     frame.render_widget(summary, sections[0]);
 
+    let statistics_lines = vec![
+        Line::from("Total PnL | Realized PnL"),
+        Line::from(format!(
+            "{} | {}",
+            format_pnl(detail.statistics.total_pnl),
+            format_pnl(detail.statistics.realized_pnl),
+        )),
+    ];
+    let statistics = Paragraph::new(statistics_lines)
+        .block(Block::default().title("Statistics").borders(Borders::ALL));
+    frame.render_widget(statistics, sections[1]);
+
     let strategy_lines = vec![
         Line::from(format!("lower: {:.4}", detail.strategy.lower_price)),
         Line::from(format!("upper: {:.4}", detail.strategy.upper_price)),
@@ -72,7 +84,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ];
     let strategy = Paragraph::new(strategy_lines)
         .block(Block::default().title("Strategy").borders(Borders::ALL));
-    frame.render_widget(strategy, sections[1]);
+    frame.render_widget(strategy, sections[2]);
 
     let execution_lines = execution_lines(
         &detail.execution,
@@ -81,7 +93,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
     let execution = Paragraph::new(execution_lines)
         .block(Block::default().title("Execution").borders(Borders::ALL));
-    frame.render_widget(execution, sections[2]);
+    frame.render_widget(execution, sections[3]);
 
     let command_lines: Vec<Line<'_>> = if detail.available_commands.is_empty() {
         vec![Line::from("No commands available")]
@@ -94,7 +106,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let commands = Paragraph::new(command_lines)
         .block(Block::default().title("Commands").borders(Borders::ALL));
-    frame.render_widget(commands, sections[3]);
+    frame.render_widget(commands, sections[4]);
 
     let activity_lines: Vec<Line<'_>> = if detail.activity.is_empty() {
         vec![Line::from("No activity yet")]
@@ -114,7 +126,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let activity = Paragraph::new(activity_lines)
         .block(Block::default().title("Activity").borders(Borders::ALL));
-    frame.render_widget(activity, sections[4]);
+    frame.render_widget(activity, sections[5]);
 }
 
 fn execution_lines(
@@ -172,6 +184,10 @@ fn format_optional_price(value: Option<f64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn format_pnl(value: f64) -> String {
+    format!("{value:+.2}")
+}
+
 fn format_command(command: &GridCommandView) -> String {
     let name = match command.command {
         GridCommandType::Pause => "pause",
@@ -193,7 +209,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::GridDetailView;
+    use crate::protocol::{GridCommandType, GridCommandView, GridDetailView};
 
     use super::render;
 
@@ -207,8 +223,7 @@ mod tests {
             .collect::<String>()
     }
 
-    #[test]
-    fn renders_grid_detail_execution_activity_and_commands() {
+    fn render_text(detail: GridDetailView) -> String {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let response: crate::protocol::GridListResponse =
@@ -216,26 +231,68 @@ mod tests {
                 .unwrap();
         let mut app = App::new(response.items);
         app.current_view = View::Instance;
-        let detail: GridDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
-                .unwrap();
         app.apply_grid_detail(detail);
         app.show_instance_for_selected();
 
         terminal
             .draw(|frame| render(frame, frame.area(), &app))
             .unwrap();
-        let text = buffer_text(&terminal);
+
+        buffer_text(&terminal)
+    }
+
+    #[test]
+    fn renders_grid_detail_execution_activity_and_commands() {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+                .unwrap();
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Resume,
+            enabled: false,
+            disabled_reason: Some("grid is not paused".to_string()),
+        });
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Flatten,
+            enabled: false,
+            disabled_reason: Some("no position to flatten".to_string()),
+        });
+        let text = render_text(detail);
 
         assert!(text.contains("Overview"));
         assert!(text.contains("Strategy"));
+        assert!(text.contains("Statistics"));
         assert!(text.contains("Execution"));
         assert!(text.contains("Activity"));
         assert!(text.contains("Commands"));
-        assert!(text.contains("pause"));
-        assert!(text.contains("risk review pending"));
+        assert!(text.contains("Total PnL"));
+        assert!(text.contains("Realized PnL"));
+        assert!(text.contains("+1245.30"));
+        assert!(text.contains("+980.10"));
+        assert!(text.contains("lower: 90.0000"));
+        assert!(text.contains("upper: 110.0000"));
+        assert!(text.contains("shape: linear"));
+        assert!(text.contains("out of band policy: freeze"));
+        assert!(text.contains("pause: enabled"));
+        assert!(text.contains("terminate: disabled - risk review pending"));
+        assert!(text.contains("resume: disabled - grid is not paused"));
+        assert!(text.contains("flatten: disabled - no position to flatten"));
         assert!(text.contains("replacement gate"));
         assert!(text.contains("9.0 bps < 13.0 bps"));
         assert!(!text.contains("client-1"));
+    }
+
+    #[test]
+    fn renders_statistics_with_explicit_separator_for_large_pnl_values() {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+                .unwrap();
+        detail.statistics.total_pnl = -123456789.12;
+        detail.statistics.realized_pnl = 987654321.99;
+
+        let text = render_text(detail);
+
+        assert!(text.contains("Total PnL | Realized PnL"));
+        assert!(text.contains("-123456789.12 | +987654321.99"));
+        assert!(!text.contains("-123456789.12+987654321.99"));
     }
 }

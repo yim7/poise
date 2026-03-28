@@ -265,6 +265,8 @@ mod tests {
 
         assert_eq!(detail.identity.id, BTC_GRID_ID);
         assert_eq!(detail.position.current_exposure, 3.5);
+        assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
     }
 

@@ -278,6 +278,7 @@ mod tests {
             risk: RiskState {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,
+                realized_pnl_cumulative: 0.0,
                 unrealized_pnl: 0.0,
             },
             observed: ObservedState {

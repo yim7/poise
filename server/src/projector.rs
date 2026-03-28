@@ -6,9 +6,10 @@ use grid_protocol::{
     ActivityLevelView, ExecutionBadgeView, ExecutionStateView, ExposureSummaryView,
     GridActivityItemView, GridCommandType, GridCommandView, GridDetailView, GridExecutionView,
     GridIdentityView, GridLifecycleView, GridListItemView, GridMarketView, GridPositionView,
-    GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView, InstrumentView,
-    OrderExecutionView, OrderStatus as ProtocolOrderStatus, OutOfBandPolicy as ProtocolPolicy,
-    ReplacementGateView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
+    GridStatisticsView, GridStatus as ProtocolGridStatus, GridStatusPanelView,
+    GridStrategyView, InstrumentView, OrderExecutionView, OrderStatus as ProtocolOrderStatus,
+    OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
 };
 
 use crate::query_service::GridReadModelSource;
@@ -76,6 +77,11 @@ impl GridProjector {
                     .target_exposure
                     .as_ref()
                     .map(|value| value.0),
+            },
+            statistics: GridStatisticsView {
+                total_pnl: source.snapshot.risk.realized_pnl_cumulative
+                    + source.snapshot.risk.unrealized_pnl,
+                realized_pnl: source.snapshot.risk.realized_pnl_cumulative,
             },
             execution: GridExecutionView {
                 state: project_execution_state(source),
@@ -408,6 +414,13 @@ mod tests {
         );
     }
 
+    fn project_detail_projects_statistics_from_risk_state() {
+        let detail = GridProjector::new().project_detail(&source_with_submitting_effect());
+
+        assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn project_detail_includes_replacement_gate_reason() {
         let mut source = source_with_submitting_effect();
@@ -550,7 +563,8 @@ mod tests {
             risk: RiskState {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,
-                unrealized_pnl: 0.0,
+                realized_pnl_cumulative: 980.1,
+                unrealized_pnl: 265.2,
             },
             observed: ObservedState {
                 reference_price: Some(101.25),
