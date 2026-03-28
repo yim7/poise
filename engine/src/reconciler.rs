@@ -207,6 +207,14 @@ fn replacement_gate_reason(
         return None;
     }
 
+    if !rounded_values_match(
+        pending_order.quantity,
+        candidate_quantity,
+        grid.exchange_rules.quantity_step,
+    ) {
+        return None;
+    }
+
     let improvement_ratio = replacement_improvement_ratio(
         pending_order,
         candidate_side,
@@ -538,10 +546,15 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_does_not_resubmit_when_pending_order_already_matches_target() {
+    fn reconcile_does_not_resubmit_when_pending_order_already_matches_candidate_order() {
         let mut grid = test_runtime();
         grid.status = GridStatus::Active;
-        grid.pending_order = Some(test_pending_order(Exposure(8.0)));
+        grid.pending_order = Some(pending_order(
+            grid_core::types::Side::Buy,
+            90.0,
+            30.0,
+            Exposure(8.0),
+        ));
 
         let result = reconcile(&grid, 90.0);
         assert!(
@@ -583,6 +596,30 @@ mod tests {
             result.replacement_gate_reason,
             Some(ReplacementGateReason::RoundedMatch)
         );
+    }
+
+    #[test]
+    fn reconcile_replaces_pending_order_when_same_side_quantity_differs_even_if_price_is_worse() {
+        let mut grid = test_runtime();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(2.0);
+        grid.pending_order = Some(pending_order(
+            grid_core::types::Side::Sell,
+            100.0,
+            1.0,
+            Exposure(1.7),
+        ));
+
+        let result = reconcile(&grid, 99.0);
+
+        assert!(matches!(
+            result.effects.as_slice(),
+            [
+                ExecutionAction::CancelAll { .. },
+                ExecutionAction::SubmitOrder { .. }
+            ]
+        ));
+        assert_eq!(result.replacement_gate_reason, None);
     }
 
     #[test]
@@ -682,8 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_keeps_existing_pending_order_when_target_differs_but_replacement_threshold_is_not_met()
-     {
+    fn reconcile_replaces_pending_order_when_target_differs_and_quantity_changes() {
         let mut grid = test_runtime();
         grid.status = GridStatus::Active;
         grid.current_exposure = Exposure(0.0);
@@ -691,12 +727,13 @@ mod tests {
 
         let result = reconcile(&grid, 90.0);
 
-        assert!(
-            !result
-                .effects
-                .iter()
-                .any(|effect| !matches!(effect, ExecutionAction::NoOp))
-        );
+        assert!(matches!(
+            result.effects.as_slice(),
+            [
+                ExecutionAction::CancelAll { .. },
+                ExecutionAction::SubmitOrder { .. }
+            ]
+        ));
     }
 
     #[test]
