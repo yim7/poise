@@ -409,6 +409,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_ticks_before_first_submit_are_absorbed_into_one_replacement_plan() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let first = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first.effects.as_slice(),
+            [ExecutionAction::SubmitOrder { .. }]
+        ));
+
+        let second = state
+            .write_service
+            .observe_market("BTCUSDT", 92.5)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.effects,
+            vec![ExecutionAction::NoOp],
+            "new tick should update target only while first submit intent is pending"
+        );
+
+        worker.run_once().await.unwrap();
+
+        let submitted = exchange.submitted_orders.lock().unwrap().clone();
+        assert_eq!(submitted.len(), 1);
+        assert!(matches!(
+            submitted.as_slice(),
+            [OrderRequest {
+                side: Side::Buy,
+                price,
+                quantity,
+                ..
+            }] if (*price - 92.5).abs() < f64::EPSILON
+                && (*quantity - test_config().base_qty_per_unit() * 6.0).abs() < f64::EPSILON
+        ));
+        assert!(
+            persistence.list_pending_effects().await.unwrap().is_empty(),
+            "replacement submit should not leave duplicate pending submit effects behind"
+        );
+    }
+
+    #[tokio::test]
     async fn effect_worker_restores_pending_effect_after_restart() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
@@ -1138,7 +1196,7 @@ mod tests {
             vec![],
             "submit rejected",
         ));
-        let persistence = Arc::new(FailOnSavePersistence::new(3));
+        let persistence = Arc::new(FailOnSavePersistence::new(2));
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -1313,15 +1371,6 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
-        ));
-
-        let event = timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            event,
             crate::notifications::GridInternalNotification::GridEffectStateChanged { .. }
         ));
     }
@@ -1591,7 +1640,14 @@ mod tests {
 
         let handles = fixture.runtime.start().await.unwrap();
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
-        wait_until_instance(&fixture.state, |instance| instance.pending_order.is_some()).await;
+        wait_until_instance(&fixture.state, |instance| {
+            instance
+                .pending_order
+                .as_ref()
+                .and_then(|pending| pending.order_id.as_deref())
+                .is_some()
+        })
+        .await;
 
         let pending = current_instance(&fixture.state)
             .await

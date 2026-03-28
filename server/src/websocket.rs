@@ -276,7 +276,7 @@ mod tests {
             })
             .expect("should emit projected list item change");
         assert_eq!(item.id, "btc-core");
-        assert_eq!(item.execution.pending_order_count, 0);
+        assert_eq!(item.execution.pending_order_count, 1);
         assert!(
             events
                 .iter()

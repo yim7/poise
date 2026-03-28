@@ -607,6 +607,20 @@ impl GridManager {
         grid.target_exposure = Some(result.target_exposure);
         grid.reference_price = Some(reference_price);
         grid.replacement_gate_reason = result.replacement_gate_reason;
+        if grid.pending_order.is_none() {
+            if let [
+                GridEffect::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] = effects.as_slice()
+            {
+                grid.pending_order = Some(PendingOrder::from_submit_request(
+                    request,
+                    target_exposure.clone(),
+                ));
+            }
+        }
 
         let mut events = result.events;
         if let Some(event) = replacement_gate_event {
@@ -1224,6 +1238,41 @@ mod tests {
         );
         assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
         assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+    }
+
+    #[test]
+    fn observe_market_records_submit_recovery_anchor_for_new_submit_effect() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = grid_core::types::Exposure(0.0);
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        let (request, target_exposure) = match transition.effects.as_slice() {
+            [
+                GridEffect::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] => (request, target_exposure),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+        assert_eq!(
+            transition.snapshot.pending_order,
+            Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            ))
+        );
     }
 
     #[test]
@@ -1979,12 +2028,21 @@ mod tests {
             )
             .unwrap();
 
-        assert!(transition.snapshot.pending_order.is_none());
-        assert!(
-            transition
-                .effects
-                .iter()
-                .any(|effect| matches!(effect, GridEffect::SubmitOrder { .. }))
+        let (request, target_exposure) = match transition.effects.as_slice() {
+            [
+                GridEffect::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] => (request, target_exposure),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+        assert_eq!(
+            transition.snapshot.pending_order,
+            Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            ))
         );
     }
 
