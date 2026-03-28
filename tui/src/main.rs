@@ -246,14 +246,24 @@ async fn process_ws_event(
     }
 
     let receiver = ws_receiver.as_mut().unwrap();
+    let mut handled_event = false;
 
-    match receiver.try_recv() {
-        Ok(event) => {
-            handle_ws_event(app, event).await;
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-            reconnect_websocket(client, ws_url, app, ws_receiver).await;
+    loop {
+        match receiver.try_recv() {
+            Ok(event) => {
+                handled_event = true;
+                handle_ws_event(app, event).await;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                if handled_event {
+                    *ws_receiver = None;
+                    app.schedule_websocket_retry(Duration::ZERO);
+                } else {
+                    reconnect_websocket(client, ws_url, app, ws_receiver).await;
+                }
+                break;
+            }
         }
     }
 }
@@ -900,6 +910,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_ws_event_drains_all_pending_events_in_one_iteration() {
+        let (client, ws_url, _) = spawn_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        let mut first = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        first.status.reference_price = Some(101.0);
+        let mut second = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        second.status.reference_price = Some(102.0);
+        second.position.current_exposure = 3.0;
+
+        sender
+            .send(GridStreamEvent {
+                grid_id: BTC_GRID_ID.into(),
+                payload: GridStreamPayload::GridDetailChanged { detail: first },
+            })
+            .await
+            .unwrap();
+        sender
+            .send(GridStreamEvent {
+                grid_id: BTC_GRID_ID.into(),
+                payload: GridStreamPayload::GridDetailChanged { detail: second },
+            })
+            .await
+            .unwrap();
+
+        let mut ws_receiver = Some(receiver);
+        process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
+
+        assert_eq!(
+            app.current_grid.as_ref().unwrap().status.reference_price,
+            Some(102.0)
+        );
+        assert_eq!(
+            app.current_grid.as_ref().unwrap().position.current_exposure,
+            3.0
+        );
+        assert!(matches!(
+            ws_receiver.as_mut().unwrap().try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(sender);
+    }
+
+    #[tokio::test]
     async fn websocket_event_applies_projected_detail() {
         let (client, _, _) = spawn_stub_server().await;
         let mut app = load_initial_state(&client).await.unwrap();
@@ -1025,7 +1083,6 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert!(ws_receiver.is_some());
         assert_eq!(
             app.current_grid.as_ref().unwrap().status.reference_price,
             Some(101.5)
@@ -1135,7 +1192,6 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert!(ws_receiver.is_some());
         assert_eq!(
             app.current_grid.as_ref().unwrap().status.reference_price,
             Some(101.5)
@@ -1499,6 +1555,65 @@ out_of_band_policy = "hold"
                 .reference_price
                 .is_some()
         );
+
+        let _ = server.kill();
+        let _ = server.wait();
+    }
+
+    #[tokio::test]
+    async fn real_server_starts_with_loopback_exchange_even_when_proxy_env_is_set() {
+        let exchange = spawn_fake_exchange_server().await;
+        let server_binary = ensure_grid_server_binary();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_address = bind_listener.local_addr().unwrap();
+        drop(bind_listener);
+        let config_path = temp_dir.path().join("grid-server.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+environment = "tui-proxy-e2e"
+bind_address = "{bind_address}"
+
+[exchange]
+api_key = "demo-key"
+api_secret = "demo-secret"
+rest_base_url = "{rest_base_url}"
+ws_base_url = "{ws_base_url}"
+
+[[grids]]
+grid_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+                rest_base_url = exchange.rest_base_url,
+                ws_base_url = exchange.ws_base_url
+            ),
+        )
+        .unwrap();
+
+        let mut server = Command::new(server_binary)
+            .arg("--config")
+            .arg(&config_path)
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .current_dir(temp_dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let base_url = format!("http://{bind_address}");
+        wait_for_http_ready(&base_url).await;
 
         let _ = server.kill();
         let _ = server.wait();

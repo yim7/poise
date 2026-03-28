@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
@@ -10,7 +11,7 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
 use tokio::time::{Duration, sleep};
-use url::form_urlencoded::Serializer;
+use url::{Host, Url, form_urlencoded::Serializer};
 
 use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position};
 
@@ -44,11 +45,12 @@ impl BinanceRestClient {
         api_key: impl Into<String>,
         api_secret: impl Into<String>,
     ) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
-            http: reqwest::Client::new(),
+            http: build_http_client(&base_url),
             api_key: api_key.into(),
             api_secret: api_secret.into(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             timestamp_provider: Arc::new(|| chrono::Utc::now().timestamp_millis()),
             timestamp_offset_ms: AtomicI64::new(0),
         }
@@ -61,11 +63,12 @@ impl BinanceRestClient {
         api_secret: impl Into<String>,
         timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
-            http: reqwest::Client::new(),
+            http: build_http_client(&base_url),
             api_key: api_key.into(),
             api_secret: api_secret.into(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             timestamp_provider,
             timestamp_offset_ms: AtomicI64::new(0),
         }
@@ -379,6 +382,28 @@ fn encode_query(params: &[(&str, String)]) -> String {
         serializer.append_pair(key, value);
     }
     serializer.finish()
+}
+
+fn build_http_client(base_url: &str) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
+    if should_bypass_proxy(base_url) {
+        builder = builder.no_proxy();
+    }
+
+    builder.build().expect("failed to build reqwest client")
+}
+
+fn should_bypass_proxy(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(host)) => IpAddr::V4(host).is_loopback(),
+        Some(Host::Ipv6(host)) => IpAddr::V6(host).is_loopback(),
+        None => false,
+    }
 }
 
 fn format_decimal(value: f64) -> String {
