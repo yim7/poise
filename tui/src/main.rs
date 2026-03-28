@@ -6,7 +6,9 @@ mod theme;
 mod views;
 
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::api_client::{ApiClient, connect_ws};
@@ -32,6 +34,13 @@ type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 struct RuntimeConfig {
     base_url: String,
     ws_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TracingDestination {
+    Disabled,
+    Stderr,
+    File(PathBuf),
 }
 
 struct TerminalGuard {
@@ -80,7 +89,7 @@ impl Drop for TerminalGuard {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    init_tracing()?;
     let config = RuntimeConfig::from_env()?;
     let mut terminal = TerminalGuard::new()?;
     let client = ApiClient::new(config.base_url.clone());
@@ -96,8 +105,43 @@ async fn main() -> Result<()> {
     .await
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt::try_init();
+fn init_tracing() -> Result<()> {
+    match tracing_destination_from_env() {
+        TracingDestination::Disabled => Ok(()),
+        TracingDestination::Stderr => {
+            let _ = tracing_subscriber::fmt().with_writer(io::stderr).try_init();
+            Ok(())
+        }
+        TracingDestination::File(path) => init_file_tracing(&path),
+    }
+}
+
+fn init_file_tracing(path: &Path) -> Result<()> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open tracing log file `{}`", path.display()))?;
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || {
+            file.try_clone()
+                .expect("failed to clone tracing log file handle")
+        })
+        .try_init();
+    Ok(())
+}
+
+fn tracing_destination_from_env() -> TracingDestination {
+    parse_tracing_destination(env_value("GRID_TUI_LOG").as_deref())
+}
+
+fn parse_tracing_destination(value: Option<&str>) -> TracingDestination {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => TracingDestination::Disabled,
+        Some(value) if value.eq_ignore_ascii_case("stderr") => TracingDestination::Stderr,
+        Some(path) => TracingDestination::File(PathBuf::from(path)),
+    }
 }
 
 impl RuntimeConfig {
@@ -436,9 +480,10 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     use super::{
-        ApiClient, CommandKind, View, bootstrap_runtime_state, derive_ws_url,
+        ApiClient, CommandKind, TracingDestination, View, bootstrap_runtime_state, derive_ws_url,
         format_command_response, handle_action, handle_ws_event, load_initial_state,
-        maybe_load_initial_state, process_ws_event, submit_selected_command,
+        maybe_load_initial_state, parse_tracing_destination, process_ws_event,
+        submit_selected_command,
     };
     use crate::api_client::connect_ws;
     use crate::app::App;
@@ -833,6 +878,38 @@ mod tests {
         let url = derive_ws_url("http://127.0.0.1:8000").unwrap();
 
         assert_eq!(url, "ws://127.0.0.1:8000/ws");
+    }
+
+    #[test]
+    fn tracing_destination_defaults_to_disabled() {
+        assert_eq!(
+            parse_tracing_destination(None),
+            TracingDestination::Disabled
+        );
+        assert_eq!(
+            parse_tracing_destination(Some("   ")),
+            TracingDestination::Disabled
+        );
+    }
+
+    #[test]
+    fn tracing_destination_accepts_stderr_keyword() {
+        assert_eq!(
+            parse_tracing_destination(Some("stderr")),
+            TracingDestination::Stderr
+        );
+        assert_eq!(
+            parse_tracing_destination(Some(" STDERR ")),
+            TracingDestination::Stderr
+        );
+    }
+
+    #[test]
+    fn tracing_destination_treats_other_values_as_log_path() {
+        assert_eq!(
+            parse_tracing_destination(Some("/tmp/grid-tui.log")),
+            TracingDestination::File(PathBuf::from("/tmp/grid-tui.log"))
+        );
     }
 
     #[test]
