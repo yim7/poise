@@ -51,8 +51,8 @@ ws_base_url = "wss://fstream.binancefuture.com"
 grid_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
-lower_price = 50000.0
-upper_price = 73000.0
+lower_price = 65500.0
+upper_price = 67500.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
@@ -65,7 +65,7 @@ notional_per_unit = 375.0
 - `environment` 只决定数据目录和环境名，不自动切换交易所地址
 - 真实启动时必须显式配置 `exchange.rest_base_url`、`exchange.ws_base_url`、`exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
-- 网格区间只是示例，联调前要按当前测试网价格改成合理范围
+- 示例里的 `btc-core` 区间总带宽是 `2000 USD`，联调前要按当前测试网价格手动平移到合理范围
 
 ### 2. 启动服务端
 

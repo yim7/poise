@@ -277,5 +277,9 @@ notional_per_unit = 375.0
         );
         assert_eq!(config.grids.len(), 1);
         assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
+        assert_eq!(
+            config.grids[0].upper_price - config.grids[0].lower_price,
+            2000.0
+        );
     }
 }
