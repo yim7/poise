@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 grid-protocol = { path = "../protocol" }
 reqwest.workspace = true

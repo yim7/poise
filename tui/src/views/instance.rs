@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
@@ -120,7 +121,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ActivityLevelView::Warn => "warn",
                     ActivityLevelView::Error => "error",
                 };
-                Line::from(format!("{} [{}] {}", item.ts, level, item.message))
+                Line::from(format!(
+                    "{} [{}] {}",
+                    format_activity_timestamp(&item.ts),
+                    level,
+                    item.message
+                ))
             })
             .collect()
     };
@@ -203,8 +209,20 @@ fn format_command(command: &GridCommandView) -> String {
     }
 }
 
+fn format_activity_timestamp(ts: &str) -> String {
+    DateTime::parse_from_rfc3339(ts)
+        .map(|value| {
+            value
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|_| ts.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, Local};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -223,8 +241,8 @@ mod tests {
             .collect::<String>()
     }
 
-    fn render_text(detail: GridDetailView) -> String {
-        let backend = TestBackend::new(100, 30);
+    fn render_text_with_size(detail: GridDetailView, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let response: crate::protocol::GridListResponse =
             serde_json::from_str(include_str!("../../tests/fixtures/grid_list_response.json"))
@@ -239,6 +257,10 @@ mod tests {
             .unwrap();
 
         buffer_text(&terminal)
+    }
+
+    fn render_text(detail: GridDetailView) -> String {
+        render_text_with_size(detail, 100, 32)
     }
 
     #[test]
@@ -294,5 +316,35 @@ mod tests {
         assert!(text.contains("Total PnL | Realized PnL"));
         assert!(text.contains("-123456789.12 | +987654321.99"));
         assert!(!text.contains("-123456789.12+987654321.99"));
+    }
+
+    #[test]
+    fn renders_activity_timestamp_in_local_time() {
+        let detail: GridDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+                .unwrap();
+
+        let text = render_text(detail.clone());
+        let original_ts = detail.activity[0].ts.clone();
+        let expected_local = DateTime::parse_from_rfc3339(&original_ts)
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string();
+
+        assert!(text.contains(&expected_local));
+        assert!(!text.contains(&original_ts));
+    }
+
+    #[test]
+    fn keeps_original_activity_timestamp_when_parsing_fails() {
+        let mut detail: GridDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+                .unwrap();
+        detail.activity[0].ts = "not-a-timestamp".to_string();
+
+        let text = render_text(detail);
+
+        assert!(text.contains("not-a-timestamp"));
     }
 }
