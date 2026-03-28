@@ -64,4 +64,4 @@ git commit -m "feat: render activity timestamps in local time"
   - `cargo test -p grid-tui views::instance::tests::renders_activity_timestamp_in_local_time -- --exact`
   - `cargo test -p grid-tui activity_timestamp -- --nocapture`
   - `cargo test -p grid-tui`
-- 实现 commit SHA：待回写
+- 实现 commit SHA：`fb1d7e1`
