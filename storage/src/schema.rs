@@ -49,6 +49,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "replacement_gate_reason_json",
         "TEXT",
     )?;
+    add_column_if_missing(
+        conn,
+        "grid_snapshots",
+        "realized_pnl_cumulative",
+        "REAL NOT NULL DEFAULT 0",
+    )?;
 
     ensure_columns_present(
         &conn,
@@ -279,13 +285,13 @@ mod tests {
         assert!(!columns.contains(&"pending_order_json".to_string()));
         assert!(!columns.contains(&"realized_pnl_day".to_string()));
         assert!(!columns.contains(&"realized_pnl_today".to_string()));
-        assert!(!columns.contains(&"realized_pnl_cumulative".to_string()));
+        assert!(columns.contains(&"realized_pnl_cumulative".to_string()));
         assert!(!columns.contains(&"unrealized_pnl".to_string()));
         assert!(!columns.contains(&"out_of_band_since".to_string()));
     }
 
     #[test]
-    fn initialize_rejects_legacy_grid_snapshots_table_without_realized_pnl_cumulative() {
+    fn initialize_upgrades_snapshot_table_missing_realized_pnl_cumulative() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE grid_snapshots (
@@ -307,7 +313,16 @@ mod tests {
         )
         .unwrap();
 
-        assert!(initialize(&conn).is_err());
+        initialize(&conn).unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(columns.contains(&"realized_pnl_cumulative".to_string()));
     }
 
     #[test]
