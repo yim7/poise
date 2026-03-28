@@ -351,7 +351,7 @@ impl GridManager {
         &self,
         id: &GridId,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        _target_exposure: grid_core::types::Exposure,
     ) -> Result<bool> {
         let grid = self
             .grids
@@ -381,9 +381,8 @@ impl GridManager {
             result.effects.as_slice(),
             [GridEffect::SubmitOrder {
                 request: planned_request,
-                target_exposure: planned_target,
+                ..
             }] if order_requests_match(planned_request, request, &planned_grid.exchange_rules)
-                && exposures_match(planned_target, &target_exposure)
         ))
     }
 
@@ -1599,6 +1598,63 @@ mod tests {
                     test_config().base_qty_per_unit() * 4.0,
                     test_exchange_rules().quantity_step,
                 )
+                && *target_exposure == grid_core::types::Exposure(4.0)
+        ));
+    }
+
+    #[test]
+    fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request() {
+        let mut manager = test_manager_with_cached_price(94.99);
+        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.config.notional_per_unit = 100.0;
+        grid.exchange_rules = grid_core::types::ExchangeRules {
+            price_tick: 10.0,
+            quantity_step: 1.0,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
+        grid.target_exposure = Some(grid_core::strategy::target_exposure(94.99, &grid.config));
+        grid.pending_order = Some(PendingOrder {
+            order_id: None,
+            client_order_id: "btc-core-reconcile".into(),
+            side: grid_core::types::Side::Buy,
+            price: 90.0,
+            quantity: 4.0,
+            target_exposure: grid_core::types::Exposure(4.0),
+            status: OrderStatus::Submitting,
+        });
+
+        let recovery = manager
+            .recover_submit_effect(
+                &GridId::new("btc-core"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "btc-core-reconcile".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 90.0,
+                    quantity: 4.0,
+                },
+                grid_core::types::Exposure(4.0),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(recovery.resolution, SubmitRecoveryResolution::Proceed);
+        assert!(recovery.effects.is_empty());
+        assert!(matches!(
+            manager.get_grid("btc-core").unwrap().pending_order.as_ref(),
+            Some(PendingOrder {
+                order_id: None,
+                client_order_id,
+                side: grid_core::types::Side::Buy,
+                price,
+                quantity,
+                target_exposure,
+                status: OrderStatus::Submitting,
+            }) if client_order_id == "btc-core-reconcile"
+                && (*price - 90.0).abs() < f64::EPSILON
+                && (*quantity - 4.0).abs() < f64::EPSILON
                 && *target_exposure == grid_core::types::Exposure(4.0)
         ));
     }
