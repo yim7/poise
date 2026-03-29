@@ -290,7 +290,7 @@ git commit -m "refactor(server): recover inventory executor working orders"
 - Test: `tui/src/api_client.rs`
 - Test: `tui/src/protocol.rs`
 
-- [ ] **Step 1: 在 `server/src/projector.rs` 写失败测试，锁住从槽位工作集投影稳定执行摘要和累计统计**
+- [x] **Step 1: 在 `server/src/projector.rs` 写失败测试，锁住从槽位工作集投影稳定执行摘要和累计统计**
 
 测试至少覆盖：
 - list 视图返回 `execution_status` 和 `active_slot_count`，不再返回 `pending_order_count`
@@ -299,7 +299,7 @@ git commit -m "refactor(server): recover inventory executor working orders"
 - `active_slot_count == execution.slots.len()`
 - `statistics` 中增加 `max_inventory_gap_abs`、`max_gap_age_ms`、`stats_started_at`
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server projector::tests::projects_execution_badge_from_working_orders -- --exact`
@@ -309,7 +309,7 @@ Run:
 Expected:
 测试失败，因为当前 projector 还没有新的执行诊断和统计字段。
 
-- [ ] **Step 3: 更新 protocol、HTTP / WS、TUI 夹具，锁住可观测性字段**
+- [x] **Step 3: 更新 protocol、HTTP / WS、TUI 夹具，锁住可观测性字段**
 
 测试要覆盖：
 - `/grids` 返回 `execution_status` 和 `active_slot_count`
@@ -318,7 +318,7 @@ Expected:
 - WebSocket 详情推送同步带出这些字段
 - TUI detail 视图能显示执行状态、偏差、偏差持续时间、活跃槽位数量、槽位视图和累计统计
 
-- [ ] **Step 4: 运行定向测试确认失败**
+- [x] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server http::tests:: -- --nocapture`
@@ -330,7 +330,7 @@ Run:
 Expected:
 协议与 TUI 夹具需要更新，新增字段测试失败。
 
-- [ ] **Step 5: 做最小实现，把观测字段投影到现有 detail / TUI**
+- [x] **Step 5: 做最小实现，把观测字段投影到现有 detail / TUI**
 
 要求：
 - `protocol/src/lib.rs` 直接重画 list / detail 里的执行读模型字段
@@ -341,7 +341,7 @@ Expected:
 - `query_service` / `http` / `websocket` / `tui` 夹具全部切到新的快照结构
 - `tui/src/views/instance.rs` 把新增字段渲染到 Execution / Statistics 区块
 
-- [ ] **Step 6: 运行 Task 4 的定向测试**
+- [x] **Step 6: 运行 Task 4 的定向测试**
 
 Run:
 `cargo test -p grid-server projector::tests:: -- --nocapture`
@@ -353,10 +353,13 @@ Run:
 Expected:
 投影和协议相关测试通过，detail / TUI 能直接看到稳定执行摘要和累计统计。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
+
+Task 4 code commit:
+`fed8aa2f983a1f7a636f487bbb27aa8b27a921c3`
 
 ```bash
-git add protocol/src/lib.rs server/src/projector.rs server/src/query_service.rs server/src/http.rs server/src/websocket.rs tui/src/views/instance.rs tui/src/api_client.rs tui/src/protocol.rs tui/tests/fixtures/grid_detail_view.json
+git add protocol/src/lib.rs server/src/http.rs server/src/projector.rs server/src/websocket.rs storage/src/sqlite.rs tui/src/main.rs tui/src/protocol.rs tui/src/views/dashboard.rs tui/src/views/instance.rs tui/tests/fixtures/grid_list_response.json tui/tests/fixtures/grid_detail_view.json tui/tests/fixtures/ws_grid_detail_changed.json tui/tests/fixtures/ws_grid_list_item_changed.json
 git commit -m "feat(observability): project inventory executor diagnostics and stats"
 ```
 
