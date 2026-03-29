@@ -4,21 +4,19 @@
 
 基于现有架构设计（见 [2026-03-24-grid-platform-architecture-design.md](2026-03-24-grid-platform-architecture-design.md)）和运行态边界收敛设计（见 [2026-03-27-grid-engine-runtime-internalization-design.md](2026-03-27-grid-engine-runtime-internalization-design.md)），把当前“库存目标直接翻成单笔挂单”的执行模型升级为独立库存执行器。
 
-> **2026-03-30 修订说明**
+> **2026-03-30 落地说明**
 >
-> 首轮库存执行器已经落地并合并，但实现仍有三处没有完全收紧到本文定义的边界：
+> 本轮边界收紧已经完成，当前实现与本文对齐：
 >
-> - `slot` 生命周期仍有一部分在 `manager` / `write_service` / `effect_worker` 侧直接推进
-> - `submit recovery` 仍残留在执行器外的旁路状态机
-> - 写侧仍使用全局串行锁，而不是按 `grid` 串行
+> - `slot` 生命周期统一由 `engine executor` transition 吸收
+> - `submit recovery` 已并回执行器，server 侧只传递事实和回写结果
+> - `write_service` 已从全局串行锁收紧为按 `grid` 串行
 >
-> 本次修订不改变主架构方向：
+> 本次落地不改变主架构方向：
 >
 > - 保留 `slot`
 > - 保留 `DesiredOrders` 不持久化
 > - 不在本次改动引入 `actor`
->
-> 本次修订只把这些实现偏差重新收回本文原本定义的边界。
 
 ## 1. 背景
 

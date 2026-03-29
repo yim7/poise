@@ -248,7 +248,7 @@ git commit -m "refactor(server): serialize grid mutations per grid"
 - Modify: `docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md`
 - Modify: `docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md`
 
-- [ ] **Step 1: 运行 crate 级回归**
+- [x] **Step 1: 运行 crate 级回归**
 
 Run:
 `cargo test -p grid-engine`
@@ -259,7 +259,7 @@ Run:
 Expected:
 相关 crate 全绿。
 
-- [ ] **Step 2: 运行工作区全量测试与格式检查**
+- [x] **Step 2: 运行工作区全量测试与格式检查**
 
 Run:
 `cargo test --workspace`
@@ -268,14 +268,14 @@ Run:
 Expected:
 工作区测试通过，格式检查通过。
 
-- [ ] **Step 3: 同步 spec 与 plan 的最终落地结果**
+- [x] **Step 3: 同步 spec 与 plan 的最终落地结果**
 
 要求：
 - 只保留这轮边界收紧实际落地的命名
 - 在本 plan 每个已完成 task 后记录 commit SHA
 - 若实现和 spec 出现偏差，先改 spec，不保留口头约定
 
-- [ ] **Step 4: 提交收尾文档同步**
+- [x] **Step 4: 提交收尾文档同步**
 
 ```bash
 git add docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
