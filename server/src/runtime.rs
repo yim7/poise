@@ -321,6 +321,7 @@ mod tests {
     use grid_core::types::{ExchangeRules, Exposure, Side};
     use grid_engine::command::GridCommand;
     use grid_engine::execution_plan::ExecutionAction;
+    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::GridManager;
     use grid_engine::ports::{
@@ -329,9 +330,9 @@ mod tests {
         OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect, Position, PriceTick,
         StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
-    use grid_engine::executor::{OrderRole, OrderSlot};
     use grid_engine::runtime::{
-        GridRuntime, GridStatus, PendingOrder, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, PendingOrder,
+        RiskState, SlotState, WorkingOrder,
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
@@ -824,6 +825,7 @@ mod tests {
             target_exposure: Exposure(6.0),
             status: OrderStatus::New,
         });
+        sync_executor_state_from_pending(&mut snapshot);
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -900,6 +902,7 @@ mod tests {
             status: OrderStatus::Submitting,
         });
         snapshot.observed.reference_price = Some(95.0);
+        sync_executor_state_from_pending(&mut snapshot);
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -1013,6 +1016,7 @@ mod tests {
             status: OrderStatus::New,
         });
         snapshot.current_exposure = Exposure(6.0);
+        sync_executor_state_from_pending(&mut snapshot);
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(22.5, 0.0),
@@ -1131,10 +1135,10 @@ mod tests {
 
     #[tokio::test]
     async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_same_batch() {
-        let exchange = Arc::new(FakeExchange::with_cancel_all_error(
+        let exchange = Arc::new(FakeExchange::with_cancel_order_error(
             btc_position(0.0, 0.0),
             vec![],
-            "cancel rejected",
+            "cancel order rejected",
         ));
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
@@ -1149,6 +1153,7 @@ mod tests {
             target_exposure: Exposure(4.0),
             status: OrderStatus::New,
         });
+        sync_executor_state_from_pending(&mut snapshot);
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -1170,7 +1175,7 @@ mod tests {
         assert!(matches!(
             transition.effects.as_slice(),
             [
-                ExecutionAction::CancelAll { .. },
+                ExecutionAction::CancelOrder { .. },
                 ExecutionAction::SubmitOrder { .. }
             ]
         ));
@@ -1178,8 +1183,8 @@ mod tests {
         worker.run_once().await.unwrap();
 
         assert_eq!(
-            exchange.cancel_all_symbols.lock().unwrap().as_slice(),
-            ["BTCUSDT"]
+            exchange.canceled_order_ids.lock().unwrap().as_slice(),
+            ["snapshot-1"]
         );
         assert!(
             exchange.submitted_orders.lock().unwrap().is_empty(),
@@ -1558,19 +1563,57 @@ mod tests {
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
         snapshot.pending_order = None;
+        snapshot.executor_state = None;
         snapshot.observed.reference_price = Some(95.0);
 
-        let fixture = runtime_fixture(
-            Some(snapshot),
-            btc_position(0.0, 0.0),
-            vec![],
-            test_budget(),
-        )
-        .await;
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        drop(price_sender);
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::without_user_receiver(price_receiver));
+        let clock = Arc::new(FixedClock(test_server_time()));
 
-        let handles = fixture.runtime.start().await.unwrap();
-        fixture
-            .user_sender
+        let mut manager = GridManager::new(clock);
+        manager
+            .add_grid(
+                GridId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                test_config(),
+                test_budget(),
+                exchange.exchange_info.rules.clone(),
+            )
+            .unwrap();
+        manager.restore_grid_state(&snapshot).unwrap();
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let (events, _) = broadcast::channel(16);
+        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
+        let write_service = Arc::new(GridWriteService::new(
+            manager,
+            persistence.clone(),
+            events.clone(),
+        ));
+        let state = build_server_state(
+            write_service,
+            effect_service,
+            Arc::new(GridQueryService::new(
+                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            )),
+            Arc::new(GridProjector::new()),
+        );
+        let runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        let user_task = runtime.spawn_user_task(user_receiver, test_server_time());
+        let effect_task = runtime.spawn_effect_task();
+        user_sender
             .send(position_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
                 7.5,
@@ -1579,8 +1622,8 @@ mod tests {
             .await
             .unwrap();
 
-        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
-        wait_until_instance(&fixture.state, |instance| {
+        wait_until(|| exchange.submitted_orders.lock().unwrap().len() == 1).await;
+        wait_until_instance(&state, |instance| {
             instance
                 .pending_order
                 .as_ref()
@@ -1589,11 +1632,14 @@ mod tests {
         })
         .await;
 
-        let submitted = fixture.exchange.submitted_orders.lock().unwrap().clone();
+        let submitted = exchange.submitted_orders.lock().unwrap().clone();
         assert_eq!(submitted[0].side, Side::Buy);
         assert_eq!(submitted[0].quantity, 7.5);
 
-        shutdown(handles).await;
+        user_task.abort();
+        let _ = user_task.await;
+        effect_task.abort();
+        let _ = effect_task.await;
     }
 
     #[tokio::test]
@@ -1838,9 +1884,7 @@ mod tests {
             .as_ref()
             .expect("startup sync should rebuild slot workset");
         assert_eq!(
-            executor_state
-                .slots
-                .as_slice(),
+            executor_state.slots.as_slice(),
             [grid_engine::runtime::ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::SubmitPending,
@@ -1961,6 +2005,7 @@ mod tests {
             target_exposure: Exposure(6.0),
             status: OrderStatus::Submitting,
         });
+        sync_executor_state_from_pending(&mut snapshot);
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(7.5, 3.0),
@@ -2733,6 +2778,50 @@ mod tests {
         test_snapshot_with_config(test_config())
     }
 
+    fn sync_executor_state_from_pending(snapshot: &mut GridSnapshot) {
+        snapshot.executor_state =
+            snapshot
+                .pending_order
+                .as_ref()
+                .map(|pending_order| ExecutorState {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: snapshot
+                        .current_exposure
+                        .delta(&pending_order.target_exposure),
+                    gap_started_at: Some(test_server_time()),
+                    last_reprice_at: None,
+                    slots: vec![ExecutionSlot {
+                        slot: OrderSlot::new("inventory_core"),
+                        state: if pending_order.is_submit_recovery_anchor() {
+                            SlotState::SubmitPending
+                        } else {
+                            SlotState::Working
+                        },
+                        working_order: Some(WorkingOrder {
+                            order_id: pending_order.order_id.clone(),
+                            client_order_id: pending_order.client_order_id.clone(),
+                            side: pending_order.side,
+                            price: pending_order.price,
+                            quantity: pending_order.quantity,
+                            target_exposure: pending_order.target_exposure.clone(),
+                            status: pending_order.status,
+                            role: match pending_order.side {
+                                Side::Buy => OrderRole::IncreaseInventory,
+                                Side::Sell => OrderRole::DecreaseInventory,
+                            },
+                            in_flight_effect_id: None,
+                        }),
+                    }],
+                    last_execution_reason: None,
+                    recovery_anomaly: None,
+                    stats: ExecutionStats {
+                        started_at: test_server_time(),
+                        max_inventory_gap_abs: Exposure(0.0),
+                        max_gap_age_ms: 0,
+                    },
+                });
+    }
+
     fn test_snapshot_with_config(config: GridConfig) -> GridSnapshot {
         GridSnapshot {
             grid_id: GridId::new("BTCUSDT"),
@@ -2773,8 +2862,10 @@ mod tests {
         position: Mutex<Position>,
         open_orders: Mutex<Vec<ExchangeOrder>>,
         submitted_orders: Mutex<Vec<OrderRequest>>,
+        canceled_order_ids: Mutex<Vec<String>>,
         cancel_all_symbols: Mutex<Vec<String>>,
         submit_error: Mutex<Option<String>>,
+        cancel_order_error: Mutex<Option<String>>,
         cancel_all_error: Mutex<Option<String>>,
         server_time: chrono::DateTime<Utc>,
         sequence: AtomicUsize,
@@ -2797,8 +2888,10 @@ mod tests {
                 position: Mutex::new(position),
                 open_orders: Mutex::new(open_orders),
                 submitted_orders: Mutex::new(Vec::new()),
+                canceled_order_ids: Mutex::new(Vec::new()),
                 cancel_all_symbols: Mutex::new(Vec::new()),
                 submit_error: Mutex::new(None),
+                cancel_order_error: Mutex::new(None),
                 cancel_all_error: Mutex::new(None),
                 server_time: test_server_time(),
                 sequence: AtomicUsize::new(1),
@@ -2817,13 +2910,13 @@ mod tests {
             exchange
         }
 
-        fn with_cancel_all_error(
+        fn with_cancel_order_error(
             position: Position,
             open_orders: Vec<ExchangeOrder>,
             error: &str,
         ) -> Self {
             let exchange = Self::new(position, open_orders);
-            *exchange.cancel_all_error.lock().unwrap() = Some(error.to_string());
+            *exchange.cancel_order_error.lock().unwrap() = Some(error.to_string());
             exchange
         }
 
@@ -2861,7 +2954,14 @@ mod tests {
             })
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        async fn cancel_order(&self, _instrument: &Instrument, order_id: &str) -> Result<()> {
+            self.canceled_order_ids
+                .lock()
+                .unwrap()
+                .push(order_id.to_string());
+            if let Some(error) = self.cancel_order_error.lock().unwrap().clone() {
+                return Err(anyhow!(error));
+            }
             Ok(())
         }
 

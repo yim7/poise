@@ -301,7 +301,11 @@ mod tests {
         let exchange = Arc::new(FakeExchange::default());
         let state = test_state(repository.clone(), exchange.clone()).await;
 
-        let transition = state.write_service.observe_market("btc-core", 95.0).await.unwrap();
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
         assert!(matches!(
             transition.effects.as_slice(),
             [GridEffect::SubmitOrder { .. }]
@@ -481,7 +485,11 @@ mod tests {
     }
 
     impl MemoryRepository {
-        async fn seed_snapshot(&self, id: &str, snapshot: grid_engine::snapshot::GridRuntimeSnapshot) {
+        async fn seed_snapshot(
+            &self,
+            id: &str,
+            snapshot: grid_engine::snapshot::GridRuntimeSnapshot,
+        ) {
             self.snapshots.lock().await.insert(id.to_string(), snapshot);
         }
 
@@ -536,7 +544,9 @@ mod tests {
                 let effect = effect_store
                     .iter_mut()
                     .find(|effect| effect.effect_id == effect_status_update.effect_id)
-                    .ok_or_else(|| anyhow!("effect `{}` not found", effect_status_update.effect_id))?;
+                    .ok_or_else(|| {
+                        anyhow!("effect `{}` not found", effect_status_update.effect_id)
+                    })?;
                 effect.status = effect_status_update.status;
                 effect.attempt_count += effect_status_update.attempt_delta;
                 effect.last_error = effect_status_update.last_error.clone();

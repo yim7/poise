@@ -146,32 +146,6 @@ impl SubmitRecoveryAnchor {
                 })
             })
     }
-
-    pub fn from_pending_order(pending_order: &PendingOrder) -> Option<Self> {
-        if pending_order.is_submit_recovery_anchor() {
-            return Some(Self {
-                client_order_id: pending_order.client_order_id.clone(),
-                kind: SubmitRecoveryKind::Submitting,
-            });
-        }
-
-        (pending_order.order_id.is_some() && pending_order.status.keeps_pending_order()).then(
-            || Self {
-                client_order_id: pending_order.client_order_id.clone(),
-                kind: SubmitRecoveryKind::ReceiptBacked,
-            },
-        )
-    }
-
-    pub fn matches(&self, pending_order: &PendingOrder) -> bool {
-        pending_order.client_order_id == self.client_order_id
-            && match self.kind {
-                SubmitRecoveryKind::Submitting => pending_order.is_submit_recovery_anchor(),
-                SubmitRecoveryKind::ReceiptBacked => {
-                    pending_order.order_id.is_some() && pending_order.status.keeps_pending_order()
-                }
-            }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -360,8 +334,8 @@ mod tests {
     use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
 
     use super::{
-        ExecutionStats, ExecutionSlot, ExecutorState, GridRuntime, GridStatus, PendingOrder,
-        RiskState, SlotState, SubmitRecoveryAnchor, SubmitRecoveryKind, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, PendingOrder,
+        RiskState, SlotState, WorkingOrder,
     };
 
     fn test_runtime() -> GridRuntime {
@@ -552,37 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn submit_recovery_anchor_tracks_submitting_and_receipt_backed_pending_orders() {
-        let pending_order = PendingOrder {
-            order_id: None,
-            client_order_id: "client-1".into(),
-            side: Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::Submitting,
-        };
-        let anchor = SubmitRecoveryAnchor::from_pending_order(&pending_order).unwrap();
-        assert_eq!(anchor.kind, SubmitRecoveryKind::Submitting);
-        assert!(anchor.matches(&pending_order));
-
-        let other = PendingOrder {
-            client_order_id: "client-2".into(),
-            ..pending_order.clone()
-        };
-        assert!(!anchor.matches(&other));
-
-        let restored = PendingOrder {
-            order_id: Some("order-1".into()),
-            status: OrderStatus::New,
-            ..pending_order
-        };
-        let restored_anchor = SubmitRecoveryAnchor::from_pending_order(&restored).unwrap();
-        assert_eq!(restored_anchor.kind, SubmitRecoveryKind::ReceiptBacked);
-        assert!(restored_anchor.matches(&restored));
-    }
-
-    #[test]
     fn snapshot_round_trips_executor_state() {
         let mut runtime = test_runtime();
         runtime.status = GridStatus::Active;
@@ -634,12 +577,7 @@ mod tests {
         assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.executor_state, runtime.executor_state);
         assert_eq!(
-            restored
-                .executor_state
-                .as_ref()
-                .unwrap()
-                .stats
-                .started_at,
+            restored.executor_state.as_ref().unwrap().stats.started_at,
             runtime.executor_state.as_ref().unwrap().stats.started_at
         );
     }

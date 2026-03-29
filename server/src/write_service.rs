@@ -388,6 +388,7 @@ mod tests {
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{ExchangeRules, Exposure, Side};
     use grid_engine::command::GridCommand;
+    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::{GridManager, SubmitRecoveryResolution};
     use grid_engine::observation::{
@@ -397,8 +398,9 @@ mod tests {
         ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, OrderRequest, OrderStatus,
         PersistedGridEffect, StateRepositoryPort,
     };
-    use grid_engine::executor::{OrderRole, OrderSlot};
-    use grid_engine::runtime::{PendingOrder, SlotState};
+    use grid_engine::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorState, PendingOrder, SlotState, WorkingOrder,
+    };
     use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_engine::transition::GridEffect;
 
@@ -586,6 +588,50 @@ mod tests {
         );
     }
 
+    fn sync_executor_state_from_pending(snapshot: &mut GridRuntimeSnapshot) {
+        snapshot.executor_state =
+            snapshot
+                .pending_order
+                .as_ref()
+                .map(|pending_order| ExecutorState {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: snapshot
+                        .current_exposure
+                        .delta(&pending_order.target_exposure),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    slots: vec![ExecutionSlot {
+                        slot: OrderSlot::new("inventory_core"),
+                        state: if pending_order.is_submit_recovery_anchor() {
+                            SlotState::SubmitPending
+                        } else {
+                            SlotState::Working
+                        },
+                        working_order: Some(WorkingOrder {
+                            order_id: pending_order.order_id.clone(),
+                            client_order_id: pending_order.client_order_id.clone(),
+                            side: pending_order.side,
+                            price: pending_order.price,
+                            quantity: pending_order.quantity,
+                            target_exposure: pending_order.target_exposure.clone(),
+                            status: pending_order.status,
+                            role: match pending_order.side {
+                                Side::Buy => OrderRole::IncreaseInventory,
+                                Side::Sell => OrderRole::DecreaseInventory,
+                            },
+                            in_flight_effect_id: None,
+                        }),
+                    }],
+                    last_execution_reason: None,
+                    recovery_anomaly: None,
+                    stats: ExecutionStats {
+                        started_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                        max_inventory_gap_abs: Exposure(0.0),
+                        max_gap_age_ms: 0,
+                    },
+                });
+    }
+
     #[tokio::test]
     async fn recover_submit_effect_proceed_persists_submitting_anchor_before_returning() {
         let repository = Arc::new(MemoryRepository::default());
@@ -662,6 +708,7 @@ mod tests {
             status: OrderStatus::Submitting,
         });
         snapshot.observed.reference_price = Some(95.0);
+        sync_executor_state_from_pending(&mut snapshot);
         {
             let mut manager = manager_handle.write().await;
             manager.restore_grid_state(&snapshot).unwrap();

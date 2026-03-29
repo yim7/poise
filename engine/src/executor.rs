@@ -110,13 +110,19 @@ const INVENTORY_CORE_SLOT: &str = "inventory_core";
 
 pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     let inventory_gap = input.current_exposure.delta(&input.target_exposure);
-    let gap_started_at = resolve_gap_started_at(input.executor_state, &inventory_gap, input.observed_at);
+    let gap_started_at =
+        resolve_gap_started_at(input.executor_state, &inventory_gap, input.observed_at);
     let gap_age_ms = gap_started_at
         .map(|started_at| (input.observed_at - started_at).num_milliseconds().max(0))
         .unwrap_or(0);
     let mode = resolve_mode(&inventory_gap, gap_age_ms);
     let last_execution_reason = resolve_reason(input.executor_state, &mode);
-    let stats = update_stats(input.executor_state, input.observed_at, &inventory_gap, gap_age_ms);
+    let stats = update_stats(
+        input.executor_state,
+        input.observed_at,
+        &inventory_gap,
+        gap_age_ms,
+    );
     let desired_orders = plan_desired_orders(&input, &inventory_gap);
     let (effects, slots, replacement_gate_reason) = diff_desired_orders(&input, &desired_orders);
 
@@ -151,22 +157,25 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         return RecoveryResolution::Anomaly(RecoveryAnomaly::DuplicateLiveOrders);
     }
 
-    let base_state = input.previous_state.cloned().unwrap_or_else(|| ExecutorState {
-        mode: ExecutionMode::Passive,
-        inventory_gap: input
-            .current_exposure
-            .delta(input.target_exposure.unwrap_or(input.current_exposure)),
-        gap_started_at: None,
-        last_reprice_at: None,
-        slots: Vec::new(),
-        last_execution_reason: None,
-        recovery_anomaly: None,
-        stats: ExecutionStats {
-            started_at: input.observed_at,
-            max_inventory_gap_abs: Exposure(0.0),
-            max_gap_age_ms: 0,
-        },
-    });
+    let base_state = input
+        .previous_state
+        .cloned()
+        .unwrap_or_else(|| ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: input
+                .current_exposure
+                .delta(input.target_exposure.unwrap_or(input.current_exposure)),
+            gap_started_at: None,
+            last_reprice_at: None,
+            slots: Vec::new(),
+            last_execution_reason: None,
+            recovery_anomaly: None,
+            stats: ExecutionStats {
+                started_at: input.observed_at,
+                max_inventory_gap_abs: Exposure(0.0),
+                max_gap_age_ms: 0,
+            },
+        });
 
     if input.live_orders.is_empty() {
         let preserved_slots = input
@@ -287,8 +296,8 @@ fn resolve_gap_started_at(
         .and_then(|state| {
             (!state.inventory_gap.is_zero()
                 && state.inventory_gap.0.signum() == inventory_gap.0.signum())
-                .then_some(state.gap_started_at)
-                .flatten()
+            .then_some(state.gap_started_at)
+            .flatten()
         })
         .or(Some(observed_at))
 }
@@ -389,10 +398,19 @@ fn desired_inventory_order(
 fn diff_desired_orders(
     input: &ExecutorInput<'_>,
     desired_orders: &[DesiredOrder],
-) -> (Vec<ExecutionAction>, Vec<ExecutionSlot>, Option<ReplacementGateReason>) {
+) -> (
+    Vec<ExecutionAction>,
+    Vec<ExecutionSlot>,
+    Option<ReplacementGateReason>,
+) {
     let current_slot = input
         .executor_state
-        .and_then(|state| state.slots.iter().find(|slot| slot.slot.0 == INVENTORY_CORE_SLOT))
+        .and_then(|state| {
+            state
+                .slots
+                .iter()
+                .find(|slot| slot.slot.0 == INVENTORY_CORE_SLOT)
+        })
         .cloned();
     let desired_order = desired_orders.first();
 
@@ -429,7 +447,8 @@ fn diff_desired_orders(
         (Some(current_slot), Some(desired_order)) => {
             let current_order = current_slot.working_order.as_ref();
             if let Some(current_order) = current_order {
-                if desired_matches_working_order(desired_order, current_order, input.exchange_rules) {
+                if desired_matches_working_order(desired_order, current_order, input.exchange_rules)
+                {
                     return (
                         vec![ExecutionAction::NoOp],
                         vec![current_slot],
@@ -443,7 +462,11 @@ fn diff_desired_orders(
                     input.reference_price,
                     input.exchange_rules,
                 ) {
-                    return (vec![ExecutionAction::NoOp], vec![current_slot], Some(reason));
+                    return (
+                        vec![ExecutionAction::NoOp],
+                        vec![current_slot],
+                        Some(reason),
+                    );
                 }
 
                 if let Some(order_id) = current_order.order_id.clone() {
@@ -470,7 +493,10 @@ fn diff_desired_orders(
     }
 }
 
-fn desired_order_to_request(input: &ExecutorInput<'_>, desired_order: &DesiredOrder) -> OrderRequest {
+fn desired_order_to_request(
+    input: &ExecutorInput<'_>,
+    desired_order: &DesiredOrder,
+) -> OrderRequest {
     OrderRequest {
         instrument: input.instrument.clone(),
         side: desired_order.side,
@@ -525,11 +551,16 @@ fn replacement_gate_reason_for_working_order(
     if current_order.side != desired_order.side {
         return None;
     }
-    if !rounded_values_match(current_order.quantity, desired_order.quantity, rules.quantity_step) {
+    if !rounded_values_match(
+        current_order.quantity,
+        desired_order.quantity,
+        rules.quantity_step,
+    ) {
         return None;
     }
 
-    let improvement_ratio = replacement_improvement_ratio(current_order, desired_order, reference_price);
+    let improvement_ratio =
+        replacement_improvement_ratio(current_order, desired_order, reference_price);
     let threshold_rate =
         (BINANCE_TAKER_FEE_RATE * 2.0) + (REPLACEMENT_SAFETY_BUFFER_BPS / BPS_DENOMINATOR);
     (improvement_ratio < threshold_rate).then(|| ReplacementGateReason::ImprovementBelowThreshold {
@@ -692,8 +723,7 @@ mod tests {
         );
         assert_eq!(catch_up.desired_orders.len(), 1);
         assert!(
-            catch_up.state.stats.max_inventory_gap_abs.0
-                >= catch_up.state.inventory_gap.0.abs()
+            catch_up.state.stats.max_inventory_gap_abs.0 >= catch_up.state.inventory_gap.0.abs()
         );
     }
 }

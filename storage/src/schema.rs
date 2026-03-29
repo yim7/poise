@@ -44,12 +44,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    add_column_if_missing(
-        conn,
-        "grid_snapshots",
-        "executor_state_json",
-        "TEXT",
-    )?;
+    add_column_if_missing(conn, "grid_snapshots", "executor_state_json", "TEXT")?;
     add_column_if_missing(
         conn,
         "grid_snapshots",

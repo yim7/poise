@@ -55,16 +55,10 @@ impl EffectService {
         let Some(snapshot) = self.load_grid_state(id).await? else {
             return Ok(None);
         };
-        let Some(pending_order) = snapshot
+        let Some(anchor) = snapshot
             .executor_state
             .as_ref()
             .and_then(SubmitRecoveryAnchor::from_executor_state)
-            .or_else(|| {
-                snapshot
-                    .pending_order
-                    .as_ref()
-                    .and_then(SubmitRecoveryAnchor::from_pending_order)
-            })
         else {
             return Ok(None);
         };
@@ -77,9 +71,9 @@ impl EffectService {
 
             match effect.effect {
                 GridEffect::SubmitOrder { request, .. }
-                    if request.client_order_id == pending_order.client_order_id =>
+                    if request.client_order_id == anchor.client_order_id =>
                 {
-                    Some(pending_order.clone())
+                    Some(anchor.clone())
                 }
                 _ => None,
             }
@@ -104,12 +98,16 @@ mod tests {
     use chrono::Utc;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
+    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::ports::{
         CommittedGridWrite, EffectStatus, EffectStatusUpdate, PersistedGridEffect,
         StateRepositoryPort,
     };
-    use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
+    use grid_engine::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
+        SlotState, WorkingOrder,
+    };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
 
@@ -123,7 +121,7 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let service = EffectService::new(repository.clone(), notifications);
 
-        repository.seed_snapshot(snapshot_with_pending(PendingOrder {
+        repository.seed_snapshot(snapshot_with_executor_order(WorkingOrder {
             order_id: None,
             client_order_id: "client-1".into(),
             side: Side::Buy,
@@ -131,6 +129,8 @@ mod tests {
             quantity: 0.25,
             target_exposure: Exposure(6.0),
             status: grid_engine::ports::OrderStatus::Submitting,
+            role: OrderRole::IncreaseInventory,
+            in_flight_effect_id: None,
         }));
         repository.seed_effect(submit_effect("btc-core:batch:0", "client-1"));
         assert_eq!(
@@ -147,7 +147,7 @@ mod tests {
             None
         );
 
-        repository.seed_snapshot(snapshot_with_pending(PendingOrder {
+        repository.seed_snapshot(snapshot_with_executor_order(WorkingOrder {
             order_id: Some("order-1".into()),
             client_order_id: "client-1".into(),
             side: Side::Buy,
@@ -155,6 +155,8 @@ mod tests {
             quantity: 0.25,
             target_exposure: Exposure(6.0),
             status: grid_engine::ports::OrderStatus::New,
+            role: OrderRole::IncreaseInventory,
+            in_flight_effect_id: None,
         }));
         repository.seed_effect(submit_effect("btc-core:batch:1", "client-1"));
         assert_eq!(
@@ -163,6 +165,29 @@ mod tests {
                 client_order_id: "client-1".into(),
                 kind: grid_engine::runtime::SubmitRecoveryKind::ReceiptBacked,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_recovery_anchor_ignores_legacy_pending_order_without_executor_state() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let service = EffectService::new(repository.clone(), notifications);
+
+        repository.seed_snapshot(snapshot_with_pending(PendingOrder {
+            order_id: None,
+            client_order_id: "client-legacy".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: grid_engine::ports::OrderStatus::Submitting,
+        }));
+        repository.seed_effect(submit_effect("btc-core:batch:legacy", "client-legacy"));
+
+        assert_eq!(
+            service.submit_recovery_anchor("btc-core").await.unwrap(),
+            None
         );
     }
 
@@ -221,6 +246,54 @@ mod tests {
             target_exposure: Some(Exposure(6.0)),
             pending_order: Some(pending_order),
             executor_state: None,
+            replacement_gate_reason: None,
+            risk: RiskState::default(),
+            observed: ObservedState {
+                reference_price: Some(95.0),
+                out_of_band_since: None,
+            },
+        }
+    }
+
+    fn snapshot_with_executor_order(order: WorkingOrder) -> GridRuntimeSnapshot {
+        GridRuntimeSnapshot {
+            grid_id: GridId::new("btc-core"),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            config: GridConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+            status: GridStatus::Active,
+            current_exposure: Exposure(0.0),
+            target_exposure: Some(Exposure(6.0)),
+            pending_order: None,
+            executor_state: Some(ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(6.0),
+                gap_started_at: Some(Utc::now()),
+                last_reprice_at: None,
+                slots: vec![ExecutionSlot {
+                    slot: OrderSlot::new("inventory_core"),
+                    state: if order.order_id.is_some() {
+                        SlotState::Working
+                    } else {
+                        SlotState::SubmitPending
+                    },
+                    working_order: Some(order),
+                }],
+                last_execution_reason: None,
+                recovery_anomaly: None,
+                stats: ExecutionStats {
+                    started_at: Utc::now(),
+                    max_inventory_gap_abs: Exposure(0.0),
+                    max_gap_age_ms: 0,
+                },
+            }),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {
