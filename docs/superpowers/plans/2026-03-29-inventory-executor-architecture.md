@@ -368,20 +368,26 @@ git commit -m "feat(observability): project inventory executor diagnostics and s
 ### Task 5: 全量回归、文档同步和旧语义清理
 
 **Files:**
+- Modify: `engine/src/executor.rs`
+- Modify: `engine/src/lib.rs`
+- Modify: `engine/src/reconciler.rs`
 - Modify: `engine/src/runtime.rs`
 - Modify: `engine/src/manager.rs`
+- Modify: `server/src/effect_service.rs`
+- Modify: `server/src/effect_worker.rs`
 - Modify: `server/src/runtime.rs`
-- Modify: `docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md`
+- Modify: `server/src/write_service.rs`
+- Modify: `storage/src/schema.rs`
 - Modify: `docs/superpowers/plans/2026-03-29-inventory-executor-architecture.md`
 
-- [ ] **Step 1: 清理未再使用的 `pending_order` 中心语义和遗留辅助函数**
+- [x] **Step 1: 清理未再使用的 `pending_order` 中心语义和遗留辅助函数**
 
 重点检查：
 - 提交恢复分支是否仍以单个 `pending_order` 为中心
 - `CancelAll` 是否仍在常规路径出现
 - 旧 `replacement_gate_reason` 判断是否被错误保留在主执行路径
 
-- [ ] **Step 2: 运行 crate 级回归**
+- [x] **Step 2: 运行 crate 级回归**
 
 Run:
 `cargo test -p grid-engine`
@@ -392,25 +398,28 @@ Run:
 Expected:
 四个 crate 全绿。
 
-- [ ] **Step 3: 运行工作区全量测试与格式检查**
+- [x] **Step 3: 运行工作区全量测试与格式检查**
 
 Run:
 `cargo test --workspace`
 `cargo fmt --all --check`
 
 Expected:
-全量测试通过；如果 `fmt --check` 因既有未格式化文件失败，至少格式化本次修改文件并记录结果。
+全量测试通过；本次实际先对分支内相关 Rust 文件执行了 `rustfmt --edition 2024 ...`，随后 `cargo fmt --all --check` 通过。
 
-- [ ] **Step 4: 同步 spec 与 plan 里的最终命名、任务勾选和提交 SHA**
+- [x] **Step 4: 同步 spec 与 plan 里的最终命名、任务勾选和提交 SHA**
 
 要求：
 - 只记录这次实际落地的命名
 - 删除执行过程中不再适用的步骤
 - 在每个已完成 task 后写入对应提交 SHA
 
-- [ ] **Step 5: 提交收尾变更**
+- [x] **Step 5: 提交收尾变更**
+
+Task 5 code commit:
+`a7fab55ec89eb80398f3eb4bf158980d30e35e84`
 
 ```bash
-git add engine/src/runtime.rs engine/src/manager.rs server/src/runtime.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-29-inventory-executor-architecture.md
-git commit -m "refactor(engine): finalize inventory executor migration"
+git add engine/src/executor.rs engine/src/lib.rs engine/src/manager.rs engine/src/reconciler.rs engine/src/runtime.rs server/src/effect_service.rs server/src/effect_worker.rs server/src/runtime.rs server/src/write_service.rs storage/src/schema.rs
+git commit -m "refactor(runtime): finish inventory executor cleanup"
 ```
