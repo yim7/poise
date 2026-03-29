@@ -277,6 +277,9 @@ Expected:
 
 - [x] **Step 4: 提交收尾文档同步**
 
+Task 4 docs commit:
+`35de858e401fb5a723af005667cca4d1902845d5`
+
 ```bash
 git add docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
 git commit -m "docs: sync inventory executor boundary hardening plan"
