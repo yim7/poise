@@ -4,6 +4,22 @@
 
 基于现有架构设计（见 [2026-03-24-grid-platform-architecture-design.md](2026-03-24-grid-platform-architecture-design.md)）和运行态边界收敛设计（见 [2026-03-27-grid-engine-runtime-internalization-design.md](2026-03-27-grid-engine-runtime-internalization-design.md)），把当前“库存目标直接翻成单笔挂单”的执行模型升级为独立库存执行器。
 
+> **2026-03-30 修订说明**
+>
+> 首轮库存执行器已经落地并合并，但实现仍有三处没有完全收紧到本文定义的边界：
+>
+> - `slot` 生命周期仍有一部分在 `manager` / `write_service` / `effect_worker` 侧直接推进
+> - `submit recovery` 仍残留在执行器外的旁路状态机
+> - 写侧仍使用全局串行锁，而不是按 `grid` 串行
+>
+> 本次修订不改变主架构方向：
+>
+> - 保留 `slot`
+> - 保留 `DesiredOrders` 不持久化
+> - 不在本次改动引入 `actor`
+>
+> 本次修订只把这些实现偏差重新收回本文原本定义的边界。
+
 ## 1. 背景
 
 当前系统已经能稳定计算：
@@ -48,6 +64,7 @@
 - 这次不扩展新的策略族
 - 这次不建立 replay benchmark；如需和传统网格做对照，放到下一阶段
 - 这次不在生产运行时里同时跑“库存执行器 + 传统网格”双执行逻辑
+- 这次不引入 per-grid actor；如需引入，只放到下一阶段的 server 侧时序收敛里讨论
 
 ## 3. 术语
 
@@ -232,6 +249,11 @@ pub enum SlotState {
 4. 恢复时先重建 `slot -> working_order` 关系，再做新一轮规划
 
 这些不变量的目标是把恢复、撤单、重挂的复杂度压回执行器内部，避免 `manager`、`write_service`、`effect_worker` 各自推断合法状态。
+
+因此一期还要再加一条实现约束：
+
+- 提交请求、提交回执、live order 认领、终态清理这些事实都只能通过执行器 transition 吸收
+- `manager`、`write_service`、`effect_worker` 只允许把事实交给执行器，不允许直接 `upsert / clear slot`
 
 ### 5.5 用 `WorkingOrder` 替代单个 `pending_order`
 
@@ -443,6 +465,18 @@ pub struct WorkingOrder {
 - 传统网格基线执行器
 - benchmark 专用验收项
 
+per-grid actor 也延后到下一阶段。
+
+它的定位固定为：
+
+- 收敛 `server` 侧每个 `grid` 的时序与状态所有权
+- 消除应用层跨 `grid` 的无谓串行化
+
+它不负责：
+
+- 取代 `slot`
+- 改写执行器内部的 `DesiredOrders -> slot -> diff` 主模型
+
 ## 6. 恢复与持久化
 
 ### 6.1 恢复中心从单订单锚点改为槽位工作集重建
@@ -465,7 +499,24 @@ pub struct WorkingOrder {
 
 也就是说，恢复之后不是“尽量延续那一笔旧单”，而是“先恢复当前槽位工作集，再重新规划当前应有工作集”。
 
-### 6.3 恢复认领决策表
+### 6.3 `submit recovery` 也属于执行器恢复语义
+
+`submit recovery` 不是 `effect_worker`、`write_service`、`manager` 之间额外拼出来的一条旁路状态机。
+
+它和启动恢复一样，本质上都是：
+
+- 输入一组已持久化事实和交易所 live facts
+- 由执行器判断当前槽位工作集应该怎样重建或保留
+- 再决定当前 effect 应该继续等待、认领 live order、确认完成，还是被当前计划 supersede
+
+因此本阶段要求：
+
+- `submit recovery` 的判断逻辑下沉到 `engine executor`
+- `effect_worker` 只负责拿到回执、live order、effect 状态这些事实并回写
+- `write_service` 只负责持久化执行器 transition，不再拥有独立的 submit recovery 状态机
+- `effect_service` 只提供 effect 查询和 effect 状态更新，不再承载恢复判断
+
+### 6.4 恢复认领决策表
 
 `server runtime` 只负责拉取 live facts，不负责判断订单该归属哪个槽位。
 
@@ -501,9 +552,9 @@ pub enum RecoveryResolution {
 
 - `server runtime` 拉取 live facts
 - `engine executor` 产出 `RecoveryResolution`
-- `effect_service` 只执行异常恢复所需动作
+- `effect_service` 只提供 effect 查询和状态更新
 
-### 6.4 `effect worker` 的边界收窄
+### 6.5 `effect worker` 的边界收窄
 
 [`server/src/effect_worker.rs`](../../../server/src/effect_worker.rs) 改造后只负责：
 
@@ -517,7 +568,12 @@ pub enum RecoveryResolution {
 - 是否应该继续追价
 - 是否应该触发整格重算
 
-### 6.5 `CancelAll` 降级成异常工具
+它也不再负责：
+
+- 分类 `submit recovery` 的稳定结果
+- 决定某个提交 effect 应该 `Proceed / Recovered / Superseded`
+
+### 6.6 `CancelAll` 降级成异常工具
 
 `CancelAll` 不再是常规替换路径。它只保留在：
 
@@ -568,7 +624,25 @@ pub enum RecoveryResolution {
 - 执行器状态机规则
 - 工作集合并规则
 
-### 7.4 `effect worker`
+### 7.4 `write_service`
+
+拥有：
+
+- 每个 `grid` 的持久化事务边界
+- 每个 `grid` 的写侧串行控制
+
+不拥有：
+
+- 跨 `grid` 的全局串行化语义
+- 执行器状态机规则
+- `submit recovery` 的独立判断逻辑
+
+这意味着：
+
+- 同一个 `grid` 的 mutation 必须按顺序提交
+- 不同 `grid` 的 mutation 不应该因为同一把全局锁互相阻塞
+
+### 7.5 `effect worker`
 
 拥有：
 
@@ -597,13 +671,16 @@ pub enum RecoveryResolution {
 2. 小偏差时进入 `Passive`，偏差扩大或超时未收敛时可升级到 `Rebalance`，再扩大或再超时可升级到 `CatchUp`。
 3. 部分成交、完全成交、撤单、拒单后，执行器会更新对应槽位及其 `working_order`，并基于新的库存偏差重新规划。
 4. 启动恢复时，系统先吸收 live position 和 live open orders，重建 `slot -> working_order` 关系，再重新规划，不再依赖单个 `pending_order` 锚点补丁。
-5. 常规改挂不使用 `CancelAll`，而是按槽位工作集 diff 做定点 `cancel / submit`。
-6. `effect worker` 不承担执行策略判断，只负责 effect 执行与回写。
-7. 当 `DesiredOrders` 与当前槽位工作集等价时，系统返回 `NoOp`，避免无意义重挂。
-8. 一期验收测试至少覆盖模式切换、部分成交、启动恢复、定点改挂和无变化 `NoOp` 这几条主路径。
-9. list / detail / TUI 读模型不再保留 `pending_order_count` 或 `execution.pending_order` 这类单订单兼容语义。
-10. detail / TUI 能直接看到稳定执行摘要，至少包含库存偏差、偏差持续时间、工作订单数量、活跃槽位数量和统计窗口起点。
-11. detail / TUI 能看到稳定的累计统计，至少包含 `max_inventory_gap_abs` 和 `max_gap_age_ms`，并能看到 `slots` 明细。
+5. 提交请求、提交回执、live order 认领和终态清理都通过执行器 transition 推进，`manager` / `write_service` / `effect_worker` 不再直接改写槽位。
+6. `submit recovery` 由执行器统一判断并输出稳定结果，不再由 `effect_service` / `write_service` / `effect_worker` 组成旁路状态机。
+7. 常规改挂不使用 `CancelAll`，而是按槽位工作集 diff 做定点 `cancel / submit`。
+8. `effect worker` 不承担执行策略判断，只负责 effect 执行与回写。
+9. 写侧对同一个 `grid` 串行提交，但不同 `grid` 不因为全局锁互相阻塞。
+10. 当 `DesiredOrders` 与当前槽位工作集等价时，系统返回 `NoOp`，避免无意义重挂。
+11. 一期验收测试至少覆盖模式切换、部分成交、启动恢复、submit recovery、定点改挂和无变化 `NoOp` 这几条主路径。
+12. list / detail / TUI 读模型不再保留 `pending_order_count` 或 `execution.pending_order` 这类单订单兼容语义。
+13. detail / TUI 能直接看到稳定执行摘要，至少包含库存偏差、偏差持续时间、工作订单数量、活跃槽位数量和统计窗口起点。
+14. detail / TUI 能看到稳定的累计统计，至少包含 `max_inventory_gap_abs` 和 `max_gap_age_ms`，并能看到 `slots` 明细。
 
 ## 10. 后续实现顺序
 
