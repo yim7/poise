@@ -278,6 +278,7 @@ mod tests {
                 current_exposure: grid.current_exposure,
                 target_exposure: grid.target_exposure,
                 pending_order: Some(pending_order),
+                executor_state: grid.executor_state,
                 replacement_gate_reason: grid.replacement_gate_reason,
                 risk: grid.risk_state,
                 observed: grid_engine::snapshot::ObservedState {

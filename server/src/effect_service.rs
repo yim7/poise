@@ -214,6 +214,7 @@ mod tests {
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
             pending_order: Some(pending_order),
+            executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {

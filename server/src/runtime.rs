@@ -1738,6 +1738,7 @@ mod tests {
                 target_exposure: Exposure(0.0),
                 status: OrderStatus::New,
             }),
+            executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
@@ -2666,6 +2667,7 @@ mod tests {
                 target_exposure: Exposure(6.0),
                 status: OrderStatus::New,
             }),
+            executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {

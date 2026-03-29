@@ -15,7 +15,7 @@ use grid_engine::ports::{
     CommittedGridWrite, EffectStatus, EffectStatusUpdate, GridReadRepositoryPort,
     PersistedGridEffect, StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot,
 };
-use grid_engine::runtime::{GridStatus, RiskState};
+use grid_engine::runtime::{ExecutorState, GridStatus, RiskState};
 use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
 use grid_engine::transition::GridEffect;
 
@@ -170,6 +170,12 @@ impl SqliteStorage {
             .map(serde_json::to_string)
             .transpose()
             .context("failed to serialize pending order")?;
+        let executor_state_json = state
+            .executor_state
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("failed to serialize executor state")?;
         let replacement_gate_reason_json = state
             .replacement_gate_reason
             .as_ref()
@@ -205,6 +211,7 @@ impl SqliteStorage {
                 current_exposure,
                 target_exposure,
                 pending_order_json,
+                executor_state_json,
                 replacement_gate_reason_json,
                 realized_pnl_day,
                 realized_pnl_today,
@@ -213,7 +220,7 @@ impl SqliteStorage {
                 reference_price,
                 out_of_band_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id,
                 state.instrument.venue.as_str(),
@@ -223,6 +230,7 @@ impl SqliteStorage {
                 state.current_exposure.0,
                 state.target_exposure.as_ref().map(|exposure| exposure.0),
                 pending_order_json,
+                executor_state_json,
                 replacement_gate_reason_json,
                 realized_pnl_day,
                 state.risk.realized_pnl_today,
@@ -340,7 +348,7 @@ impl SqliteStorage {
         let snapshot = conn
             .query_row(
                 "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
-                        pending_order_json, replacement_gate_reason_json, realized_pnl_day,
+                        pending_order_json, executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since
                  FROM grid_snapshots
@@ -362,7 +370,7 @@ impl SqliteStorage {
         let snapshot = conn
             .query_row(
                 "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
-                        pending_order_json, replacement_gate_reason_json, realized_pnl_day,
+                        pending_order_json, executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, updated_at
                  FROM grid_snapshots
@@ -381,9 +389,10 @@ impl SqliteStorage {
         let config_json: String = row.get(3)?;
         let status_json: String = row.get(4)?;
         let pending_order_json: Option<String> = row.get(7)?;
-        let replacement_gate_reason_json: Option<String> = row.get(8)?;
-        let realized_pnl_day: Option<String> = row.get(9)?;
-        let out_of_band_since: Option<String> = row.get(14)?;
+        let executor_state_json: Option<String> = row.get(8)?;
+        let replacement_gate_reason_json: Option<String> = row.get(9)?;
+        let realized_pnl_day: Option<String> = row.get(10)?;
+        let out_of_band_since: Option<String> = row.get(15)?;
         let config = Self::deserialize_grid_config(&config_json)?;
         let status = Self::deserialize_grid_status(&status_json)?;
         let venue = Self::deserialize_venue(&venue)?;
@@ -398,11 +407,22 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
+        let executor_state = executor_state_json
+            .map(|json| {
+                serde_json::from_str::<ExecutorState>(&json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })
+            })
+            .transpose()?;
         let replacement_gate_reason = replacement_gate_reason_json
             .map(|json| {
                 serde_json::from_str::<ReplacementGateReason>(&json).map_err(|err| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        8,
+                        9,
                         rusqlite::types::Type::Text,
                         Box::new(err),
                     )
@@ -413,7 +433,7 @@ impl SqliteStorage {
             .map(|value| {
                 NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        9,
+                        10,
                         rusqlite::types::Type::Text,
                         Box::new(err),
                     )
@@ -427,7 +447,7 @@ impl SqliteStorage {
                     .map(|parsed| parsed.with_timezone(&Utc))
                     .map_err(|err| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            14,
+                            15,
                             rusqlite::types::Type::Text,
                             Box::new(err),
                         )
@@ -443,15 +463,16 @@ impl SqliteStorage {
             current_exposure: Exposure(row.get(5)?),
             target_exposure,
             pending_order,
+            executor_state,
             replacement_gate_reason,
             risk: RiskState {
                 realized_pnl_day,
-                realized_pnl_today: row.get(10)?,
-                realized_pnl_cumulative: row.get(11)?,
-                unrealized_pnl: row.get(12)?,
+                realized_pnl_today: row.get(11)?,
+                realized_pnl_cumulative: row.get(12)?,
+                unrealized_pnl: row.get(13)?,
             },
             observed: ObservedState {
-                reference_price: row.get(13)?,
+                reference_price: row.get(14)?,
                 out_of_band_since,
             },
         })
@@ -460,11 +481,11 @@ impl SqliteStorage {
     fn stored_grid_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredGridSnapshot> {
-        let updated_at: String = row.get(15)?;
+        let updated_at: String = row.get(16)?;
 
         Ok(StoredGridSnapshot {
             snapshot: Self::grid_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 15)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 16)?,
         })
     }
 
@@ -825,7 +846,11 @@ mod tests {
     use grid_engine::ports::{
         EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
     };
-    use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
+    use grid_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use grid_engine::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
+        SlotState, WorkingOrder,
+    };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
     use rusqlite::Connection;
@@ -862,6 +887,43 @@ mod tests {
                 realized_pnl_cumulative: 17.5,
                 unrealized_pnl: -3.0,
             },
+            executor_state: Some(ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(2.0),
+                gap_started_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-24T07:31:00+00:00")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+                last_reprice_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-24T07:32:00+00:00")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+                slots: vec![ExecutionSlot {
+                    slot: OrderSlot::new("passive_buy_1"),
+                    state: SlotState::Working,
+                    working_order: Some(WorkingOrder {
+                        order_id: Some("order-1".into()),
+                        client_order_id: "client-1".into(),
+                        side: Side::Buy,
+                        price: 94.5,
+                        quantity: 0.25,
+                        target_exposure: Exposure(6.0),
+                        status: OrderStatus::New,
+                        role: OrderRole::IncreaseInventory,
+                        in_flight_effect_id: None,
+                    }),
+                }],
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                stats: ExecutionStats {
+                    started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    max_inventory_gap_abs: Exposure(3.5),
+                    max_gap_age_ms: 42_000,
+                },
+            }),
             observed: ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: Some(
@@ -1105,6 +1167,40 @@ mod tests {
             .unwrap();
         assert!((loaded.risk.realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
         assert_eq!(loaded, snapshot);
+    }
+
+    #[tokio::test]
+    async fn saves_and_loads_executor_state_with_working_orders() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition(snapshot.grid_id.as_str(), &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let loaded = storage
+            .load_grid_state(snapshot.grid_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.executor_state, snapshot.executor_state);
+        assert_eq!(
+            loaded
+                .executor_state
+                .as_ref()
+                .unwrap()
+                .stats
+                .started_at,
+            snapshot
+                .executor_state
+                .as_ref()
+                .unwrap()
+                .stats
+                .started_at
+        );
+        assert!(loaded.pending_order.is_some());
     }
 
     #[tokio::test]

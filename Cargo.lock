@@ -575,6 +575,7 @@ dependencies = [
  "chrono",
  "grid-core",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

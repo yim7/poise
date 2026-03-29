@@ -12,6 +12,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             current_exposure REAL NOT NULL,
             target_exposure REAL,
             pending_order_json TEXT,
+            executor_state_json TEXT,
             replacement_gate_reason_json TEXT,
             realized_pnl_day TEXT,
             realized_pnl_today REAL NOT NULL DEFAULT 0,
@@ -46,6 +47,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     add_column_if_missing(
         conn,
         "grid_snapshots",
+        "executor_state_json",
+        "TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "grid_snapshots",
         "replacement_gate_reason_json",
         "TEXT",
     )?;
@@ -68,6 +75,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "current_exposure",
             "target_exposure",
             "pending_order_json",
+            "executor_state_json",
             "replacement_gate_reason_json",
             "realized_pnl_day",
             "realized_pnl_today",
@@ -232,6 +240,7 @@ mod tests {
                 current_exposure REAL NOT NULL,
                 target_exposure REAL,
                 pending_order_json TEXT,
+                executor_state_json TEXT,
                 realized_pnl_day TEXT,
                 realized_pnl_today REAL NOT NULL DEFAULT 0,
                 realized_pnl_cumulative REAL NOT NULL DEFAULT 0,

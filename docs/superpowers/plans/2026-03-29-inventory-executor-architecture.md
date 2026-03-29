@@ -56,7 +56,7 @@
 - Test: `engine/src/snapshot.rs`
 - Test: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 在 `engine/src/runtime.rs` 写失败测试，锁住 `ExecutorState`、`ExecutionSlot` 和 `WorkingOrder` 的最小形状**
+- [x] **Step 1: 在 `engine/src/runtime.rs` 写失败测试，锁住 `ExecutorState`、`ExecutionSlot` 和 `WorkingOrder` 的最小形状**
 
 测试要覆盖：
 - `GridRuntime::snapshot()` 会带出 `executor_state`
@@ -66,7 +66,7 @@
 - `ExecutionStats` 至少包含 `started_at`、`max_inventory_gap_abs`、`max_gap_age_ms`
 - `DesiredOrders` 不在 snapshot 中持久化
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine runtime::tests::snapshot_round_trips_executor_state -- --exact`
@@ -74,13 +74,13 @@ Run:
 Expected:
 编译失败或测试失败，因为当前 `GridRuntimeSnapshot` 仍然只有 `pending_order`。
 
-- [ ] **Step 3: 在 `storage/src/sqlite.rs` 写失败测试，锁住 `executor_state` 持久化**
+- [x] **Step 3: 在 `storage/src/sqlite.rs` 写失败测试，锁住 `executor_state` 持久化**
 
 测试要覆盖：
 - 保存带槽位工作集的 snapshot 后能正确读回
 - 旧 `pending_order_json` 不能再作为运行态唯一来源
 
-- [ ] **Step 4: 运行定向测试确认失败**
+- [x] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-storage sqlite::tests::saves_and_loads_executor_state_with_working_orders -- --exact`
@@ -88,7 +88,7 @@ Run:
 Expected:
 编译失败或测试失败，因为当前 schema 和 sqlite 读写逻辑还没有 `executor_state`。
 
-- [ ] **Step 5: 做最小实现，建立执行器运行态骨架**
+- [x] **Step 5: 做最小实现，建立执行器运行态骨架**
 
 要求：
 - `engine/src/executor.rs` 增加 `ExecutionMode`、`ExecutionReason`、`OrderRole`、`OrderSlot`、`DesiredOrder`
@@ -98,7 +98,7 @@ Expected:
 - 明确每个 `slot` 的不变量：最多一笔工作单、最多一个 in-flight effect
 - 先不删除旧字段使用点之外的全部旧代码，优先让新结构可存可读
 
-- [ ] **Step 6: 运行 Task 1 的定向测试**
+- [x] **Step 6: 运行 Task 1 的定向测试**
 
 Run:
 `cargo test -p grid-engine runtime::tests::snapshot_round_trips_executor_state -- --exact`

@@ -7,6 +7,7 @@ use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 use grid_core::types::{ExchangeRules, Exposure, Side};
 
+use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
 use crate::grid::{GridId, Instrument};
 use crate::observation::OrderObservation;
 use crate::ports::{ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus};
@@ -161,6 +162,64 @@ pub struct RiskState {
     pub unrealized_pnl: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionStats {
+    pub started_at: DateTime<Utc>,
+    pub max_inventory_gap_abs: Exposure,
+    pub max_gap_age_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotState {
+    Empty,
+    SubmitPending,
+    Working,
+    CancelPending,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkingOrder {
+    pub order_id: Option<String>,
+    pub client_order_id: String,
+    pub side: Side,
+    pub price: f64,
+    pub quantity: f64,
+    pub target_exposure: Exposure,
+    pub status: OrderStatus,
+    pub role: OrderRole,
+    pub in_flight_effect_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionSlot {
+    // Invariant: one slot owns at most one working order. If an effect is in flight,
+    // it must be attached to that working order via `in_flight_effect_id`.
+    pub slot: OrderSlot,
+    pub state: SlotState,
+    pub working_order: Option<WorkingOrder>,
+}
+
+impl ExecutionSlot {
+    pub fn has_in_flight_effect(&self) -> bool {
+        self.working_order
+            .as_ref()
+            .and_then(|order| order.in_flight_effect_id.as_ref())
+            .is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutorState {
+    pub mode: ExecutionMode,
+    pub inventory_gap: Exposure,
+    pub gap_started_at: Option<DateTime<Utc>>,
+    pub last_reprice_at: Option<DateTime<Utc>>,
+    pub slots: Vec<ExecutionSlot>,
+    pub last_execution_reason: Option<ExecutionReason>,
+    pub stats: ExecutionStats,
+}
+
 #[derive(Debug, Clone)]
 pub struct GridRuntime {
     pub id: GridId,
@@ -173,6 +232,7 @@ pub struct GridRuntime {
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
+    pub executor_state: Option<ExecutorState>,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk_state: RiskState,
     pub reference_price: Option<f64>,
@@ -197,6 +257,7 @@ impl GridRuntime {
             current_exposure: Exposure(0.0),
             target_exposure: None,
             pending_order: None,
+            executor_state: None,
             replacement_gate_reason: None,
             risk_state: RiskState::default(),
             reference_price: None,
@@ -217,6 +278,7 @@ impl GridRuntime {
             current_exposure: self.current_exposure.clone(),
             target_exposure: self.target_exposure.clone(),
             pending_order: self.pending_order.clone(),
+            executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
@@ -252,6 +314,7 @@ impl GridRuntime {
         self.current_exposure = snapshot.current_exposure.clone();
         self.target_exposure = snapshot.target_exposure.clone();
         self.pending_order = snapshot.pending_order.clone();
+        self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.risk_state = snapshot.risk.clone();
         self.reference_price = snapshot.observed.reference_price;
@@ -263,13 +326,90 @@ impl GridRuntime {
 
 #[cfg(test)]
 mod tests {
-    use grid_core::types::{Exposure, Side};
+    use chrono::{DateTime, Utc};
+    use grid_core::events::ReplacementGateReason;
+    use grid_core::risk::CapacityBudget;
+    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use grid_core::types::{ExchangeRules, Exposure, Side};
 
-    use crate::grid::{Instrument, Venue};
+    use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use crate::grid::{GridId, Instrument, Venue};
     use crate::observation::OrderObservation;
     use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
 
-    use super::{PendingOrder, SubmitRecoveryAnchor, SubmitRecoveryKind};
+    use super::{
+        ExecutionStats, ExecutionSlot, ExecutorState, GridRuntime, GridStatus, PendingOrder,
+        RiskState, SlotState, SubmitRecoveryAnchor, SubmitRecoveryKind, WorkingOrder,
+    };
+
+    fn test_runtime() -> GridRuntime {
+        GridRuntime::new(
+            GridId::new("grid-1"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            GridConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+            CapacityBudget {
+                max_notional: 6_000.0,
+                daily_loss_limit: -500.0,
+                stop_loss_pct: 10.0,
+            },
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.01,
+                min_qty: 0.01,
+                min_notional: 5.0,
+            },
+        )
+    }
+
+    fn test_executor_state() -> ExecutorState {
+        let slot = ExecutionSlot {
+            slot: OrderSlot::new("passive_buy_1"),
+            state: SlotState::Working,
+            working_order: Some(WorkingOrder {
+                order_id: Some("order-1".into()),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                target_exposure: Exposure(6.0),
+                status: OrderStatus::New,
+                role: OrderRole::IncreaseInventory,
+                in_flight_effect_id: None,
+            }),
+        };
+
+        ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(2.0),
+            gap_started_at: Some(
+                DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            last_reprice_at: Some(
+                DateTime::parse_from_rfc3339("2026-03-29T08:01:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            slots: vec![slot],
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            stats: ExecutionStats {
+                started_at: DateTime::parse_from_rfc3339("2026-03-29T07:55:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                max_inventory_gap_abs: Exposure(3.0),
+                max_gap_age_ms: 42_000,
+            },
+        }
+    }
 
     #[test]
     fn pending_order_builders_preserve_existing_submit_and_live_order_shapes() {
@@ -417,5 +557,67 @@ mod tests {
         let restored_anchor = SubmitRecoveryAnchor::from_pending_order(&restored).unwrap();
         assert_eq!(restored_anchor.kind, SubmitRecoveryKind::ReceiptBacked);
         assert!(restored_anchor.matches(&restored));
+    }
+
+    #[test]
+    fn snapshot_round_trips_executor_state() {
+        let mut runtime = test_runtime();
+        runtime.status = GridStatus::Active;
+        runtime.current_exposure = Exposure(4.0);
+        runtime.target_exposure = Some(Exposure(6.0));
+        runtime.pending_order = Some(PendingOrder {
+            order_id: Some("legacy-order-1".into()),
+            client_order_id: "legacy-client-1".into(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::New,
+        });
+        runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
+        runtime.risk_state = RiskState {
+            realized_pnl_day: None,
+            realized_pnl_today: 1.0,
+            realized_pnl_cumulative: 2.0,
+            unrealized_pnl: -0.5,
+        };
+        runtime.reference_price = Some(96.0);
+        runtime.out_of_band_since = Some(
+            DateTime::parse_from_rfc3339("2026-03-29T08:02:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        runtime.executor_state = Some(test_executor_state());
+
+        let snapshot = runtime.snapshot();
+        assert!(snapshot.executor_state.is_some());
+        assert_eq!(snapshot.executor_state, runtime.executor_state);
+
+        let serialized = serde_json::to_value(&snapshot).unwrap();
+        assert!(serialized.get("executor_state").is_some());
+        assert!(
+            serialized
+                .get("executor_state")
+                .unwrap()
+                .get("desired_orders")
+                .is_none()
+        );
+
+        let mut restored = test_runtime();
+        restored.restore_from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(restored.status, GridStatus::Active);
+        assert_eq!(restored.current_exposure, Exposure(4.0));
+        assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(restored.executor_state, runtime.executor_state);
+        assert_eq!(
+            restored
+                .executor_state
+                .as_ref()
+                .unwrap()
+                .stats
+                .started_at,
+            runtime.executor_state.as_ref().unwrap().stats.started_at
+        );
     }
 }
