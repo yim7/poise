@@ -32,12 +32,11 @@
 
 - 明确拆分 `Inventory Policy` 与 `Inventory Executor`
 - 让库存偏差具备持续执行语义，而不是单次触发语义
-- 用工作订单集合替代单个 `pending_order`
-- 恢复时先重建工作集，再重新规划执行，而不是依赖旧的单订单锚点补丁
+- 用槽位工作集替代单个 `pending_order`
+- 恢复时先重建槽位工作集，再重新规划执行，而不是依赖旧的单订单锚点补丁
 - 保留现有曲线库存模型，不在这次改动 `core` 的策略形状
-- 提升执行层可观测性，让运行时状态和量化指标都能解释“为什么这么执行”
-- 提供稳定的量化评价口径，能在固定场景里比较迁移前后执行效果
-- 支持在回放层和传统网格基线做 benchmark，而不是只看新执行器自身指标
+- 提升执行层可观测性，让运行时状态和稳定累计统计都能解释“为什么这么执行”
+- 提供稳定的内部观测口径，支持本阶段验收和联调
 
 ### 2.2 非目标
 
@@ -45,8 +44,9 @@
 - 这次不实现多 planner / 多执行器框架
 - 这次不引入 `MARKET` 作为常规执行路径
 - 这次不引入盘口依赖、波动率自适应、动态步长
-- 这次不新增新的 HTTP / WebSocket 接口；如需观测字段，只在现有 detail / TUI 视图内扩展
+- 这次不新增额外 endpoint，但允许重画现有 list / detail 读模型结构
 - 这次不扩展新的策略族
+- 这次不建立 replay benchmark；如需和传统网格做对照，放到下一阶段
 - 这次不在生产运行时里同时跑“库存执行器 + 传统网格”双执行逻辑
 
 ## 3. 术语
@@ -79,7 +79,21 @@
 
 ### 3.6 `ExecutionStats`
 
-执行器累计统计信息。它是运行结果事实，用于量化评价迁移效果，和单轮 `DesiredOrders` 不同，需要持久化。
+执行器累计统计信息。它是运行结果事实，用于观测执行器是否稳定收敛，和单轮 `DesiredOrders` 不同，需要持久化。
+
+```rust
+pub struct ExecutionStats {
+    pub started_at: DateTime<Utc>,
+    pub max_inventory_gap_abs: Exposure,
+    pub max_gap_age_ms: i64,
+}
+```
+
+一期统计窗口固定为“当前 grid activation”：
+
+- grid 创建或重新启用时重置
+- 进程重启不重置
+- `ExecutionStats` 至少要记录 `started_at`
 
 ## 4. 候选方向与决策
 
@@ -172,14 +186,56 @@ pub struct ExecutorState {
     pub inventory_gap: Exposure,
     pub gap_started_at: Option<DateTime<Utc>>,
     pub last_reprice_at: Option<DateTime<Utc>>,
-    pub working_orders: Vec<WorkingOrder>,
+    pub stats: ExecutionStats,
+    pub slots: Vec<ExecutionSlot>,
     pub last_execution_reason: Option<ExecutionReason>,
 }
 ```
 
 一期不把 `DesiredOrders` 持久化到 snapshot；它只存在于单轮规划过程中。
 
-### 5.3 用 `WorkingOrder` 替代单个 `pending_order`
+### 5.3 用 `ExecutionSlot` 明确每个槽位的生命周期
+
+当前设计里真正需要被持久化和恢复的，不是“无名订单列表”，而是“执行器有哪些固定槽位、每个槽位现在处于什么状态”。
+
+因此 `ExecutorState` 里的核心对象不是松散的 `working_orders` 列表，而是具名槽位：
+
+```rust
+pub struct ExecutionSlot {
+    pub slot: OrderSlot,
+    pub state: SlotState,
+    pub working_order: Option<WorkingOrder>,
+}
+
+pub enum SlotState {
+    Empty,
+    SubmitPending,
+    Working,
+    CancelPending,
+}
+```
+
+其中：
+
+- `slot` 是稳定身份
+- `state` 是槽位生命周期
+- `working_order` 是该槽位当前绑定的订单事实
+
+执行器当前“工作集”定义为：所有非 `Empty` 槽位里的 `working_order` 集合。
+
+### 5.4 槽位不变量
+
+一期必须明确以下不变量：
+
+1. 每个 `slot` 在任一时刻最多绑定一笔 `working_order`
+2. 每个 `slot` 在任一时刻最多只有一个 in-flight effect
+3. `slot` 的生命周期只能由执行器推进，外部观测只提供事实，不直接改写槽位语义
+4. `DesiredOrders` 必须先映射到具体 `slot`，再生成 `cancel / submit`
+5. 恢复时先重建 `slot -> working_order` 关系，再做新一轮规划
+
+这些不变量的目标是把恢复、撤单、重挂的复杂度压回执行器内部，避免 `manager`、`write_service`、`effect_worker` 各自推断合法状态。
+
+### 5.5 用 `WorkingOrder` 替代单个 `pending_order`
 
 `WorkingOrder` 至少包含：
 
@@ -205,7 +261,7 @@ pub struct WorkingOrder {
 
 一期不追求复杂铺单，但必须把“订单语义归属”从交易所字段中独立出来。
 
-### 5.4 执行模式
+### 5.6 执行模式
 
 一期模式固定为：
 
@@ -230,7 +286,7 @@ pub struct WorkingOrder {
 
 模式切换不再简单等同于“价格是否再次触发”。
 
-### 5.5 执行流程改成“先规划集合，再做 diff”
+### 5.7 执行流程改成“先规划集合，再做 diff”
 
 当前流程是：
 
@@ -242,8 +298,9 @@ pub struct WorkingOrder {
 2. 执行器根据运行态计算 `inventory_gap`
 3. 执行器决定 `ExecutionMode`
 4. 执行器生成本轮 `DesiredOrders`
-5. 执行器对比 `DesiredOrders` 与 `working_orders`
-6. 生成定点 `cancel / submit` effect
+5. 执行器先把 `DesiredOrders` 映射到具体 `slot`
+6. 执行器对比 `DesiredOrders` 与当前槽位工作集
+7. 生成定点 `cancel / submit` effect
 
 这意味着：
 
@@ -251,14 +308,13 @@ pub struct WorkingOrder {
 - 常规改挂只修改真正发生变化的订单
 - `NoOp` 的判断依据不再只是“单个旧单是否还能凑合保留”
 
-### 5.6 `desired_orders` 不持久化
+### 5.8 `desired_orders` 不持久化
 
 这是本次设计的重要取舍。
 
 持久化：
 
 - `executor_state`
-- `working_orders`
 - 模式相关时间戳
 
 不持久化：
@@ -271,12 +327,12 @@ pub struct WorkingOrder {
 - 恢复后重新计算更稳
 - 可以避免把未来执行逻辑固化到 snapshot 中
 
-### 5.7 执行器必须同时输出“当前诊断”和“累计统计”
+### 5.9 执行器必须同时输出“当前诊断”和“累计统计”
 
-只知道当前 `working_orders` 还不够，执行器还需要可观测性模型来回答两类问题：
+只知道当前槽位工作集还不够，执行器还需要可观测性模型来回答两类问题：
 
 1. 当前为什么在这样执行
-2. 迁移后相比旧模型到底改善了多少
+2. 当前执行是否在稳定收敛
 
 因此一期增加两类可观测数据。
 
@@ -296,77 +352,103 @@ pub struct WorkingOrder {
 
 累计统计属于效果视角，至少包括：
 
-- `requote_count`
-- `catch_up_count`
-- `working_order_submit_count`
-- `working_order_cancel_count`
-- `working_order_fill_count`
 - `max_inventory_gap_abs`
 - `max_gap_age_ms`
 
-这些指标不追求理论最优，只要求口径稳定、跨重启可恢复，能在固定测试场景和实盘联调中量化比较行为变化。
+这些指标不追求理论最优，只要求口径稳定、跨重启可恢复，能在本阶段验收测试和实盘联调中量化观察行为变化。
 
-#### 基准对比所需原始事实
+这里的“跨重启可恢复”含义固定为：
 
-为了支持和传统网格对照，运行时还必须稳定提供可回放的原始执行事实。第一版不要求把所有 benchmark 指标都持久化到主 snapshot，但至少要能从运行态 / 活动流 / effect 记录中稳定恢复这些事实：
+- 统计窗口延续同一个 grid activation
+- 不是无限期累计历史最大值
+- grid 重新启用后重新开始统计
 
-- 库存偏差随时间的变化
-- 工作订单提交、撤销、成交的计数与时间点
-- 模式切换时间点
-- 当前和累计已实现收益
+#### 对外投影收窄为稳定摘要
 
-这样 benchmark 层可以在不污染生产主逻辑的前提下，离线聚合出对比指标。
+当前诊断和累计统计里有两类信息：
 
-#### 投影边界
+1. 执行器内部语义
+2. 对产品和运维稳定有意义的摘要
 
-一期不新增新接口，只在现有 detail / TUI 上补充观测字段：
+一期明确只把第二类放进主协议和 TUI 主视图。
 
-- `Execution` 区块展示当前诊断
-- `Statistics` 区块展示累计统计
+主协议 / TUI 主视图允许投影：
 
-这样既不扩展接口数量，也能让执行器迁移具备可解释性和量化评价基础。
+- `execution_status`
+- `inventory_gap`
+- `gap_age_ms`
+- `active_slot_count`
+- `max_inventory_gap_abs`
+- `max_gap_age_ms`
+- `stats_started_at`
 
-### 5.8 传统网格 benchmark 放在回放层，不放在主运行时
+一期不把下面这些执行器内部概念固化进主协议：
 
-这次明确把 benchmark 设计为回放层能力，而不是生产运行时能力。
+- `mode`
+- `last_execution_reason`
 
 原因：
 
-- 传统网格是对照基线，不是当前主执行逻辑
-- 若把对照组塞进生产运行时，会把执行器边界和持久化边界一起做宽
-- benchmark 需要的是“同一段输入、同一套撮合假设、两套执行逻辑的可重复比较”，这更适合测试 / 回放 harness
+- 它对当前执行器实现很有用
+- 但不是稳定的产品语义
+- 未来只要执行模式命名或内部状态机调整，就会放大协议变更范围
 
-因此采用下面的分层：
+因此这些字段保留在：
 
-- 主运行时负责提供原始执行事实和累计统计
-- 回放 harness 负责喂入固定价格路径与固定成交规则
-- benchmark 报告负责聚合并比较：
-  - 当前库存执行器
-  - 传统网格基线执行器
+- 内部 snapshot / debug 能力
 
-一期 benchmark 的推荐对比指标为：
+#### 投影边界
 
-- `mean_abs_inventory_gap`
-- `max_inventory_gap_abs`
-- `max_gap_age_ms`
-- `submit_count`
-- `cancel_count`
-- `fill_count`
-- `requote_count`
-- `catch_up_count`
-- `realized_pnl`
-- `net_realized_pnl`
+一期允许重画现有 list / detail 读模型，但要求它们直接围绕槽位工作集表达：
 
-其中：
+- list 视图展示 `execution_status` 和 `active_slot_count`，不再展示 `pending_order_count`
+- detail 视图的 `Execution` 区块展示稳定执行摘要
+- `execution_status` 使用稳定对外语义：
+  - `normal`
+  - `attention_required`
+- detail 视图的 `Execution` 区块展示 `slots`
+- `slots` 对外投影为稳定的 `ExecutionSlotView`
+- `active_slot_count` 必须恒等于 `execution.slots.len()`
+- `ExecutionSlotView` 至少包含：
+  - `label`
+  - `phase`
+  - `intent`
+  - `order`
+- `order` 为可选对象，至少包含：
+  - `side`
+  - `price`
+  - `quantity`
+- `phase` 使用稳定视图语义：
+  - `opening`
+  - `working`
+  - `closing`
+- `intent` 使用稳定业务语义：
+  - `increase_inventory`
+  - `decrease_inventory`
+- `ExecutionSlotView` 不直接暴露内部 `SlotState`、`OrderRole` 或交易所订单状态枚举，也不要求与内部枚举一一对应
+- `Statistics` 区块展示稳定累计统计
+- 读模型不再保留 `execution.pending_order`
 
-- 运行时负责产出原始事实
-- benchmark 层负责从同一回放场景中聚合上述对比指标
+这样既不扩展接口数量，也能让执行器迁移具备可解释性和稳定观测基础。
 
-这样能保证主运行时边界稳定，同时支持以后继续迭代对照组。
+### 5.10 下一阶段候选项
+
+和传统网格的 replay benchmark 延后到下一阶段。
+
+本阶段只要求主运行时支持：
+
+- 当前诊断
+- 稳定累计统计
+
+不为离线对照回放额外引入：
+
+- benchmark harness
+- 传统网格基线执行器
+- benchmark 专用验收项
 
 ## 6. 恢复与持久化
 
-### 6.1 恢复中心从单订单锚点改为工作集重建
+### 6.1 恢复中心从单订单锚点改为槽位工作集重建
 
 当前恢复模型围绕单个 `pending_order` 的 `Submitting / receipt-backed` 锚点展开。改造后恢复中心变为：
 
@@ -379,14 +461,52 @@ pub struct WorkingOrder {
 启动时对每个 grid 的处理顺序固定为：
 
 1. 吸收 live position，更新 `current_exposure`
-2. 吸收 live open orders，重建 `working_orders`
+2. 吸收 live open orders，并由执行器负责重建 `slot -> working_order` 关系
 3. 基于最新 `target_exposure`、`current_exposure`、`reference_price` 重新规划 `DesiredOrders`
-4. 对比 `DesiredOrders` 与 `working_orders`
+4. 对比 `DesiredOrders` 与当前槽位工作集
 5. 生成需要的定点 `cancel / submit` effect
 
-也就是说，恢复之后不是“尽量延续那一笔旧单”，而是“先恢复当前工作集，再重新规划当前应有工作集”。
+也就是说，恢复之后不是“尽量延续那一笔旧单”，而是“先恢复当前槽位工作集，再重新规划当前应有工作集”。
 
-### 6.3 `effect worker` 的边界收窄
+### 6.3 恢复认领决策表
+
+`server runtime` 只负责拉取 live facts，不负责判断订单该归属哪个槽位。
+
+执行器对恢复认领输出统一的 `RecoveryResolution`：
+
+```rust
+pub enum RecoveryResolution {
+    Rebuilt { slots: Vec<ExecutionSlot> },
+    Anomaly(RecoveryAnomaly),
+}
+```
+
+其中 `RecoveryAnomaly` 只表达稳定异常类别，不夹带恢复动作。
+
+槽位认领规则由执行器统一决定：
+
+1. 一个 live order 仅匹配一个 slot
+   - 认领到该 slot
+2. 某个 slot 没有对应 live order
+   - 清空该 slot，由后续重规划决定是否补单
+3. 多个 live orders 同时匹配同一个 slot
+   - 进入 `RecoveryAnomaly`
+4. 某个 live order 无法匹配任何 slot
+   - 进入 `RecoveryAnomaly`
+5. 一个 live order 可能匹配多个 slots
+   - 进入 `RecoveryAnomaly`
+
+出现 `RecoveryAnomaly` 时，不做部分认领；启动异常恢复路径。
+
+只要异常恢复路径仍未解除，对外 `execution_status` 必须保持为 `attention_required`。
+
+模块责任固定为：
+
+- `server runtime` 拉取 live facts
+- `engine executor` 产出 `RecoveryResolution`
+- `effect_service` 只执行异常恢复所需动作
+
+### 6.4 `effect worker` 的边界收窄
 
 [`server/src/effect_worker.rs`](../../../server/src/effect_worker.rs) 改造后只负责：
 
@@ -400,7 +520,7 @@ pub struct WorkingOrder {
 - 是否应该继续追价
 - 是否应该触发整格重算
 
-### 6.4 `CancelAll` 降级成异常工具
+### 6.5 `CancelAll` 降级成异常工具
 
 `CancelAll` 不再是常规替换路径。它只保留在：
 
@@ -433,10 +553,10 @@ pub struct WorkingOrder {
 
 - `target_exposure` 计算
 - `executor_state`
-- `working_orders`
+- `slots`
 - 执行模式切换
 - `DesiredOrders` 规划
-- 工作集 diff 与 effect 生成
+- 槽位工作集 diff 与 effect 生成
 
 ### 7.3 `server runtime`
 
@@ -469,28 +589,29 @@ pub struct WorkingOrder {
 
 - 只有一个库存执行器实现
 - 不做多 planner 抽象
-- `working_orders` 总数上限先保持很小，优先验证工作集模型
+- 活跃槽位总数上限先保持很小，优先验证工作集模型
 - 常规路径先以“有助于库存收敛的订单”为主，不实现完整双边对称网格
 - `CatchUp` 只允许更激进的限价行为，不引入 `MARKET`
+- 不做 replay benchmark 及其配套回放 harness
 
 ## 9. 验收标准
 
-1. 当 `target_exposure` 与 `current_exposure` 存在偏差时，系统会持续维护 `working_orders`，而不是只生成一次单笔挂单后停止收敛。
+1. 当 `target_exposure` 与 `current_exposure` 存在偏差时，系统会持续维护槽位工作集，而不是只生成一次单笔挂单后停止收敛。
 2. 小偏差时进入 `Passive`，偏差扩大或超时未收敛时可升级到 `Rebalance`，再扩大或再超时可升级到 `CatchUp`。
-3. 部分成交、完全成交、撤单、拒单后，执行器会更新 `working_orders`，并基于新的库存偏差重新规划。
-4. 启动恢复时，系统先吸收 live position 和 live open orders，重建 `working_orders`，再重新规划，不再依赖单个 `pending_order` 锚点补丁。
-5. 常规改挂不使用 `CancelAll`，而是按工作集 diff 做定点 `cancel / submit`。
+3. 部分成交、完全成交、撤单、拒单后，执行器会更新对应槽位及其 `working_order`，并基于新的库存偏差重新规划。
+4. 启动恢复时，系统先吸收 live position 和 live open orders，重建 `slot -> working_order` 关系，再重新规划，不再依赖单个 `pending_order` 锚点补丁。
+5. 常规改挂不使用 `CancelAll`，而是按槽位工作集 diff 做定点 `cancel / submit`。
 6. `effect worker` 不承担执行策略判断，只负责 effect 执行与回写。
-7. 当 `DesiredOrders` 与 `working_orders` 等价时，系统返回 `NoOp`，避免无意义重挂。
+7. 当 `DesiredOrders` 与当前槽位工作集等价时，系统返回 `NoOp`，避免无意义重挂。
 8. 一期验收测试至少覆盖模式切换、部分成交、启动恢复、定点改挂和无变化 `NoOp` 这几条主路径。
-9. detail / TUI 能直接看到当前执行模式、库存偏差、偏差持续时间、工作订单数量和最近一次执行原因。
-10. detail / TUI 能看到稳定的累计统计，至少包含 `requote_count`、`catch_up_count`、提交/撤单/成交计数、`max_inventory_gap_abs` 和 `max_gap_age_ms`。
-11. 存在一个固定回放场景，能在相同输入和相同成交规则下同时跑库存执行器与传统网格基线，并产出稳定 benchmark 报告。
+9. list / detail / TUI 读模型不再保留 `pending_order_count` 或 `execution.pending_order` 这类单订单兼容语义。
+10. detail / TUI 能直接看到稳定执行摘要，至少包含库存偏差、偏差持续时间、工作订单数量、活跃槽位数量和统计窗口起点。
+11. detail / TUI 能看到稳定的累计统计，至少包含 `max_inventory_gap_abs` 和 `max_gap_age_ms`，并能看到 `slots` 明细。
 
 ## 10. 后续实现顺序
 
 1. 先补验收测试，锁定执行器行为
-2. 引入 `executor_state` 与 `working_orders`
+2. 引入 `executor_state` 与槽位工作集
 3. 将执行规划从 `reconciler` 下移到执行器
 4. 改造恢复链路和 effect worker
 5. 清理旧的 `pending_order` 中心语义

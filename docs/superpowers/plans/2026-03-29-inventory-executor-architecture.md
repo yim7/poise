@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把当前“库存目标直接翻成单笔挂单”的执行模型改造成独立库存执行器，让系统能持续管理库存偏差，并补齐可观测性与量化评价指标。
+**Goal:** 把当前“库存目标直接翻成单笔挂单”的执行模型改造成独立库存执行器，让系统能持续管理库存偏差，并补齐可观测性与稳定执行统计。
 
-**Architecture:** 这次按五段推进：先引入 `executor_state`、`working_orders` 和执行统计的运行态与持久化，再把执行规划从 `reconciler` 下移到新的执行模块，然后重写 `manager` / `write_service` / `runtime` 的恢复与观测吸收路径，接着在不新增接口的前提下把当前诊断和累计统计投影到 detail / TUI，最后做全量回归和收尾清理。每个 task 都先写失败测试，再做最小实现，再跑定向验证并提交。
+**Architecture:** 这次按五段推进：先引入 `executor_state`、槽位状态机和执行统计的运行态与持久化，再把执行规划从 `reconciler` 下移到新的执行模块，然后重写 `manager` / `write_service` / `runtime` 的恢复与观测吸收路径，接着在不新增接口的前提下把稳定执行摘要和累计统计投影到 detail / TUI，最后做全量回归和收尾清理。每个 task 都先写失败测试，再做最小实现，再跑定向验证并提交。
 
 **Tech Stack:** Rust workspace, cargo test, tokio, rusqlite, serde, anyhow, chrono
 
@@ -14,29 +14,27 @@
 
 ### 新建文件
 
-- `engine/src/executor.rs`：库存执行器主逻辑，负责 `ExecutionMode`、`DesiredOrders` 规划和 `working_orders` diff
-- `server/tests/inventory_executor_benchmark.rs`：固定回放场景下的库存执行器 vs 传统网格 benchmark
-- `server/tests/support/replay_benchmark.rs`：benchmark 共享回放 harness、对照组和报告聚合
+- `engine/src/executor.rs`：库存执行器主逻辑，负责 `ExecutionMode`、`DesiredOrders` 规划和槽位工作集 diff
 
 ### 修改文件
 
 - `engine/src/lib.rs`：导出新的执行器模块
-- `engine/src/runtime.rs`：引入 `ExecutorState`、`WorkingOrder`、执行原因与槽位语义，收窄 `PendingOrder`
+- `engine/src/runtime.rs`：引入 `ExecutorState`、`ExecutionSlot`、`WorkingOrder`、执行原因与槽位语义，收窄 `PendingOrder`
 - `engine/src/snapshot.rs`：把快照从 `pending_order` 扩展到 `executor_state`
 - `engine/src/reconciler.rs`：收窄为高层库存收敛，不再直接规划单笔下单 effect
-- `engine/src/manager.rs`：改成“目标库存 -> 执行器 -> 工作集 diff”的主编排路径
-- `protocol/src/lib.rs`：扩展 detail 里的执行诊断和统计字段
-- `storage/src/schema.rs`：为 `executor_state` / `working_orders` 持久化调整 schema
+- `engine/src/manager.rs`：改成“目标库存 -> 执行器 -> 槽位工作集 diff”的主编排路径
+- `protocol/src/lib.rs`：扩展 detail 里的稳定执行摘要和统计字段
+- `storage/src/schema.rs`：为 `executor_state` / 槽位工作集持久化调整 schema
 - `storage/src/sqlite.rs`：读写新的快照结构，并保留恢复所需字段
 - `server/src/effect_service.rs`：删除或收窄围绕单个 `pending_order` 的恢复锚点逻辑
 - `server/src/write_service.rs`：按新的快照与恢复语义改写写侧入口
-- `server/src/runtime.rs`：startup sync 改成“重建工作集 -> 重新规划”
+- `server/src/runtime.rs`：startup sync 改成“重建槽位工作集 -> 重新规划”
 - `server/src/effect_worker.rs`：只负责逐笔 effect 执行与结果回写，不再承担执行策略判断
-- `server/src/projector.rs`：在不改对外 contract 的前提下，从 `working_orders` 投影执行视图
+- `server/src/projector.rs`：从槽位工作集投影新的执行读模型
 - `server/src/query_service.rs`：测试夹具与读模型源适配新的快照结构
 - `server/src/http.rs`：更新 HTTP 测试夹具
 - `server/src/websocket.rs`：更新 WS 测试夹具
-- `tui/src/views/instance.rs`：渲染当前执行诊断和累计统计
+- `tui/src/views/instance.rs`：渲染稳定执行摘要和累计统计
 - `tui/src/api_client.rs`：适配扩展后的 detail 结构
 - `tui/src/protocol.rs`：补齐协议反序列化测试
 - `tui/tests/fixtures/grid_detail_view.json`：更新 detail 夹具
@@ -58,12 +56,14 @@
 - Test: `engine/src/snapshot.rs`
 - Test: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 在 `engine/src/runtime.rs` 写失败测试，锁住 `ExecutorState` 和 `WorkingOrder` 的最小形状**
+- [ ] **Step 1: 在 `engine/src/runtime.rs` 写失败测试，锁住 `ExecutorState`、`ExecutionSlot` 和 `WorkingOrder` 的最小形状**
 
 测试要覆盖：
 - `GridRuntime::snapshot()` 会带出 `executor_state`
-- `restore_from_snapshot()` 能恢复 `mode`、`inventory_gap`、`working_orders`
-- `ExecutionStats` 会跟随 snapshot 一起持久化
+- `ExecutorState` 会持久化具名 `slot` 及其状态
+- `restore_from_snapshot()` 能恢复 `mode`、`inventory_gap`、槽位工作集
+- `ExecutionStats` 会跟随 snapshot 一起持久化，并保留同一统计窗口起点
+- `ExecutionStats` 至少包含 `started_at`、`max_inventory_gap_abs`、`max_gap_age_ms`
 - `DesiredOrders` 不在 snapshot 中持久化
 
 - [ ] **Step 2: 运行定向测试确认失败**
@@ -77,7 +77,7 @@ Expected:
 - [ ] **Step 3: 在 `storage/src/sqlite.rs` 写失败测试，锁住 `executor_state` 持久化**
 
 测试要覆盖：
-- 保存带 `working_orders` 的 snapshot 后能正确读回
+- 保存带槽位工作集的 snapshot 后能正确读回
 - 旧 `pending_order_json` 不能再作为运行态唯一来源
 
 - [ ] **Step 4: 运行定向测试确认失败**
@@ -92,9 +92,10 @@ Expected:
 
 要求：
 - `engine/src/executor.rs` 增加 `ExecutionMode`、`ExecutionReason`、`OrderRole`、`OrderSlot`、`DesiredOrder`
-- `engine/src/runtime.rs` 增加 `ExecutorState`、`WorkingOrder` 和 `ExecutionStats`
+- `engine/src/runtime.rs` 增加 `ExecutorState`、`ExecutionSlot`、`SlotState`、`WorkingOrder` 和 `ExecutionStats`
 - `engine/src/snapshot.rs` 改成持久化 `executor_state`
 - `storage/src/schema.rs` / `storage/src/sqlite.rs` 改成读写新的快照结构
+- 明确每个 `slot` 的不变量：最多一笔工作单、最多一个 in-flight effect
 - 先不删除旧字段使用点之外的全部旧代码，优先让新结构可存可读
 
 - [ ] **Step 6: 运行 Task 1 的定向测试**
@@ -132,7 +133,7 @@ git commit -m "refactor(engine): add inventory executor runtime state"
 - 偏差扩大或超时进入 `Rebalance`
 - 再扩大或再超时进入 `CatchUp`
 - 规划过程中会更新 `last_execution_reason`
-- 发生重报价、进入 `CatchUp` 时会累加对应统计
+- 规划过程中会更新累计统计
 
 - [ ] **Step 2: 运行定向测试确认失败**
 
@@ -146,7 +147,7 @@ Expected:
 
 测试至少覆盖：
 - 市场观察后不会直接写单笔 `SubmitOrder`，而是通过执行器决定 effect
-- `DesiredOrders` 与 `working_orders` 等价时返回 `NoOp`
+- `DesiredOrders` 与当前槽位工作集等价时返回 `NoOp`
 - 常规改挂不生成 `CancelAll`
 
 - [ ] **Step 4: 运行定向测试确认失败**
@@ -163,7 +164,8 @@ Expected:
 要求：
 - `reconciler` 只返回高层 `target_exposure` 和事件
 - 执行器根据 `target_exposure`、`current_exposure`、`reference_price`、`executor_state` 生成 `DesiredOrders`
-- 执行器对 `DesiredOrders` 与 `working_orders` 做 diff
+- 执行器先把 `DesiredOrders` 映射到具名 `slot`
+- 执行器对 `DesiredOrders` 与当前槽位工作集做 diff
 - `manager` 改为调用执行器并把 diff 结果翻成 effect
 - 正常路径不再默认使用 `CancelAll + SubmitOrder`
 - 执行器同步更新当前诊断与累计统计
@@ -200,16 +202,17 @@ git commit -m "refactor(engine): move execution planning into inventory executor
 - Test: `server/src/effect_worker.rs`
 - Test: `server/src/write_service.rs`
 
-- [ ] **Step 1: 在 `server/src/runtime.rs` 写失败测试，锁住 startup sync 会先重建 `working_orders` 再重新规划**
+- [ ] **Step 1: 在 `server/src/runtime.rs` 写失败测试，锁住 startup sync 会先重建槽位工作集再重新规划**
 
 测试要覆盖：
 - live position 和 live open orders 会被吸收到新的 `executor_state`
 - 恢复后是“工作集重建 + 重算”，不是延续旧 `pending_order` 锚点补丁
+- live open orders 出现重复匹配或未知匹配时会进入异常恢复路径
 
 - [ ] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server runtime::tests::startup_sync_rebuilds_working_orders_before_replanning -- --exact`
+`cargo test -p grid-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
 
 Expected:
 测试失败，因为当前恢复仍围绕 `pending_order`。
@@ -217,15 +220,15 @@ Expected:
 - [ ] **Step 3: 在 `server/src/effect_worker.rs` 和 `server/src/write_service.rs` 写失败测试，锁住 worker 只做逐笔执行与回写**
 
 测试至少覆盖：
-- 提交成功后更新对应 `working_order`
-- 取消成功后清理对应 `working_order`
+- 提交成功后更新对应槽位里的 `working_order`
+- 取消成功后清理对应槽位里的 `working_order`
 - worker 不再依赖单个 `pending_order` 的 submit anchor
 
 - [ ] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
-`cargo test -p grid-server write_service::tests::recovers_working_orders_from_live_exchange_state -- --exact`
+`cargo test -p grid-server write_service::tests::recovers_slot_workset_from_live_exchange_state -- --exact`
 
 Expected:
 测试失败，因为当前 write service / worker 仍围绕 `pending_order`。
@@ -233,18 +236,19 @@ Expected:
 - [ ] **Step 5: 做最小实现，重写恢复与观测吸收路径**
 
 要求：
-- `manager.observe()` / `manager.sync_exchange_state()` 改成更新 `working_orders`
+- `manager.observe()` / `manager.sync_exchange_state()` 改成更新槽位工作集
 - `write_service` 改为保存新的快照结构
-- `runtime.startup_sync()` 改为“重建工作集 -> 重算 `DesiredOrders` -> diff”
+- `runtime.startup_sync()` 改为“执行器认领槽位工作集 -> 重算 `DesiredOrders` -> diff”
+- 槽位认领决策只允许由执行器负责，`runtime` 不直接做 slot 推断
 - `effect_worker` 只做 effect 执行与结果回写
 - `effect_service` 删除或收窄所有围绕单个 `pending_order` 的中心语义
 
 - [ ] **Step 6: 运行 Task 3 的定向测试**
 
 Run:
-`cargo test -p grid-server runtime::tests::startup_sync_rebuilds_working_orders_before_replanning -- --exact`
+`cargo test -p grid-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
 `cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
-`cargo test -p grid-server write_service::tests::recovers_working_orders_from_live_exchange_state -- --exact`
+`cargo test -p grid-server write_service::tests::recovers_slot_workset_from_live_exchange_state -- --exact`
 
 Expected:
 恢复链路与 worker 边界测试通过。
@@ -258,7 +262,7 @@ git commit -m "refactor(server): recover inventory executor working orders"
 
 ---
 
-### Task 4: 补执行可观测性并保持对外 contract 不变
+### Task 4: 重画执行读模型并补执行可观测性
 
 **Files:**
 - Modify: `protocol/src/lib.rs`
@@ -277,19 +281,20 @@ git commit -m "refactor(server): recover inventory executor working orders"
 - Test: `tui/src/api_client.rs`
 - Test: `tui/src/protocol.rs`
 
-- [ ] **Step 1: 在 `server/src/projector.rs` 写失败测试，锁住从 `working_orders` 投影当前执行诊断和累计统计**
+- [ ] **Step 1: 在 `server/src/projector.rs` 写失败测试，锁住从槽位工作集投影稳定执行摘要和累计统计**
 
 测试至少覆盖：
-- `pending_order_count` 改由 `working_orders` 与 pending effects 推导
-- 详情页里的 `execution.pending_order` 继续返回一个稳定的代表订单视图
-- `execution` 中增加当前 `mode`、`inventory_gap`、`gap_age_ms`、`working_order_count`、`last_execution_reason`
-- `statistics` 中增加 `requote_count`、`catch_up_count`、提交/撤单/成交计数、`max_inventory_gap_abs`、`max_gap_age_ms`
+- list 视图返回 `execution_status` 和 `active_slot_count`，不再返回 `pending_order_count`
+- `execution` 中增加 `execution_status`、`inventory_gap`、`gap_age_ms`、`active_slot_count`
+- `execution.slots` 返回稳定的 `ExecutionSlotView`
+- `active_slot_count == execution.slots.len()`
+- `statistics` 中增加 `max_inventory_gap_abs`、`max_gap_age_ms`、`stats_started_at`
 
 - [ ] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server projector::tests::projects_execution_badge_from_working_orders -- --exact`
-`cargo test -p grid-server projector::tests::projects_detail_pending_order_from_primary_working_order -- --exact`
+`cargo test -p grid-server projector::tests::projects_execution_slots_from_slot_workset -- --exact`
 `cargo test -p grid-server projector::tests::projects_execution_observability_statistics -- --exact`
 
 Expected:
@@ -298,11 +303,11 @@ Expected:
 - [ ] **Step 3: 更新 protocol、HTTP / WS、TUI 夹具，锁住可观测性字段**
 
 测试要覆盖：
-- `/grids` 继续返回 `pending_order_count`
-- `/grids/:id` 继续返回 `execution.pending_order`
-- `/grids/:id` 新增当前执行诊断和累计统计字段
+- `/grids` 返回 `execution_status` 和 `active_slot_count`
+- `/grids/:id` 返回 `execution.slots`
+- `/grids/:id` 新增稳定执行摘要和累计统计字段
 - WebSocket 详情推送同步带出这些字段
-- TUI detail 视图能显示当前模式、偏差、偏差持续时间、工作订单数量和累计统计
+- TUI detail 视图能显示执行状态、偏差、偏差持续时间、活跃槽位数量、槽位视图和累计统计
 
 - [ ] **Step 4: 运行定向测试确认失败**
 
@@ -319,10 +324,11 @@ Expected:
 - [ ] **Step 5: 做最小实现，把观测字段投影到现有 detail / TUI**
 
 要求：
-- `protocol/src/lib.rs` 为现有 detail 结构补充默认可选观测字段
-- `projector` 从 `working_orders` 推导现有执行徽标与详情视图
-- `projector` 同时投影当前诊断与累计统计
-- 优先选一个稳定“主工作单”映射到现有 `pending_order` 字段
+- `protocol/src/lib.rs` 直接重画 list / detail 里的执行读模型字段
+- `protocol/src/lib.rs` 定义稳定的 `execution_status`，不要直接复用内部异常或模式枚举
+- `protocol/src/lib.rs` 定义独立的 `ExecutionSlotView`，不要直接复用内部 `SlotState` / `OrderRole`
+- `ExecutionSlotView` 的 `phase` / `intent` 使用稳定视图语义，不与内部枚举一一绑定
+- `projector` 从槽位工作集推导 `execution_status`、`active_slot_count`、`ExecutionSlotView`、稳定执行摘要与累计统计
 - `query_service` / `http` / `websocket` / `tui` 夹具全部切到新的快照结构
 - `tui/src/views/instance.rs` 把新增字段渲染到 Execution / Statistics 区块
 
@@ -336,7 +342,7 @@ Run:
 `cargo test -p grid-tui`
 
 Expected:
-投影和协议相关测试通过，detail / TUI 能直接看到当前诊断和累计统计。
+投影和协议相关测试通过，detail / TUI 能直接看到稳定执行摘要和累计统计。
 
 - [ ] **Step 7: 提交**
 
@@ -347,88 +353,7 @@ git commit -m "feat(observability): project inventory executor diagnostics and s
 
 ---
 
-### Task 5: 建立回放 benchmark，对照传统网格基线
-
-**Files:**
-- Create: `server/tests/inventory_executor_benchmark.rs`
-- Create: `server/tests/support/replay_benchmark.rs`
-- Modify: `server/src/runtime.rs`
-- Modify: `docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md`
-- Modify: `docs/superpowers/plans/2026-03-29-inventory-executor-architecture.md`
-
-- [ ] **Step 1: 在 `server/tests/inventory_executor_benchmark.rs` 写失败测试，锁住固定回放场景和 benchmark 报告结构**
-
-测试至少覆盖：
-- 同一段价格路径、同一套成交规则、同一套交易所约束
-- 同时跑：
-  - 当前库存执行器
-  - 传统网格基线执行器
-- 输出稳定报告字段：
-  - `mean_abs_inventory_gap`
-  - `max_inventory_gap_abs`
-  - `max_gap_age_ms`
-  - `submit_count`
-  - `cancel_count`
-  - `fill_count`
-  - `requote_count`
-  - `catch_up_count`
-  - `realized_pnl`
-  - `net_realized_pnl`
-
-- [ ] **Step 2: 运行定向测试确认失败**
-
-Run:
-`cargo test -p grid-server inventory_executor_benchmark::tests::replay_benchmark_compares_inventory_executor_against_traditional_grid -- --exact`
-
-Expected:
-编译失败，因为 benchmark harness 和传统网格基线还不存在。
-
-- [ ] **Step 3: 在 `server/tests/support/replay_benchmark.rs` 实现最小回放 harness**
-
-要求：
-- 尽量复用现有 `runtime_fixture` / 测试工具的输入形状
-- 用固定价格路径和固定成交判定，避免把 benchmark 变成不稳定随机测试
-- 主运行时只提供原始执行事实，不把“传统网格对照逻辑”塞进生产代码
-
-- [ ] **Step 4: 写失败测试，锁住 benchmark 使用运行时原始事实而不是额外业务分支**
-
-测试至少覆盖：
-- benchmark 报告能从执行器现有原始事实聚合得到
-- 不要求生产代码同时维护两套执行路径
-
-- [ ] **Step 5: 运行定向测试确认失败**
-
-Run:
-`cargo test -p grid-server inventory_executor_benchmark::tests::benchmark_report_uses_runtime_observability_facts -- --exact`
-
-Expected:
-测试失败，因为当前还没有聚合逻辑。
-
-- [ ] **Step 6: 做最小实现，产出稳定 benchmark 报告**
-
-要求：
-- 报告从运行时原始事实和累计统计聚合
-- 传统网格基线只存在于回放 harness
-- benchmark 输出保持纯测试能力，不新增生产接口
-
-- [ ] **Step 7: 运行 Task 5 的定向测试**
-
-Run:
-`cargo test -p grid-server inventory_executor_benchmark::tests:: -- --nocapture`
-
-Expected:
-固定回放场景 benchmark 通过，并能稳定输出两套执行逻辑的对比指标。
-
-- [ ] **Step 8: 提交**
-
-```bash
-git add server/tests/inventory_executor_benchmark.rs server/tests/support/replay_benchmark.rs server/src/runtime.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-29-inventory-executor-architecture.md
-git commit -m "test(benchmark): add replay comparison against traditional grid"
-```
-
----
-
-### Task 6: 全量回归、文档同步和旧语义清理
+### Task 5: 全量回归、文档同步和旧语义清理
 
 **Files:**
 - Modify: `engine/src/runtime.rs`
