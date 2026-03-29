@@ -51,7 +51,8 @@
       },
       "execution": {
         "state": "open",
-        "pending_order_count": 1
+        "execution_status": "normal",
+        "active_slot_count": 1
       }
     }
   ]
@@ -65,7 +66,9 @@
 - `lifecycle`：网格生命周期状态与最近更新时间。
 - `reference_price`：当前策略参考价；当前 Binance 适配层使用 mark price 作为参考价输入。
 - `exposure`：当前和目标敞口摘要。
-- `execution`：列表页执行摘要，只表达执行状态和待处理委托数量，不暴露原始委托对象。当前运行时只跟踪单个待处理执行，因此 `pending_order_count` 目前只会是 `0` 或 `1`。
+- `execution.state`：执行面是否处于 `open / paused / closed`。
+- `execution.execution_status`：执行是否需要人工关注。当前稳定值为 `normal` 和 `attention_required`。
+- `execution.active_slot_count`：当前执行器中有多少个活跃槽位。它表达的是槽位工作集数量，不等于交易所原始 open orders 数量。
 
 ### 2.2 `GET /grids/:id` -> `GridDetailView`
 
@@ -82,8 +85,21 @@
 
 其中：
 
-- `execution.pending_order` 为空表示当前没有待处理委托。
-- `execution.pending_order` 当前只包含 `symbol`、`order_id`、`side`、`price`、`quantity`、`status`，不暴露内部跟踪字段。
+- `statistics` 提供稳定累计统计，当前包含 `total_pnl`、`realized_pnl`、`max_inventory_gap_abs`、`max_gap_age_ms` 和 `stats_started_at`。
+- `execution` 提供执行摘要，当前包含：
+  - `state`
+  - `execution_status`
+  - `inventory_gap`
+  - `gap_age_ms`
+  - `active_slot_count`
+  - `slots`
+  - `replacement_gate`
+- `execution.slots` 是执行器对外稳定槽位视图。每个槽位只暴露：
+  - `label`
+  - `phase`
+  - `intent`
+  - `order`
+- `execution.slots[].order` 只包含 `side`、`price`、`quantity`；不暴露 `client_order_id`、交易所订单状态或内部恢复字段。
 - `activity` 是已经投影过的活动流，不直接暴露原始 `DomainEvent`。
 - `available_commands` 直接给出命令是否可执行以及禁用原因，客户端不再自行推断。
 
@@ -170,6 +186,6 @@
 - WebSocket 推送到达后，TUI 直接应用 `grid_list_item_changed` / `grid_detail_changed`，不再做旧快照兼容解析。
 - 客户端必须允许这些字段为空：
   - 列表：`items[].reference_price`、`items[].exposure.target`
-  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.target_exposure`、`execution.pending_order`
-  - 详情待处理委托：`execution.pending_order.order_id`
+  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.target_exposure`、`statistics.stats_started_at`、`execution.replacement_gate`
+  - 详情槽位订单：`execution.slots[].order`
   - 命令描述：`available_commands[].disabled_reason`

@@ -399,7 +399,7 @@ mod tests {
         PersistedGridEffect, StateRepositoryPort,
     };
     use grid_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, PendingOrder, SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder,
     };
     use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_engine::transition::GridEffect;
@@ -587,47 +587,68 @@ mod tests {
         );
     }
 
-    fn sync_executor_state_from_pending(snapshot: &mut GridRuntimeSnapshot) {
-        snapshot.executor_state =
-            snapshot
-                .pending_order
-                .as_ref()
-                .map(|pending_order| ExecutorState {
-                    mode: ExecutionMode::Passive,
-                    inventory_gap: snapshot
-                        .current_exposure
-                        .delta(&pending_order.target_exposure),
-                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
-                    last_reprice_at: None,
-                    slots: vec![ExecutionSlot {
-                        slot: OrderSlot::new("inventory_core"),
-                        state: if pending_order.is_submit_recovery_anchor() {
-                            SlotState::SubmitPending
-                        } else {
-                            SlotState::Working
-                        },
-                        working_order: Some(WorkingOrder {
-                            order_id: pending_order.order_id.clone(),
-                            client_order_id: pending_order.client_order_id.clone(),
-                            side: pending_order.side,
-                            price: pending_order.price,
-                            quantity: pending_order.quantity,
-                            target_exposure: pending_order.target_exposure.clone(),
-                            status: pending_order.status,
-                            role: match pending_order.side {
-                                Side::Buy => OrderRole::IncreaseInventory,
-                                Side::Sell => OrderRole::DecreaseInventory,
-                            },
-                        }),
-                    }],
-                    last_execution_reason: None,
-                    recovery_anomaly: None,
-                    stats: ExecutionStats {
-                        started_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                        max_inventory_gap_abs: Exposure(0.0),
-                        max_gap_age_ms: 0,
-                    },
-                });
+    fn working_order(
+        order_id: Option<&str>,
+        client_order_id: &str,
+        side: Side,
+        price: f64,
+        quantity: f64,
+        target_exposure: Exposure,
+        status: OrderStatus,
+    ) -> WorkingOrder {
+        WorkingOrder {
+            order_id: order_id.map(str::to_string),
+            client_order_id: client_order_id.to_string(),
+            side,
+            price,
+            quantity,
+            target_exposure,
+            status,
+            role: match side {
+                Side::Buy => OrderRole::IncreaseInventory,
+                Side::Sell => OrderRole::DecreaseInventory,
+            },
+        }
+    }
+
+    fn working_order_from_submit_request(
+        request: &OrderRequest,
+        target_exposure: Exposure,
+    ) -> WorkingOrder {
+        working_order(
+            None,
+            &request.client_order_id,
+            request.side,
+            request.price,
+            request.quantity,
+            target_exposure,
+            OrderStatus::Submitting,
+        )
+    }
+
+    fn set_executor_state(
+        snapshot: &mut GridRuntimeSnapshot,
+        order: WorkingOrder,
+        state: SlotState,
+    ) {
+        snapshot.executor_state = Some(ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
+            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state,
+                working_order: Some(order),
+            }],
+            last_execution_reason: None,
+            recovery_anomaly: None,
+            stats: ExecutionStats {
+                started_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                max_inventory_gap_abs: Exposure(0.0),
+                max_gap_age_ms: 0,
+            },
+        });
     }
 
     #[tokio::test]
@@ -662,8 +683,10 @@ mod tests {
         assert_eq!(
             repository
                 .snapshot_for("btc-core")
-                .and_then(|snapshot| snapshot.pending_order),
-            Some(PendingOrder::from_submit_request(
+                .and_then(|snapshot| snapshot.executor_state)
+                .and_then(|state| state.slots.into_iter().next())
+                .and_then(|slot| slot.working_order),
+            Some(working_order_from_submit_request(
                 &request,
                 target_exposure.clone()
             ))
@@ -673,8 +696,10 @@ mod tests {
         assert_eq!(
             manager
                 .snapshot("btc-core")
-                .and_then(|snapshot| snapshot.pending_order),
-            Some(PendingOrder::from_submit_request(&request, target_exposure))
+                .and_then(|snapshot| snapshot.executor_state)
+                .and_then(|state| state.slots.into_iter().next())
+                .and_then(|slot| slot.working_order),
+            Some(working_order_from_submit_request(&request, target_exposure))
         );
     }
 
@@ -696,17 +721,12 @@ mod tests {
         };
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(6.0));
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: request.client_order_id.clone(),
-            side: request.side,
-            price: request.price,
-            quantity: request.quantity,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::Submitting,
-        });
         snapshot.observed.reference_price = Some(95.0);
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order_from_submit_request(&request, Exposure(6.0)),
+            SlotState::SubmitPending,
+        );
         {
             let mut manager = manager_handle.write().await;
             manager.restore_grid_state(&snapshot).unwrap();
@@ -780,7 +800,7 @@ mod tests {
             GridEffect::SubmitOrder {
                 request,
                 target_exposure,
-            } => Some(PendingOrder::from_submit_request(
+            } => Some(working_order_from_submit_request(
                 request,
                 target_exposure.clone(),
             )),
@@ -789,7 +809,9 @@ mod tests {
         assert_eq!(
             repository
                 .snapshot_for("btc-core")
-                .and_then(|snapshot| snapshot.pending_order),
+                .and_then(|snapshot| snapshot.executor_state)
+                .and_then(|state| state.slots.into_iter().next())
+                .and_then(|slot| slot.working_order),
             replacement_pending
         );
 

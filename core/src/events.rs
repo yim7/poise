@@ -37,7 +37,7 @@ pub enum DomainEvent {
     RiskDenied {
         reason: String,
     },
-    PendingOrderKept {
+    ReplacementGateApplied {
         reason: ReplacementGateReason,
     },
 }

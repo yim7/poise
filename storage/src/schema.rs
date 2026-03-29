@@ -11,7 +11,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL,
             current_exposure REAL NOT NULL,
             target_exposure REAL,
-            pending_order_json TEXT,
             executor_state_json TEXT,
             replacement_gate_reason_json TEXT,
             realized_pnl_day TEXT,
@@ -69,7 +68,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "status",
             "current_exposure",
             "target_exposure",
-            "pending_order_json",
             "executor_state_json",
             "replacement_gate_reason_json",
             "realized_pnl_day",
@@ -210,9 +208,17 @@ mod tests {
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_grid_effects_batch_sequence'",
                 [],
                 |row| row.get(0),
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_eq!(effects_batch_index_count, 1);
+
+        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!columns.contains(&"pending_order_json".to_string()));
     }
 
     #[test]
@@ -234,7 +240,6 @@ mod tests {
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 target_exposure REAL,
-                pending_order_json TEXT,
                 executor_state_json TEXT,
                 realized_pnl_day TEXT,
                 realized_pnl_today REAL NOT NULL DEFAULT 0,
@@ -306,7 +311,6 @@ mod tests {
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 target_exposure REAL,
-                pending_order_json TEXT,
                 realized_pnl_day TEXT,
                 realized_pnl_today REAL NOT NULL DEFAULT 0,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,

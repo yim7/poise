@@ -105,8 +105,8 @@ mod tests {
         StateRepositoryPort,
     };
     use grid_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
-        SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        WorkingOrder,
     };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
@@ -167,20 +167,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_recovery_anchor_ignores_legacy_pending_order_without_executor_state() {
+    async fn submit_recovery_anchor_returns_none_without_executor_state() {
         let repository = Arc::new(MemoryRepository::default());
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let service = EffectService::new(repository.clone(), notifications);
 
-        repository.seed_snapshot(snapshot_with_pending(PendingOrder {
-            order_id: None,
-            client_order_id: "client-legacy".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: grid_engine::ports::OrderStatus::Submitting,
-        }));
+        repository.seed_snapshot(snapshot_without_executor_state());
         repository.seed_effect(submit_effect("btc-core:batch:legacy", "client-legacy"));
 
         assert_eq!(
@@ -226,7 +218,7 @@ mod tests {
         );
     }
 
-    fn snapshot_with_pending(pending_order: PendingOrder) -> GridRuntimeSnapshot {
+    fn snapshot_without_executor_state() -> GridRuntimeSnapshot {
         GridRuntimeSnapshot {
             grid_id: GridId::new("btc-core"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -242,7 +234,6 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            pending_order: Some(pending_order),
             executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState::default(),
@@ -269,7 +260,6 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            pending_order: None,
             executor_state: Some(ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),

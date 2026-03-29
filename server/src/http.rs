@@ -143,13 +143,12 @@ mod tests {
     use chrono::Utc;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{ExchangeRules, Exposure};
+    use grid_core::types::ExchangeRules;
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::GridManager;
     use grid_engine::ports::{
         ClockPort, GridReadRepositoryPort, OrderStatus, StateRepositoryPort, StoredGridSnapshot,
     };
-    use grid_engine::runtime::PendingOrder;
     use grid_protocol::{
         ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, GridCommandAccepted,
         GridCommandRequest, GridCommandType, GridDetailView, GridListResponse, GridStatus,
@@ -260,33 +259,16 @@ mod tests {
             .get_grid("btc-core")
             .expect("grid should still exist")
             .clone();
-        let pending_order = PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: Exposure(4.0),
-            status: OrderStatus::New,
-        };
-        manager
-            .restore_grid_state(&grid_engine::ports::GridSnapshot {
-                grid_id: grid.id,
-                instrument: grid.instrument,
-                config: grid.config,
-                status: grid.status,
-                current_exposure: grid.current_exposure,
-                target_exposure: grid.target_exposure,
-                pending_order: Some(pending_order),
-                executor_state: grid.executor_state,
-                replacement_gate_reason: grid.replacement_gate_reason,
-                risk: grid.risk_state,
-                observed: grid_engine::snapshot::ObservedState {
-                    reference_price: grid.reference_price,
-                    out_of_band_since: grid.out_of_band_since,
-                },
-            })
-            .unwrap();
+        let mut snapshot = grid.snapshot();
+        let slot_order = snapshot
+            .executor_state
+            .as_mut()
+            .and_then(|state| state.slots.first_mut())
+            .and_then(|slot| slot.working_order.as_mut())
+            .expect("market observe should seed inventory_core working order");
+        slot_order.order_id = Some("order-1".into());
+        slot_order.status = OrderStatus::New;
+        manager.restore_grid_state(&snapshot).unwrap();
         manager
     }
 

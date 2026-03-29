@@ -9,8 +9,7 @@ use grid_core::types::{ExchangeRules, Exposure, Side};
 
 use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot, RecoveryAnomaly};
 use crate::grid::{GridId, Instrument};
-use crate::observation::OrderObservation;
-use crate::ports::{ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus};
+use crate::ports::OrderStatus;
 use crate::snapshot::{GridRuntimeSnapshot, ObservedState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23,95 +22,6 @@ pub enum GridStatus {
     Holding,
     Terminated,
     Paused,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PendingOrder {
-    pub order_id: Option<String>,
-    pub client_order_id: String,
-    pub side: Side,
-    pub price: f64,
-    pub quantity: f64,
-    pub target_exposure: Exposure,
-    pub status: OrderStatus,
-}
-
-impl PendingOrder {
-    pub fn from_submit_request(request: &OrderRequest, target_exposure: Exposure) -> Self {
-        Self {
-            order_id: None,
-            client_order_id: request.client_order_id.clone(),
-            side: request.side,
-            price: request.price,
-            quantity: request.quantity,
-            target_exposure,
-            status: OrderStatus::Submitting,
-        }
-    }
-
-    pub fn from_submit_receipt(
-        request: &OrderRequest,
-        target_exposure: Exposure,
-        receipt: &OrderReceipt,
-    ) -> Self {
-        Self {
-            order_id: Some(receipt.order_id.clone()),
-            client_order_id: receipt.client_order_id.clone(),
-            side: request.side,
-            price: request.price,
-            quantity: request.quantity,
-            target_exposure,
-            status: receipt.status,
-        }
-    }
-
-    pub fn from_exchange_order(order: &ExchangeOrder, target_exposure: Exposure) -> Self {
-        Self {
-            order_id: Some(order.order_id.clone()),
-            client_order_id: order.client_order_id.clone(),
-            side: order.side,
-            price: order.price,
-            quantity: order.qty,
-            target_exposure,
-            status: order.status,
-        }
-    }
-
-    pub fn from_order_observation(
-        observation: &OrderObservation,
-        target_exposure: Exposure,
-    ) -> Self {
-        Self {
-            order_id: Some(observation.order_id.clone()),
-            client_order_id: observation.client_order_id.clone(),
-            side: observation.side,
-            price: observation.price,
-            quantity: observation.quantity,
-            target_exposure,
-            status: observation.status,
-        }
-    }
-
-    pub fn is_submit_recovery_anchor(&self) -> bool {
-        self.order_id.is_none() && self.status == OrderStatus::Submitting
-    }
-
-    pub fn target_reached(current_exposure: Exposure, target_exposure: Exposure) -> bool {
-        let delta = target_exposure.0 - current_exposure.0;
-        if delta.abs() <= f64::EPSILON {
-            return true;
-        }
-
-        if target_exposure.0.abs() <= f64::EPSILON {
-            return current_exposure.0.abs() <= f64::EPSILON;
-        }
-
-        if target_exposure.0 >= 0.0 {
-            current_exposure.0 >= target_exposure.0
-        } else {
-            current_exposure.0 <= target_exposure.0
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +50,7 @@ impl SubmitRecoveryAnchor {
                     });
                 }
 
-                (order.order_id.is_some() && order.status.keeps_pending_order()).then(|| Self {
+                (order.order_id.is_some() && order.status.keeps_working_order()).then(|| Self {
                     client_order_id: order.client_order_id.clone(),
                     kind: SubmitRecoveryKind::ReceiptBacked,
                 })
@@ -215,7 +125,6 @@ pub struct GridRuntime {
     pub current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
-    pub pending_order: Option<PendingOrder>,
     pub executor_state: Option<ExecutorState>,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk_state: RiskState,
@@ -240,7 +149,6 @@ impl GridRuntime {
             status: GridStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
-            pending_order: None,
             executor_state: None,
             replacement_gate_reason: None,
             risk_state: RiskState::default(),
@@ -261,7 +169,6 @@ impl GridRuntime {
             status: self.status.clone(),
             current_exposure: self.current_exposure.clone(),
             target_exposure: self.target_exposure.clone(),
-            pending_order: self.pending_order.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
             risk: self.risk_state.clone(),
@@ -297,7 +204,6 @@ impl GridRuntime {
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
         self.target_exposure = snapshot.target_exposure.clone();
-        self.pending_order = snapshot.pending_order.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.risk_state = snapshot.risk.clone();
@@ -318,12 +224,11 @@ mod tests {
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::grid::{GridId, Instrument, Venue};
-    use crate::observation::OrderObservation;
-    use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
+    use crate::ports::OrderStatus;
 
     use super::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, PendingOrder,
-        RiskState, SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, RiskState,
+        SlotState, SubmitRecoveryAnchor, SubmitRecoveryKind, WorkingOrder,
     };
 
     fn test_runtime() -> GridRuntime {
@@ -396,120 +301,40 @@ mod tests {
     }
 
     #[test]
-    fn pending_order_builders_preserve_existing_submit_and_live_order_shapes() {
-        let request = OrderRequest {
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            side: Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            client_order_id: "client-1".into(),
-        };
-        let target_exposure = Exposure(6.0);
+    fn submit_recovery_anchor_detects_submitting_and_receipt_backed_slots() {
+        let mut state = test_executor_state();
+        state.slots[0].state = SlotState::SubmitPending;
+        state.slots[0].working_order.as_mut().unwrap().order_id = None;
+        state.slots[0].working_order.as_mut().unwrap().status = OrderStatus::Submitting;
 
         assert_eq!(
-            PendingOrder::from_submit_request(&request, target_exposure.clone()),
-            PendingOrder {
-                order_id: None,
+            SubmitRecoveryAnchor::from_executor_state(&state),
+            Some(SubmitRecoveryAnchor {
                 client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure: target_exposure.clone(),
-                status: OrderStatus::Submitting,
-            }
+                kind: SubmitRecoveryKind::Submitting,
+            })
         );
 
-        let receipt = OrderReceipt {
-            order_id: "order-1".into(),
-            client_order_id: "client-1".into(),
-            status: OrderStatus::New,
-        };
+        let mut receipt_backed = test_executor_state();
+        receipt_backed.slots[0].state = SlotState::Working;
+        receipt_backed.slots[0]
+            .working_order
+            .as_mut()
+            .unwrap()
+            .status = OrderStatus::New;
+
         assert_eq!(
-            PendingOrder::from_submit_receipt(&request, target_exposure.clone(), &receipt),
-            PendingOrder {
-                order_id: Some("order-1".into()),
+            SubmitRecoveryAnchor::from_executor_state(&receipt_backed),
+            Some(SubmitRecoveryAnchor {
                 client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure,
-                status: OrderStatus::New,
-            }
+                kind: SubmitRecoveryKind::ReceiptBacked,
+            })
         );
 
-        let observation = OrderObservation {
-            order_id: "live-1".into(),
-            client_order_id: "live-client-1".into(),
-            side: Side::Sell,
-            price: 105.5,
-            quantity: 0.5,
-            realized_pnl: 0.0,
-            status: OrderStatus::PartiallyFilled,
-        };
-        assert_eq!(
-            PendingOrder::from_order_observation(&observation, Exposure(-2.0)),
-            PendingOrder {
-                order_id: Some("live-1".into()),
-                client_order_id: "live-client-1".into(),
-                side: Side::Sell,
-                price: 105.5,
-                quantity: 0.5,
-                target_exposure: Exposure(-2.0),
-                status: OrderStatus::PartiallyFilled,
-            }
-        );
-    }
+        let mut terminal = test_executor_state();
+        terminal.slots[0].working_order.as_mut().unwrap().status = OrderStatus::Filled;
 
-    #[test]
-    fn pending_order_recovery_anchor_only_matches_submitting_without_order_id() {
-        let request = OrderRequest {
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            side: Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            client_order_id: "client-1".into(),
-        };
-        let anchor = PendingOrder::from_submit_request(&request, Exposure(6.0));
-        assert!(anchor.is_submit_recovery_anchor());
-
-        let receipt = OrderReceipt {
-            order_id: "order-1".into(),
-            client_order_id: "client-1".into(),
-            status: OrderStatus::New,
-        };
-        assert!(
-            !PendingOrder::from_submit_receipt(&request, Exposure(6.0), &receipt)
-                .is_submit_recovery_anchor()
-        );
-
-        let observation = OrderObservation {
-            order_id: "live-1".into(),
-            client_order_id: "live-client-1".into(),
-            side: Side::Sell,
-            price: 105.5,
-            quantity: 0.5,
-            realized_pnl: 0.0,
-            status: OrderStatus::PartiallyFilled,
-        };
-        assert!(
-            !PendingOrder::from_order_observation(&observation, Exposure(-2.0))
-                .is_submit_recovery_anchor()
-        );
-    }
-
-    #[test]
-    fn pending_order_target_reached_uses_directional_comparison() {
-        assert!(PendingOrder::target_reached(Exposure(6.0), Exposure(6.0)));
-        assert!(PendingOrder::target_reached(Exposure(6.5), Exposure(6.0)));
-        assert!(!PendingOrder::target_reached(Exposure(5.5), Exposure(6.0)));
-        assert!(PendingOrder::target_reached(Exposure(-3.0), Exposure(-2.0)));
-        assert!(!PendingOrder::target_reached(
-            Exposure(-1.5),
-            Exposure(-2.0)
-        ));
-        assert!(PendingOrder::target_reached(Exposure(0.0), Exposure(0.0)));
-        assert!(!PendingOrder::target_reached(Exposure(2.0), Exposure(0.0)));
-        assert!(!PendingOrder::target_reached(Exposure(-2.0), Exposure(0.0)));
+        assert_eq!(SubmitRecoveryAnchor::from_executor_state(&terminal), None);
     }
 
     #[test]
@@ -518,15 +343,6 @@ mod tests {
         runtime.status = GridStatus::Active;
         runtime.current_exposure = Exposure(4.0);
         runtime.target_exposure = Some(Exposure(6.0));
-        runtime.pending_order = Some(PendingOrder {
-            order_id: Some("legacy-order-1".into()),
-            client_order_id: "legacy-client-1".into(),
-            side: Side::Buy,
-            price: 95.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::New,
-        });
         runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
         runtime.risk_state = RiskState {
             realized_pnl_day: None,
@@ -548,6 +364,7 @@ mod tests {
 
         let serialized = serde_json::to_value(&snapshot).unwrap();
         assert!(serialized.get("executor_state").is_some());
+        assert!(serialized.get("pending_order").is_none());
         assert!(
             serialized
                 .get("executor_state")

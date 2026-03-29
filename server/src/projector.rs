@@ -348,15 +348,15 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
             format!("risk cap {:.4} -> {:.4}", intended.0, capped.0)
         }
         DomainEvent::RiskDenied { reason } => format!("risk denied: {reason}"),
-        DomainEvent::PendingOrderKept { reason } => match reason {
+        DomainEvent::ReplacementGateApplied { reason } => match reason {
             grid_core::events::ReplacementGateReason::RoundedMatch => {
-                "kept pending order: candidate matches pending order after rounding".into()
+                "replacement gate: candidate matches working order after rounding".into()
             }
             grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
                 improvement_bps,
                 threshold_bps,
             } => format!(
-                "kept pending order: improvement {:.1} bps < threshold {:.1} bps",
+                "replacement gate: improvement {:.1} bps < threshold {:.1} bps",
                 improvement_bps, threshold_bps
             ),
         },
@@ -427,8 +427,8 @@ mod tests {
         EffectStatus, OrderRequest, OrderStatus, PersistedGridEffect, StoredDomainEvent,
     };
     use grid_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
-        SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        WorkingOrder,
     };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
@@ -494,7 +494,7 @@ mod tests {
                 .all(|item| !item.message.contains("client-1"))
         );
         assert!(
-            detail_json["execution"]["pending_order"]
+            detail_json["execution"]["slots"][0]["order"]
                 .get("client_order_id")
                 .is_none()
         );
@@ -589,7 +589,7 @@ mod tests {
         source.recent_domain_events = vec![StoredDomainEvent {
             id: 1,
             grid_id: GridId::new("btc-core"),
-            event: DomainEvent::PendingOrderKept {
+            event: DomainEvent::ReplacementGateApplied {
                 reason: grid_core::events::ReplacementGateReason::RoundedMatch,
             },
             created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(activity.len(), 2);
         assert_eq!(
             activity[0].message,
-            "kept pending order: candidate matches pending order after rounding"
+            "replacement gate: candidate matches working order after rounding"
         );
         assert_eq!(activity[0].level, ActivityLevelView::Info);
     }
@@ -674,15 +674,6 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
-            pending_order: Some(PendingOrder {
-                order_id: Some("order-1".into()),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 100.5,
-                quantity: 0.1,
-                target_exposure: Exposure(4.0),
-                status: OrderStatus::New,
-            }),
             executor_state: Some(ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(0.5),

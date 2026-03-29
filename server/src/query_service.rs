@@ -91,12 +91,16 @@ mod tests {
     use grid_core::events::DomainEvent;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
+    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::ports::{
         EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, PersistedGridEffect,
         StoredDomainEvent, StoredGridSnapshot,
     };
-    use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
+    use grid_engine::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        WorkingOrder,
+    };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
 
@@ -265,16 +269,33 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
-            pending_order: Some(PendingOrder {
-                order_id: Some("order-1".into()),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 100.5,
-                quantity: 0.1,
-                target_exposure: Exposure(4.0),
-                status: OrderStatus::New,
+            executor_state: Some(ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(0.5),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
+                last_reprice_at: None,
+                slots: vec![ExecutionSlot {
+                    slot: OrderSlot::new("inventory_core"),
+                    state: SlotState::Working,
+                    working_order: Some(WorkingOrder {
+                        order_id: Some("order-1".into()),
+                        client_order_id: "client-1".into(),
+                        side: Side::Buy,
+                        price: 100.5,
+                        quantity: 0.1,
+                        target_exposure: Exposure(4.0),
+                        status: OrderStatus::New,
+                        role: OrderRole::IncreaseInventory,
+                    }),
+                }],
+                last_execution_reason: None,
+                recovery_anomaly: None,
+                stats: ExecutionStats {
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                    max_inventory_gap_abs: Exposure(0.5),
+                    max_gap_age_ms: 0,
+                },
             }),
-            executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,

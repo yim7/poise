@@ -65,14 +65,14 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
-    pub fn keeps_pending_order(self) -> bool {
+    pub fn keeps_working_order(self) -> bool {
         matches!(
             self,
             Self::Submitting | Self::New | Self::PartiallyFilled | Self::Canceling
         )
     }
 
-    pub fn clears_pending_order(self) -> bool {
+    pub fn clears_working_order(self) -> bool {
         matches!(
             self,
             Self::Filled | Self::Canceled | Self::Rejected | Self::Expired

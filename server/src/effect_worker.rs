@@ -316,8 +316,7 @@ mod tests {
         {
             let manager_handle = state.write_service.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.snapshot("btc-core").unwrap();
-            snapshot.pending_order = None;
+            let snapshot = manager.snapshot("btc-core").unwrap();
             manager.restore_grid_state(&snapshot).unwrap();
             repository.seed_snapshot("btc-core", snapshot).await;
         }
@@ -462,7 +461,6 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            pending_order: None,
             executor_state: Some(ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),

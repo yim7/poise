@@ -17,7 +17,7 @@ use crate::observation::{
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
 use crate::runtime::{
-    ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, PendingOrder, SlotState,
+    ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, SlotState,
     SubmitRecoveryAnchor, WorkingOrder,
 };
 use crate::snapshot::GridRuntimeSnapshot;
@@ -314,7 +314,7 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        if order.status.keeps_pending_order() {
+        if order.status.keeps_working_order() {
             upsert_inventory_core_slot(
                 grid,
                 self.clock.now(),
@@ -344,15 +344,7 @@ impl GridManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         let cleared_slot = clear_executor_slot(grid, client_order_id, None);
-        let cleared_legacy_pending = grid
-            .pending_order
-            .as_ref()
-            .map(|pending| pending.client_order_id == client_order_id)
-            .unwrap_or(false);
-        if cleared_legacy_pending {
-            grid.pending_order = None;
-        }
-        if cleared_slot || cleared_legacy_pending {
+        if cleared_slot {
             grid.replacement_gate_reason = None;
         }
         Ok(())
@@ -423,7 +415,6 @@ impl GridManager {
         }
 
         let mut planned_grid = grid.clone();
-        planned_grid.pending_order = None;
         planned_grid.executor_state = None;
         let result = self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
 
@@ -522,7 +513,7 @@ impl GridManager {
             return Ok(());
         }
 
-        if observation.status.keeps_pending_order() {
+        if observation.status.keeps_working_order() {
             let target_exposure = Self::resolve_pending_target_exposure(grid);
             upsert_inventory_core_slot(
                 grid,
@@ -546,24 +537,13 @@ impl GridManager {
             return Ok(());
         }
 
-        if observation.status.clears_pending_order() {
+        if observation.status.clears_working_order() {
             let cleared_slot = clear_executor_slot(
                 grid,
                 &observation.client_order_id,
                 Some(&observation.order_id),
             );
-            let cleared_legacy_pending = grid
-                .pending_order
-                .as_ref()
-                .map(|pending| {
-                    pending.client_order_id == observation.client_order_id
-                        || pending.order_id.as_deref() == Some(observation.order_id.as_str())
-                })
-                .unwrap_or(false);
-            if cleared_legacy_pending {
-                grid.pending_order = None;
-            }
-            if cleared_slot || cleared_legacy_pending {
+            if cleared_slot {
                 grid.replacement_gate_reason = None;
             }
         }
@@ -616,14 +596,12 @@ impl GridManager {
                 state.slots.clear();
                 state.recovery_anomaly = Some(anomaly);
                 grid.executor_state = Some(state);
-                sync_pending_order_from_executor_state(grid);
                 grid.replacement_gate_reason = None;
                 Ok((vec![], vec![GridEffect::NoOp]))
             }
             executor::RecoveryResolution::Rebuilt { state } => {
                 let mut planned_grid = grid.clone();
                 planned_grid.executor_state = Some(state);
-                sync_pending_order_from_executor_state(&mut planned_grid);
 
                 if matches!(planned_grid.status, GridStatus::Paused) {
                     let grid = self
@@ -631,7 +609,6 @@ impl GridManager {
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
                     grid.executor_state = planned_grid.executor_state;
-                    sync_pending_order_from_executor_state(grid);
                     grid.replacement_gate_reason = None;
                     return Ok((vec![], vec![]));
                 }
@@ -642,7 +619,6 @@ impl GridManager {
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
                     grid.executor_state = planned_grid.executor_state;
-                    sync_pending_order_from_executor_state(grid);
                     grid.replacement_gate_reason = None;
                     return Ok((vec![], vec![]));
                 };
@@ -660,7 +636,6 @@ impl GridManager {
                     grid.reference_price = Some(reference_price);
                     grid.replacement_gate_reason = None;
                     grid.executor_state = planned_grid.executor_state;
-                    sync_pending_order_from_executor_state(grid);
                     return Ok((target.events, vec![]));
                 }
 
@@ -677,7 +652,6 @@ impl GridManager {
                 grid.reference_price = Some(reference_price);
                 grid.replacement_gate_reason = planned.replacement_gate_reason;
                 grid.executor_state = Some(planned.executor_state);
-                sync_pending_order_from_executor_state(grid);
                 Ok((planned.events, planned.effects))
             }
         }
@@ -735,7 +709,7 @@ impl GridManager {
         let replacement_gate_event = (grid.replacement_gate_reason != replacement_gate_reason)
             .then(|| replacement_gate_reason.clone())
             .flatten()
-            .map(|reason| DomainEvent::PendingOrderKept { reason });
+            .map(|reason| DomainEvent::ReplacementGateApplied { reason });
         if let Some(new_status) = new_status {
             grid.status = new_status;
         }
@@ -743,7 +717,6 @@ impl GridManager {
         grid.reference_price = Some(reference_price);
         grid.replacement_gate_reason = replacement_gate_reason;
         grid.executor_state = Some(executor_state);
-        sync_pending_order_from_executor_state(grid);
 
         if let Some(event) = replacement_gate_event {
             events.push(event);
@@ -898,7 +871,7 @@ impl GridManager {
             .map(|current_target| exposures_match(current_target, &target_exposure))
             .unwrap_or(false);
         let target_reached =
-            PendingOrder::target_reached(grid.current_exposure.clone(), target_exposure.clone());
+            target_exposure_reached(grid.current_exposure.clone(), target_exposure.clone());
 
         if receipt_backed {
             if has_live_order {
@@ -973,7 +946,6 @@ fn upsert_inventory_core_slot(
         state,
         working_order: Some(working_order),
     }];
-    sync_pending_order_from_executor_state(grid);
 }
 
 fn clear_executor_slot(
@@ -997,26 +969,8 @@ fn clear_executor_slot(
     });
     if should_clear {
         executor_state.slots.clear();
-        sync_pending_order_from_executor_state(grid);
     }
     should_clear
-}
-
-fn sync_pending_order_from_executor_state(grid: &mut GridRuntime) {
-    grid.pending_order = grid
-        .executor_state
-        .as_ref()
-        .and_then(|state| state.slots.first())
-        .and_then(|slot| slot.working_order.as_ref())
-        .map(|order| PendingOrder {
-            order_id: order.order_id.clone(),
-            client_order_id: order.client_order_id.clone(),
-            side: order.side,
-            price: order.price,
-            quantity: order.quantity,
-            target_exposure: order.target_exposure.clone(),
-            status: order.status,
-        });
 }
 
 fn order_requests_match(
@@ -1035,6 +989,23 @@ fn exposures_match(left: &grid_core::types::Exposure, right: &grid_core::types::
     (left.0 - right.0).abs() <= f64::EPSILON
 }
 
+fn target_exposure_reached(current_exposure: Exposure, target_exposure: Exposure) -> bool {
+    let delta = target_exposure.0 - current_exposure.0;
+    if delta.abs() <= f64::EPSILON {
+        return true;
+    }
+
+    if target_exposure.0.abs() <= f64::EPSILON {
+        return current_exposure.0.abs() <= f64::EPSILON;
+    }
+
+    if target_exposure.0 >= 0.0 {
+        current_exposure.0 >= target_exposure.0
+    } else {
+        current_exposure.0 <= target_exposure.0
+    }
+}
+
 fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
     let tolerance = if step <= f64::EPSILON {
         f64::EPSILON * 16.0
@@ -1050,8 +1021,8 @@ mod tests {
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
     use crate::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
-        SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
     use grid_core::events::ReplacementGateReason;
@@ -1133,7 +1104,70 @@ mod tests {
             .unwrap();
     }
 
-    fn active_runtime_with_pending_order() -> GridRuntime {
+    fn working_order(
+        order_id: Option<&str>,
+        client_order_id: &str,
+        side: grid_core::types::Side,
+        price: f64,
+        quantity: f64,
+        target_exposure: grid_core::types::Exposure,
+        status: OrderStatus,
+    ) -> WorkingOrder {
+        WorkingOrder {
+            order_id: order_id.map(str::to_string),
+            client_order_id: client_order_id.to_string(),
+            side,
+            price,
+            quantity,
+            target_exposure,
+            status,
+            role: match side {
+                grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+            },
+        }
+    }
+
+    fn seed_executor_slot(grid: &mut GridRuntime, order: WorkingOrder, state: SlotState) {
+        upsert_inventory_core_slot(
+            grid,
+            Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
+            order,
+            state,
+        );
+    }
+
+    fn working_order_from_submit_request(
+        request: &OrderRequest,
+        target_exposure: grid_core::types::Exposure,
+    ) -> WorkingOrder {
+        working_order(
+            None,
+            &request.client_order_id,
+            request.side,
+            request.price,
+            request.quantity,
+            target_exposure,
+            OrderStatus::Submitting,
+        )
+    }
+
+    fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
+        grid.executor_state
+            .as_ref()
+            .and_then(|state| state.slots.first())
+            .and_then(|slot| slot.working_order.as_ref())
+    }
+
+    fn inventory_core_order_from_snapshot(snapshot: &GridRuntimeSnapshot) -> Option<&WorkingOrder> {
+        snapshot
+            .executor_state
+            .as_ref()
+            .and_then(|state| state.slots.first())
+            .and_then(|slot| slot.working_order.as_ref())
+    }
+
+    fn active_runtime_with_executor_order() -> GridRuntime {
         let mut grid = GridRuntime::new(
             GridId::new("btc-core"),
             test_instrument("BTCUSDT"),
@@ -1144,15 +1178,19 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(4.0);
         grid.target_exposure = Some(grid_core::types::Exposure(6.0));
-        grid.pending_order = Some(PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::New,
-        });
+        seed_executor_slot(
+            &mut grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         grid.risk_state = RiskState {
             realized_pnl_day: Some(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
@@ -1165,34 +1203,7 @@ mod tests {
         };
         grid.reference_price = Some(95.0);
         grid.out_of_band_since = Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap());
-        let pending = grid.pending_order.clone().unwrap();
-        seed_executor_slot_from_pending(&mut grid, &pending);
         grid
-    }
-
-    fn seed_executor_slot_from_pending(grid: &mut GridRuntime, pending_order: &PendingOrder) {
-        upsert_inventory_core_slot(
-            grid,
-            Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
-            WorkingOrder {
-                order_id: pending_order.order_id.clone(),
-                client_order_id: pending_order.client_order_id.clone(),
-                side: pending_order.side,
-                price: pending_order.price,
-                quantity: pending_order.quantity,
-                target_exposure: pending_order.target_exposure.clone(),
-                status: pending_order.status,
-                role: match pending_order.side {
-                    grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
-                    grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
-                },
-            },
-            if pending_order.is_submit_recovery_anchor() {
-                SlotState::SubmitPending
-            } else {
-                SlotState::Working
-            },
-        );
     }
 
     fn passive_executor_state_with_matching_buy_order() -> ExecutorState {
@@ -1346,7 +1357,7 @@ mod tests {
 
     #[test]
     fn snapshot_roundtrip_preserves_runtime_state() {
-        let runtime = active_runtime_with_pending_order();
+        let runtime = active_runtime_with_executor_order();
         let snapshot = runtime.snapshot();
         let mut restored = GridRuntime::new(
             GridId::new("btc-core"),
@@ -1635,17 +1646,19 @@ mod tests {
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(0.0);
         grid.target_exposure = Some(grid_core::types::Exposure(6.0));
-        let pending_order = PendingOrder {
-            order_id: None,
-            client_order_id: "recover-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::Submitting,
-        };
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                None,
+                "recover-1",
+                grid_core::types::Side::Buy,
+                94.0,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
 
         let transition = manager
             .observe(
@@ -1691,8 +1704,8 @@ mod tests {
             other => panic!("expected one submit effect, got {other:?}"),
         };
         assert_eq!(
-            transition.snapshot.pending_order,
-            Some(PendingOrder::from_submit_request(
+            inventory_core_order_from_snapshot(&transition.snapshot),
+            Some(&working_order_from_submit_request(
                 request,
                 target_exposure.clone(),
             ))
@@ -1712,17 +1725,19 @@ mod tests {
             min_qty: 0.0,
             min_notional: 0.0,
         };
-        let pending_order = PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Sell,
-            price: 99.9,
-            quantity: 7.0,
-            target_exposure: grid_core::types::Exposure(0.5),
-            status: OrderStatus::New,
-        };
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Sell,
+                99.9,
+                7.0,
+                grid_core::types::Exposure(0.5),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         let transition = manager
             .observe(
@@ -1739,7 +1754,7 @@ mod tests {
         );
         assert!(transition.events.iter().any(|event| matches!(
             event,
-            DomainEvent::PendingOrderKept {
+            DomainEvent::ReplacementGateApplied {
                 reason: ReplacementGateReason::RoundedMatch,
             }
         )));
@@ -1758,17 +1773,19 @@ mod tests {
             min_qty: 0.0,
             min_notional: 0.0,
         };
-        let pending_order = PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Sell,
-            price: 99.9,
-            quantity: 7.0,
-            target_exposure: grid_core::types::Exposure(0.5),
-            status: OrderStatus::New,
-        };
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Sell,
+                99.9,
+                7.0,
+                grid_core::types::Exposure(0.5),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         let first = manager
             .observe(
@@ -1789,7 +1806,7 @@ mod tests {
 
         assert!(first.events.iter().any(|event| matches!(
             event,
-            DomainEvent::PendingOrderKept {
+            DomainEvent::ReplacementGateApplied {
                 reason: ReplacementGateReason::RoundedMatch,
             }
         )));
@@ -1797,7 +1814,7 @@ mod tests {
             !second
                 .events
                 .iter()
-                .any(|event| matches!(event, DomainEvent::PendingOrderKept { .. }))
+                .any(|event| matches!(event, DomainEvent::ReplacementGateApplied { .. }))
         );
         assert_eq!(
             second.snapshot.replacement_gate_reason,
@@ -1812,17 +1829,19 @@ mod tests {
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(0.0);
-        let pending_order = PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 100.0,
-            quantity: 0.1,
-            target_exposure: grid_core::types::Exposure(0.4),
-            status: OrderStatus::New,
-        };
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                100.0,
+                0.1,
+                grid_core::types::Exposure(0.4),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         grid.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
 
         let transition = manager
@@ -1843,7 +1862,7 @@ mod tests {
         );
         assert!(transition.events.iter().any(|event| matches!(
             event,
-            DomainEvent::PendingOrderKept {
+            DomainEvent::ReplacementGateApplied {
                 reason:
                     ReplacementGateReason::ImprovementBelowThreshold {
                         improvement_bps,
@@ -1904,17 +1923,19 @@ mod tests {
             min_qty: 0.0,
             min_notional: 0.0,
         };
-        let pending_order = PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Sell,
-            price: 99.9,
-            quantity: 7.0,
-            target_exposure: grid_core::types::Exposure(0.5),
-            status: OrderStatus::New,
-        };
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Sell,
+                99.9,
+                7.0,
+                grid_core::types::Exposure(0.5),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         manager.resume_grid("btc1").unwrap();
 
@@ -1927,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn record_submit_receipt_stores_pending_order() {
+    fn record_submit_receipt_updates_inventory_core_slot() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
@@ -1955,16 +1976,16 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(
-            grid.pending_order,
-            Some(PendingOrder {
-                order_id: Some("order-1".into()),
-                client_order_id: "client-1".into(),
-                side: grid_core::types::Side::Buy,
-                price: 95.0,
-                quantity: 0.4,
-                target_exposure: grid_core::types::Exposure(4.0),
-                status: OrderStatus::New,
-            })
+            inventory_core_order(grid),
+            Some(&working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                95.0,
+                0.4,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ))
         );
     }
 
@@ -1972,26 +1993,26 @@ mod tests {
     fn clear_pending_submit_clears_by_client_order_id() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        manager
-            .grids
-            .get_mut(&GridId::new("btc1"))
-            .unwrap()
-            .pending_order = Some(PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(4.0),
-            status: OrderStatus::New,
-        });
+        seed_executor_slot(
+            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         manager
             .clear_pending_submit(&GridId::new("btc1"), "client-1")
             .unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.pending_order, None);
+        assert!(inventory_core_order(grid).is_none());
     }
 
     #[test]
@@ -2000,7 +2021,6 @@ mod tests {
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.current_exposure = grid_core::types::Exposure(6.0);
         grid.target_exposure = Some(grid_core::types::Exposure(6.0));
-        grid.pending_order = None;
 
         let recovery = manager
             .recover_submit_effect(
@@ -2019,13 +2039,7 @@ mod tests {
 
         assert_eq!(recovery.resolution, SubmitRecoveryResolution::Superseded);
         assert!(recovery.effects.is_empty());
-        assert!(
-            manager
-                .get_grid("btc-core")
-                .unwrap()
-                .pending_order
-                .is_none()
-        );
+        assert!(inventory_core_order(manager.get_grid("btc-core").unwrap()).is_none());
     }
 
     #[test]
@@ -2034,15 +2048,19 @@ mod tests {
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.current_exposure = grid_core::types::Exposure(0.0);
         grid.target_exposure = Some(grid_core::types::Exposure(4.0));
-        grid.pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: "btc-core-reconcile".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.0,
-            quantity: test_config().base_qty_per_unit() * 6.0,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::Submitting,
-        });
+        seed_executor_slot(
+            grid,
+            working_order(
+                None,
+                "btc-core-reconcile",
+                grid_core::types::Side::Buy,
+                94.0,
+                test_config().base_qty_per_unit() * 6.0,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
 
         let recovery = manager
             .recover_submit_effect(
@@ -2080,15 +2098,15 @@ mod tests {
                     request,
                     target_exposure,
                 },
-            ] => Some(PendingOrder::from_submit_request(
+            ] => Some(working_order_from_submit_request(
                 request,
                 target_exposure.clone(),
             )),
             _ => None,
         };
         assert_eq!(
-            manager.get_grid("btc-core").unwrap().pending_order,
-            replacement_pending
+            inventory_core_order(manager.get_grid("btc-core").unwrap()),
+            replacement_pending.as_ref()
         );
     }
 
@@ -2105,15 +2123,19 @@ mod tests {
             min_notional: 0.0,
         };
         grid.target_exposure = Some(grid_core::strategy::target_exposure(94.99, &grid.config));
-        grid.pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: "btc-core-reconcile".into(),
-            side: grid_core::types::Side::Buy,
-            price: 90.0,
-            quantity: 4.0,
-            target_exposure: grid_core::types::Exposure(4.0),
-            status: OrderStatus::Submitting,
-        });
+        seed_executor_slot(
+            grid,
+            working_order(
+                None,
+                "btc-core-reconcile",
+                grid_core::types::Side::Buy,
+                90.0,
+                4.0,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
 
         let recovery = manager
             .recover_submit_effect(
@@ -2133,8 +2155,8 @@ mod tests {
         assert_eq!(recovery.resolution, SubmitRecoveryResolution::Proceed);
         assert!(recovery.effects.is_empty());
         assert!(matches!(
-            manager.get_grid("btc-core").unwrap().pending_order.as_ref(),
-            Some(PendingOrder {
+            inventory_core_order(manager.get_grid("btc-core").unwrap()),
+            Some(WorkingOrder {
                 order_id: None,
                 client_order_id,
                 side: grid_core::types::Side::Buy,
@@ -2142,6 +2164,7 @@ mod tests {
                 quantity,
                 target_exposure,
                 status: OrderStatus::Submitting,
+                role: _,
             }) if client_order_id == "btc-core-reconcile"
                 && (*price - 90.0).abs() < f64::EPSILON
                 && (*quantity - 4.0).abs() < f64::EPSILON
@@ -2205,22 +2228,22 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_clears_stale_pending_order_when_submit_anchor_is_not_preserved() {
+    fn sync_exchange_state_clears_stale_inventory_core_slot_when_submit_anchor_is_not_preserved() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        manager
-            .grids
-            .get_mut(&GridId::new("btc1"))
-            .unwrap()
-            .pending_order = Some(PendingOrder {
-            order_id: Some("stale-1".into()),
-            client_order_id: "stale-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::New,
-        });
+        seed_executor_slot(
+            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            working_order(
+                Some("stale-1"),
+                "stale-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         let transition = manager
             .sync_exchange_state(
@@ -2239,25 +2262,27 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(grid.current_exposure, grid_core::types::Exposure(4.0));
-        assert!(grid.pending_order.is_none());
+        assert!(inventory_core_order(grid).is_none());
     }
 
     #[test]
     fn sync_exchange_state_preserves_submit_anchor_before_replaying_open_orders() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let pending_order = PendingOrder {
-            order_id: None,
-            client_order_id: "restore-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::Submitting,
-        };
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                None,
+                "restore-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
 
         let transition = manager
             .sync_exchange_state(
@@ -2288,16 +2313,16 @@ mod tests {
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(grid.current_exposure, grid_core::types::Exposure(2.0));
         assert_eq!(
-            grid.pending_order,
-            Some(PendingOrder {
-                order_id: Some("live-1".into()),
-                client_order_id: "restore-1".into(),
-                side: grid_core::types::Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure: grid_core::types::Exposure(6.0),
-                status: OrderStatus::New,
-            })
+            inventory_core_order(grid),
+            Some(&working_order(
+                Some("live-1"),
+                "restore-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::New,
+            ))
         );
     }
 
@@ -2335,22 +2360,24 @@ mod tests {
     fn sync_exchange_state_marks_attention_required_when_receipt_backed_order_is_missing() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let pending_order = PendingOrder {
-            order_id: Some("restore-1".into()),
-            client_order_id: "restore-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::New,
-        };
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(2.0);
         grid.target_exposure = Some(grid_core::types::Exposure(6.0));
         grid.reference_price = Some(95.0);
-        grid.pending_order = Some(pending_order.clone());
-        seed_executor_slot_from_pending(grid, &pending_order);
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("restore-1"),
+                "restore-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         let transition = manager
             .sync_exchange_state(
@@ -2372,7 +2399,7 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(grid.target_exposure, Some(grid_core::types::Exposure(6.0)));
-        assert!(grid.pending_order.is_none());
+        assert!(inventory_core_order(grid).is_none());
         assert_eq!(
             grid.executor_state
                 .as_ref()
@@ -2382,22 +2409,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_does_not_preserve_submit_anchor_from_legacy_pending_order_only_state() {
+    fn sync_exchange_state_ignores_submit_anchor_without_matching_executor_slot() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        manager
-            .grids
-            .get_mut(&GridId::new("btc1"))
-            .unwrap()
-            .pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: "legacy-submit".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(6.0),
-            status: OrderStatus::Submitting,
-        });
 
         let transition = manager
             .sync_exchange_state(
@@ -2424,7 +2438,7 @@ mod tests {
                 .map(|state| state.slots.is_empty())
                 .unwrap_or(true)
         );
-        assert!(grid.pending_order.is_none());
+        assert!(inventory_core_order(grid).is_none());
     }
 
     #[test]
@@ -2529,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_order_rebuilds_pending_order_for_open_status() {
+    fn observe_order_rebuilds_inventory_core_slot_for_open_status() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
@@ -2556,16 +2570,16 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(
-            grid.pending_order,
-            Some(PendingOrder {
-                order_id: Some("order-1".into()),
-                client_order_id: "client-1".into(),
-                side: grid_core::types::Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure: grid_core::types::Exposure(6.0),
-                status: OrderStatus::New,
-            })
+            inventory_core_order(grid),
+            Some(&working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::New,
+            ))
         );
     }
 
@@ -2606,7 +2620,7 @@ mod tests {
             .unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert!(grid.pending_order.is_none());
+        assert!(inventory_core_order(grid).is_none());
         assert_eq!(
             grid.executor_state
                 .as_ref()
@@ -2665,7 +2679,7 @@ mod tests {
                 .and_then(|state| state.recovery_anomaly.as_ref()),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
-        assert!(transition.snapshot.pending_order.is_none());
+        assert!(inventory_core_order_from_snapshot(&transition.snapshot).is_none());
     }
 
     #[test]
@@ -2673,15 +2687,19 @@ mod tests {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.target_exposure = Some(grid_core::types::Exposure(4.0));
-        grid.pending_order = Some(PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(4.0),
-            status: OrderStatus::New,
-        });
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         let transition = manager
             .observe(
@@ -2708,8 +2726,8 @@ mod tests {
             other => panic!("expected one submit effect, got {other:?}"),
         };
         assert_eq!(
-            transition.snapshot.pending_order,
-            Some(PendingOrder::from_submit_request(
+            inventory_core_order_from_snapshot(&transition.snapshot),
+            Some(&working_order_from_submit_request(
                 request,
                 target_exposure.clone(),
             ))
@@ -2721,15 +2739,19 @@ mod tests {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.target_exposure = Some(grid_core::types::Exposure(4.0));
-        grid.pending_order = Some(PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(4.0),
-            status: OrderStatus::New,
-        });
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         let transition = manager
             .observe(
@@ -2747,7 +2769,7 @@ mod tests {
             .unwrap();
 
         assert!(transition.effects.is_empty());
-        assert!(transition.snapshot.pending_order.is_none());
+        assert!(inventory_core_order_from_snapshot(&transition.snapshot).is_none());
         assert!((transition.snapshot.risk.realized_pnl_today + 12.5).abs() < f64::EPSILON);
         assert_eq!(
             transition
@@ -2760,23 +2782,23 @@ mod tests {
     }
 
     #[test]
-    fn observe_order_clears_matching_pending_order_on_terminal_status() {
+    fn observe_order_clears_matching_inventory_core_slot_on_terminal_status() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        manager
-            .grids
-            .get_mut(&GridId::new("btc1"))
-            .unwrap()
-            .pending_order = Some(PendingOrder {
-            order_id: Some("order-1".into()),
-            client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
-            price: 94.5,
-            quantity: 0.25,
-            target_exposure: grid_core::types::Exposure(4.0),
-            status: OrderStatus::New,
-        });
+        seed_executor_slot(
+            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
 
         manager
             .observe(
@@ -2794,7 +2816,7 @@ mod tests {
             .unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.pending_order, None);
+        assert!(inventory_core_order(grid).is_none());
     }
 
     #[test]

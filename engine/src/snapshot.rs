@@ -6,7 +6,7 @@ use grid_core::strategy::GridConfig;
 use grid_core::types::Exposure;
 
 use crate::grid::{GridId, Instrument};
-use crate::runtime::{ExecutorState, GridStatus, PendingOrder, RiskState};
+use crate::runtime::{ExecutorState, GridStatus, RiskState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ObservedState {
@@ -22,7 +22,6 @@ pub struct GridRuntimeSnapshot {
     pub status: GridStatus,
     pub current_exposure: Exposure,
     pub target_exposure: Option<Exposure>,
-    pub pending_order: Option<PendingOrder>,
     #[serde(default)]
     pub executor_state: Option<ExecutorState>,
     #[serde(default)]

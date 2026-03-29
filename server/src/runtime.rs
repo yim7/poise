@@ -346,8 +346,8 @@ mod tests {
         StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, PendingOrder,
-        RiskState, SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, RiskState,
+        SlotState, WorkingOrder,
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
@@ -362,19 +362,22 @@ mod tests {
     use super::{RuntimeHandles, ServerRuntime};
 
     #[tokio::test]
-    async fn market_tick_submits_order_and_records_pending_order() {
+    async fn market_tick_submits_order_and_records_inventory_core_slot() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
 
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
-        wait_until_instance(&fixture.state, |instance| instance.pending_order.is_some()).await;
+        wait_until_instance(&fixture.state, |instance| {
+            inventory_core_order(instance).is_some()
+        })
+        .await;
 
         let instance = current_instance(&fixture.state).await;
-        let pending = instance.pending_order.unwrap();
-        assert_eq!(pending.order_id.as_deref(), Some("order-1"));
-        assert_eq!(pending.target_exposure, Exposure(4.0));
+        let order = inventory_core_order(&instance).unwrap();
+        assert_eq!(order.order_id.as_deref(), Some("order-1"));
+        assert_eq!(order.target_exposure, Exposure(4.0));
 
         shutdown(handles).await;
     }
@@ -417,10 +420,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .and_then(|pending| pending.order_id.as_deref()),
+            inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
             Some("order-1")
         );
 
@@ -578,13 +578,13 @@ mod tests {
 
         let instance = current_instance(&state).await;
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
-        assert!(instance.pending_order.is_none());
+        assert!(inventory_core_order(&instance).is_none());
 
         shutdown(handles).await;
     }
 
     #[tokio::test]
-    async fn effect_worker_leaves_submitting_pending_order_when_receipt_persistence_fails() {
+    async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_fails() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(FailOnReceiptPersistence::default());
         let state = test_state(
@@ -614,11 +614,9 @@ mod tests {
         worker.run_once().await.unwrap();
 
         let instance = current_instance(&state).await;
-        let pending = instance
-            .pending_order
-            .expect("submit intent should remain durable");
-        assert_eq!(pending.order_id, None);
-        assert_eq!(pending.status, OrderStatus::Submitting);
+        let order = inventory_core_order(&instance).expect("submit intent should remain durable");
+        assert_eq!(order.order_id, None);
+        assert_eq!(order.status, OrderStatus::Submitting);
 
         let effects = persistence.all_effects().await;
         assert_eq!(effects.len(), 1);
@@ -660,7 +658,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.target_exposure, None);
-        assert_eq!(instance.pending_order, None);
+        assert!(inventory_core_order(&instance).is_none());
         assert!(
             fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
             "paused grid should not execute stale submit effects"
@@ -676,7 +674,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -770,7 +768,7 @@ mod tests {
         let mut snapshot = test_snapshot_with_config(config.clone());
         snapshot.current_exposure = Exposure(2.0);
         snapshot.target_exposure = Some(Exposure(3.0));
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         snapshot.observed.reference_price = Some(95.0);
         let state = test_state_with_config(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -831,16 +829,19 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: Some("order-restored".into()),
-            client_order_id: "BTCUSDT-reconcile".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::New,
-        });
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("order-restored"),
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -892,10 +893,7 @@ mod tests {
         assert_eq!(effects[0].status, EffectStatus::Pending);
         let instance = current_instance(&state).await;
         assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .and_then(|pending| pending.order_id.as_deref()),
+            inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
             Some("order-restored")
         );
     }
@@ -907,17 +905,20 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(6.0));
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: "BTCUSDT-reconcile".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: test_config().base_qty_per_unit() * 6.0,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::Submitting,
-        });
         snapshot.observed.reference_price = Some(95.0);
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                test_config().base_qty_per_unit() * 6.0,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -1020,17 +1021,20 @@ mod tests {
     #[tokio::test]
     async fn effect_worker_keeps_receipt_backed_submit_pending_when_attention_required_is_active() {
         let mut snapshot = test_snapshot();
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: Some("order-restored".into()),
-            client_order_id: "BTCUSDT-reconcile".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::New,
-        });
         snapshot.current_exposure = Exposure(6.0);
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("order-restored"),
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(22.5, 0.0),
@@ -1078,7 +1082,7 @@ mod tests {
             Some(EffectStatus::Pending)
         );
         let instance = current_instance(&fixture.state).await;
-        assert_eq!(instance.pending_order, None);
+        assert!(inventory_core_order(&instance).is_none());
         assert_eq!(instance.current_exposure, Exposure(6.0));
         assert_eq!(
             instance
@@ -1096,7 +1100,7 @@ mod tests {
         let exchange = Arc::new(FakeExchange::new(btc_position(22.5, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         snapshot.current_exposure = Exposure(6.0);
         snapshot.target_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(92.5);
@@ -1162,16 +1166,19 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: Some("snapshot-1".into()),
-            client_order_id: "snapshot-1".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(4.0),
-            status: OrderStatus::New,
-        });
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("snapshot-1"),
+                "snapshot-1",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -1257,10 +1264,7 @@ mod tests {
 
         let instance = current_instance(&state).await;
         assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .map(|pending| pending.status),
+            inventory_core_order(&instance).map(|order| order.status),
             Some(OrderStatus::Submitting)
         );
     }
@@ -1280,18 +1284,20 @@ mod tests {
             )],
         ));
         let persistence = Arc::new(MemoryPersistence::default());
-        let restored_snapshot = GridSnapshot {
-            pending_order: Some(PendingOrder {
-                order_id: Some("order-restored".into()),
-                client_order_id: "BTCUSDT-reconcile".into(),
-                side: Side::Buy,
-                price: 94.0,
-                quantity: 0.25,
-                target_exposure: Exposure(6.0),
-                status: OrderStatus::New,
-            }),
-            ..test_snapshot()
-        };
+        let mut restored_snapshot = test_snapshot();
+        set_executor_state(
+            &mut restored_snapshot,
+            working_order(
+                Some("order-restored"),
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -1513,7 +1519,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         snapshot.observed.reference_price = Some(95.0);
         manager.restore_grid_state(&snapshot).unwrap();
         persistence
@@ -1580,7 +1586,6 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.pending_order = None;
         snapshot.executor_state = None;
         snapshot.observed.reference_price = Some(95.0);
 
@@ -1642,10 +1647,7 @@ mod tests {
 
         wait_until(|| exchange.submitted_orders.lock().unwrap().len() == 1).await;
         wait_until_instance(&state, |instance| {
-            instance
-                .pending_order
-                .as_ref()
-                .and_then(|pending| pending.order_id.as_deref())
+            inventory_core_order(instance).and_then(|order| order.order_id.as_deref())
                 == Some("order-1")
         })
         .await;
@@ -1665,7 +1667,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(0.0));
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         snapshot.observed.reference_price = Some(100.0);
         snapshot.risk.unrealized_pnl = 0.0;
 
@@ -1702,35 +1704,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn order_update_clears_pending_order_on_terminal_status() {
+    async fn order_update_clears_inventory_core_slot_on_terminal_status() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let handles = fixture.runtime.start().await.unwrap();
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until_instance(&fixture.state, |instance| {
-            instance
-                .pending_order
-                .as_ref()
-                .and_then(|pending| pending.order_id.as_deref())
+            inventory_core_order(instance)
+                .and_then(|order| order.order_id.as_deref())
                 .is_some()
         })
         .await;
 
-        let pending = current_instance(&fixture.state)
-            .await
-            .pending_order
-            .unwrap();
+        let order = inventory_core_order(&current_instance(&fixture.state).await)
+            .unwrap()
+            .clone();
 
         fixture
             .user_sender
             .send(order_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
                 btc_exchange_order(
-                    &pending.order_id.clone().unwrap(),
-                    &pending.client_order_id,
+                    &order.order_id.clone().unwrap(),
+                    &order.client_order_id,
                     Side::Buy,
-                    pending.price,
-                    pending.quantity,
+                    order.price,
+                    order.quantity,
                     0.0,
                     OrderStatus::Filled,
                 ),
@@ -1738,7 +1737,10 @@ mod tests {
             .await
             .unwrap();
 
-        wait_until_instance(&fixture.state, |instance| instance.pending_order.is_none()).await;
+        wait_until_instance(&fixture.state, |instance| {
+            inventory_core_order(instance).is_none()
+        })
+        .await;
 
         shutdown(handles).await;
     }
@@ -1751,21 +1753,20 @@ mod tests {
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
 
-        let pending = current_instance(&fixture.state)
-            .await
-            .pending_order
-            .unwrap();
+        let order = inventory_core_order(&current_instance(&fixture.state).await)
+            .unwrap()
+            .clone();
 
         fixture
             .user_sender
             .send(order_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
                 btc_exchange_order(
-                    &pending.order_id.clone().unwrap(),
-                    &pending.client_order_id,
+                    &order.order_id.clone().unwrap(),
+                    &order.client_order_id,
                     Side::Buy,
-                    pending.price,
-                    pending.quantity,
+                    order.price,
+                    order.quantity,
                     0.0,
                     OrderStatus::Canceled,
                 ),
@@ -1775,10 +1776,8 @@ mod tests {
 
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 2).await;
         wait_until_instance(&fixture.state, |instance| {
-            instance
-                .pending_order
-                .as_ref()
-                .and_then(|pending| pending.order_id.as_deref())
+            inventory_core_order(instance)
+                .and_then(|working_order| working_order.order_id.as_deref())
                 == Some("order-2")
         })
         .await;
@@ -1789,22 +1788,13 @@ mod tests {
     #[tokio::test]
     async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event()
      {
-        let snapshot = GridSnapshot {
+        let mut snapshot = GridSnapshot {
             grid_id: GridId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config: test_config(),
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(0.0)),
-            pending_order: Some(PendingOrder {
-                order_id: Some("order-1".into()),
-                client_order_id: "order-1".into(),
-                side: Side::Buy,
-                price: 100.0,
-                quantity: 0.1,
-                target_exposure: Exposure(0.0),
-                status: OrderStatus::New,
-            }),
             executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState::default(),
@@ -1813,6 +1803,19 @@ mod tests {
                 out_of_band_since: None,
             },
         };
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("order-1"),
+                "order-1",
+                Side::Buy,
+                100.0,
+                0.1,
+                Exposure(0.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         let open_orders = vec![ExchangeOrder {
             instrument: btc_instrument(),
             order_id: "order-1".into(),
@@ -1943,7 +1946,7 @@ mod tests {
     async fn startup_sync_marks_attention_required_when_live_order_cannot_be_claimed() {
         let mut snapshot = test_snapshot();
         snapshot.target_exposure = Some(Exposure(0.0));
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(0.0, 0.0),
@@ -1978,7 +1981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_clears_stale_pending_order_when_exchange_has_no_open_orders() {
+    async fn startup_sync_rebuilds_inventory_core_slot_when_exchange_has_no_open_orders() {
         let fixture = runtime_fixture(
             Some(test_snapshot()),
             btc_position(7.5, 3.0),
@@ -1993,17 +1996,11 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .map(|order| order.client_order_id.as_str()),
+            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
             Some("BTCUSDT-reconcile")
         );
         assert_ne!(
-            instance
-                .pending_order
-                .as_ref()
-                .and_then(|order| order.order_id.as_deref()),
+            inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
             Some("snapshot-1")
         );
 
@@ -2011,18 +2008,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_preserves_submitting_pending_order_until_exchange_catches_up() {
+    async fn startup_sync_preserves_submitting_working_order_until_exchange_catches_up() {
         let mut snapshot = test_snapshot();
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: "BTCUSDT-reconcile".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::Submitting,
-        });
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(7.5, 3.0),
@@ -2058,10 +2058,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .map(|pending| pending.status),
+            inventory_core_order(&instance).map(|order| order.status),
             Some(OrderStatus::Submitting)
         );
 
@@ -2077,16 +2074,19 @@ mod tests {
     #[tokio::test]
     async fn startup_sync_marks_attention_required_when_receipt_backed_submit_has_no_live_order() {
         let mut snapshot = test_snapshot();
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: Some("receipt-1".into()),
-            client_order_id: "BTCUSDT-reconcile".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::New,
-        });
-        sync_executor_state_from_pending(&mut snapshot);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("receipt-1"),
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(7.5, 3.0),
@@ -2135,17 +2135,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_clears_orphaned_submitting_anchor_without_pending_effect() {
+    async fn startup_sync_clears_orphaned_submitting_anchor_without_effect() {
         let mut snapshot = test_snapshot();
-        snapshot.pending_order = Some(PendingOrder {
-            order_id: None,
-            client_order_id: "BTCUSDT-reconcile".into(),
-            side: Side::Buy,
-            price: 94.0,
-            quantity: 0.25,
-            target_exposure: Exposure(6.0),
-            status: OrderStatus::Submitting,
-        });
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(7.5, 3.0),
@@ -2158,10 +2162,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            instance
-                .pending_order
-                .as_ref()
-                .map(|order| order.client_order_id.as_str()),
+            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
             Some("BTCUSDT-reconcile")
         );
 
@@ -2223,7 +2224,7 @@ mod tests {
                 .and_then(|state| state.recovery_anomaly.as_ref()),
             Some(&grid_engine::executor::RecoveryAnomaly::DuplicateLiveOrders)
         );
-        assert!(instance.pending_order.is_none());
+        assert!(inventory_core_order(&instance).is_none());
 
         shutdown(handles).await;
     }
@@ -2232,7 +2233,7 @@ mod tests {
     async fn user_data_event_resyncs_recovery_anomaly_automatically() {
         let mut snapshot = test_snapshot();
         snapshot.target_exposure = Some(Exposure(0.0));
-        snapshot.pending_order = None;
+        snapshot.executor_state = None;
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(0.0, 0.0),
@@ -2914,66 +2915,66 @@ mod tests {
         test_snapshot_with_config(test_config())
     }
 
-    fn sync_executor_state_from_pending(snapshot: &mut GridSnapshot) {
-        snapshot.executor_state =
-            snapshot
-                .pending_order
-                .as_ref()
-                .map(|pending_order| ExecutorState {
-                    mode: ExecutionMode::Passive,
-                    inventory_gap: snapshot
-                        .current_exposure
-                        .delta(&pending_order.target_exposure),
-                    gap_started_at: Some(test_server_time()),
-                    last_reprice_at: None,
-                    slots: vec![ExecutionSlot {
-                        slot: OrderSlot::new("inventory_core"),
-                        state: if pending_order.is_submit_recovery_anchor() {
-                            SlotState::SubmitPending
-                        } else {
-                            SlotState::Working
-                        },
-                        working_order: Some(WorkingOrder {
-                            order_id: pending_order.order_id.clone(),
-                            client_order_id: pending_order.client_order_id.clone(),
-                            side: pending_order.side,
-                            price: pending_order.price,
-                            quantity: pending_order.quantity,
-                            target_exposure: pending_order.target_exposure.clone(),
-                            status: pending_order.status,
-                            role: match pending_order.side {
-                                Side::Buy => OrderRole::IncreaseInventory,
-                                Side::Sell => OrderRole::DecreaseInventory,
-                            },
-                        }),
-                    }],
-                    last_execution_reason: None,
-                    recovery_anomaly: None,
-                    stats: ExecutionStats {
-                        started_at: test_server_time(),
-                        max_inventory_gap_abs: Exposure(0.0),
-                        max_gap_age_ms: 0,
-                    },
-                });
+    fn working_order(
+        order_id: Option<&str>,
+        client_order_id: &str,
+        side: Side,
+        price: f64,
+        quantity: f64,
+        target_exposure: Exposure,
+        status: OrderStatus,
+    ) -> WorkingOrder {
+        WorkingOrder {
+            order_id: order_id.map(str::to_string),
+            client_order_id: client_order_id.to_string(),
+            side,
+            price,
+            quantity,
+            target_exposure,
+            status,
+            role: match side {
+                Side::Buy => OrderRole::IncreaseInventory,
+                Side::Sell => OrderRole::DecreaseInventory,
+            },
+        }
+    }
+
+    fn set_executor_state(snapshot: &mut GridSnapshot, order: WorkingOrder, state: SlotState) {
+        snapshot.executor_state = Some(ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
+            gap_started_at: Some(test_server_time()),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state,
+                working_order: Some(order),
+            }],
+            last_execution_reason: None,
+            recovery_anomaly: None,
+            stats: ExecutionStats {
+                started_at: test_server_time(),
+                max_inventory_gap_abs: Exposure(0.0),
+                max_gap_age_ms: 0,
+            },
+        });
+    }
+
+    fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
+        grid.executor_state
+            .as_ref()
+            .and_then(|state| state.slots.first())
+            .and_then(|slot| slot.working_order.as_ref())
     }
 
     fn test_snapshot_with_config(config: GridConfig) -> GridSnapshot {
-        GridSnapshot {
+        let mut snapshot = GridSnapshot {
             grid_id: GridId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config,
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            pending_order: Some(PendingOrder {
-                order_id: Some("snapshot-1".into()),
-                client_order_id: "snapshot-1".into(),
-                side: Side::Buy,
-                price: 94.0,
-                quantity: 0.25,
-                target_exposure: Exposure(6.0),
-                status: OrderStatus::New,
-            }),
             executor_state: None,
             replacement_gate_reason: None,
             risk: RiskState::default(),
@@ -2981,7 +2982,21 @@ mod tests {
                 reference_price: Some(95.0),
                 out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
             },
-        }
+        };
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("snapshot-1"),
+                "snapshot-1",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        snapshot
     }
 
     struct FixedClock(chrono::DateTime<Utc>);
@@ -3332,9 +3347,11 @@ mod tests {
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
             if state
-                .pending_order
+                .executor_state
                 .as_ref()
-                .and_then(|pending| pending.order_id.as_ref())
+                .and_then(|executor_state| executor_state.slots.first())
+                .and_then(|slot| slot.working_order.as_ref())
+                .and_then(|order| order.order_id.as_ref())
                 .is_some()
             {
                 return Err(anyhow!("injected receipt persistence failure"));
