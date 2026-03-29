@@ -7,7 +7,7 @@ use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 use grid_core::types::{ExchangeRules, Exposure, Side};
 
-use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot, RecoveryAnomaly};
 use crate::grid::{GridId, Instrument};
 use crate::observation::OrderObservation;
 use crate::ports::{ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus};
@@ -127,6 +127,26 @@ pub struct SubmitRecoveryAnchor {
 }
 
 impl SubmitRecoveryAnchor {
+    pub fn from_executor_state(executor_state: &ExecutorState) -> Option<Self> {
+        executor_state
+            .slots
+            .iter()
+            .filter_map(|slot| slot.working_order.as_ref())
+            .find_map(|order| {
+                if order.order_id.is_none() && order.status == OrderStatus::Submitting {
+                    return Some(Self {
+                        client_order_id: order.client_order_id.clone(),
+                        kind: SubmitRecoveryKind::Submitting,
+                    });
+                }
+
+                (order.order_id.is_some() && order.status.keeps_pending_order()).then(|| Self {
+                    client_order_id: order.client_order_id.clone(),
+                    kind: SubmitRecoveryKind::ReceiptBacked,
+                })
+            })
+    }
+
     pub fn from_pending_order(pending_order: &PendingOrder) -> Option<Self> {
         if pending_order.is_submit_recovery_anchor() {
             return Some(Self {
@@ -217,6 +237,8 @@ pub struct ExecutorState {
     pub last_reprice_at: Option<DateTime<Utc>>,
     pub slots: Vec<ExecutionSlot>,
     pub last_execution_reason: Option<ExecutionReason>,
+    #[serde(default)]
+    pub recovery_anomaly: Option<RecoveryAnomaly>,
     pub stats: ExecutionStats,
 }
 
@@ -401,6 +423,7 @@ mod tests {
             ),
             slots: vec![slot],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: DateTime::parse_from_rfc3339("2026-03-29T07:55:00Z")
                     .unwrap()

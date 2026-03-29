@@ -7,8 +7,11 @@ use grid_core::types::{ExchangeRules, Exposure, Side};
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::grid::{GridId, Instrument};
+use crate::observation::OrderObservation;
 use crate::ports::{OrderRequest, OrderStatus};
-use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
+use crate::runtime::{
+    ExecutionSlot, ExecutionStats, ExecutorState, SlotState, SubmitRecoveryAnchor, WorkingOrder,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +27,14 @@ pub enum ExecutionReason {
     GapEnteredPassive,
     GapEscalatedToRebalance,
     GapEscalatedToCatchUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAnomaly {
+    UnknownLiveOrder,
+    DuplicateLiveOrders,
+    AmbiguousLiveOrder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +82,23 @@ pub struct ExecutorPlan {
     pub replacement_gate_reason: Option<ReplacementGateReason>,
 }
 
+pub struct RecoveryInput<'a> {
+    pub exchange_rules: &'a ExchangeRules,
+    pub base_qty_per_unit: f64,
+    pub current_exposure: &'a Exposure,
+    pub target_exposure: Option<&'a Exposure>,
+    pub reference_price: Option<f64>,
+    pub previous_state: Option<&'a ExecutorState>,
+    pub live_orders: &'a [OrderObservation],
+    pub submit_recovery_anchor: Option<&'a SubmitRecoveryAnchor>,
+    pub observed_at: DateTime<Utc>,
+}
+
+pub enum RecoveryResolution {
+    Rebuilt { state: ExecutorState },
+    Anomaly(RecoveryAnomaly),
+}
+
 const REBALANCE_GAP_THRESHOLD: f64 = 2.0;
 const CATCH_UP_GAP_THRESHOLD: f64 = 5.0;
 const REBALANCE_AGE_MS: i64 = 60_000;
@@ -109,12 +137,141 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
             },
             slots,
             last_execution_reason,
+            recovery_anomaly: None,
             stats,
         },
         desired_orders,
         effects,
         replacement_gate_reason,
     }
+}
+
+pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
+    if input.live_orders.len() > 1 {
+        return RecoveryResolution::Anomaly(RecoveryAnomaly::DuplicateLiveOrders);
+    }
+
+    let base_state = input.previous_state.cloned().unwrap_or_else(|| ExecutorState {
+        mode: ExecutionMode::Passive,
+        inventory_gap: input
+            .current_exposure
+            .delta(input.target_exposure.unwrap_or(input.current_exposure)),
+        gap_started_at: None,
+        last_reprice_at: None,
+        slots: Vec::new(),
+        last_execution_reason: None,
+        recovery_anomaly: None,
+        stats: ExecutionStats {
+            started_at: input.observed_at,
+            max_inventory_gap_abs: Exposure(0.0),
+            max_gap_age_ms: 0,
+        },
+    });
+
+    if input.live_orders.is_empty() {
+        let preserved_slots = input
+            .submit_recovery_anchor
+            .and_then(|anchor| {
+                (!base_state.slots.is_empty()
+                    && base_state.slots.iter().any(|slot| {
+                        slot.working_order
+                            .as_ref()
+                            .map(|order| order.client_order_id == anchor.client_order_id)
+                            .unwrap_or(false)
+                    }))
+                .then(|| base_state.slots.clone())
+            })
+            .unwrap_or_default();
+
+        let mut state = base_state;
+        state.slots = preserved_slots;
+        state.recovery_anomaly = None;
+        return RecoveryResolution::Rebuilt { state };
+    }
+
+    let candidate_slot = base_state
+        .slots
+        .first()
+        .cloned()
+        .or_else(|| infer_recovery_slot(&input))
+        .or_else(|| {
+            (input.target_exposure.is_none() && input.reference_price.is_none()).then(|| {
+                ExecutionSlot {
+                    slot: OrderSlot::new(INVENTORY_CORE_SLOT),
+                    state: SlotState::Empty,
+                    working_order: None,
+                }
+            })
+        });
+
+    let Some(mut slot) = candidate_slot else {
+        return RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder);
+    };
+
+    let live_order = &input.live_orders[0];
+    let expected_side = slot.working_order.as_ref().map(|order| order.side);
+    if expected_side.is_some() && expected_side != Some(live_order.side) {
+        return RecoveryResolution::Anomaly(RecoveryAnomaly::AmbiguousLiveOrder);
+    }
+
+    let target_exposure = slot
+        .working_order
+        .as_ref()
+        .map(|order| order.target_exposure.clone())
+        .or_else(|| input.target_exposure.cloned())
+        .unwrap_or_else(|| input.current_exposure.clone());
+    let role = slot
+        .working_order
+        .as_ref()
+        .map(|order| order.role.clone())
+        .unwrap_or_else(|| match live_order.side {
+            Side::Buy => OrderRole::IncreaseInventory,
+            Side::Sell => OrderRole::DecreaseInventory,
+        });
+    slot.state = SlotState::Working;
+    slot.working_order = Some(WorkingOrder {
+        order_id: Some(live_order.order_id.clone()),
+        client_order_id: live_order.client_order_id.clone(),
+        side: live_order.side,
+        price: live_order.price,
+        quantity: live_order.quantity,
+        target_exposure,
+        status: live_order.status,
+        role,
+        in_flight_effect_id: None,
+    });
+
+    let mut state = base_state;
+    state.slots = vec![slot];
+    state.recovery_anomaly = None;
+    RecoveryResolution::Rebuilt { state }
+}
+
+fn infer_recovery_slot(input: &RecoveryInput<'_>) -> Option<ExecutionSlot> {
+    let target_exposure = input.target_exposure?;
+    let reference_price = input.reference_price?;
+    desired_inventory_order(
+        input.exchange_rules,
+        input.base_qty_per_unit,
+        input.current_exposure,
+        target_exposure,
+        reference_price,
+    )
+    .map(|desired_order| ExecutionSlot {
+        slot: desired_order.slot.clone(),
+        state: SlotState::Empty,
+        working_order: Some(WorkingOrder {
+            order_id: None,
+            client_order_id: String::new(),
+            side: desired_order.side,
+            price: desired_order.price,
+            quantity: desired_order.quantity,
+            target_exposure: desired_order.target_exposure.clone(),
+            status: OrderStatus::Submitting,
+            role: desired_order.role.clone(),
+            in_flight_effect_id: None,
+        }),
+    })
 }
 
 fn resolve_gap_started_at(
@@ -186,31 +343,47 @@ fn update_stats(
     }
 }
 
-fn plan_desired_orders(input: &ExecutorInput<'_>, inventory_gap: &Exposure) -> Vec<DesiredOrder> {
-    let Some(side) = Side::from_exposure(inventory_gap) else {
-        return Vec::new();
-    };
+fn plan_desired_orders(input: &ExecutorInput<'_>, _inventory_gap: &Exposure) -> Vec<DesiredOrder> {
+    desired_inventory_order(
+        input.exchange_rules,
+        input.base_qty_per_unit,
+        &input.current_exposure,
+        &input.target_exposure,
+        input.reference_price,
+    )
+    .into_iter()
+    .collect()
+}
 
-    let price = round_to_step(input.reference_price, input.exchange_rules.price_tick);
+fn desired_inventory_order(
+    exchange_rules: &ExchangeRules,
+    base_qty_per_unit: f64,
+    current_exposure: &Exposure,
+    target_exposure: &Exposure,
+    reference_price: f64,
+) -> Option<DesiredOrder> {
+    let inventory_gap = current_exposure.delta(target_exposure);
+    let side = Side::from_exposure(&inventory_gap)?;
+    let price = round_to_step(reference_price, exchange_rules.price_tick);
     let quantity = round_to_step(
-        inventory_gap.0.abs() * input.base_qty_per_unit,
-        input.exchange_rules.quantity_step,
+        inventory_gap.0.abs() * base_qty_per_unit,
+        exchange_rules.quantity_step,
     );
-    if !is_meetable_minimum(price, quantity, input.exchange_rules) {
-        return Vec::new();
+    if !is_meetable_minimum(price, quantity, exchange_rules) {
+        return None;
     }
 
-    vec![DesiredOrder {
+    Some(DesiredOrder {
         slot: OrderSlot::new(INVENTORY_CORE_SLOT),
         side,
         price,
         quantity,
-        target_exposure: input.target_exposure.clone(),
+        target_exposure: target_exposure.clone(),
         role: match side {
             Side::Buy => OrderRole::IncreaseInventory,
             Side::Sell => OrderRole::DecreaseInventory,
         },
-    }]
+    })
 }
 
 fn diff_desired_orders(
@@ -445,6 +618,7 @@ mod tests {
                 }),
             }],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
                 max_inventory_gap_abs: Exposure(4.0),

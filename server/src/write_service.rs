@@ -397,7 +397,8 @@ mod tests {
         ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, OrderRequest, OrderStatus,
         PersistedGridEffect, StateRepositoryPort,
     };
-    use grid_engine::runtime::PendingOrder;
+    use grid_engine::executor::{OrderRole, OrderSlot};
+    use grid_engine::runtime::{PendingOrder, SlotState};
     use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_engine::transition::GridEffect;
 
@@ -535,11 +536,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_exchange_state_persists_single_startup_snapshot_write() {
+    async fn recovers_slot_workset_from_live_exchange_state() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
 
-        service
+        let transition = service
             .sync_exchange_state(
                 "btc-core",
                 PositionObservation {
@@ -559,13 +560,29 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(transition.effects, vec![]);
 
+        let snapshot = repository.snapshot_for("btc-core").unwrap();
+        let executor_state = snapshot
+            .executor_state
+            .expect("startup sync should rebuild slot workset");
         assert_eq!(
-            repository
-                .snapshot_for("btc-core")
-                .and_then(|snapshot| snapshot.pending_order)
-                .and_then(|pending| pending.order_id),
-            Some("live-1".into())
+            executor_state.slots,
+            vec![grid_engine::runtime::ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(grid_engine::runtime::WorkingOrder {
+                    order_id: Some("live-1".into()),
+                    client_order_id: "restore-1".into(),
+                    side: Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    target_exposure: Exposure(2.0),
+                    status: OrderStatus::New,
+                    role: OrderRole::IncreaseInventory,
+                    in_flight_effect_id: None,
+                }),
+            }]
         );
     }
 

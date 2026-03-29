@@ -916,6 +916,7 @@ mod tests {
                     }),
                 }],
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
                 stats: ExecutionStats {
                     started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
                         .unwrap()

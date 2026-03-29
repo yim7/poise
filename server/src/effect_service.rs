@@ -56,9 +56,15 @@ impl EffectService {
             return Ok(None);
         };
         let Some(pending_order) = snapshot
-            .pending_order
+            .executor_state
             .as_ref()
-            .and_then(SubmitRecoveryAnchor::from_pending_order)
+            .and_then(SubmitRecoveryAnchor::from_executor_state)
+            .or_else(|| {
+                snapshot
+                    .pending_order
+                    .as_ref()
+                    .and_then(SubmitRecoveryAnchor::from_pending_order)
+            })
         else {
             return Ok(None);
         };

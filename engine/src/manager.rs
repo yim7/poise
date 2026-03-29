@@ -127,8 +127,9 @@ impl GridManager {
         open_orders: Vec<OrderObservation>,
         submit_recovery_anchor: Option<SubmitRecoveryAnchor>,
     ) -> Result<GridTransition> {
-        self.apply_startup_exchange_state(id, position, open_orders, submit_recovery_anchor)?;
-        self.transition_for(id, vec![], vec![])
+        let (events, effects) =
+            self.apply_startup_exchange_state(id, position, open_orders, submit_recovery_anchor)?;
+        self.transition_for(id, events, effects)
     }
 
     pub fn command(&mut self, id: &GridId, command: GridCommand) -> Result<GridTransition> {
@@ -247,7 +248,25 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        grid.pending_order = Some(PendingOrder::from_submit_request(request, target_exposure));
+        upsert_inventory_core_slot(
+            grid,
+            self.clock.now(),
+            WorkingOrder {
+                order_id: None,
+                client_order_id: request.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure,
+                status: crate::ports::OrderStatus::Submitting,
+                role: match request.side {
+                    grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                    grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+                },
+                in_flight_effect_id: None,
+            },
+            SlotState::SubmitPending,
+        );
         grid.replacement_gate_reason = None;
         Ok(())
     }
@@ -263,11 +282,25 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        grid.pending_order = Some(PendingOrder::from_submit_receipt(
-            request,
-            target_exposure,
-            receipt,
-        ));
+        upsert_inventory_core_slot(
+            grid,
+            self.clock.now(),
+            WorkingOrder {
+                order_id: Some(receipt.order_id.clone()),
+                client_order_id: receipt.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure,
+                status: receipt.status,
+                role: match request.side {
+                    grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                    grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+                },
+                in_flight_effect_id: None,
+            },
+            SlotState::Working,
+        );
         grid.replacement_gate_reason = None;
         Ok(())
     }
@@ -283,7 +316,25 @@ impl GridManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         if order.status.keeps_pending_order() {
-            grid.pending_order = Some(PendingOrder::from_exchange_order(order, target_exposure));
+            upsert_inventory_core_slot(
+                grid,
+                self.clock.now(),
+                WorkingOrder {
+                    order_id: Some(order.order_id.clone()),
+                    client_order_id: order.client_order_id.clone(),
+                    side: order.side,
+                    price: order.price,
+                    quantity: order.qty,
+                    target_exposure,
+                    status: order.status,
+                    role: match order.side {
+                        grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                        grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+                    },
+                    in_flight_effect_id: None,
+                },
+                SlotState::Working,
+            );
             grid.replacement_gate_reason = None;
         }
         Ok(())
@@ -294,13 +345,16 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        if grid
+        let cleared_slot = clear_executor_slot(grid, client_order_id, None);
+        let cleared_pending = grid
             .pending_order
             .as_ref()
             .map(|pending| pending.client_order_id == client_order_id)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if cleared_pending {
             grid.pending_order = None;
+        }
+        if cleared_slot || cleared_pending {
             grid.replacement_gate_reason = None;
         }
         Ok(())
@@ -471,26 +525,31 @@ impl GridManager {
 
         if observation.status.keeps_pending_order() {
             let target_exposure = Self::resolve_pending_target_exposure(grid);
-            grid.pending_order = Some(PendingOrder::from_order_observation(
-                &observation,
-                target_exposure,
-            ));
+            upsert_inventory_core_slot(
+                grid,
+                self.clock.now(),
+                WorkingOrder {
+                    order_id: Some(observation.order_id.clone()),
+                    client_order_id: observation.client_order_id.clone(),
+                    side: observation.side,
+                    price: observation.price,
+                    quantity: observation.quantity,
+                    target_exposure,
+                    status: observation.status,
+                    role: match observation.side {
+                        grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                        grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+                    },
+                    in_flight_effect_id: None,
+                },
+                SlotState::Working,
+            );
             grid.replacement_gate_reason = None;
             return Ok(());
         }
 
         if observation.status.clears_pending_order() {
-            let should_clear = grid
-                .pending_order
-                .as_ref()
-                .map(|pending| {
-                    pending.order_id.as_deref() == Some(observation.order_id.as_str())
-                        || pending.client_order_id == observation.client_order_id
-                })
-                .unwrap_or(false);
-
-            if should_clear {
-                grid.pending_order = None;
+            if clear_executor_slot(grid, &observation.client_order_id, Some(&observation.order_id)) {
                 grid.replacement_gate_reason = None;
             }
         }
@@ -502,71 +561,100 @@ impl GridManager {
         &mut self,
         id: &GridId,
         position: PositionObservation,
-        mut open_orders: Vec<OrderObservation>,
+        open_orders: Vec<OrderObservation>,
         submit_recovery_anchor: Option<SubmitRecoveryAnchor>,
-    ) -> Result<()> {
-        open_orders.sort_by(|left, right| {
-            left.client_order_id
-                .cmp(&right.client_order_id)
-                .then_with(|| left.order_id.cmp(&right.order_id))
-        });
-        if open_orders.len() > 1 {
-            let open_orders = open_orders
-                .iter()
-                .map(|order| format!("{}/{}", order.client_order_id, order.order_id))
-                .collect::<Vec<_>>()
-                .join(", ");
-            bail!(
-                "grid `{}` received multiple live open orders during startup sync: {}",
-                id.as_str(),
-                open_orders
-            );
-        }
-
+    ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
         self.observe_position(id, position)?;
-        let preserve_submit_anchor = self
-            .grids
-            .get(id)
-            .and_then(|grid| {
-                let pending = grid.pending_order.as_ref()?;
-                submit_recovery_anchor
-                    .as_ref()
-                    .filter(|anchor| anchor.matches(pending))
-            })
-            .is_some();
-        if !preserve_submit_anchor {
-            self.clear_pending_order(id)?;
-        }
-        if let Some(open_order) = open_orders.into_iter().next() {
-            self.replay_live_open_order(id, open_order)?;
-        }
-        Ok(())
-    }
-
-    fn replay_live_open_order(&mut self, id: &GridId, observation: OrderObservation) -> Result<()> {
+        let observed_at = self.clock.now();
         let grid = self
             .grids
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?
+            .clone();
+        let previous_state = grid
+            .executor_state
+            .as_ref()
+            .cloned()
+            .or_else(|| legacy_executor_state_from_pending_order(&grid, observed_at));
+        let recovery = executor::recover_working_orders(executor::RecoveryInput {
+            exchange_rules: &grid.exchange_rules,
+            base_qty_per_unit: grid.config.base_qty_per_unit(),
+            current_exposure: &grid.current_exposure,
+            target_exposure: grid.target_exposure.as_ref(),
+            reference_price: grid.reference_price,
+            previous_state: previous_state.as_ref(),
+            live_orders: &open_orders,
+            submit_recovery_anchor: submit_recovery_anchor.as_ref(),
+            observed_at,
+        });
 
-        if !observation.status.keeps_pending_order() {
-            return Ok(());
+        match recovery {
+            executor::RecoveryResolution::Anomaly(anomaly) => {
+                let grid = self
+                    .grids
+                    .get_mut(id)
+                    .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                let mut state = previous_state.unwrap_or_else(|| {
+                    empty_executor_state(
+                        observed_at,
+                        grid.current_exposure.clone(),
+                        grid.target_exposure
+                            .clone()
+                            .unwrap_or_else(|| grid.current_exposure.clone()),
+                    )
+                });
+                state.slots.clear();
+                state.recovery_anomaly = Some(anomaly);
+                grid.executor_state = Some(state);
+                sync_pending_order_from_executor_state(grid);
+                grid.replacement_gate_reason = None;
+                Ok((vec![], vec![GridEffect::NoOp]))
+            }
+            executor::RecoveryResolution::Rebuilt { state } => {
+                let mut planned_grid = grid.clone();
+                planned_grid.executor_state = Some(state);
+                sync_pending_order_from_executor_state(&mut planned_grid);
+
+                let Some(reference_price) = planned_grid.reference_price else {
+                    let grid = self
+                        .grids
+                        .get_mut(id)
+                        .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                    grid.executor_state = planned_grid.executor_state;
+                    sync_pending_order_from_executor_state(grid);
+                    grid.replacement_gate_reason = None;
+                    return Ok((vec![], vec![]));
+                };
+
+                let planned = self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
+                let grid = self
+                    .grids
+                    .get_mut(id)
+                    .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                if let Some(new_status) = planned.new_status {
+                    grid.status = new_status;
+                }
+                grid.target_exposure = Some(planned.target_exposure);
+                grid.reference_price = Some(reference_price);
+                grid.replacement_gate_reason = planned.replacement_gate_reason;
+                grid.executor_state = Some(planned.executor_state);
+                sync_pending_order_from_executor_state(grid);
+                Ok((planned.events, planned.effects))
+            }
         }
-
-        let target_exposure = Self::resolve_pending_target_exposure(grid);
-        grid.pending_order = Some(PendingOrder::from_order_observation(
-            &observation,
-            target_exposure,
-        ));
-        grid.replacement_gate_reason = None;
-
-        Ok(())
     }
 
     fn resolve_pending_target_exposure(grid: &GridRuntime) -> grid_core::types::Exposure {
-        grid.pending_order
+        grid.executor_state
             .as_ref()
-            .map(|pending| pending.target_exposure.clone())
+            .and_then(|state| state.slots.first())
+            .and_then(|slot| slot.working_order.as_ref())
+            .map(|order| order.target_exposure.clone())
+            .or_else(|| {
+                grid.pending_order
+            .as_ref()
+                    .map(|pending| pending.target_exposure.clone())
+            })
             .or_else(|| grid.target_exposure.clone())
             .unwrap_or_else(|| grid.current_exposure.clone())
     }
@@ -585,9 +673,10 @@ impl GridManager {
         }
 
         let suppress_effects_during_submit_recovery = self.grids[&id]
-            .pending_order
+            .executor_state
             .as_ref()
-            .map(PendingOrder::is_submit_recovery_anchor)
+            .and_then(SubmitRecoveryAnchor::from_executor_state)
+            .map(|anchor| anchor.kind == crate::runtime::SubmitRecoveryKind::Submitting)
             .unwrap_or(false);
 
         let grid = self
@@ -621,23 +710,13 @@ impl GridManager {
         grid.reference_price = Some(reference_price);
         grid.replacement_gate_reason = replacement_gate_reason;
         grid.executor_state = Some(executor_state);
-        sync_pending_order_from_effects(grid, &effects);
+        sync_pending_order_from_executor_state(grid);
 
         if let Some(event) = replacement_gate_event {
             events.push(event);
         }
 
         Ok((events, effects))
-    }
-
-    fn clear_pending_order(&mut self, id: &GridId) -> Result<()> {
-        let grid = self
-            .grids
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        grid.pending_order = None;
-        grid.replacement_gate_reason = None;
-        Ok(())
     }
 
     fn supersede_submit_effect(
@@ -652,14 +731,7 @@ impl GridManager {
             target_exposure,
         }] = effects.as_slice()
         {
-            let grid = self
-                .grids
-                .get_mut(id)
-                .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-            grid.pending_order = Some(PendingOrder::from_submit_request(
-                request,
-                target_exposure.clone(),
-            ));
+            self.record_submit_request(id, request, target_exposure.clone())?;
         }
         Ok(effects)
     }
@@ -690,6 +762,20 @@ impl GridManager {
         reference_price: f64,
     ) -> Result<PlannedInventoryExecution> {
         let target = reconciler::reconcile_target(grid, reference_price);
+        if let Some(executor_state) = grid
+            .executor_state
+            .as_ref()
+            .filter(|state| state.recovery_anomaly.is_some())
+        {
+            return Ok(PlannedInventoryExecution {
+                events: target.events,
+                effects: vec![GridEffect::NoOp],
+                target_exposure: target.target_exposure,
+                new_status: target.new_status,
+                replacement_gate_reason: None,
+                executor_state: executor_state.clone(),
+            });
+        }
         let observed_at = self.clock.now();
         let legacy_state = if grid.executor_state.is_none() {
             legacy_executor_state_from_pending_order(grid, observed_at)
@@ -714,6 +800,7 @@ impl GridManager {
                         last_reprice_at: None,
                         slots: vec![],
                         last_execution_reason: None,
+                        recovery_anomaly: None,
                         stats: ExecutionStats {
                             started_at: observed_at,
                             max_inventory_gap_abs: Exposure(0.0),
@@ -756,15 +843,24 @@ impl GridManager {
             .grids
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let restored_pending = grid
-            .pending_order
+        let receipt_backed = grid
+            .executor_state
             .as_ref()
-            .filter(|pending| pending.client_order_id == request.client_order_id)
-            .cloned();
-        let receipt_backed = restored_pending
-            .as_ref()
-            .and_then(|pending| pending.order_id.as_ref())
-            .is_some();
+            .and_then(|state| {
+                state
+                    .slots
+                    .iter()
+                    .filter_map(|slot| slot.working_order.as_ref())
+                    .find(|order| order.client_order_id == request.client_order_id)
+            })
+            .and_then(|order| order.order_id.as_ref())
+            .is_some()
+            || grid
+                .pending_order
+                .as_ref()
+                .filter(|pending| pending.client_order_id == request.client_order_id)
+                .and_then(|pending| pending.order_id.as_ref())
+                .is_some();
         let still_targeting_effect = grid
             .target_exposure
             .as_ref()
@@ -839,6 +935,7 @@ fn legacy_executor_state_from_pending_order(
             }),
         }],
         last_execution_reason: None,
+        recovery_anomaly: None,
         stats: grid
             .executor_state
             .as_ref()
@@ -851,34 +948,81 @@ fn legacy_executor_state_from_pending_order(
     })
 }
 
-fn sync_pending_order_from_effects(grid: &mut GridRuntime, effects: &[GridEffect]) {
-    match effects {
-        [GridEffect::SubmitOrder {
-            request,
-            target_exposure,
-        }] => {
-            grid.pending_order = Some(PendingOrder::from_submit_request(
-                request,
-                target_exposure.clone(),
-            ));
-        }
-        [
-            GridEffect::CancelOrder { .. },
-            GridEffect::SubmitOrder {
-                request,
-                target_exposure,
-            },
-        ] => {
-            grid.pending_order = Some(PendingOrder::from_submit_request(
-                request,
-                target_exposure.clone(),
-            ));
-        }
-        [GridEffect::CancelOrder { .. }] => {
-            grid.pending_order = None;
-        }
-        _ => {}
+fn empty_executor_state(
+    observed_at: chrono::DateTime<chrono::Utc>,
+    current_exposure: Exposure,
+    target_exposure: Exposure,
+) -> ExecutorState {
+    ExecutorState {
+        mode: ExecutionMode::Passive,
+        inventory_gap: current_exposure.delta(&target_exposure),
+        gap_started_at: None,
+        last_reprice_at: None,
+        slots: vec![],
+        last_execution_reason: None,
+        recovery_anomaly: None,
+        stats: ExecutionStats {
+            started_at: observed_at,
+            max_inventory_gap_abs: Exposure(0.0),
+            max_gap_age_ms: 0,
+        },
     }
+}
+
+fn upsert_inventory_core_slot(
+    grid: &mut GridRuntime,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    working_order: WorkingOrder,
+    state: SlotState,
+) {
+    let target_exposure = working_order.target_exposure.clone();
+    let executor_state = grid
+        .executor_state
+        .get_or_insert_with(|| empty_executor_state(observed_at, grid.current_exposure.clone(), target_exposure.clone()));
+    executor_state.recovery_anomaly = None;
+    executor_state.slots = vec![ExecutionSlot {
+        slot: OrderSlot::new("inventory_core"),
+        state,
+        working_order: Some(working_order),
+    }];
+    sync_pending_order_from_executor_state(grid);
+}
+
+fn clear_executor_slot(grid: &mut GridRuntime, client_order_id: &str, order_id: Option<&str>) -> bool {
+    let Some(executor_state) = grid.executor_state.as_mut() else {
+        return false;
+    };
+    let should_clear = executor_state.slots.iter().any(|slot| {
+        slot.working_order.as_ref().map(|order| {
+            order.client_order_id == client_order_id
+                || order_id
+                    .map(|order_id| order.order_id.as_deref() == Some(order_id))
+                    .unwrap_or(false)
+        }).unwrap_or(false)
+    });
+    if should_clear {
+        executor_state.slots.clear();
+        executor_state.recovery_anomaly = None;
+        sync_pending_order_from_executor_state(grid);
+    }
+    should_clear
+}
+
+fn sync_pending_order_from_executor_state(grid: &mut GridRuntime) {
+    grid.pending_order = grid
+        .executor_state
+        .as_ref()
+        .and_then(|state| state.slots.first())
+        .and_then(|slot| slot.working_order.as_ref())
+        .map(|order| PendingOrder {
+            order_id: order.order_id.clone(),
+            client_order_id: order.client_order_id.clone(),
+            side: order.side,
+            price: order.price,
+            quantity: order.quantity,
+            target_exposure: order.target_exposure.clone(),
+            status: order.status,
+        });
 }
 
 fn order_requests_match(
@@ -1052,6 +1196,7 @@ mod tests {
                 }),
             }],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
                 max_inventory_gap_abs: grid_core::types::Exposure(4.0),
