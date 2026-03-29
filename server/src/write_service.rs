@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -13,17 +14,37 @@ use grid_engine::ports::{
     EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
 };
 use grid_engine::transition::{GridEffect, GridTransition};
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 use crate::notifications::GridInternalNotification;
 
 pub type SharedManager = Arc<RwLock<GridManager>>;
 
+#[derive(Default)]
+struct GridMutationGuards {
+    locks: Mutex<HashMap<GridId, Arc<Mutex<()>>>>,
+}
+
+impl GridMutationGuards {
+    async fn lock(&self, id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(GridId::new(id))
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+
+        lock.lock_owned().await
+    }
+}
+
 #[derive(Clone)]
 pub struct GridWriteService {
     manager: SharedManager,
     repository: Arc<dyn StateRepositoryPort>,
-    mutation_lock: Arc<Mutex<()>>,
+    mutation_guards: Arc<GridMutationGuards>,
     notifications: broadcast::Sender<GridInternalNotification>,
 }
 
@@ -99,7 +120,7 @@ impl GridWriteService {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             repository,
-            mutation_lock: Arc::new(Mutex::new(())),
+            mutation_guards: Arc::new(GridMutationGuards::default()),
             notifications,
         }
     }
@@ -196,7 +217,7 @@ impl GridWriteService {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
     ) -> Result<GridTransition> {
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_grid_mutation(id).await;
         let pending_submit_hints = self
             .repository
             .list_pending_effects()
@@ -303,7 +324,7 @@ impl GridWriteService {
         target_exposure: grid_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitRecoveryResolution> {
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_grid_mutation(id).await;
         let (previous_snapshot, plan, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
@@ -357,7 +378,7 @@ impl GridWriteService {
         F: FnOnce(&mut GridManager) -> Result<R>,
         R: TransitionResult,
     {
-        let _mutation_guard = self.mutation_lock.lock().await;
+        let _mutation_guard = self.lock_grid_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
@@ -372,8 +393,11 @@ impl GridWriteService {
 
         self.commit_grid_mutation(id, &previous_snapshot, &next_snapshot, &result, None, false)
             .await?;
-
         Ok(result)
+    }
+
+    async fn lock_grid_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
+        self.mutation_guards.lock(id).await
     }
 
     async fn commit_grid_mutation<R>(
@@ -436,7 +460,9 @@ impl GridWriteService {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
@@ -460,6 +486,8 @@ mod tests {
     };
     use grid_engine::snapshot::GridRuntimeSnapshot;
     use grid_engine::transition::GridEffect;
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     use crate::notifications::GridInternalNotification;
 
@@ -628,6 +656,200 @@ mod tests {
                 grid_id: GridId::new("btc-core"),
                 recovery_anomaly_active: true,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn mutations_for_same_grid_remain_serialized() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.block_next_save("btc-core");
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        let first_service = service.clone();
+        let first_mutation =
+            tokio::spawn(async move { first_service.observe_market("btc-core", 95.0).await });
+        repository.wait_for_save_started("btc-core", 1).await;
+
+        let second_service = service.clone();
+        let second_mutation =
+            tokio::spawn(
+                async move { second_service.command("btc-core", GridCommand::Pause).await },
+            );
+
+        assert!(
+            timeout(
+                Duration::from_millis(100),
+                repository.wait_for_save_started("btc-core", 2),
+            )
+            .await
+            .is_err(),
+            "same-grid mutation should wait for the in-flight commit"
+        );
+
+        repository.release_save("btc-core");
+
+        first_mutation.await.unwrap().unwrap();
+        second_mutation.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutations_for_different_grids_do_not_share_global_lock() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.block_next_save("btc-core");
+        let service = multi_grid_service(
+            repository.clone() as Arc<dyn StateRepositoryPort>,
+            &[("btc-core", "BTCUSDT"), ("eth-core", "ETHUSDT")],
+        );
+
+        let first_service = service.clone();
+        let first_mutation =
+            tokio::spawn(async move { first_service.observe_market("btc-core", 95.0).await });
+        repository.wait_for_save_started("btc-core", 1).await;
+
+        let second_service = service.clone();
+        let second_mutation =
+            tokio::spawn(
+                async move { second_service.command("eth-core", GridCommand::Pause).await },
+            );
+
+        let completed_before_release = timeout(
+            Duration::from_millis(100),
+            repository.wait_for_completed_save_count(1),
+        )
+        .await;
+        let completed_snapshot = repository.completed_saves();
+
+        repository.release_save("btc-core");
+        first_mutation.await.unwrap().unwrap();
+        second_mutation.await.unwrap().unwrap();
+
+        assert!(
+            completed_before_release.is_ok(),
+            "different grids should not share a global write lock"
+        );
+        assert_eq!(completed_snapshot, vec!["eth-core".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn recover_submit_effect_uses_same_per_grid_guard_as_regular_mutations() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = multi_grid_service(
+            repository.clone() as Arc<dyn StateRepositoryPort>,
+            &[("btc-core", "BTCUSDT"), ("eth-core", "ETHUSDT")],
+        );
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let request = OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            client_order_id: "btc-core-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: snapshot.config.base_qty_per_unit() * 6.0,
+        };
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order_from_submit_request(&request, Exposure(6.0)),
+            SlotState::SubmitPending,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
+
+        let transition = service
+            .observe_position(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        repository.seed_effect(PersistedGridEffect {
+            effect_id: "btc-core:recovery:0".into(),
+            grid_id: GridId::new("btc-core"),
+            batch_id: "recovery".into(),
+            sequence: 0,
+            effect: GridEffect::SubmitOrder {
+                request: request.clone(),
+                target_exposure: Exposure(6.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        repository.block_next_save("btc-core");
+        let started_before_recovery = repository.save_started_count("btc-core");
+        let completed_before_recovery = repository.completed_saves().len();
+
+        let recover_service = service.clone();
+        let recover_request = request.clone();
+        let recover_target_exposure = Exposure(6.0);
+        let recover_task = tokio::spawn(async move {
+            recover_service
+                .recover_submit_effect(
+                    "btc-core",
+                    "btc-core:recovery:0",
+                    &recover_request,
+                    recover_target_exposure,
+                    None,
+                )
+                .await
+        });
+        let recovery_started = timeout(
+            Duration::from_millis(100),
+            repository.wait_for_save_started("btc-core", started_before_recovery + 1),
+        )
+        .await;
+        if recovery_started.is_err() {
+            recover_task.abort();
+        }
+        assert!(
+            recovery_started.is_ok(),
+            "recover_submit_effect should reach persistence before this test checks cross-grid isolation"
+        );
+
+        let other_grid_service = service.clone();
+        let other_grid_mutation = tokio::spawn(async move {
+            other_grid_service
+                .command("eth-core", GridCommand::Pause)
+                .await
+        });
+
+        let other_grid_completed = timeout(
+            Duration::from_millis(100),
+            repository.wait_for_completed_save_count(completed_before_recovery + 1),
+        )
+        .await;
+        let completed_snapshot = repository.completed_saves();
+
+        repository.release_save("btc-core");
+
+        assert!(matches!(
+            recover_task.await.unwrap().unwrap(),
+            SubmitRecoveryResolution::Superseded { .. }
+        ));
+        other_grid_mutation.await.unwrap().unwrap();
+
+        assert!(
+            other_grid_completed.is_ok(),
+            "other grids should remain writable while recovery is persisting"
+        );
+        assert_eq!(
+            completed_snapshot,
+            vec!["btc-core".to_string(), "eth-core".to_string()]
         );
     }
 
@@ -957,34 +1179,43 @@ mod tests {
     }
 
     fn test_service(repository: Arc<dyn StateRepositoryPort>) -> GridWriteService {
+        multi_grid_service(repository, &[("btc-core", "BTCUSDT")])
+    }
+
+    fn multi_grid_service(
+        repository: Arc<dyn StateRepositoryPort>,
+        grids: &[(&str, &str)],
+    ) -> GridWriteService {
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mut manager = GridManager::new(Arc::new(FixedClock));
-        manager
-            .add_grid(
-                GridId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                GridConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: OutOfBandPolicy::Freeze,
-                },
-                CapacityBudget {
-                    max_notional: 3000.0,
-                    daily_loss_limit: -100.0,
-                    stop_loss_pct: 10.0,
-                },
-                ExchangeRules {
-                    price_tick: 0.1,
-                    quantity_step: 0.1,
-                    min_qty: 0.0,
-                    min_notional: 0.0,
-                },
-            )
-            .unwrap();
+        for (id, symbol) in grids {
+            manager
+                .add_grid(
+                    GridId::new(*id),
+                    Instrument::new(Venue::Binance, *symbol),
+                    GridConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: OutOfBandPolicy::Freeze,
+                    },
+                    CapacityBudget {
+                        max_notional: 3000.0,
+                        daily_loss_limit: -100.0,
+                        stop_loss_pct: 10.0,
+                    },
+                    ExchangeRules {
+                        price_tick: 0.1,
+                        quantity_step: 0.1,
+                        min_qty: 0.0,
+                        min_notional: 0.0,
+                    },
+                )
+                .unwrap();
+        }
 
         GridWriteService::new(manager, repository, notifications)
     }
@@ -995,6 +1226,9 @@ mod tests {
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedGridEffect>>,
         next_effect_seq: Mutex<u64>,
+        save_controls: Mutex<HashMap<String, Arc<SaveControl>>>,
+        completed_saves: Mutex<Vec<String>>,
+        completed_notify: Notify,
     }
 
     impl MemoryRepository {
@@ -1035,6 +1269,46 @@ mod tests {
         fn seed_effect(&self, effect: PersistedGridEffect) {
             self.effects.lock().unwrap().push(effect);
         }
+
+        fn block_next_save(&self, id: &str) {
+            self.save_control(id)
+                .block_next
+                .store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_save_started(&self, id: &str, expected_count: usize) {
+            let control = self.save_control(id);
+            while control.started.load(Ordering::SeqCst) < expected_count {
+                control.started_notify.notified().await;
+            }
+        }
+
+        fn save_started_count(&self, id: &str) -> usize {
+            self.save_control(id).started.load(Ordering::SeqCst)
+        }
+
+        fn release_save(&self, id: &str) {
+            self.save_control(id).release_notify.notify_one();
+        }
+
+        fn completed_saves(&self) -> Vec<String> {
+            self.completed_saves.lock().unwrap().clone()
+        }
+
+        async fn wait_for_completed_save_count(&self, expected_count: usize) {
+            while self.completed_saves.lock().unwrap().len() < expected_count {
+                self.completed_notify.notified().await;
+            }
+        }
+
+        fn save_control(&self, id: &str) -> Arc<SaveControl> {
+            let mut controls = self.save_controls.lock().unwrap();
+            Arc::clone(
+                controls
+                    .entry(id.to_string())
+                    .or_insert_with(|| Arc::new(SaveControl::default())),
+            )
+        }
     }
 
     #[async_trait::async_trait]
@@ -1047,6 +1321,13 @@ mod tests {
             effects: &[GridEffect],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
+            let save_control = self.save_control(id);
+            save_control.started.fetch_add(1, Ordering::SeqCst);
+            save_control.started_notify.notify_waiters();
+            if save_control.block_next.swap(false, Ordering::SeqCst) {
+                save_control.release_notify.notified().await;
+            }
+
             self.snapshots
                 .lock()
                 .unwrap()
@@ -1097,6 +1378,9 @@ mod tests {
                 effect.last_error = effect_status_update.last_error.clone();
                 effect.updated_at = now;
             }
+
+            self.completed_saves.lock().unwrap().push(id.to_string());
+            self.completed_notify.notify_waiters();
 
             Ok(CommittedGridWrite {
                 grid_id: GridId::new(id),
@@ -1211,6 +1495,14 @@ mod tests {
     }
 
     struct FixedClock;
+
+    #[derive(Default)]
+    struct SaveControl {
+        block_next: AtomicBool,
+        started: AtomicUsize,
+        started_notify: Notify,
+        release_notify: Notify,
+    }
 
     impl ClockPort for FixedClock {
         fn now(&self) -> chrono::DateTime<Utc> {
