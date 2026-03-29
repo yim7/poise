@@ -208,14 +208,14 @@ git commit -m "refactor(engine): move execution planning into inventory executor
 - Test: `server/src/effect_worker.rs`
 - Test: `server/src/write_service.rs`
 
-- [ ] **Step 1: 在 `server/src/runtime.rs` 写失败测试，锁住 startup sync 会先重建槽位工作集再重新规划**
+- [x] **Step 1: 在 `server/src/runtime.rs` 写失败测试，锁住 startup sync 会先重建槽位工作集再重新规划**
 
 测试要覆盖：
 - live position 和 live open orders 会被吸收到新的 `executor_state`
 - 恢复后是“工作集重建 + 重算”，不是延续旧 `pending_order` 锚点补丁
 - live open orders 出现重复匹配或未知匹配时会进入异常恢复路径
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
@@ -223,14 +223,14 @@ Run:
 Expected:
 测试失败，因为当前恢复仍围绕 `pending_order`。
 
-- [ ] **Step 3: 在 `server/src/effect_worker.rs` 和 `server/src/write_service.rs` 写失败测试，锁住 worker 只做逐笔执行与回写**
+- [x] **Step 3: 在 `server/src/effect_worker.rs` 和 `server/src/write_service.rs` 写失败测试，锁住 worker 只做逐笔执行与回写**
 
 测试至少覆盖：
 - 提交成功后更新对应槽位里的 `working_order`
 - 取消成功后清理对应槽位里的 `working_order`
 - worker 不再依赖单个 `pending_order` 的 submit anchor
 
-- [ ] **Step 4: 运行定向测试确认失败**
+- [x] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
@@ -239,7 +239,7 @@ Run:
 Expected:
 测试失败，因为当前 write service / worker 仍围绕 `pending_order`。
 
-- [ ] **Step 5: 做最小实现，重写恢复与观测吸收路径**
+- [x] **Step 5: 做最小实现，重写恢复与观测吸收路径**
 
 要求：
 - `manager.observe()` / `manager.sync_exchange_state()` 改成更新槽位工作集
@@ -249,7 +249,7 @@ Expected:
 - `effect_worker` 只做 effect 执行与结果回写
 - `effect_service` 删除或收窄所有围绕单个 `pending_order` 的中心语义
 
-- [ ] **Step 6: 运行 Task 3 的定向测试**
+- [x] **Step 6: 运行 Task 3 的定向测试**
 
 Run:
 `cargo test -p grid-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
@@ -259,7 +259,10 @@ Run:
 Expected:
 恢复链路与 worker 边界测试通过。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
+
+Task 3 code commit:
+`4e0ac3d1cb93d72617f0516f21bc0f84b8bf238d`
 
 ```bash
 git add engine/src/manager.rs server/src/effect_service.rs server/src/write_service.rs server/src/runtime.rs server/src/effect_worker.rs
