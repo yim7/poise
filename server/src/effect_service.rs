@@ -130,7 +130,6 @@ mod tests {
             target_exposure: Exposure(6.0),
             status: grid_engine::ports::OrderStatus::Submitting,
             role: OrderRole::IncreaseInventory,
-            in_flight_effect_id: None,
         }));
         repository.seed_effect(submit_effect("btc-core:batch:0", "client-1"));
         assert_eq!(
@@ -156,7 +155,6 @@ mod tests {
             target_exposure: Exposure(6.0),
             status: grid_engine::ports::OrderStatus::New,
             role: OrderRole::IncreaseInventory,
-            in_flight_effect_id: None,
         }));
         repository.seed_effect(submit_effect("btc-core:batch:1", "client-1"));
         assert_eq!(

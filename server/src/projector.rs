@@ -270,9 +270,6 @@ fn project_execution_slots(source: &GridReadModelSource) -> Vec<ExecutionSlotVie
                             grid_engine::runtime::SlotState::Working => {
                                 ExecutionSlotPhaseView::Working
                             }
-                            grid_engine::runtime::SlotState::CancelPending => {
-                                ExecutionSlotPhaseView::Closing
-                            }
                             grid_engine::runtime::SlotState::Empty => return None,
                         },
                         intent: match order.role {
@@ -703,7 +700,6 @@ mod tests {
                         target_exposure: Exposure(4.0),
                         status: OrderStatus::New,
                         role: OrderRole::IncreaseInventory,
-                        in_flight_effect_id: None,
                     }),
                 }],
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),

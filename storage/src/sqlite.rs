@@ -912,7 +912,6 @@ mod tests {
                         target_exposure: Exposure(6.0),
                         status: OrderStatus::New,
                         role: OrderRole::IncreaseInventory,
-                        in_flight_effect_id: None,
                     }),
                 }],
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),

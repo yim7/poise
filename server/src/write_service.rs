@@ -582,7 +582,6 @@ mod tests {
                     target_exposure: Exposure(2.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
-                    in_flight_effect_id: None,
                 }),
             }]
         );
@@ -619,7 +618,6 @@ mod tests {
                                 Side::Buy => OrderRole::IncreaseInventory,
                                 Side::Sell => OrderRole::DecreaseInventory,
                             },
-                            in_flight_effect_id: None,
                         }),
                     }],
                     last_execution_reason: None,

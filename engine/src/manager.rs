@@ -264,7 +264,6 @@ impl GridManager {
                     grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
                     grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
                 },
-                in_flight_effect_id: None,
             },
             SlotState::SubmitPending,
         );
@@ -298,7 +297,6 @@ impl GridManager {
                     grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
                     grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
                 },
-                in_flight_effect_id: None,
             },
             SlotState::Working,
         );
@@ -332,7 +330,6 @@ impl GridManager {
                         grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
                         grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
                     },
-                    in_flight_effect_id: None,
                 },
                 SlotState::Working,
             );
@@ -516,6 +513,15 @@ impl GridManager {
             grid.risk_state.realized_pnl_cumulative += observation.realized_pnl;
         }
 
+        if grid
+            .executor_state
+            .as_ref()
+            .and_then(|state| state.recovery_anomaly.as_ref())
+            .is_some()
+        {
+            return Ok(());
+        }
+
         if observation.status.keeps_pending_order() {
             let target_exposure = Self::resolve_pending_target_exposure(grid);
             upsert_inventory_core_slot(
@@ -533,7 +539,6 @@ impl GridManager {
                         grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
                         grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
                     },
-                    in_flight_effect_id: None,
                 },
                 SlotState::Working,
             );
@@ -955,7 +960,6 @@ fn upsert_inventory_core_slot(
             target_exposure.clone(),
         )
     });
-    executor_state.recovery_anomaly = None;
     executor_state.slots = vec![ExecutionSlot {
         slot: OrderSlot::new("inventory_core"),
         state,
@@ -985,7 +989,6 @@ fn clear_executor_slot(
     });
     if should_clear {
         executor_state.slots.clear();
-        executor_state.recovery_anomaly = None;
         sync_pending_order_from_executor_state(grid);
     }
     should_clear
@@ -1175,7 +1178,6 @@ mod tests {
                     grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
                     grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
                 },
-                in_flight_effect_id: None,
             },
             if pending_order.is_submit_recovery_anchor() {
                 SlotState::SubmitPending
@@ -1203,7 +1205,6 @@ mod tests {
                     target_exposure: grid_core::types::Exposure(4.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
-                    in_flight_effect_id: None,
                 }),
             }],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
@@ -2398,7 +2399,6 @@ mod tests {
                     target_exposure: grid_core::types::Exposure(6.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
-                    in_flight_effect_id: None,
                 }),
             }]
         );
@@ -2590,6 +2590,105 @@ mod tests {
                 status: OrderStatus::New,
             })
         );
+    }
+
+    #[test]
+    fn observe_order_does_not_mutate_slots_while_recovery_anomaly_is_active() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.target_exposure = Some(grid_core::types::Exposure(6.0));
+        grid.executor_state = Some(ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: grid_core::types::Exposure(6.0),
+            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
+            last_reprice_at: None,
+            slots: vec![],
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
+            stats: ExecutionStats {
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
+                max_inventory_gap_abs: grid_core::types::Exposure(6.0),
+                max_gap_age_ms: 0,
+            },
+        });
+
+        manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Order(OrderObservation {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::New,
+                }),
+            )
+            .unwrap();
+
+        let grid = manager.get_grid("btc1").unwrap();
+        assert!(grid.pending_order.is_none());
+        assert_eq!(
+            grid.executor_state
+                .as_ref()
+                .and_then(|state| state.recovery_anomaly.as_ref()),
+            Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
+        );
+        assert!(
+            grid.executor_state
+                .as_ref()
+                .map(|state| state.slots.is_empty())
+                .unwrap_or(true)
+        );
+    }
+
+    #[test]
+    fn canceled_order_keeps_attention_required_while_recovery_anomaly_is_active() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.executor_state = Some(ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: grid_core::types::Exposure(4.0),
+            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
+            last_reprice_at: None,
+            slots: vec![],
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
+            stats: ExecutionStats {
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
+                max_inventory_gap_abs: grid_core::types::Exposure(4.0),
+                max_gap_age_ms: 0,
+            },
+        });
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc-core"),
+                GridObservation::Order(OrderObservation {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::Canceled,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert_eq!(
+            transition
+                .snapshot
+                .executor_state
+                .as_ref()
+                .and_then(|state| state.recovery_anomaly.as_ref()),
+            Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
+        );
+        assert!(transition.snapshot.pending_order.is_none());
     }
 
     #[test]

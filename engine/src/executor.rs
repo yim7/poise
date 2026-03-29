@@ -247,7 +247,6 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         target_exposure,
         status: live_order.status,
         role,
-        in_flight_effect_id: None,
     });
 
     let mut state = base_state;
@@ -278,7 +277,6 @@ fn infer_recovery_slot(input: &RecoveryInput<'_>) -> Option<ExecutionSlot> {
             target_exposure: desired_order.target_exposure.clone(),
             status: OrderStatus::Submitting,
             role: desired_order.role.clone(),
-            in_flight_effect_id: None,
         }),
     })
 }
@@ -519,7 +517,6 @@ fn submit_pending_slot(desired_order: &DesiredOrder, request: &OrderRequest) -> 
             target_exposure: desired_order.target_exposure.clone(),
             status: OrderStatus::Submitting,
             role: desired_order.role.clone(),
-            in_flight_effect_id: None,
         }),
     }
 }
@@ -645,7 +642,6 @@ mod tests {
                     target_exposure: Exposure(4.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
-                    in_flight_effect_id: None,
                 }),
             }],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),

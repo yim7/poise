@@ -165,7 +165,6 @@ impl Default for ExecutionStatusView {
 pub enum ExecutionSlotPhaseView {
     Opening,
     Working,
-    Closing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

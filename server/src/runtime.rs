@@ -13,8 +13,6 @@ use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
 use crate::write_service::GridMutationError;
 
-const STARTUP_CANCEL_ALL_POLL_ATTEMPTS: usize = 10;
-const STARTUP_CANCEL_ALL_POLL_DELAY: Duration = Duration::from_millis(100);
 #[derive(Clone)]
 pub struct ServerRuntime {
     state: ServerState,
@@ -65,19 +63,7 @@ impl ServerRuntime {
     async fn startup_sync(&self) -> Result<()> {
         for grid in self.state.write_service.grid_instruments().await {
             let position = self.exchange.get_position(&grid.instrument).await?;
-            let mut open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
-            if open_orders.len() > 1 {
-                tracing::warn!(
-                    "grid {}:{} has {} live open orders during startup; canceling all before sync",
-                    grid.instrument.venue.as_str(),
-                    grid.instrument.symbol,
-                    open_orders.len()
-                );
-                self.exchange.cancel_all(&grid.instrument).await?;
-                open_orders = self
-                    .wait_for_startup_open_orders_to_clear(&grid.instrument)
-                    .await?;
-            }
+            let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
             let submit_recovery_anchor = self
                 .state
                 .effect_service
@@ -96,34 +82,6 @@ impl ServerRuntime {
         }
 
         Ok(())
-    }
-
-    async fn wait_for_startup_open_orders_to_clear(
-        &self,
-        instrument: &grid_engine::grid::Instrument,
-    ) -> Result<Vec<ExchangeOrder>> {
-        for attempt in 0..STARTUP_CANCEL_ALL_POLL_ATTEMPTS {
-            let open_orders = self.exchange.get_open_orders(instrument).await?;
-            if open_orders.is_empty() {
-                return Ok(open_orders);
-            }
-
-            if attempt + 1 < STARTUP_CANCEL_ALL_POLL_ATTEMPTS {
-                tokio::time::sleep(STARTUP_CANCEL_ALL_POLL_DELAY).await;
-            }
-        }
-
-        let open_orders = self.exchange.get_open_orders(instrument).await?;
-        let summary = open_orders
-            .iter()
-            .map(|order| format!("{}/{}", order.client_order_id, order.order_id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(anyhow!(
-            "grid `{}` still has live open orders after startup cancel_all: {}",
-            instrument.symbol,
-            summary
-        ))
     }
 
     async fn replay_startup_user_data(
@@ -1897,7 +1855,6 @@ mod tests {
                     target_exposure: Exposure(4.0),
                     status: OrderStatus::Submitting,
                     role: OrderRole::IncreaseInventory,
-                    in_flight_effect_id: None,
                 }),
             }]
         );
@@ -2098,7 +2055,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_cancels_multiple_live_open_orders_before_continuing() {
+    async fn startup_sync_marks_attention_required_when_multiple_live_open_orders_exist() {
         let fixture = runtime_fixture(
             Some(test_snapshot()),
             btc_position(7.5, 3.0),
@@ -2128,25 +2085,25 @@ mod tests {
 
         let handles = fixture.runtime.start().await.unwrap();
 
-        assert_eq!(
+        assert!(
             fixture
                 .exchange
                 .cancel_all_symbols
                 .lock()
                 .unwrap()
-                .as_slice(),
-            ["BTCUSDT"]
+                .is_empty()
         );
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert_eq!(
             instance
-                .pending_order
+                .executor_state
                 .as_ref()
-                .map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+                .and_then(|state| state.recovery_anomaly.as_ref()),
+            Some(&grid_engine::executor::RecoveryAnomaly::DuplicateLiveOrders)
         );
+        assert!(instance.pending_order.is_none());
 
         shutdown(handles).await;
     }
@@ -2809,7 +2766,6 @@ mod tests {
                                 Side::Buy => OrderRole::IncreaseInventory,
                                 Side::Sell => OrderRole::DecreaseInventory,
                             },
-                            in_flight_effect_id: None,
                         }),
                     }],
                     last_execution_reason: None,

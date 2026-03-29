@@ -95,7 +95,7 @@ Expected:
 - `engine/src/runtime.rs` 增加 `ExecutorState`、`ExecutionSlot`、`SlotState`、`WorkingOrder` 和 `ExecutionStats`
 - `engine/src/snapshot.rs` 改成持久化 `executor_state`
 - `storage/src/schema.rs` / `storage/src/sqlite.rs` 改成读写新的快照结构
-- 明确每个 `slot` 的不变量：最多一笔工作单、最多一个 in-flight effect
+- 明确每个 `slot` 的不变量：最多一笔工作单，槽位生命周期只能由执行器推进
 - 先不删除旧字段使用点之外的全部旧代码，优先让新结构可存可读
 
 - [x] **Step 6: 运行 Task 1 的定向测试**

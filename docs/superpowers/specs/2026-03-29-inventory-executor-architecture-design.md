@@ -211,7 +211,6 @@ pub enum SlotState {
     Empty,
     SubmitPending,
     Working,
-    CancelPending,
 }
 ```
 
@@ -228,10 +227,9 @@ pub enum SlotState {
 一期必须明确以下不变量：
 
 1. 每个 `slot` 在任一时刻最多绑定一笔 `working_order`
-2. 每个 `slot` 在任一时刻最多只有一个 in-flight effect
-3. `slot` 的生命周期只能由执行器推进，外部观测只提供事实，不直接改写槽位语义
-4. `DesiredOrders` 必须先映射到具体 `slot`，再生成 `cancel / submit`
-5. 恢复时先重建 `slot -> working_order` 关系，再做新一轮规划
+2. `slot` 的生命周期只能由执行器推进，外部观测只提供事实，不直接改写槽位语义
+3. `DesiredOrders` 必须先映射到具体 `slot`，再生成 `cancel / submit`
+4. 恢复时先重建 `slot -> working_order` 关系，再做新一轮规划
 
 这些不变量的目标是把恢复、撤单、重挂的复杂度压回执行器内部，避免 `manager`、`write_service`、`effect_worker` 各自推断合法状态。
 
@@ -421,7 +419,6 @@ pub struct WorkingOrder {
 - `phase` 使用稳定视图语义：
   - `opening`
   - `working`
-  - `closing`
 - `intent` 使用稳定业务语义：
   - `increase_inventory`
   - `decrease_inventory`

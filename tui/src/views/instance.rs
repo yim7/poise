@@ -212,7 +212,6 @@ fn format_slot_phase(value: ExecutionSlotPhaseView) -> &'static str {
     match value {
         ExecutionSlotPhaseView::Opening => "opening",
         ExecutionSlotPhaseView::Working => "working",
-        ExecutionSlotPhaseView::Closing => "closing",
     }
 }
 

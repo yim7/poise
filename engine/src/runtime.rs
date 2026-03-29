@@ -169,7 +169,6 @@ pub enum SlotState {
     Empty,
     SubmitPending,
     Working,
-    CancelPending,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,25 +181,14 @@ pub struct WorkingOrder {
     pub target_exposure: Exposure,
     pub status: OrderStatus,
     pub role: OrderRole,
-    pub in_flight_effect_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionSlot {
-    // Invariant: one slot owns at most one working order. If an effect is in flight,
-    // it must be attached to that working order via `in_flight_effect_id`.
+    // Invariant: one slot owns at most one working order.
     pub slot: OrderSlot,
     pub state: SlotState,
     pub working_order: Option<WorkingOrder>,
-}
-
-impl ExecutionSlot {
-    pub fn has_in_flight_effect(&self) -> bool {
-        self.working_order
-            .as_ref()
-            .and_then(|order| order.in_flight_effect_id.as_ref())
-            .is_some()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -378,7 +366,6 @@ mod tests {
                 target_exposure: Exposure(6.0),
                 status: OrderStatus::New,
                 role: OrderRole::IncreaseInventory,
-                in_flight_effect_id: None,
             }),
         };
 
