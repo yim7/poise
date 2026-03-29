@@ -87,18 +87,12 @@ impl ServerRuntime {
         for grid in self.state.write_service.grid_instruments().await {
             let position = self.exchange.get_position(&grid.instrument).await?;
             let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
-            let submit_recovery_anchor = self
-                .state
-                .effect_service
-                .submit_recovery_anchor(&grid.id)
-                .await?;
             self.state
                 .write_service
                 .sync_exchange_state(
                     &grid.id,
                     position_observation(&position),
                     open_orders.iter().map(order_observation).collect(),
-                    submit_recovery_anchor,
                 )
                 .await?;
         }
@@ -340,18 +334,12 @@ async fn sync_exchange_state_from_exchange(
         .get_open_orders(instrument)
         .await
         .map_err(GridMutationError::Persistence)?;
-    let submit_recovery_anchor = state
-        .effect_service
-        .submit_recovery_anchor(grid_id)
-        .await
-        .map_err(GridMutationError::Persistence)?;
     let _ = state
         .write_service
         .sync_exchange_state(
             grid_id,
             position_observation(&position),
             open_orders.iter().map(order_observation).collect(),
-            submit_recovery_anchor,
         )
         .await
         .map_err(preserve_grid_mutation_error)?;
@@ -1982,8 +1970,8 @@ mod tests {
     async fn startup_sync_restores_claimed_live_order_before_replanning() {
         let snapshot = test_snapshot();
         let live_order = btc_exchange_order(
-            "live-1",
-            "live-1",
+            "snapshot-1",
+            "snapshot-1",
             Side::Buy,
             94.5,
             0.25,
@@ -1999,7 +1987,7 @@ mod tests {
         .await;
         let save_count_before_start = fixture.persistence.save_transition_count();
 
-        let handles = fixture.runtime.start().await.unwrap();
+        fixture.runtime.startup_sync().await.unwrap();
         assert_eq!(
             fixture.persistence.save_transition_count() - save_count_before_start,
             1,
@@ -2020,8 +2008,8 @@ mod tests {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::Working,
                 working_order: Some(grid_engine::runtime::WorkingOrder {
-                    order_id: Some("live-1".into()),
-                    client_order_id: "live-1".into(),
+                    order_id: Some("snapshot-1".into()),
+                    client_order_id: "snapshot-1".into(),
                     side: Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
@@ -2035,7 +2023,7 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             matches!(
                 &effect.effect,
-                ExecutionAction::CancelOrder { order_id, .. } if order_id == "live-1"
+                ExecutionAction::CancelOrder { order_id, .. } if order_id == "snapshot-1"
             )
         }));
         assert!(effects.iter().any(|effect| {
@@ -2048,26 +2036,28 @@ mod tests {
                         && *target_exposure == Exposure(4.0)
             )
         }));
-
-        shutdown(handles).await;
     }
 
     #[tokio::test]
     async fn startup_sync_replans_even_when_submit_recovery_anchor_is_present() {
-        let snapshot = test_snapshot();
-        let live_order = btc_exchange_order(
-            "live-1",
-            "snapshot-1",
-            Side::Buy,
-            94.5,
-            0.25,
-            0.0,
-            OrderStatus::New,
+        let mut snapshot = test_snapshot();
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "snapshot-1",
+                Side::Buy,
+                94.0,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
         );
         let fixture = runtime_fixture(
             Some(snapshot),
-            btc_position(7.5, 3.0),
-            vec![live_order],
+            btc_position(0.0, 0.0),
+            vec![],
             test_budget(),
         )
         .await;
@@ -2096,27 +2086,96 @@ mod tests {
             })
             .await;
 
-        let handles = fixture.runtime.start().await.unwrap();
+        fixture.runtime.startup_sync().await.unwrap();
+
+        let instance = current_instance(&fixture.state).await;
+        assert_eq!(
+            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
+            Some("BTCUSDT-reconcile")
+        );
 
         let effects = fixture.persistence.all_effects().await;
-        assert!(effects.iter().any(|effect| {
-            matches!(
-                &effect.effect,
-                ExecutionAction::CancelOrder { order_id, .. } if order_id == "live-1"
-            )
-        }));
         assert!(effects.iter().any(|effect| {
             matches!(
                 &effect.effect,
                 ExecutionAction::SubmitOrder { request, target_exposure }
                     if request.client_order_id == "BTCUSDT-reconcile"
                         && (request.price - 95.0).abs() < f64::EPSILON
-                        && (request.quantity - 7.5).abs() < f64::EPSILON
+                        && (request.quantity - 15.0).abs() < f64::EPSILON
                         && *target_exposure == Exposure(4.0)
             )
         }));
+    }
 
-        shutdown(handles).await;
+    #[tokio::test]
+    async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.observed.reference_price = Some(92.5);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                92.5,
+                22.5,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(0.0, 0.0),
+            vec![],
+            test_budget(),
+        )
+        .await;
+        fixture
+            .persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:startup:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "startup".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 92.5,
+                        quantity: 22.5,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        fixture.runtime.startup_sync().await.unwrap();
+
+        let pending_effects = fixture.persistence.list_pending_effects().await.unwrap();
+        assert_eq!(pending_effects.len(), 1);
+        assert!(matches!(
+            pending_effects.as_slice(),
+            [PersistedGridEffect {
+                effect:
+                    ExecutionAction::SubmitOrder {
+                        request,
+                        target_exposure,
+                    },
+                ..
+            }] if request.client_order_id == "BTCUSDT-reconcile"
+                && (request.price - 92.5).abs() < f64::EPSILON
+                && (request.quantity - 22.5).abs() < f64::EPSILON
+                && *target_exposure == Exposure(6.0)
+        ));
     }
 
     #[tokio::test]
@@ -2164,7 +2223,7 @@ mod tests {
         )
         .await;
 
-        let handles = fixture.runtime.start().await.unwrap();
+        fixture.runtime.startup_sync().await.unwrap();
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
@@ -2177,12 +2236,10 @@ mod tests {
             inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
             Some("snapshot-1")
         );
-
-        shutdown(handles).await;
     }
 
     #[tokio::test]
-    async fn startup_sync_preserves_submitting_working_order_until_exchange_catches_up() {
+    async fn startup_sync_rebuilds_submit_pending_slot_to_current_plan_before_follow_up_sync() {
         let mut snapshot = test_snapshot();
         set_executor_state(
             &mut snapshot,
@@ -2232,8 +2289,16 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.status),
-            Some(OrderStatus::Submitting)
+            inventory_core_order(&instance),
+            Some(&working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                95.0,
+                7.5,
+                Exposure(4.0),
+                OrderStatus::Submitting,
+            ))
         );
 
         let transition = fixture

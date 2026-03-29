@@ -3,8 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use grid_engine::grid::GridId;
 use grid_engine::ports::{GridSnapshot, PersistedGridEffect, StateRepositoryPort};
-use grid_engine::runtime::SubmitRecoveryAnchor;
-use grid_engine::transition::GridEffect;
 use tokio::sync::broadcast;
 
 use crate::notifications::GridInternalNotification;
@@ -49,32 +47,6 @@ impl EffectService {
         self.repository.mark_effect_failed(effect_id, error).await?;
         self.emit_effect_state_changed(id);
         Ok(())
-    }
-
-    pub async fn submit_recovery_anchor(&self, id: &str) -> Result<Option<SubmitRecoveryAnchor>> {
-        let Some(snapshot) = self.load_grid_state(id).await? else {
-            return Ok(None);
-        };
-        let Some(anchor) = SubmitRecoveryAnchor::from_executor_state(&snapshot.executor_state)
-        else {
-            return Ok(None);
-        };
-
-        let pending_effects = self.list_pending_effects().await?;
-        Ok(pending_effects.into_iter().find_map(|effect| {
-            if effect.grid_id.as_str() != id {
-                return None;
-            }
-
-            match effect.effect {
-                GridEffect::SubmitOrder { request, .. }
-                    if request.client_order_id == anchor.client_order_id =>
-                {
-                    Some(anchor.clone())
-                }
-                _ => None,
-            }
-        }))
     }
 
     fn emit_effect_state_changed(&self, id: &str) {
@@ -130,17 +102,20 @@ mod tests {
         }));
         repository.seed_effect(submit_effect("btc-core:batch:0", "client-1"));
         assert_eq!(
-            service.submit_recovery_anchor("btc-core").await.unwrap(),
-            Some(grid_engine::runtime::SubmitRecoveryAnchor {
-                client_order_id: "client-1".into(),
-                kind: grid_engine::runtime::SubmitRecoveryKind::Submitting,
-            })
+            service
+                .list_pending_effects()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|effect| effect.effect_id)
+                .collect::<Vec<_>>(),
+            vec!["btc-core:batch:0".to_string()]
         );
 
         repository.clear_effects();
         assert_eq!(
-            service.submit_recovery_anchor("btc-core").await.unwrap(),
-            None
+            service.list_pending_effects().await.unwrap(),
+            Vec::<PersistedGridEffect>::new()
         );
 
         repository.seed_snapshot(snapshot_with_executor_order(WorkingOrder {
@@ -155,11 +130,14 @@ mod tests {
         }));
         repository.seed_effect(submit_effect("btc-core:batch:1", "client-1"));
         assert_eq!(
-            service.submit_recovery_anchor("btc-core").await.unwrap(),
-            Some(grid_engine::runtime::SubmitRecoveryAnchor {
-                client_order_id: "client-1".into(),
-                kind: grid_engine::runtime::SubmitRecoveryKind::ReceiptBacked,
-            })
+            service
+                .list_pending_effects()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|effect| effect.effect_id)
+                .collect::<Vec<_>>(),
+            vec!["btc-core:batch:1".to_string()]
         );
     }
 
@@ -173,8 +151,14 @@ mod tests {
         repository.seed_effect(submit_effect("btc-core:batch:legacy", "client-legacy"));
 
         assert_eq!(
-            service.submit_recovery_anchor("btc-core").await.unwrap(),
-            None
+            service
+                .list_pending_effects()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|effect| effect.effect_id)
+                .collect::<Vec<_>>(),
+            vec!["btc-core:batch:legacy".to_string()]
         );
     }
 

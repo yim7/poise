@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use grid_engine::manager::SubmitRecoveryResolution;
+use grid_engine::executor::SubmitRecoveryResolution;
 use grid_engine::ports::{ExchangePort, OrderRequest, PersistedGridEffect};
 use grid_engine::transition::GridEffect;
 use tokio::task::JoinHandle;
@@ -114,13 +114,13 @@ impl EffectWorker {
         request: OrderRequest,
         target_exposure: grid_core::types::Exposure,
     ) -> Result<()> {
-        match self
+        let target_exposure = match self
             .handle_recovered_submit(persisted, &request, target_exposure.clone())
             .await?
         {
-            SubmitRecovery::Proceed => {}
+            SubmitRecovery::Proceed { target_exposure } => target_exposure,
             SubmitRecovery::Recovered | SubmitRecovery::AwaitExchangeState => return Ok(()),
-        }
+        };
 
         match self.exchange.submit_order(request.clone()).await {
             Ok(receipt) => {
@@ -199,16 +199,17 @@ impl EffectWorker {
                 persisted.grid_id.as_str(),
                 &persisted.effect_id,
                 request,
-                target_exposure,
+                target_exposure.clone(),
                 live_order.as_ref(),
             )
             .await?
         {
-            SubmitRecoveryResolution::Proceed => Ok(SubmitRecovery::Proceed),
+            SubmitRecoveryResolution::Proceed {
+                target_exposure, ..
+            } => Ok(SubmitRecovery::Proceed { target_exposure }),
             SubmitRecoveryResolution::AwaitExchangeState => Ok(SubmitRecovery::AwaitExchangeState),
-            SubmitRecoveryResolution::Succeeded | SubmitRecoveryResolution::Superseded => {
-                Ok(SubmitRecovery::Recovered)
-            }
+            SubmitRecoveryResolution::Recovered { .. }
+            | SubmitRecoveryResolution::Superseded { .. } => Ok(SubmitRecovery::Recovered),
         }
     }
 
@@ -284,7 +285,9 @@ enum Cancellation {
 }
 
 enum SubmitRecovery {
-    Proceed,
+    Proceed {
+        target_exposure: grid_core::types::Exposure,
+    },
     Recovered,
     AwaitExchangeState,
 }
@@ -309,7 +312,9 @@ mod tests {
         OrderStatus, PersistedGridEffect, Position, StateRepositoryPort, StoredDomainEvent,
         StoredGridSnapshot,
     };
-    use grid_engine::runtime::{ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState};
+    use grid_engine::runtime::{
+        ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState, WorkingOrder,
+    };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, broadcast};
@@ -516,9 +521,122 @@ mod tests {
         assert_eq!(effect.status, EffectStatus::Succeeded);
     }
 
+    #[tokio::test]
+    async fn submit_recovery_proceed_receipt_keeps_current_plan_target() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let config = GridConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        };
+        let exchange_rules = ExchangeRules {
+            price_tick: 10.0,
+            quantity_step: 1.0,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
+        let state = test_state_with_grid(
+            repository.clone(),
+            exchange.clone(),
+            config.clone(),
+            exchange_rules,
+        )
+        .await;
+        let expected_target = grid_core::strategy::target_exposure(94.99, &config);
+        let snapshot = snapshot_with_submit_pending_order(
+            94.99,
+            config.clone(),
+            WorkingOrder {
+                order_id: None,
+                client_order_id: "btc-core-reconcile".into(),
+                side: Side::Buy,
+                price: 90.0,
+                quantity: 4.0,
+                target_exposure: Exposure(4.0),
+                status: OrderStatus::Submitting,
+                role: grid_engine::executor::OrderRole::IncreaseInventory,
+            },
+        );
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+        repository
+            .seed_effect(PersistedGridEffect {
+                effect_id: "btc-core:batch:0".into(),
+                grid_id: GridId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: GridEffect::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 90.0,
+                        quantity: 4.0,
+                        client_order_id: "btc-core-reconcile".into(),
+                    },
+                    target_exposure: Exposure(4.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        let manager_handle = state.write_service.manager();
+        let manager = manager_handle.read().await;
+        let snapshot = manager.snapshot("btc-core").unwrap();
+        assert_eq!(
+            snapshot
+                .executor_state
+                .slots
+                .first()
+                .and_then(|slot| slot.working_order.as_ref())
+                .map(|order| order.target_exposure.clone()),
+            Some(expected_target)
+        );
+    }
+
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
+    ) -> crate::assembly::ServerState {
+        test_state_with_grid(
+            repository,
+            exchange,
+            test_config(),
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.1,
+                min_qty: 0.0,
+                min_notional: 0.0,
+            },
+        )
+        .await
+    }
+
+    async fn test_state_with_grid(
+        repository: Arc<MemoryRepository>,
+        _exchange: Arc<FakeExchange>,
+        config: GridConfig,
+        exchange_rules: ExchangeRules,
     ) -> crate::assembly::ServerState {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
@@ -529,9 +647,9 @@ mod tests {
             .add_grid(
                 GridId::new("btc-core"),
                 instrument.clone(),
-                test_config(),
+                config,
                 test_budget(),
-                exchange.get_exchange_info(&instrument).await.unwrap().rules,
+                exchange_rules,
             )
             .unwrap();
 
@@ -629,6 +747,48 @@ mod tests {
             risk: RiskState::default(),
             observed: ObservedState {
                 reference_price: Some(95.0),
+                out_of_band_since: None,
+            },
+        }
+    }
+
+    fn snapshot_with_submit_pending_order(
+        reference_price: f64,
+        config: GridConfig,
+        order: WorkingOrder,
+    ) -> GridRuntimeSnapshot {
+        GridRuntimeSnapshot {
+            grid_id: GridId::new("btc-core"),
+            instrument: btc_instrument(),
+            config: config.clone(),
+            status: GridStatus::Active,
+            current_exposure: Exposure(0.0),
+            target_exposure: Some(grid_core::strategy::target_exposure(
+                reference_price,
+                &config,
+            )),
+            executor_state: ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(order.target_exposure.0),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                slots: vec![grid_engine::runtime::ExecutionSlot {
+                    slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                    state: SlotState::SubmitPending,
+                    working_order: Some(order),
+                }],
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+                stats: ExecutionStats {
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
+                    max_inventory_gap_abs: Exposure(0.0),
+                    max_gap_age_ms: 0,
+                },
+            },
+            replacement_gate_reason: None,
+            risk: RiskState::default(),
+            observed: ObservedState {
+                reference_price: Some(reference_price),
                 out_of_band_since: None,
             },
         }

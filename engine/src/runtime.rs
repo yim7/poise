@@ -24,40 +24,6 @@ pub enum GridStatus {
     Paused,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubmitRecoveryKind {
-    Submitting,
-    ReceiptBacked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubmitRecoveryAnchor {
-    pub client_order_id: String,
-    pub kind: SubmitRecoveryKind,
-}
-
-impl SubmitRecoveryAnchor {
-    pub fn from_executor_state(executor_state: &ExecutorState) -> Option<Self> {
-        executor_state
-            .slots
-            .iter()
-            .filter_map(|slot| slot.working_order.as_ref())
-            .find_map(|order| {
-                if order.order_id.is_none() && order.status == OrderStatus::Submitting {
-                    return Some(Self {
-                        client_order_id: order.client_order_id.clone(),
-                        kind: SubmitRecoveryKind::Submitting,
-                    });
-                }
-
-                (order.order_id.is_some() && order.status.keeps_working_order()).then(|| Self {
-                    client_order_id: order.client_order_id.clone(),
-                    kind: SubmitRecoveryKind::ReceiptBacked,
-                })
-            })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RiskState {
     pub realized_pnl_day: Option<NaiveDate>,
@@ -263,7 +229,7 @@ mod tests {
 
     use super::{
         ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, RiskState,
-        SlotState, SubmitRecoveryAnchor, SubmitRecoveryKind, WorkingOrder,
+        SlotState, WorkingOrder,
     };
 
     fn test_runtime() -> GridRuntime {
@@ -334,43 +300,6 @@ mod tests {
                 max_gap_age_ms: 42_000,
             },
         }
-    }
-
-    #[test]
-    fn submit_recovery_anchor_detects_submitting_and_receipt_backed_slots() {
-        let mut state = test_executor_state();
-        state.slots[0].state = SlotState::SubmitPending;
-        state.slots[0].working_order.as_mut().unwrap().order_id = None;
-        state.slots[0].working_order.as_mut().unwrap().status = OrderStatus::Submitting;
-
-        assert_eq!(
-            SubmitRecoveryAnchor::from_executor_state(&state),
-            Some(SubmitRecoveryAnchor {
-                client_order_id: "client-1".into(),
-                kind: SubmitRecoveryKind::Submitting,
-            })
-        );
-
-        let mut receipt_backed = test_executor_state();
-        receipt_backed.slots[0].state = SlotState::Working;
-        receipt_backed.slots[0]
-            .working_order
-            .as_mut()
-            .unwrap()
-            .status = OrderStatus::New;
-
-        assert_eq!(
-            SubmitRecoveryAnchor::from_executor_state(&receipt_backed),
-            Some(SubmitRecoveryAnchor {
-                client_order_id: "client-1".into(),
-                kind: SubmitRecoveryKind::ReceiptBacked,
-            })
-        );
-
-        let mut terminal = test_executor_state();
-        terminal.slots[0].working_order.as_mut().unwrap().status = OrderStatus::Filled;
-
-        assert_eq!(SubmitRecoveryAnchor::from_executor_state(&terminal), None);
     }
 
     #[test]

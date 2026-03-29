@@ -3,15 +3,15 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use grid_core::events::DomainEvent;
 use grid_engine::command::GridCommand;
+use grid_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
 use grid_engine::grid::{GridId, Instrument};
-use grid_engine::manager::{GridManager, SubmitRecoveryPlan, SubmitRecoveryResolution};
+use grid_engine::manager::GridManager;
 use grid_engine::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
 };
 use grid_engine::ports::{
     EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
 };
-use grid_engine::runtime::SubmitRecoveryAnchor;
 use grid_engine::transition::{GridEffect, GridTransition};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -195,18 +195,57 @@ impl GridWriteService {
         id: &str,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
-        submit_recovery_anchor: Option<SubmitRecoveryAnchor>,
     ) -> Result<GridTransition> {
-        self.mutate_grid(id, |manager| {
-            manager.sync_exchange_state(
-                &GridId::new(id),
-                position.clone(),
-                open_orders.clone(),
-                submit_recovery_anchor.clone(),
-            )
-        })
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let pending_submit_hints = self
+            .repository
+            .list_pending_effects()
+            .await
+            .map_err(GridMutationError::Persistence)?
+            .into_iter()
+            .filter(|effect| effect.grid_id.as_str() == id)
+            .filter_map(|effect| match effect.effect {
+                GridEffect::SubmitOrder {
+                    request,
+                    target_exposure,
+                } => Some(grid_engine::executor::PendingSubmitHint {
+                    request,
+                    target_exposure,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (previous_snapshot, transition, next_snapshot) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+            let transition = manager
+                .sync_exchange_state(
+                    &GridId::new(id),
+                    position,
+                    open_orders,
+                    pending_submit_hints,
+                )
+                .map_err(GridMutationError::Mutation)?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+            (previous_snapshot, transition, next_snapshot)
+        };
+
+        self.commit_grid_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &transition,
+            None,
+            false,
+        )
         .await
-        .map_err(anyhow::Error::new)
+        .map_err(anyhow::Error::new)?;
+
+        Ok(transition)
     }
 
     pub async fn record_submit_receipt(
@@ -285,15 +324,14 @@ impl GridWriteService {
         };
 
         let effect_status_update = match plan.resolution {
-            SubmitRecoveryResolution::Succeeded => {
+            SubmitRecoveryResolution::Recovered { .. } => {
                 Some(EffectStatusUpdate::succeeded(effect_id.to_string()))
             }
-            SubmitRecoveryResolution::Superseded => {
+            SubmitRecoveryResolution::Superseded { .. } => {
                 Some(EffectStatusUpdate::superseded(effect_id.to_string()))
             }
-            SubmitRecoveryResolution::Proceed | SubmitRecoveryResolution::AwaitExchangeState => {
-                None
-            }
+            SubmitRecoveryResolution::Proceed { .. }
+            | SubmitRecoveryResolution::AwaitExchangeState => None,
         };
 
         self.commit_grid_mutation(
@@ -407,9 +445,9 @@ mod tests {
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{ExchangeRules, Exposure, Side};
     use grid_engine::command::GridCommand;
-    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
     use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::{GridManager, SubmitRecoveryResolution};
+    use grid_engine::manager::GridManager;
     use grid_engine::observation::{
         GridObservation, MarketObservation, OrderObservation, PositionObservation,
     };
@@ -580,7 +618,6 @@ mod tests {
                     realized_pnl: 0.0,
                     status: grid_engine::ports::OrderStatus::New,
                 }],
-                None,
             )
             .await
             .unwrap();
@@ -639,7 +676,6 @@ mod tests {
                     realized_pnl: 0.0,
                     status: grid_engine::ports::OrderStatus::New,
                 }],
-                None,
             )
             .await
             .unwrap();
@@ -758,7 +794,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolution, SubmitRecoveryResolution::Proceed);
+        assert!(matches!(
+            resolution,
+            SubmitRecoveryResolution::Proceed { .. }
+        ));
         assert_eq!(
             repository
                 .snapshot_for("btc-core")
@@ -850,7 +889,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolution, SubmitRecoveryResolution::Superseded);
+        assert!(matches!(
+            resolution,
+            SubmitRecoveryResolution::Superseded { .. }
+        ));
         let effects = repository.all_effects();
         assert_eq!(effects.len(), 2);
         assert_eq!(

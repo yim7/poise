@@ -16,7 +16,7 @@ use crate::observation::{
 };
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
-use crate::runtime::{ExecutorState, GridRuntime, GridStatus, SubmitRecoveryAnchor};
+use crate::runtime::{ExecutorState, GridRuntime, GridStatus};
 use crate::snapshot::GridRuntimeSnapshot;
 use crate::transition::{GridEffect, GridTransition};
 
@@ -24,29 +24,6 @@ pub struct GridManager {
     grids: HashMap<GridId, GridRuntime>,
     instruments: HashMap<Instrument, GridId>,
     clock: Arc<dyn ClockPort>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitRecoveryResolution {
-    Proceed,
-    AwaitExchangeState,
-    Succeeded,
-    Superseded,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SubmitRecoveryPlan {
-    pub resolution: SubmitRecoveryResolution,
-    pub effects: Vec<GridEffect>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubmitRecoveryAction {
-    Proceed,
-    AwaitExchangeState,
-    RestoreLiveOrder,
-    CompleteReceiptBacked,
-    Supersede,
 }
 
 impl GridManager {
@@ -123,10 +100,10 @@ impl GridManager {
         id: &GridId,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
-        submit_recovery_anchor: Option<SubmitRecoveryAnchor>,
+        pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<GridTransition> {
         let (events, effects) =
-            self.apply_startup_exchange_state(id, position, open_orders, submit_recovery_anchor)?;
+            self.apply_startup_exchange_state(id, position, open_orders, pending_submit_hints)?;
         self.transition_for(id, events, effects)
     }
 
@@ -284,32 +261,6 @@ impl GridManager {
         Ok(())
     }
 
-    fn observe_live_open_order(&mut self, id: &GridId, order: &ExchangeOrder) -> Result<()> {
-        let grid = self
-            .grids
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        if order.status.keeps_working_order() {
-            let next_state = executor::apply_order_observation(
-                &grid.executor_state,
-                &OrderObservation {
-                    order_id: order.order_id.clone(),
-                    client_order_id: order.client_order_id.clone(),
-                    side: order.side,
-                    price: order.price,
-                    quantity: order.qty,
-                    realized_pnl: 0.0,
-                    status: order.status,
-                },
-            );
-            if next_state != grid.executor_state {
-                grid.executor_state = next_state;
-                grid.replacement_gate_reason = None;
-            }
-        }
-        Ok(())
-    }
-
     pub fn clear_pending_submit(&mut self, id: &GridId, client_order_id: &str) -> Result<()> {
         let grid = self
             .grids
@@ -355,75 +306,91 @@ impl GridManager {
         request: &OrderRequest,
         target_exposure: grid_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
-    ) -> Result<SubmitRecoveryPlan> {
-        match self.classify_submit_recovery_effect(
-            id,
-            request,
-            target_exposure.clone(),
-            live_order.is_some(),
-        )? {
-            SubmitRecoveryAction::Proceed => Ok(SubmitRecoveryPlan {
-                resolution: SubmitRecoveryResolution::Proceed,
-                effects: {
-                    self.record_submit_request(id, request, target_exposure)?;
-                    vec![]
-                },
-            }),
-            SubmitRecoveryAction::AwaitExchangeState => Ok(SubmitRecoveryPlan {
-                resolution: SubmitRecoveryResolution::AwaitExchangeState,
-                effects: vec![],
-            }),
-            SubmitRecoveryAction::RestoreLiveOrder => {
-                let order = live_order.expect("live order must exist for restore");
-                self.observe_live_open_order(id, order)?;
-                Ok(SubmitRecoveryPlan {
-                    resolution: SubmitRecoveryResolution::Succeeded,
-                    effects: vec![],
-                })
+    ) -> Result<executor::SubmitRecoveryPlan> {
+        let current_plan_submit = self.current_submit_recovery_request(id)?;
+        let live_order_observation = live_order.map(|order| OrderObservation {
+            order_id: order.order_id.clone(),
+            client_order_id: order.client_order_id.clone(),
+            side: order.side,
+            price: order.price,
+            quantity: order.qty,
+            realized_pnl: 0.0,
+            status: order.status,
+        });
+
+        let resolution = {
+            let grid = self
+                .grids
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+            let resolution = executor::recover_submit_effect(executor::SubmitRecoveryInput {
+                exchange_rules: &grid.exchange_rules,
+                previous_state: &grid.executor_state,
+                request,
+                target_exposure: &target_exposure,
+                current_exposure: &grid.current_exposure,
+                current_plan_submit: current_plan_submit.as_ref(),
+                live_order: live_order_observation.as_ref(),
+            });
+            match &resolution {
+                executor::SubmitRecoveryResolution::Proceed { state, .. }
+                | executor::SubmitRecoveryResolution::Recovered { state }
+                | executor::SubmitRecoveryResolution::Superseded { state } => {
+                    if state != &grid.executor_state {
+                        grid.executor_state = state.clone();
+                        grid.replacement_gate_reason = None;
+                    }
+                }
+                executor::SubmitRecoveryResolution::AwaitExchangeState => {}
             }
-            SubmitRecoveryAction::CompleteReceiptBacked => {
-                self.clear_pending_submit(id, &request.client_order_id)?;
-                Ok(SubmitRecoveryPlan {
-                    resolution: SubmitRecoveryResolution::Succeeded,
-                    effects: vec![],
-                })
+            resolution
+        };
+
+        let effects = match resolution {
+            executor::SubmitRecoveryResolution::Superseded { .. } => {
+                self.stage_superseding_effects(id)?
             }
-            SubmitRecoveryAction::Supersede => Ok(SubmitRecoveryPlan {
-                resolution: SubmitRecoveryResolution::Superseded,
-                effects: self.supersede_submit_effect(id, &request.client_order_id)?,
-            }),
-        }
+            _ => vec![],
+        };
+
+        Ok(executor::SubmitRecoveryPlan {
+            resolution,
+            effects,
+        })
     }
 
-    fn submit_effect_matches_current_plan(
+    fn current_submit_recovery_request(
         &self,
         id: &GridId,
-        request: &OrderRequest,
-        _target_exposure: grid_core::types::Exposure,
-    ) -> Result<bool> {
+    ) -> Result<Option<executor::PendingSubmitHint>> {
         let grid = self
             .grids
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         let Some(reference_price) = grid.reference_price else {
-            return Ok(false);
+            return Ok(None);
         };
 
         if matches!(grid.status, GridStatus::Paused) {
-            return Ok(false);
+            return Ok(None);
         }
 
         let mut planned_grid = grid.clone();
         planned_grid.executor_state = ExecutorState::empty(self.clock.now());
         let result = self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
 
-        Ok(matches!(
-            result.effects.as_slice(),
-            [GridEffect::SubmitOrder {
-                request: planned_request,
-                ..
-            }] if order_requests_match(planned_request, request, &planned_grid.exchange_rules)
-        ))
+        Ok(match result.effects.as_slice() {
+            [
+                GridEffect::SubmitOrder {
+                    request: planned_request,
+                    target_exposure,
+                },
+            ] => Some(executor::PendingSubmitHint {
+                request: planned_request.clone(),
+                target_exposure: target_exposure.clone(),
+            }),
+            _ => None,
+        })
     }
 
     pub fn list_grids(&self) -> Vec<&GridRuntime> {
@@ -521,7 +488,7 @@ impl GridManager {
         id: &GridId,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
-        submit_recovery_anchor: Option<SubmitRecoveryAnchor>,
+        pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
         self.observe_position(id, position)?;
         let observed_at = self.clock.now();
@@ -539,7 +506,7 @@ impl GridManager {
             reference_price: grid.reference_price,
             previous_state: Some(&previous_state),
             live_orders: &open_orders,
-            submit_recovery_anchor: submit_recovery_anchor.as_ref(),
+            pending_submit_hints: &pending_submit_hints,
             observed_at,
         });
 
@@ -582,6 +549,23 @@ impl GridManager {
 
                 let planned =
                     self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
+                let effects = planned
+                    .effects
+                    .iter()
+                    .filter(|effect| match effect {
+                        GridEffect::SubmitOrder { request, .. } => {
+                            !pending_submit_hints.iter().any(|hint| {
+                                executor::submit_requests_match(
+                                    &hint.request,
+                                    request,
+                                    &planned_grid.exchange_rules,
+                                )
+                            })
+                        }
+                        _ => true,
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let grid = self
                     .grids
                     .get_mut(id)
@@ -593,7 +577,7 @@ impl GridManager {
                 grid.reference_price = Some(reference_price);
                 grid.replacement_gate_reason = planned.replacement_gate_reason;
                 grid.executor_state = planned.executor_state;
-                Ok((planned.events, planned.effects))
+                Ok((planned.events, effects))
             }
         }
     }
@@ -611,11 +595,6 @@ impl GridManager {
             return Ok((vec![], vec![]));
         }
 
-        let suppress_effects_during_submit_recovery =
-            SubmitRecoveryAnchor::from_executor_state(&self.grids[&id].executor_state)
-                .map(|anchor| anchor.kind == crate::runtime::SubmitRecoveryKind::Submitting)
-                .unwrap_or(false);
-
         let grid = self
             .grids
             .get(id)
@@ -628,11 +607,7 @@ impl GridManager {
             replacement_gate_reason,
             executor_state,
         } = self.plan_inventory_execution_for_grid(grid, reference_price)?;
-        let effects = if suppress_effects_during_submit_recovery {
-            vec![GridEffect::NoOp]
-        } else {
-            planned_effects
-        };
+        let effects = planned_effects;
 
         let grid = self.grids.get_mut(id).unwrap();
         let replacement_gate_event = (grid.replacement_gate_reason != replacement_gate_reason)
@@ -654,12 +629,7 @@ impl GridManager {
         Ok((events, effects))
     }
 
-    fn supersede_submit_effect(
-        &mut self,
-        id: &GridId,
-        client_order_id: &str,
-    ) -> Result<Vec<GridEffect>> {
-        self.clear_pending_submit(id, client_order_id)?;
+    fn stage_superseding_effects(&mut self, id: &GridId) -> Result<Vec<GridEffect>> {
         let effects = self.plan_effects_for_current_state(id)?;
         if let [
             GridEffect::SubmitOrder {
@@ -748,59 +718,6 @@ impl GridManager {
             executor_state: plan.state,
         })
     }
-
-    fn classify_submit_recovery_effect(
-        &self,
-        id: &GridId,
-        request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
-        has_live_order: bool,
-    ) -> Result<SubmitRecoveryAction> {
-        let grid = self
-            .grids
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        if grid.executor_state.recovery_anomaly.is_some() {
-            return Ok(SubmitRecoveryAction::AwaitExchangeState);
-        }
-        let receipt_backed = grid
-            .executor_state
-            .slots
-            .iter()
-            .filter_map(|slot| slot.working_order.as_ref())
-            .find(|order| order.client_order_id == request.client_order_id)
-            .and_then(|order| order.order_id.as_ref())
-            .is_some();
-        let still_targeting_effect = grid
-            .target_exposure
-            .as_ref()
-            .map(|current_target| exposures_match(current_target, &target_exposure))
-            .unwrap_or(false);
-        let target_reached =
-            target_exposure_reached(grid.current_exposure.clone(), target_exposure.clone());
-
-        if receipt_backed {
-            if has_live_order {
-                return Ok(SubmitRecoveryAction::RestoreLiveOrder);
-            }
-
-            if target_reached {
-                return Ok(SubmitRecoveryAction::CompleteReceiptBacked);
-            }
-
-            return Ok(SubmitRecoveryAction::AwaitExchangeState);
-        }
-
-        if still_targeting_effect && target_reached {
-            return Ok(SubmitRecoveryAction::Supersede);
-        }
-
-        if !self.submit_effect_matches_current_plan(id, request, target_exposure)? {
-            return Ok(SubmitRecoveryAction::Supersede);
-        }
-
-        Ok(SubmitRecoveryAction::Proceed)
-    }
 }
 
 struct PlannedInventoryExecution {
@@ -812,39 +729,7 @@ struct PlannedInventoryExecution {
     executor_state: ExecutorState,
 }
 
-fn order_requests_match(
-    left: &OrderRequest,
-    right: &OrderRequest,
-    rules: &grid_core::types::ExchangeRules,
-) -> bool {
-    left.instrument == right.instrument
-        && left.side == right.side
-        && left.client_order_id == right.client_order_id
-        && rounded_values_match(left.price, right.price, rules.price_tick)
-        && rounded_values_match(left.quantity, right.quantity, rules.quantity_step)
-}
-
-fn exposures_match(left: &grid_core::types::Exposure, right: &grid_core::types::Exposure) -> bool {
-    (left.0 - right.0).abs() <= f64::EPSILON
-}
-
-fn target_exposure_reached(current_exposure: Exposure, target_exposure: Exposure) -> bool {
-    let delta = target_exposure.0 - current_exposure.0;
-    if delta.abs() <= f64::EPSILON {
-        return true;
-    }
-
-    if target_exposure.0.abs() <= f64::EPSILON {
-        return current_exposure.0.abs() <= f64::EPSILON;
-    }
-
-    if target_exposure.0 >= 0.0 {
-        current_exposure.0 >= target_exposure.0
-    } else {
-        current_exposure.0 <= target_exposure.0
-    }
-}
-
+#[cfg(test)]
 fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
     let tolerance = if step <= f64::EPSILON {
         f64::EPSILON * 16.0
@@ -1499,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_market_suppresses_replan_while_submit_recovery_anchor_exists() {
+    fn observe_market_keeps_submit_pending_slot_without_extra_effects() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
@@ -1534,11 +1419,23 @@ mod tests {
             Some(grid_core::types::Exposure(4.0))
         );
         assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
+        assert_eq!(
+            inventory_core_order_from_snapshot(&transition.snapshot),
+            Some(&working_order(
+                None,
+                "recover-1",
+                grid_core::types::Side::Buy,
+                94.0,
+                0.25,
+                grid_core::types::Exposure(6.0),
+                OrderStatus::Submitting,
+            ))
+        );
         assert_eq!(transition.effects, vec![GridEffect::NoOp]);
     }
 
     #[test]
-    fn observe_market_records_submit_recovery_anchor_for_new_submit_effect() {
+    fn observe_market_records_submit_pending_slot_for_new_submit_effect() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
@@ -1986,7 +1883,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(recovery.resolution, SubmitRecoveryResolution::Superseded);
+        assert!(matches!(
+            recovery.resolution,
+            executor::SubmitRecoveryResolution::Superseded { .. }
+        ));
         assert!(recovery.effects.is_empty());
         assert!(inventory_core_order(manager.get_grid("btc-core").unwrap()).is_none());
     }
@@ -2026,7 +1926,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(recovery.resolution, SubmitRecoveryResolution::Superseded);
+        assert!(matches!(
+            recovery.resolution,
+            executor::SubmitRecoveryResolution::Superseded { .. }
+        ));
         assert!(matches!(
             recovery.effects.as_slice(),
             [GridEffect::SubmitOrder {
@@ -2071,7 +1974,8 @@ mod tests {
             min_qty: 0.0,
             min_notional: 0.0,
         };
-        grid.target_exposure = Some(grid_core::strategy::target_exposure(94.99, &grid.config));
+        let expected_target = grid_core::strategy::target_exposure(94.99, &grid.config);
+        grid.target_exposure = Some(expected_target.clone());
         seed_executor_slot(
             grid,
             working_order(
@@ -2101,7 +2005,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(recovery.resolution, SubmitRecoveryResolution::Proceed);
+        assert!(matches!(
+            recovery.resolution,
+            executor::SubmitRecoveryResolution::Proceed { .. }
+        ));
         assert!(recovery.effects.is_empty());
         assert!(matches!(
             inventory_core_order(manager.get_grid("btc-core").unwrap()),
@@ -2117,7 +2024,7 @@ mod tests {
             }) if client_order_id == "btc-core-reconcile"
                 && (*price - 90.0).abs() < f64::EPSILON
                 && (*quantity - 4.0).abs() < f64::EPSILON
-                && *target_exposure == grid_core::types::Exposure(4.0)
+                && *target_exposure == expected_target
         ));
     }
 
@@ -2202,7 +2109,7 @@ mod tests {
                     unrealized_pnl: 12.5,
                 },
                 vec![],
-                None,
+                vec![],
             )
             .unwrap();
 
@@ -2249,10 +2156,7 @@ mod tests {
                     realized_pnl: 0.0,
                     status: OrderStatus::New,
                 }],
-                Some(SubmitRecoveryAnchor {
-                    client_order_id: "restore-1".into(),
-                    kind: crate::runtime::SubmitRecoveryKind::Submitting,
-                }),
+                vec![],
             )
             .unwrap();
 
@@ -2292,7 +2196,7 @@ mod tests {
                     unrealized_pnl: 3.0,
                 },
                 vec![],
-                None,
+                vec![],
             )
             .unwrap();
 
@@ -2336,10 +2240,16 @@ mod tests {
                     unrealized_pnl: 3.0,
                 },
                 vec![],
-                Some(SubmitRecoveryAnchor {
-                    client_order_id: "restore-1".into(),
-                    kind: crate::runtime::SubmitRecoveryKind::ReceiptBacked,
-                }),
+                vec![executor::PendingSubmitHint {
+                    request: OrderRequest {
+                        instrument: test_instrument("BTCUSDT"),
+                        client_order_id: "restore-1".into(),
+                        side: grid_core::types::Side::Buy,
+                        price: 94.5,
+                        quantity: 0.25,
+                    },
+                    target_exposure: grid_core::types::Exposure(6.0),
+                }],
             )
             .unwrap();
 
@@ -2368,10 +2278,7 @@ mod tests {
                     unrealized_pnl: 3.0,
                 },
                 vec![],
-                Some(SubmitRecoveryAnchor {
-                    client_order_id: "legacy-submit".into(),
-                    kind: crate::runtime::SubmitRecoveryKind::Submitting,
-                }),
+                vec![],
             )
             .unwrap();
 
@@ -2421,7 +2328,7 @@ mod tests {
                     realized_pnl: -5.0,
                     status: OrderStatus::PartiallyFilled,
                 }],
-                None,
+                vec![],
             )
             .unwrap();
 
@@ -2469,7 +2376,7 @@ mod tests {
                         status: OrderStatus::New,
                     },
                 ],
-                None,
+                vec![],
             )
             .unwrap();
 
