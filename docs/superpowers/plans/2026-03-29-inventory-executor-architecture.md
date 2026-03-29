@@ -129,7 +129,7 @@ git commit -m "refactor(engine): add inventory executor runtime state"
 - Test: `engine/src/reconciler.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: 在 `engine/src/executor.rs` 写失败测试，锁住 `Passive / Rebalance / CatchUp` 的模式切换**
+- [x] **Step 1: 在 `engine/src/executor.rs` 写失败测试，锁住 `Passive / Rebalance / CatchUp` 的模式切换**
 
 测试至少覆盖：
 - 小偏差进入 `Passive`
@@ -138,7 +138,7 @@ git commit -m "refactor(engine): add inventory executor runtime state"
 - 规划过程中会更新 `last_execution_reason`
 - 规划过程中会更新累计统计
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine executor::tests::plans_execution_mode_from_gap_and_age -- --exact`
@@ -146,14 +146,14 @@ Run:
 Expected:
 编译失败，因为执行器规划逻辑还不存在。
 
-- [ ] **Step 3: 在 `engine/src/manager.rs` 写失败测试，锁住“先算 `DesiredOrders`，再 diff 工作集”的主路径**
+- [x] **Step 3: 在 `engine/src/manager.rs` 写失败测试，锁住“先算 `DesiredOrders`，再 diff 工作集”的主路径**
 
 测试至少覆盖：
 - 市场观察后不会直接写单笔 `SubmitOrder`，而是通过执行器决定 effect
 - `DesiredOrders` 与当前槽位工作集等价时返回 `NoOp`
 - 常规改挂不生成 `CancelAll`
 
-- [ ] **Step 4: 运行定向测试确认失败**
+- [x] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine manager::tests::observe_market_plans_through_inventory_executor -- --exact`
@@ -162,7 +162,7 @@ Run:
 Expected:
 测试失败，因为当前 `manager` / `reconciler` 仍然是单订单路径。
 
-- [ ] **Step 5: 做最小实现，把规划收回执行器**
+- [x] **Step 5: 做最小实现，把规划收回执行器**
 
 要求：
 - `reconciler` 只返回高层 `target_exposure` 和事件
@@ -173,7 +173,7 @@ Expected:
 - 正常路径不再默认使用 `CancelAll + SubmitOrder`
 - 执行器同步更新当前诊断与累计统计
 
-- [ ] **Step 6: 运行 Task 2 的定向测试**
+- [x] **Step 6: 运行 Task 2 的定向测试**
 
 Run:
 `cargo test -p grid-engine executor::tests:: -- --nocapture`

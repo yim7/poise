@@ -5,16 +5,21 @@ use anyhow::{Result, bail};
 use grid_core::events::DomainEvent;
 use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
+use grid_core::types::Exposure;
 use grid_core::types::ExchangeRules;
 
 use crate::command::GridCommand;
+use crate::executor::{self, ExecutionMode, OrderRole, OrderSlot};
 use crate::grid::{GridId, Instrument};
 use crate::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
 };
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
-use crate::runtime::{GridRuntime, GridStatus, PendingOrder, SubmitRecoveryAnchor};
+use crate::runtime::{
+    ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, PendingOrder,
+    SlotState, SubmitRecoveryAnchor, WorkingOrder,
+};
 use crate::snapshot::GridRuntimeSnapshot;
 use crate::transition::{GridEffect, GridTransition};
 
@@ -178,7 +183,7 @@ impl GridManager {
                 Some(reference_price) => {
                     let mut resumed = grid.clone();
                     resumed.status = GridStatus::WaitingMarketData;
-                    let result = reconciler::reconcile(&resumed, reference_price);
+                    let result = self.plan_inventory_execution_for_grid(&resumed, reference_price)?;
                     Some((
                         result.new_status.unwrap_or(GridStatus::Active),
                         result.target_exposure,
@@ -375,7 +380,8 @@ impl GridManager {
 
         let mut planned_grid = grid.clone();
         planned_grid.pending_order = None;
-        let result = reconciler::reconcile(&planned_grid, reference_price);
+        planned_grid.executor_state = None;
+        let result = self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
 
         Ok(matches!(
             result.effects.as_slice(),
@@ -588,41 +594,35 @@ impl GridManager {
             .grids
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let result = reconciler::reconcile(grid, reference_price);
+        let PlannedInventoryExecution {
+            mut events,
+            effects: planned_effects,
+            target_exposure,
+            new_status,
+            replacement_gate_reason,
+            executor_state,
+        } = self.plan_inventory_execution_for_grid(grid, reference_price)?;
         let effects = if suppress_effects_during_submit_recovery {
             vec![GridEffect::NoOp]
         } else {
-            result.effects
+            planned_effects
         };
 
         let grid = self.grids.get_mut(id).unwrap();
         let replacement_gate_event = (grid.replacement_gate_reason
-            != result.replacement_gate_reason)
-            .then(|| result.replacement_gate_reason.clone())
+            != replacement_gate_reason)
+            .then(|| replacement_gate_reason.clone())
             .flatten()
             .map(|reason| DomainEvent::PendingOrderKept { reason });
-        if let Some(new_status) = result.new_status {
+        if let Some(new_status) = new_status {
             grid.status = new_status;
         }
-        grid.target_exposure = Some(result.target_exposure);
+        grid.target_exposure = Some(target_exposure);
         grid.reference_price = Some(reference_price);
-        grid.replacement_gate_reason = result.replacement_gate_reason;
-        if grid.pending_order.is_none() {
-            if let [
-                GridEffect::SubmitOrder {
-                    request,
-                    target_exposure,
-                },
-            ] = effects.as_slice()
-            {
-                grid.pending_order = Some(PendingOrder::from_submit_request(
-                    request,
-                    target_exposure.clone(),
-                ));
-            }
-        }
+        grid.replacement_gate_reason = replacement_gate_reason;
+        grid.executor_state = Some(executor_state);
+        sync_pending_order_from_effects(grid, &effects);
 
-        let mut events = result.events;
         if let Some(event) = replacement_gate_event {
             events.push(event);
         }
@@ -676,11 +676,73 @@ impl GridManager {
             return Ok(vec![]);
         }
 
-        Ok(reconciler::reconcile(grid, reference_price)
+        Ok(self
+            .plan_inventory_execution_for_grid(grid, reference_price)?
             .effects
             .into_iter()
             .filter(|effect| !matches!(effect, GridEffect::NoOp))
             .collect())
+    }
+
+    fn plan_inventory_execution_for_grid(
+        &self,
+        grid: &GridRuntime,
+        reference_price: f64,
+    ) -> Result<PlannedInventoryExecution> {
+        let target = reconciler::reconcile_target(grid, reference_price);
+        let observed_at = self.clock.now();
+        let legacy_state = if grid.executor_state.is_none() {
+            legacy_executor_state_from_pending_order(grid, observed_at)
+        } else {
+            None
+        };
+        if target.suppress_execution {
+            return Ok(PlannedInventoryExecution {
+                events: target.events,
+                effects: vec![GridEffect::NoOp],
+                target_exposure: target.target_exposure.clone(),
+                new_status: target.new_status,
+                replacement_gate_reason: None,
+                executor_state: grid
+                    .executor_state
+                    .clone()
+                    .or(legacy_state)
+                    .unwrap_or_else(|| ExecutorState {
+                        mode: ExecutionMode::Passive,
+                        inventory_gap: grid.current_exposure.delta(&target.target_exposure),
+                        gap_started_at: None,
+                        last_reprice_at: None,
+                        slots: vec![],
+                        last_execution_reason: None,
+                        stats: ExecutionStats {
+                            started_at: observed_at,
+                            max_inventory_gap_abs: Exposure(0.0),
+                            max_gap_age_ms: 0,
+                        },
+                    }),
+            });
+        }
+        let executor_state = grid.executor_state.as_ref().or(legacy_state.as_ref());
+        let plan = executor::plan(executor::ExecutorInput {
+            grid_id: &grid.id,
+            instrument: &grid.instrument,
+            exchange_rules: &grid.exchange_rules,
+            base_qty_per_unit: grid.config.base_qty_per_unit(),
+            current_exposure: grid.current_exposure.clone(),
+            target_exposure: target.target_exposure.clone(),
+            reference_price,
+            executor_state,
+            observed_at,
+        });
+
+        Ok(PlannedInventoryExecution {
+            events: target.events,
+            effects: plan.effects,
+            target_exposure: target.target_exposure,
+            new_status: target.new_status,
+            replacement_gate_reason: plan.replacement_gate_reason,
+            executor_state: plan.state,
+        })
     }
 
     fn classify_submit_recovery_effect(
@@ -735,6 +797,90 @@ impl GridManager {
     }
 }
 
+struct PlannedInventoryExecution {
+    events: Vec<DomainEvent>,
+    effects: Vec<GridEffect>,
+    target_exposure: Exposure,
+    new_status: Option<GridStatus>,
+    replacement_gate_reason: Option<grid_core::events::ReplacementGateReason>,
+    executor_state: ExecutorState,
+}
+
+fn legacy_executor_state_from_pending_order(
+    grid: &GridRuntime,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> Option<ExecutorState> {
+    let pending_order = grid.pending_order.as_ref()?;
+    Some(ExecutorState {
+        mode: ExecutionMode::Passive,
+        inventory_gap: grid.current_exposure.delta(&pending_order.target_exposure),
+        gap_started_at: Some(observed_at),
+        last_reprice_at: None,
+        slots: vec![ExecutionSlot {
+            slot: OrderSlot::new("inventory_core"),
+            state: if pending_order.is_submit_recovery_anchor() {
+                SlotState::SubmitPending
+            } else {
+                SlotState::Working
+            },
+            working_order: Some(WorkingOrder {
+                order_id: pending_order.order_id.clone(),
+                client_order_id: pending_order.client_order_id.clone(),
+                side: pending_order.side,
+                price: pending_order.price,
+                quantity: pending_order.quantity,
+                target_exposure: pending_order.target_exposure.clone(),
+                status: pending_order.status,
+                role: match pending_order.side {
+                    grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                    grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+                },
+                in_flight_effect_id: None,
+            }),
+        }],
+        last_execution_reason: None,
+        stats: grid
+            .executor_state
+            .as_ref()
+            .map(|state| state.stats.clone())
+            .unwrap_or(ExecutionStats {
+                started_at: observed_at,
+                max_inventory_gap_abs: Exposure(0.0),
+                max_gap_age_ms: 0,
+            }),
+    })
+}
+
+fn sync_pending_order_from_effects(grid: &mut GridRuntime, effects: &[GridEffect]) {
+    match effects {
+        [GridEffect::SubmitOrder {
+            request,
+            target_exposure,
+        }] => {
+            grid.pending_order = Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            ));
+        }
+        [
+            GridEffect::CancelOrder { .. },
+            GridEffect::SubmitOrder {
+                request,
+                target_exposure,
+            },
+        ] => {
+            grid.pending_order = Some(PendingOrder::from_submit_request(
+                request,
+                target_exposure.clone(),
+            ));
+        }
+        [GridEffect::CancelOrder { .. }] => {
+            grid.pending_order = None;
+        }
+        _ => {}
+    }
+}
+
 fn order_requests_match(
     left: &OrderRequest,
     right: &OrderRequest,
@@ -763,8 +909,12 @@ fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
-    use crate::runtime::{GridStatus, PendingOrder, RiskState};
+    use crate::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
+        SlotState, WorkingOrder,
+    };
     use chrono::{TimeZone, Utc};
     use grid_core::events::ReplacementGateReason;
     use grid_core::strategy::*;
@@ -878,6 +1028,36 @@ mod tests {
         grid.reference_price = Some(95.0);
         grid.out_of_band_since = Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap());
         grid
+    }
+
+    fn passive_executor_state_with_matching_buy_order() -> ExecutorState {
+        ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: grid_core::types::Exposure(4.0),
+            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    target_exposure: grid_core::types::Exposure(4.0),
+                    status: OrderStatus::New,
+                    role: OrderRole::IncreaseInventory,
+                    in_flight_effect_id: None,
+                }),
+            }],
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            stats: ExecutionStats {
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
+                max_inventory_gap_abs: grid_core::types::Exposure(4.0),
+                max_gap_age_ms: 0,
+            },
+        }
     }
 
     fn test_manager_with_active_grid() -> GridManager {
@@ -1090,6 +1270,66 @@ mod tests {
         assert!(!transition.effects.is_empty());
         assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
         assert!(!transition.events.is_empty());
+    }
+
+    #[test]
+    fn observe_market_plans_through_inventory_executor() {
+        let mut manager = test_manager_with_active_grid();
+        let transition = manager
+            .observe(
+                &GridId::new("btc-core"),
+                crate::observation::GridObservation::Market(
+                    crate::observation::MarketObservation {
+                        reference_price: 95.0,
+                    },
+                ),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [GridEffect::SubmitOrder { .. }]
+        ));
+        assert!(transition
+            .snapshot
+            .executor_state
+            .as_ref()
+            .map(|state| !state.slots.is_empty())
+            .unwrap_or(false));
+        assert!(
+            !transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, GridEffect::CancelAll { .. }))
+        );
+    }
+
+    #[test]
+    fn executor_noop_when_working_orders_match_desired_orders() {
+        let mut manager = test_manager_with_active_grid();
+        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.executor_state = Some(passive_executor_state_with_matching_buy_order());
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc-core"),
+                crate::observation::GridObservation::Market(
+                    crate::observation::MarketObservation {
+                        reference_price: 95.0,
+                    },
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        let executor_state = transition.snapshot.executor_state.unwrap();
+        assert_eq!(executor_state.slots.len(), 1);
+        assert_eq!(
+            executor_state.slots,
+            passive_executor_state_with_matching_buy_order().slots
+        );
     }
 
     #[test]

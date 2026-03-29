@@ -19,6 +19,13 @@ pub struct ReconcileResult {
     pub replacement_gate_reason: Option<ReplacementGateReason>,
 }
 
+pub struct TargetReconcileResult {
+    pub events: Vec<DomainEvent>,
+    pub target_exposure: Exposure,
+    pub new_status: Option<GridStatus>,
+    pub suppress_execution: bool,
+}
+
 /// 纯函数：给定实例当前状态、价格和风控预算，返回执行计划。
 ///
 /// 这是 engine 的核心协调逻辑：
@@ -27,54 +34,11 @@ pub struct ReconcileResult {
 /// 3. 调用 core::evaluate_risk 风控拦截
 /// 4. 生成 effect 列表（数据，不是 IO）
 pub fn reconcile(grid: &GridRuntime, reference_price: f64) -> ReconcileResult {
-    let band = strategy::band_status(reference_price, &grid.config);
-
-    let (target, new_status) = match &band {
-        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(grid)),
-        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(grid, *policy),
-    };
-
-    let intent = ExposureIntent {
-        current: grid.current_exposure.clone(),
-        target: target.clone(),
-        unit_notional: grid.config.notional_per_unit,
-        realized_pnl_today: grid.risk_state.realized_pnl_today,
-        unrealized_pnl: grid.risk_state.unrealized_pnl,
-    };
-
-    let decision = risk::evaluate_risk(&intent, &grid.budget);
-
-    let (approved_target, mut events) = match decision {
-        RiskDecision::Allow(t) => (t, vec![]),
-        RiskDecision::Cap(t) => {
-            let events = vec![DomainEvent::RiskCapApplied {
-                intended: target.clone(),
-                capped: t.clone(),
-            }];
-            (t, events)
-        }
-        RiskDecision::Deny { reason } => {
-            return ReconcileResult {
-                effects: vec![ExecutionAction::NoOp],
-                events: vec![DomainEvent::RiskDenied { reason }],
-                target_exposure: grid.current_exposure.clone(),
-                new_status: None,
-                replacement_gate_reason: None,
-            };
-        }
-    };
-
-    // 带外 Freeze/Hold：保留离开带之前最后一个 target_exposure，并避免为了追赶 frozen target 而继续加风险。
-    let would_increase_risk_out_of_band = matches!(
-        band,
-        BandStatus::OutOfBand {
-            policy: OutOfBandPolicy::Freeze | OutOfBandPolicy::Hold,
-            ..
-        }
-    ) && approved_target.0.abs()
-        > grid.current_exposure.0.abs();
-
-    if would_increase_risk_out_of_band {
+    let target = reconcile_target(grid, reference_price);
+    let approved_target = target.target_exposure.clone();
+    let events = target.events.clone();
+    let new_status = target.new_status.clone();
+    if target.suppress_execution {
         return ReconcileResult {
             effects: vec![ExecutionAction::NoOp],
             events,
@@ -94,11 +58,6 @@ pub fn reconcile(grid: &GridRuntime, reference_price: f64) -> ReconcileResult {
             replacement_gate_reason: None,
         };
     }
-
-    events.push(DomainEvent::ExposureTargetChanged {
-        from: grid.current_exposure.clone(),
-        to: approved_target.clone(),
-    });
 
     let side = Side::from_exposure(&delta).expect("non-zero delta must have side");
     let rules = &grid.exchange_rules;
@@ -170,6 +129,85 @@ pub fn reconcile(grid: &GridRuntime, reference_price: f64) -> ReconcileResult {
         target_exposure: approved_target,
         new_status,
         replacement_gate_reason: None,
+    }
+}
+
+pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetReconcileResult {
+    let band = strategy::band_status(reference_price, &grid.config);
+
+    let (target, new_status) = match &band {
+        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(grid)),
+        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(grid, *policy),
+    };
+
+    let intent = ExposureIntent {
+        current: grid.current_exposure.clone(),
+        target: target.clone(),
+        unit_notional: grid.config.notional_per_unit,
+        realized_pnl_today: grid.risk_state.realized_pnl_today,
+        unrealized_pnl: grid.risk_state.unrealized_pnl,
+    };
+
+    let decision = risk::evaluate_risk(&intent, &grid.budget);
+
+    let (approved_target, mut events) = match decision {
+        RiskDecision::Allow(t) => (t, vec![]),
+        RiskDecision::Cap(t) => {
+            let events = vec![DomainEvent::RiskCapApplied {
+                intended: target.clone(),
+                capped: t.clone(),
+            }];
+            (t, events)
+        }
+        RiskDecision::Deny { reason } => {
+            return TargetReconcileResult {
+                events: vec![DomainEvent::RiskDenied { reason }],
+                target_exposure: grid.current_exposure.clone(),
+                new_status: None,
+                suppress_execution: true,
+            };
+        }
+    };
+
+    // 带外 Freeze/Hold：保留离开带之前最后一个 target_exposure，并避免为了追赶 frozen target 而继续加风险。
+    let would_increase_risk_out_of_band = matches!(
+        band,
+        BandStatus::OutOfBand {
+            policy: OutOfBandPolicy::Freeze | OutOfBandPolicy::Hold,
+            ..
+        }
+    ) && approved_target.0.abs()
+        > grid.current_exposure.0.abs();
+
+    if would_increase_risk_out_of_band {
+        return TargetReconcileResult {
+            events,
+            target_exposure: approved_target,
+            new_status,
+            suppress_execution: true,
+        };
+    }
+
+    let delta = grid.current_exposure.delta(&approved_target);
+    if delta.is_zero() {
+        return TargetReconcileResult {
+            events,
+            target_exposure: approved_target,
+            new_status,
+            suppress_execution: true,
+        };
+    }
+
+    events.push(DomainEvent::ExposureTargetChanged {
+        from: grid.current_exposure.clone(),
+        to: approved_target.clone(),
+    });
+
+    TargetReconcileResult {
+        events,
+        target_exposure: approved_target,
+        new_status,
+        suppress_execution: false,
     }
 }
 
