@@ -197,14 +197,14 @@ git commit -m "refactor(server): move submit recovery into executor"
 - Test: `server/src/write_service.rs`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 在 `server/src/write_service.rs` 写失败测试，锁住同 `grid` 串行、不同 `grid` 可并行**
+- [x] **Step 1: 在 `server/src/write_service.rs` 写失败测试，锁住同 `grid` 串行、不同 `grid` 可并行**
 
 测试至少覆盖：
 - 同一个 `grid` 的两次 mutation 仍按顺序提交
 - 两个不同 `grid` 的 mutation 不共享同一把全局锁
 - `recover_submit_effect()` 和常规 `mutate_grid()` 使用同一套按 `grid` 串行规则
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server write_service::tests::mutations_for_same_grid_remain_serialized -- --exact`
@@ -213,7 +213,7 @@ Run:
 Expected:
 测试失败，因为当前 `write_service` 仍只有全局 `mutation_lock`。
 
-- [ ] **Step 3: 做最小实现，把 `write_service` 改为按 `grid` 串行**
+- [x] **Step 3: 做最小实现，把 `write_service` 改为按 `grid` 串行**
 
 要求：
 - 用按 `GridId` 索引的锁表替换单一 `mutation_lock`
@@ -221,7 +221,7 @@ Expected:
 - 保持持久化事务与通知顺序不变
 - 不引入 actor；这一步只收紧现有 `write_service` 的串行粒度
 
-- [ ] **Step 4: 运行 Task 3 的定向测试**
+- [x] **Step 4: 运行 Task 3 的定向测试**
 
 Run:
 `cargo test -p grid-server write_service::tests:: -- --nocapture`
@@ -230,7 +230,10 @@ Run:
 Expected:
 写侧并发测试通过，现有 runtime 集成测试无回归。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
+
+Task 3 code commit:
+`8437513b5c13d17c4b0096c28d661d4300c7f10e`
 
 ```bash
 git add server/src/write_service.rs server/src/runtime.rs
