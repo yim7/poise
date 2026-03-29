@@ -274,7 +274,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::ExchangeRules;
+    use grid_core::types::{ExchangeRules, Exposure, Side};
+    use grid_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::manager::GridManager;
     use grid_engine::ports::{
@@ -283,7 +284,8 @@ mod tests {
         OrderStatus, PersistedGridEffect, Position, StateRepositoryPort, StoredDomainEvent,
         StoredGridSnapshot,
     };
-    use grid_engine::runtime::SlotState;
+    use grid_engine::runtime::{ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState};
+    use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
@@ -352,6 +354,63 @@ mod tests {
         assert_eq!(effect.status, EffectStatus::Succeeded);
     }
 
+    #[tokio::test]
+    async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        repository
+            .seed_snapshot("btc-core", snapshot_with_recovery_anomaly())
+            .await;
+        repository
+            .seed_effect(PersistedGridEffect {
+                effect_id: "btc-core:batch:0".into(),
+                grid_id: GridId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: GridEffect::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            let snapshot = snapshot_with_recovery_anomaly();
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        assert!(exchange.effects.lock().await.is_empty());
+        let effect = repository
+            .list_all_effects()
+            .await
+            .into_iter()
+            .next()
+            .expect("submit effect should remain pending");
+        assert_eq!(effect.status, EffectStatus::Pending);
+    }
+
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
@@ -393,6 +452,38 @@ mod tests {
 
     fn btc_instrument() -> Instrument {
         Instrument::new(Venue::Binance, "BTCUSDT")
+    }
+
+    fn snapshot_with_recovery_anomaly() -> GridRuntimeSnapshot {
+        GridRuntimeSnapshot {
+            grid_id: GridId::new("btc-core"),
+            instrument: btc_instrument(),
+            config: test_config(),
+            status: GridStatus::Active,
+            current_exposure: Exposure(0.0),
+            target_exposure: Some(Exposure(6.0)),
+            pending_order: None,
+            executor_state: Some(ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(6.0),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                slots: vec![],
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: Some(RecoveryAnomaly::UnknownLiveOrder),
+                stats: ExecutionStats {
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
+                    max_inventory_gap_abs: Exposure(6.0),
+                    max_gap_age_ms: 0,
+                },
+            }),
+            replacement_gate_reason: None,
+            risk: RiskState::default(),
+            observed: ObservedState {
+                reference_price: Some(95.0),
+                out_of_band_since: None,
+            },
+        }
     }
 
     fn test_config() -> GridConfig {
@@ -491,6 +582,10 @@ mod tests {
             snapshot: grid_engine::snapshot::GridRuntimeSnapshot,
         ) {
             self.snapshots.lock().await.insert(id.to_string(), snapshot);
+        }
+
+        async fn seed_effect(&self, effect: PersistedGridEffect) {
+            self.effects.lock().await.push(effect);
         }
 
         async fn list_all_effects(&self) -> Vec<PersistedGridEffect> {

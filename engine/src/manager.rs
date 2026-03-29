@@ -872,6 +872,14 @@ impl GridManager {
             .grids
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+        if grid
+            .executor_state
+            .as_ref()
+            .and_then(|state| state.recovery_anomaly.as_ref())
+            .is_some()
+        {
+            return Ok(SubmitRecoveryAction::AwaitExchangeState);
+        }
         let receipt_backed = grid
             .executor_state
             .as_ref()
@@ -2324,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_preserves_recovery_slot_without_emitting_effects() {
+    fn sync_exchange_state_marks_attention_required_when_receipt_backed_order_is_missing() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let pending_order = PendingOrder {
@@ -2359,48 +2367,17 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            transition.events,
-            vec![DomainEvent::ExposureTargetChanged {
-                from: grid_core::types::Exposure(2.0),
-                to: grid_core::types::Exposure(4.0),
-            }]
-        );
-        assert!(transition.effects.is_empty());
+        assert!(transition.events.is_empty());
+        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.target_exposure, Some(grid_core::types::Exposure(4.0)));
-        assert_eq!(
-            grid.pending_order,
-            Some(PendingOrder {
-                order_id: Some("restore-1".into()),
-                client_order_id: "restore-1".into(),
-                side: grid_core::types::Side::Buy,
-                price: 94.5,
-                quantity: 0.25,
-                target_exposure: grid_core::types::Exposure(6.0),
-                status: OrderStatus::New,
-            })
-        );
+        assert_eq!(grid.target_exposure, Some(grid_core::types::Exposure(6.0)));
+        assert!(grid.pending_order.is_none());
         assert_eq!(
             grid.executor_state
                 .as_ref()
-                .map(|state| state.slots.clone())
-                .unwrap_or_default(),
-            vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("restore-1".into()),
-                    client_order_id: "restore-1".into(),
-                    side: grid_core::types::Side::Buy,
-                    price: 94.5,
-                    quantity: 0.25,
-                    target_exposure: grid_core::types::Exposure(6.0),
-                    status: OrderStatus::New,
-                    role: OrderRole::IncreaseInventory,
-                }),
-            }]
+                .and_then(|state| state.recovery_anomaly.as_ref()),
+            Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
     }
 

@@ -107,7 +107,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                apply_user_data_event(&self.state, &grid_id, event)
+                apply_user_data_event(&self.state, &self.exchange, &grid_id, event)
                     .await
                     .map_err(mutate_error)?;
             }
@@ -180,6 +180,7 @@ impl ServerRuntime {
         startup_cutoff: chrono::DateTime<chrono::Utc>,
     ) -> JoinHandle<()> {
         let state = self.state.clone();
+        let exchange = Arc::clone(&self.exchange);
 
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
@@ -196,7 +197,8 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                if let Err(error) = apply_user_data_event(&state, &grid_id, event).await {
+                if let Err(error) = apply_user_data_event(&state, &exchange, &grid_id, event).await
+                {
                     tracing::warn!(
                         "failed to apply user data update for {}: {}",
                         instrument.symbol,
@@ -211,9 +213,15 @@ impl ServerRuntime {
 
 async fn apply_user_data_event(
     state: &ServerState,
+    exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), GridMutationError> {
+    if grid_has_recovery_anomaly(state, grid_id).await? {
+        return sync_exchange_state_from_exchange(state, exchange, grid_id, event.instrument())
+            .await;
+    }
+
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
@@ -231,6 +239,55 @@ async fn apply_user_data_event(
         }
     }
 
+    Ok(())
+}
+
+async fn grid_has_recovery_anomaly(
+    state: &ServerState,
+    grid_id: &str,
+) -> std::result::Result<bool, GridMutationError> {
+    let snapshot = state
+        .effect_service
+        .load_grid_state(grid_id)
+        .await
+        .map_err(GridMutationError::Persistence)?
+        .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{grid_id}` not found")))?;
+    Ok(snapshot
+        .executor_state
+        .as_ref()
+        .and_then(|executor_state| executor_state.recovery_anomaly.as_ref())
+        .is_some())
+}
+
+async fn sync_exchange_state_from_exchange(
+    state: &ServerState,
+    exchange: &Arc<dyn ExchangePort>,
+    grid_id: &str,
+    instrument: &grid_engine::grid::Instrument,
+) -> std::result::Result<(), GridMutationError> {
+    let position = exchange
+        .get_position(instrument)
+        .await
+        .map_err(GridMutationError::Persistence)?;
+    let open_orders = exchange
+        .get_open_orders(instrument)
+        .await
+        .map_err(GridMutationError::Persistence)?;
+    let submit_recovery_anchor = state
+        .effect_service
+        .submit_recovery_anchor(grid_id)
+        .await
+        .map_err(GridMutationError::Persistence)?;
+    let _ = state
+        .write_service
+        .sync_exchange_state(
+            grid_id,
+            position_observation(&position),
+            open_orders.iter().map(order_observation).collect(),
+            submit_recovery_anchor,
+        )
+        .await
+        .map_err(preserve_grid_mutation_error)?;
     Ok(())
 }
 
@@ -961,8 +1018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_worker_completes_submit_without_retry_when_receipt_snapshot_has_no_live_order_and_target_reached()
-     {
+    async fn effect_worker_keeps_receipt_backed_submit_pending_when_attention_required_is_active() {
         let mut snapshot = test_snapshot();
         snapshot.pending_order = Some(PendingOrder {
             order_id: Some("order-restored".into()),
@@ -1009,24 +1065,28 @@ mod tests {
 
         let handles = fixture.runtime.start().await.unwrap();
 
-        wait_until_async(|| {
-            let persistence = fixture.persistence.clone();
-            async move {
-                persistence.all_effects().await.iter().any(|effect| {
-                    effect.effect_id == "BTCUSDT:recovery:0"
-                        && effect.status == EffectStatus::Succeeded
-                })
-            }
-        })
-        .await;
-
         assert!(
             fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
-            "when target exposure is already reached, recovery should complete without a duplicate submit"
+            "attention_required should block duplicate submit attempts"
+        );
+        let effects = fixture.persistence.all_effects().await;
+        assert_eq!(
+            effects
+                .iter()
+                .find(|effect| effect.effect_id == "BTCUSDT:recovery:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Pending)
         );
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.pending_order, None);
         assert_eq!(instance.current_exposure, Exposure(6.0));
+        assert_eq!(
+            instance
+                .executor_state
+                .as_ref()
+                .and_then(|state| state.recovery_anomaly.as_ref()),
+            Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+        );
 
         shutdown(handles).await;
     }
@@ -1803,7 +1863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_rebuilds_slot_workset_before_replanning() {
+    async fn startup_sync_restores_claimed_live_order_before_replanning() {
         let snapshot = test_snapshot();
         let live_order = btc_exchange_order(
             "live-1",
@@ -1845,15 +1905,15 @@ mod tests {
             executor_state.slots.as_slice(),
             [grid_engine::runtime::ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
-                state: SlotState::SubmitPending,
+                state: SlotState::Working,
                 working_order: Some(grid_engine::runtime::WorkingOrder {
-                    order_id: None,
-                    client_order_id: "BTCUSDT-reconcile".into(),
+                    order_id: Some("live-1".into()),
+                    client_order_id: "live-1".into(),
                     side: Side::Buy,
-                    price: 95.0,
-                    quantity: 7.5,
-                    target_exposure: Exposure(4.0),
-                    status: OrderStatus::Submitting,
+                    price: 94.5,
+                    quantity: 0.25,
+                    target_exposure: Exposure(6.0),
+                    status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
             }]
@@ -2015,6 +2075,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_sync_marks_attention_required_when_receipt_backed_submit_has_no_live_order() {
+        let mut snapshot = test_snapshot();
+        snapshot.pending_order = Some(PendingOrder {
+            order_id: Some("receipt-1".into()),
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 94.0,
+            quantity: 0.25,
+            target_exposure: Exposure(6.0),
+            status: OrderStatus::New,
+        });
+        sync_executor_state_from_pending(&mut snapshot);
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(7.5, 3.0),
+            vec![],
+            test_budget(),
+        )
+        .await;
+        fixture
+            .persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:startup:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "startup".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance
+                .executor_state
+                .as_ref()
+                .and_then(|state| state.recovery_anomaly.as_ref())
+                == Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+        })
+        .await;
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn startup_sync_clears_orphaned_submitting_anchor_without_pending_effect() {
         let mut snapshot = test_snapshot();
         snapshot.pending_order = Some(PendingOrder {
@@ -2104,6 +2224,62 @@ mod tests {
             Some(&grid_engine::executor::RecoveryAnomaly::DuplicateLiveOrders)
         );
         assert!(instance.pending_order.is_none());
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn user_data_event_resyncs_recovery_anomaly_automatically() {
+        let mut snapshot = test_snapshot();
+        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.pending_order = None;
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(0.0, 0.0),
+            vec![btc_exchange_order(
+                "live-1",
+                "unexpected-live",
+                Side::Buy,
+                94.5,
+                0.25,
+                0.0,
+                OrderStatus::New,
+            )],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance
+                .executor_state
+                .as_ref()
+                .and_then(|state| state.recovery_anomaly.as_ref())
+                == Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+        })
+        .await;
+
+        fixture.exchange.open_orders.lock().unwrap().clear();
+        fixture
+            .user_sender
+            .send(position_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                0.0,
+                0.0,
+            ))
+            .await
+            .unwrap();
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance
+                .executor_state
+                .as_ref()
+                .and_then(|state| state.recovery_anomaly.as_ref())
+                .is_none()
+        })
+        .await;
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
 
         shutdown(handles).await;
     }
@@ -2233,8 +2409,11 @@ mod tests {
             Arc::new(GridProjector::new()),
         );
 
+        let exchange =
+            Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![])) as Arc<dyn ExchangePort>;
         let error = super::apply_user_data_event(
             &state,
+            &exchange,
             "missing-grid",
             position_event_at(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 1).unwrap(),

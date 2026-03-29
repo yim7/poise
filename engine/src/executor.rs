@@ -10,7 +10,8 @@ use crate::grid::{GridId, Instrument};
 use crate::observation::OrderObservation;
 use crate::ports::{OrderRequest, OrderStatus};
 use crate::runtime::{
-    ExecutionSlot, ExecutionStats, ExecutorState, SlotState, SubmitRecoveryAnchor, WorkingOrder,
+    ExecutionSlot, ExecutionStats, ExecutorState, SlotState, SubmitRecoveryAnchor,
+    SubmitRecoveryKind, WorkingOrder,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,10 +179,18 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         });
 
     if input.live_orders.is_empty() {
+        if matches!(
+            input.submit_recovery_anchor.map(|anchor| &anchor.kind),
+            Some(SubmitRecoveryKind::ReceiptBacked)
+        ) {
+            return RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder);
+        }
+
         let preserved_slots = input
             .submit_recovery_anchor
             .and_then(|anchor| {
-                (!base_state.slots.is_empty()
+                (anchor.kind == SubmitRecoveryKind::Submitting
+                    && !base_state.slots.is_empty()
                     && base_state.slots.iter().any(|slot| {
                         slot.working_order
                             .as_ref()
@@ -425,7 +434,7 @@ fn diff_desired_orders(
                         instrument: input.instrument.clone(),
                         order_id,
                     }],
-                    Vec::new(),
+                    vec![current_slot],
                     None,
                 );
             }
@@ -480,7 +489,7 @@ fn diff_desired_orders(
                                 target_exposure: desired_order.target_exposure.clone(),
                             },
                         ],
-                        vec![submit_pending_slot(desired_order, &request)],
+                        vec![current_slot],
                         None,
                     );
                 }
@@ -721,5 +730,62 @@ mod tests {
         assert!(
             catch_up.state.stats.max_inventory_gap_abs.0 >= catch_up.state.inventory_gap.0.abs()
         );
+    }
+
+    #[test]
+    fn cancel_plan_keeps_live_slot_until_cancel_effect_completes() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+
+        let plan = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(4.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 95.0,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::CancelOrder { order_id, .. }] if order_id == "order-1"
+        ));
+        assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn replace_plan_keeps_live_slot_until_cancel_effect_completes() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+
+        let plan = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 90.0,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder { .. }
+            ] if order_id == "order-1"
+        ));
+        assert_eq!(plan.state.slots, existing_state.slots);
     }
 }
