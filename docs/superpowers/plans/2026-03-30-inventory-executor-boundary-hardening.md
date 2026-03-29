@@ -124,14 +124,14 @@ git commit -m "refactor(engine): internalize slot lifecycle transitions"
 - Test: `server/src/runtime.rs`
 - Test: `server/src/effect_service.rs`
 
-- [ ] **Step 1: 在 `engine/src/executor.rs` 写失败测试，锁住 `submit recovery` 的执行器决策**
+- [x] **Step 1: 在 `engine/src/executor.rs` 写失败测试，锁住 `submit recovery` 的执行器决策**
 
 测试至少覆盖：
 - receipt-backed 槽位存在 live order 时由执行器认领并恢复 `Working`
 - 当前计划已变化且 effect 失效时由执行器返回 supersede
 - 缺少充分事实时由执行器返回继续等待 exchange state
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine executor::tests::submit_recovery_restores_live_order_from_receipt_backed_slot -- --exact`
@@ -140,14 +140,14 @@ Run:
 Expected:
 测试失败，因为当前 `submit recovery` 仍在 `manager` 里单独分类。
 
-- [ ] **Step 3: 在 `server/src/effect_worker.rs`、`server/src/runtime.rs` 和 `server/src/effect_service.rs` 写失败测试，锁住 server 侧只传递事实**
+- [x] **Step 3: 在 `server/src/effect_worker.rs`、`server/src/runtime.rs` 和 `server/src/effect_service.rs` 写失败测试，锁住 server 侧只传递事实**
 
 测试至少覆盖：
 - `effect_service` 不再产出 `submit_recovery_anchor`
 - `effect_worker` 只根据执行器恢复结果决定 effect 后续动作
 - startup sync 不再依赖 `effect_service` 拼 recovery 旁路语义
 
-- [ ] **Step 4: 运行定向测试确认失败**
+- [x] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server effect_service::tests::submit_recovery_anchor_only_exists_for_matching_pending_submit_effect -- --exact`
@@ -157,7 +157,7 @@ Run:
 Expected:
 现有测试需要改写或新增，因为当前 server 侧仍持有 recovery 旁路判断。
 
-- [ ] **Step 5: 做最小实现，把 `submit recovery` 彻底收回执行器**
+- [x] **Step 5: 做最小实现，把 `submit recovery` 彻底收回执行器**
 
 要求：
 - `engine/src/executor.rs` 增加 submit recovery 输入输出，统一判断 `Proceed / AwaitExchangeState / Recovered / Superseded`
@@ -166,7 +166,7 @@ Expected:
 - `server/src/effect_worker.rs` 只收集回执、live order 和 effect 事实，再调用写侧持久化执行器结果
 - `server/src/runtime.rs` 不再从 `effect_service` 取 recovery anchor 后再驱动恢复
 
-- [ ] **Step 6: 运行 Task 2 的定向测试**
+- [x] **Step 6: 运行 Task 2 的定向测试**
 
 Run:
 `cargo test -p grid-engine executor::tests:: -- --nocapture`
@@ -177,7 +177,10 @@ Run:
 Expected:
 `submit recovery` 的判断与恢复入口都统一回到执行器，server 侧测试通过。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
+
+Task 2 code commit:
+`629d7372d55a171c7b0651ff7eb660c6ab5a3b72`
 
 ```bash
 git add engine/src/executor.rs engine/src/manager.rs engine/src/runtime.rs server/src/effect_service.rs server/src/effect_worker.rs server/src/write_service.rs server/src/runtime.rs
