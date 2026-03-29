@@ -45,7 +45,7 @@
 - Test: `engine/src/manager.rs`
 - Test: `server/src/effect_worker.rs`
 
-- [ ] **Step 1: 在 `engine/src/executor.rs` 写失败测试，锁住执行器拥有槽位状态推进**
+- [x] **Step 1: 在 `engine/src/executor.rs` 写失败测试，锁住执行器拥有槽位状态推进**
 
 测试至少覆盖：
 - `submit request` 会由执行器创建 `SubmitPending` 槽位
@@ -53,7 +53,7 @@
 - 终态订单事实会由执行器清理对应槽位
 - 无匹配槽位时不会由外层偷偷补一个新槽位
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine executor::tests::submit_receipt_promotes_submit_pending_slot_to_working -- --exact`
@@ -62,14 +62,14 @@ Run:
 Expected:
 测试失败或编译失败，因为当前槽位推进仍有一部分散在 `manager` 辅助函数里。
 
-- [ ] **Step 3: 在 `engine/src/manager.rs` 和 `server/src/effect_worker.rs` 写失败测试，锁住外层只传事实不改槽位**
+- [x] **Step 3: 在 `engine/src/manager.rs` 和 `server/src/effect_worker.rs` 写失败测试，锁住外层只传事实不改槽位**
 
 测试至少覆盖：
 - `manager.observe_order()` 通过执行器 transition 清理终态槽位
 - `effect_worker` 在提交成功后只回写回执事实，不直接决定槽位状态
 - 现有主路径行为保持不变：成功提交后仍能看到 `working_order`
 
-- [ ] **Step 4: 运行定向测试确认失败**
+- [x] **Step 4: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine manager::tests::observe_order_clears_matching_inventory_core_slot_on_terminal_status -- --exact`
@@ -78,7 +78,7 @@ Run:
 Expected:
 测试失败，因为当前 `manager` / `effect_worker` 还在调用直接改槽位的入口。
 
-- [ ] **Step 5: 做最小实现，把槽位 transition 收回 `engine::executor`**
+- [x] **Step 5: 做最小实现，把槽位 transition 收回 `engine::executor`**
 
 要求：
 - 在 `engine/src/executor.rs` 增加执行器拥有的槽位事实吸收入口，覆盖 `submit request`、`submit receipt`、live order 认领和终态清理
@@ -86,7 +86,7 @@ Expected:
 - `manager` 改成把订单事实转给执行器，而不是直接写 `executor_state.slots`
 - `server/src/effect_worker.rs` 改成只提交事实并触发持久化，不再隐含槽位状态机
 
-- [ ] **Step 6: 运行 Task 1 的定向测试**
+- [x] **Step 6: 运行 Task 1 的定向测试**
 
 Run:
 `cargo test -p grid-engine executor::tests:: -- --nocapture`
@@ -96,10 +96,13 @@ Run:
 Expected:
 槽位推进相关测试通过，且外层不再直接改写槽位。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
+
+Task 1 code commit:
+`48196ae618d043023f78fe9a4818545778ddc14e`
 
 ```bash
-git add engine/src/executor.rs engine/src/manager.rs engine/src/runtime.rs server/src/effect_worker.rs
+git add engine/src/executor.rs engine/src/manager.rs server/src/effect_worker.rs
 git commit -m "refactor(engine): internalize slot lifecycle transitions"
 ```
 
