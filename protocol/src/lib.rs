@@ -51,7 +51,8 @@ pub struct ExposureSummaryView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionBadgeView {
     pub state: ExecutionStateView,
-    pub pending_order_count: u32,
+    pub execution_status: ExecutionStatusView,
+    pub active_slot_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,25 +106,73 @@ pub struct GridPositionView {
 pub struct GridStatisticsView {
     pub total_pnl: f64,
     pub realized_pnl: f64,
+    #[serde(default)]
+    pub max_inventory_gap_abs: f64,
+    #[serde(default)]
+    pub max_gap_age_ms: i64,
+    #[serde(default)]
+    pub stats_started_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridExecutionView {
     pub state: ExecutionStateView,
     #[serde(default)]
-    pub pending_order: Option<OrderExecutionView>,
+    pub execution_status: ExecutionStatusView,
+    #[serde(default)]
+    pub inventory_gap: f64,
+    #[serde(default)]
+    pub gap_age_ms: i64,
+    #[serde(default)]
+    pub active_slot_count: u32,
+    #[serde(default)]
+    pub slots: Vec<ExecutionSlotView>,
     #[serde(default)]
     pub replacement_gate: Option<ReplacementGateView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OrderExecutionView {
-    pub symbol: String,
-    pub order_id: Option<String>,
+pub struct ExecutionSlotView {
+    pub label: String,
+    pub phase: ExecutionSlotPhaseView,
+    pub intent: ExecutionIntentView,
+    #[serde(default)]
+    pub order: Option<ExecutionSlotOrderView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionSlotOrderView {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
-    pub status: OrderStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatusView {
+    Normal,
+    AttentionRequired,
+}
+
+impl Default for ExecutionStatusView {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionSlotPhaseView {
+    Opening,
+    Working,
+    Closing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionIntentView {
+    IncreaseInventory,
+    DecreaseInventory,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -225,19 +274,6 @@ pub enum Side {
     Sell,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrderStatus {
-    Submitting,
-    New,
-    PartiallyFilled,
-    Filled,
-    Canceling,
-    Canceled,
-    Rejected,
-    Expired,
-}
-
 impl fmt::Display for GridStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
@@ -284,23 +320,6 @@ impl fmt::Display for Side {
         let value = match self {
             Self::Buy => "buy",
             Self::Sell => "sell",
-        };
-
-        f.write_str(value)
-    }
-}
-
-impl fmt::Display for OrderStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Submitting => "submitting",
-            Self::New => "new",
-            Self::PartiallyFilled => "partially_filled",
-            Self::Filled => "filled",
-            Self::Canceling => "canceling",
-            Self::Canceled => "canceled",
-            Self::Rejected => "rejected",
-            Self::Expired => "expired",
         };
 
         f.write_str(value)

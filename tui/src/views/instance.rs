@@ -6,8 +6,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
 use crate::protocol::{
-    ActivityLevelView, ExecutionStateView, GridCommandType, GridCommandView, GridExecutionView,
-    ReplacementGateView,
+    ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
+    ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, ReplacementGateView,
 };
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -15,9 +15,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(6),
-            Constraint::Length(6),
+            Constraint::Length(9),
             Constraint::Length(6),
             Constraint::Min(0),
         ])
@@ -63,11 +63,21 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(summary, sections[0]);
 
     let statistics_lines = vec![
-        Line::from("Total PnL | Realized PnL"),
+        Line::from("Total PnL | Realized PnL | Max Gap | Max Gap Age"),
         Line::from(format!(
-            "{} | {}",
+            "{} | {} | {:.4} | {} ms",
             format_pnl(detail.statistics.total_pnl),
             format_pnl(detail.statistics.realized_pnl),
+            detail.statistics.max_inventory_gap_abs,
+            detail.statistics.max_gap_age_ms,
+        )),
+        Line::from(format!(
+            "stats since: {}",
+            detail
+                .statistics
+                .stats_started_at
+                .clone()
+                .unwrap_or_else(|| "-".to_string())
         )),
     ];
     let statistics = Paragraph::new(statistics_lines)
@@ -145,17 +155,35 @@ fn execution_lines(
         ExecutionStateView::Paused => "paused",
         ExecutionStateView::Closed => "closed",
     };
-
-    let pending_order = execution
-        .pending_order
-        .as_ref()
-        .map(|order| {
-            format!(
-                "{} {:.4} @ {:.4} ({})",
-                order.side, order.quantity, order.price, order.status
-            )
-        })
-        .unwrap_or_else(|| "none".to_string());
+    let execution_status = match execution.execution_status {
+        ExecutionStatusView::Normal => "normal",
+        ExecutionStatusView::AttentionRequired => "attention_required",
+    };
+    let slots = if execution.slots.is_empty() {
+        "none".to_string()
+    } else {
+        execution
+            .slots
+            .iter()
+            .map(|slot| {
+                let order = slot
+                    .order
+                    .as_ref()
+                    .map(|order| {
+                        format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price)
+                    })
+                    .unwrap_or_else(|| "no order".to_string());
+                format!(
+                    "{} {} {} {}",
+                    slot.label,
+                    format_slot_phase(slot.phase),
+                    format_slot_intent(slot.intent),
+                    order
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     let replacement_gate = execution
         .replacement_gate
         .as_ref()
@@ -164,14 +192,35 @@ fn execution_lines(
 
     vec![
         Line::from(format!("state: {state}")),
+        Line::from(format!("execution status: {execution_status}")),
         Line::from(format!(
             "mark/index: {}/{}",
             format_optional_price(mark_price),
             format_optional_price(index_price)
         )),
-        Line::from(format!("pending order: {pending_order}")),
+        Line::from(format!(
+            "inventory gap / age: {:.4} / {} ms",
+            execution.inventory_gap, execution.gap_age_ms
+        )),
+        Line::from(format!("active slots: {}", execution.active_slot_count)),
+        Line::from(format!("slots: {slots}")),
         Line::from(format!("replacement gate: {replacement_gate}")),
     ]
+}
+
+fn format_slot_phase(value: ExecutionSlotPhaseView) -> &'static str {
+    match value {
+        ExecutionSlotPhaseView::Opening => "opening",
+        ExecutionSlotPhaseView::Working => "working",
+        ExecutionSlotPhaseView::Closing => "closing",
+    }
+}
+
+fn format_slot_intent(value: ExecutionIntentView) -> &'static str {
+    match value {
+        ExecutionIntentView::IncreaseInventory => "increase_inventory",
+        ExecutionIntentView::DecreaseInventory => "decrease_inventory",
+    }
 }
 
 fn format_replacement_gate(value: &ReplacementGateView) -> String {
@@ -260,7 +309,7 @@ mod tests {
     }
 
     fn render_text(detail: GridDetailView) -> String {
-        render_text_with_size(detail, 100, 32)
+        render_text_with_size(detail, 100, 36)
     }
 
     #[test]
@@ -288,12 +337,19 @@ mod tests {
         assert!(text.contains("Commands"));
         assert!(text.contains("Total PnL"));
         assert!(text.contains("Realized PnL"));
+        assert!(text.contains("Max Gap"));
+        assert!(text.contains("Max Gap Age"));
         assert!(text.contains("+1245.30"));
         assert!(text.contains("+980.10"));
+        assert!(text.contains("stats since: 2026-03-26T09:45:00Z"));
         assert!(text.contains("lower: 90.0000"));
         assert!(text.contains("upper: 110.0000"));
         assert!(text.contains("shape: linear"));
         assert!(text.contains("out of band policy: freeze"));
+        assert!(text.contains("execution status: normal"));
+        assert!(text.contains("inventory gap / age: 0.5000 / 60000 ms"));
+        assert!(text.contains("active slots: 1"));
+        assert!(text.contains("inventory_core opening increase_inventory buy 0.0100 @ 100.5000"));
         assert!(text.contains("pause: enabled"));
         assert!(text.contains("terminate: disabled - risk review pending"));
         assert!(text.contains("resume: disabled - grid is not paused"));

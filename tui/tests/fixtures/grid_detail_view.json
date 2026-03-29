@@ -29,22 +29,33 @@
   },
   "statistics": {
     "total_pnl": 1245.3,
-    "realized_pnl": 980.1
+    "realized_pnl": 980.1,
+    "max_inventory_gap_abs": 1.5,
+    "max_gap_age_ms": 120000,
+    "stats_started_at": "2026-03-26T09:45:00Z"
   },
   "execution": {
     "state": "open",
+    "execution_status": "normal",
+    "inventory_gap": 0.5,
+    "gap_age_ms": 60000,
+    "active_slot_count": 1,
+    "slots": [
+      {
+        "label": "inventory_core",
+        "phase": "opening",
+        "intent": "increase_inventory",
+        "order": {
+          "side": "buy",
+          "price": 100.5,
+          "quantity": 0.01
+        }
+      }
+    ],
     "replacement_gate": {
       "kind": "improvement_below_threshold",
       "improvement_bps": 9.0,
       "threshold_bps": 13.0
-    },
-    "pending_order": {
-      "symbol": "BTCUSDT",
-      "order_id": "order-1",
-      "side": "buy",
-      "price": 100.5,
-      "quantity": 0.01,
-      "status": "new"
     }
   },
   "activity": [

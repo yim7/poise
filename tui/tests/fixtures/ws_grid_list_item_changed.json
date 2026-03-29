@@ -19,7 +19,8 @@
       },
       "execution": {
         "state": "open",
-        "pending_order_count": 0
+        "execution_status": "normal",
+        "active_slot_count": 0
       }
     }
   }

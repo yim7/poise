@@ -496,7 +496,7 @@ impl SqliteStorage {
         let mut stmt = conn
             .prepare(
                 "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
-                        pending_order_json, replacement_gate_reason_json, realized_pnl_day,
+                        pending_order_json, executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, updated_at
                  FROM grid_snapshots
@@ -842,11 +842,11 @@ mod tests {
     use grid_core::strategy::BandBoundary;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
+    use grid_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::ports::{
         EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
     };
-    use grid_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use grid_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
         SlotState, WorkingOrder,
@@ -1188,18 +1188,8 @@ mod tests {
 
         assert_eq!(loaded.executor_state, snapshot.executor_state);
         assert_eq!(
-            loaded
-                .executor_state
-                .as_ref()
-                .unwrap()
-                .stats
-                .started_at,
-            snapshot
-                .executor_state
-                .as_ref()
-                .unwrap()
-                .stats
-                .started_at
+            loaded.executor_state.as_ref().unwrap().stats.started_at,
+            snapshot.executor_state.as_ref().unwrap().stats.started_at
         );
         assert!(loaded.pending_order.is_some());
     }

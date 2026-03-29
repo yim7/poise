@@ -1,15 +1,15 @@
 use grid_core::events::DomainEvent;
-use grid_engine::ports::{EffectStatus, OrderStatus as EngineOrderStatus};
+use grid_engine::ports::EffectStatus;
 use grid_engine::runtime::GridStatus as EngineGridStatus;
 use grid_engine::transition::GridEffect;
 use grid_protocol::{
-    ActivityLevelView, ExecutionBadgeView, ExecutionStateView, ExposureSummaryView,
-    GridActivityItemView, GridCommandType, GridCommandView, GridDetailView, GridExecutionView,
-    GridIdentityView, GridLifecycleView, GridListItemView, GridMarketView, GridPositionView,
-    GridStatisticsView, GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView,
-    InstrumentView, OrderExecutionView, OrderStatus as ProtocolOrderStatus,
-    OutOfBandPolicy as ProtocolPolicy, ReplacementGateView, ShapeFamily as ProtocolShapeFamily,
-    Side as ProtocolSide,
+    ActivityLevelView, ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView,
+    ExecutionSlotPhaseView, ExecutionSlotView, ExecutionStateView, ExecutionStatusView,
+    ExposureSummaryView, GridActivityItemView, GridCommandType, GridCommandView, GridDetailView,
+    GridExecutionView, GridIdentityView, GridLifecycleView, GridListItemView, GridMarketView,
+    GridPositionView, GridStatisticsView, GridStatus as ProtocolGridStatus, GridStatusPanelView,
+    GridStrategyView, InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
 };
 
 use crate::query_service::GridReadModelSource;
@@ -40,7 +40,8 @@ impl GridProjector {
             },
             execution: ExecutionBadgeView {
                 state: project_execution_state(source),
-                pending_order_count: pending_order_count(source),
+                execution_status: project_execution_status(source),
+                active_slot_count: active_slot_count(source),
             },
         }
     }
@@ -82,19 +83,46 @@ impl GridProjector {
                 total_pnl: source.snapshot.risk.realized_pnl_cumulative
                     + source.snapshot.risk.unrealized_pnl,
                 realized_pnl: source.snapshot.risk.realized_pnl_cumulative,
+                max_inventory_gap_abs: source
+                    .snapshot
+                    .executor_state
+                    .as_ref()
+                    .map(|state| state.stats.max_inventory_gap_abs.0)
+                    .unwrap_or(0.0),
+                max_gap_age_ms: source
+                    .snapshot
+                    .executor_state
+                    .as_ref()
+                    .map(|state| state.stats.max_gap_age_ms)
+                    .unwrap_or(0),
+                stats_started_at: source
+                    .snapshot
+                    .executor_state
+                    .as_ref()
+                    .map(|state| state.stats.started_at.to_rfc3339()),
             },
             execution: GridExecutionView {
                 state: project_execution_state(source),
-                pending_order: source.snapshot.pending_order.as_ref().map(|order| {
-                    OrderExecutionView {
-                        symbol: source.snapshot.instrument.symbol.clone(),
-                        order_id: order.order_id.clone(),
-                        side: project_side(order.side),
-                        price: order.price,
-                        quantity: order.quantity,
-                        status: project_order_status(order.status),
-                    }
-                }),
+                execution_status: project_execution_status(source),
+                inventory_gap: source
+                    .snapshot
+                    .executor_state
+                    .as_ref()
+                    .map(|state| state.inventory_gap.0)
+                    .unwrap_or(0.0),
+                gap_age_ms: source
+                    .snapshot
+                    .executor_state
+                    .as_ref()
+                    .and_then(|state| state.gap_started_at)
+                    .map(|started_at| {
+                        (source.snapshot_updated_at - started_at)
+                            .num_milliseconds()
+                            .max(0)
+                    })
+                    .unwrap_or(0),
+                active_slot_count: active_slot_count(source),
+                slots: project_execution_slots(source),
                 replacement_gate: source
                     .snapshot
                     .replacement_gate_reason
@@ -181,19 +209,6 @@ fn project_side(value: grid_core::types::Side) -> ProtocolSide {
     }
 }
 
-fn project_order_status(value: EngineOrderStatus) -> ProtocolOrderStatus {
-    match value {
-        EngineOrderStatus::Submitting => ProtocolOrderStatus::Submitting,
-        EngineOrderStatus::New => ProtocolOrderStatus::New,
-        EngineOrderStatus::PartiallyFilled => ProtocolOrderStatus::PartiallyFilled,
-        EngineOrderStatus::Filled => ProtocolOrderStatus::Filled,
-        EngineOrderStatus::Canceling => ProtocolOrderStatus::Canceling,
-        EngineOrderStatus::Canceled => ProtocolOrderStatus::Canceled,
-        EngineOrderStatus::Rejected => ProtocolOrderStatus::Rejected,
-        EngineOrderStatus::Expired => ProtocolOrderStatus::Expired,
-    }
-}
-
 fn project_replacement_gate_reason(
     reason: &grid_core::events::ReplacementGateReason,
 ) -> ReplacementGateView {
@@ -217,16 +232,67 @@ fn project_execution_state(source: &GridReadModelSource) -> ExecutionStateView {
     }
 }
 
-fn pending_order_count(source: &GridReadModelSource) -> u32 {
-    u32::from(
-        source.snapshot.pending_order.is_some()
-            || source.recent_effects.iter().any(|effect| {
-                matches!(
-                    effect.status,
-                    EffectStatus::Pending | EffectStatus::Executing
-                )
-            }),
-    )
+fn project_execution_status(source: &GridReadModelSource) -> ExecutionStatusView {
+    if source
+        .snapshot
+        .executor_state
+        .as_ref()
+        .and_then(|state| state.recovery_anomaly.as_ref())
+        .is_some()
+    {
+        ExecutionStatusView::AttentionRequired
+    } else {
+        ExecutionStatusView::Normal
+    }
+}
+
+fn active_slot_count(source: &GridReadModelSource) -> u32 {
+    project_execution_slots(source).len() as u32
+}
+
+fn project_execution_slots(source: &GridReadModelSource) -> Vec<ExecutionSlotView> {
+    source
+        .snapshot
+        .executor_state
+        .as_ref()
+        .map(|state| {
+            state
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    let order = slot.working_order.as_ref()?;
+                    Some(ExecutionSlotView {
+                        label: slot.slot.0.clone(),
+                        phase: match slot.state {
+                            grid_engine::runtime::SlotState::SubmitPending => {
+                                ExecutionSlotPhaseView::Opening
+                            }
+                            grid_engine::runtime::SlotState::Working => {
+                                ExecutionSlotPhaseView::Working
+                            }
+                            grid_engine::runtime::SlotState::CancelPending => {
+                                ExecutionSlotPhaseView::Closing
+                            }
+                            grid_engine::runtime::SlotState::Empty => return None,
+                        },
+                        intent: match order.role {
+                            grid_engine::executor::OrderRole::IncreaseInventory => {
+                                ExecutionIntentView::IncreaseInventory
+                            }
+                            grid_engine::executor::OrderRole::DecreaseInventory => {
+                                ExecutionIntentView::DecreaseInventory
+                            }
+                        },
+                        order: Some(ExecutionSlotOrderView {
+                            side: project_side(order.side),
+                            price: order.price,
+                            quantity: order.quantity,
+                        }),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn project_available_commands(status: &EngineGridStatus) -> Vec<GridCommandView> {
@@ -356,27 +422,50 @@ mod tests {
     use grid_core::events::DomainEvent;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
+    use grid_engine::executor::{
+        ExecutionMode, ExecutionReason, OrderRole, OrderSlot, RecoveryAnomaly,
+    };
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::ports::{
         EffectStatus, OrderRequest, OrderStatus, PersistedGridEffect, StoredDomainEvent,
     };
-    use grid_engine::runtime::{GridStatus, PendingOrder, RiskState};
+    use grid_engine::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, PendingOrder, RiskState,
+        SlotState, WorkingOrder,
+    };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
-    use grid_protocol::{ActivityLevelView, ExecutionStateView, GridCommandType};
+    use grid_protocol::{
+        ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
+        ExecutionStatusView, GridCommandType,
+    };
 
     use super::GridProjector;
     use crate::query_service::GridReadModelSource;
 
     #[test]
-    fn project_list_item_summarizes_execution_state() {
+    fn projects_execution_badge_from_working_orders() {
         let source = source_with_submitting_effect();
         let item = GridProjector::new().project_list_item(&source);
 
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.state, ExecutionStateView::Open);
-        assert_eq!(item.execution.pending_order_count, 1);
+        assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
+        assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
+
+        let mut anomaly_source = source_with_submitting_effect();
+        anomaly_source
+            .snapshot
+            .executor_state
+            .as_mut()
+            .unwrap()
+            .recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+        let anomaly_item = GridProjector::new().project_list_item(&anomaly_source);
+        assert_eq!(
+            anomaly_item.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
     }
 
     #[test]
@@ -414,11 +503,49 @@ mod tests {
         );
     }
 
-    fn project_detail_projects_statistics_from_risk_state() {
+    #[test]
+    fn projects_execution_slots_from_slot_workset() {
+        let detail = GridProjector::new().project_detail(&source_with_submitting_effect());
+
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::Normal
+        );
+        assert!((detail.execution.inventory_gap - 0.5).abs() < f64::EPSILON);
+        assert_eq!(detail.execution.gap_age_ms, 90_000);
+        assert_eq!(detail.execution.active_slot_count, 1);
+        assert_eq!(
+            detail.execution.active_slot_count,
+            detail.execution.slots.len() as u32
+        );
+        assert_eq!(detail.execution.slots.len(), 1);
+        assert_eq!(detail.execution.slots[0].label, "inventory_core");
+        assert_eq!(
+            detail.execution.slots[0].phase,
+            ExecutionSlotPhaseView::Working
+        );
+        assert_eq!(
+            detail.execution.slots[0].intent,
+            ExecutionIntentView::IncreaseInventory
+        );
+        let order = detail.execution.slots[0].order.as_ref().unwrap();
+        assert_eq!(order.side, grid_protocol::Side::Buy);
+        assert!((order.price - 100.5).abs() < f64::EPSILON);
+        assert!((order.quantity - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn projects_execution_observability_statistics() {
         let detail = GridProjector::new().project_detail(&source_with_submitting_effect());
 
         assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert!((detail.statistics.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
+        assert_eq!(detail.statistics.max_gap_age_ms, 120_000);
+        assert_eq!(
+            detail.statistics.stats_started_at.as_deref(),
+            Some("2026-03-26T09:45:00+00:00")
+        );
     }
 
     #[test]
@@ -559,7 +686,34 @@ mod tests {
                 target_exposure: Exposure(4.0),
                 status: OrderStatus::New,
             }),
-            executor_state: None,
+            executor_state: Some(ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(0.5),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
+                last_reprice_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap()),
+                slots: vec![ExecutionSlot {
+                    slot: OrderSlot::new("inventory_core"),
+                    state: SlotState::Working,
+                    working_order: Some(WorkingOrder {
+                        order_id: Some("order-1".into()),
+                        client_order_id: "client-1".into(),
+                        side: Side::Buy,
+                        price: 100.5,
+                        quantity: 0.1,
+                        target_exposure: Exposure(4.0),
+                        status: OrderStatus::New,
+                        role: OrderRole::IncreaseInventory,
+                        in_flight_effect_id: None,
+                    }),
+                }],
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+                stats: ExecutionStats {
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                    max_inventory_gap_abs: Exposure(1.5),
+                    max_gap_age_ms: 120_000,
+                },
+            }),
             replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,

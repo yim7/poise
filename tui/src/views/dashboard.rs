@@ -3,7 +3,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::widgets::{Block, Borders, Row, Table, TableState};
 
 use crate::app::App;
-use crate::protocol::ExecutionStateView;
+use crate::protocol::{ExecutionStateView, ExecutionStatusView};
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -22,8 +22,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .reference_price
             .map(|value| format!("{value:.4}"))
             .unwrap_or_else(|| "-".to_string());
-        let execution =
-            format_execution_badge(item.execution.state, item.execution.pending_order_count);
+        let execution = format_execution_badge(
+            item.execution.state,
+            item.execution.execution_status,
+            item.execution.active_slot_count,
+        );
 
         Row::new(vec![
             item.id.clone(),
@@ -59,17 +62,25 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn format_execution_badge(state: ExecutionStateView, pending_order_count: u32) -> String {
+fn format_execution_badge(
+    state: ExecutionStateView,
+    execution_status: ExecutionStatusView,
+    active_slot_count: u32,
+) -> String {
     let state = match state {
         ExecutionStateView::Open => "open",
         ExecutionStateView::Paused => "paused",
         ExecutionStateView::Closed => "closed",
     };
 
-    if pending_order_count == 0 {
-        state.to_string()
+    let mut badge = state.to_string();
+    if matches!(execution_status, ExecutionStatusView::AttentionRequired) {
+        badge.push_str(" !");
+    }
+    if active_slot_count > 0 {
+        format!("{badge} ({active_slot_count})")
     } else {
-        format!("{state} ({pending_order_count})")
+        badge
     }
 }
 
@@ -108,7 +119,7 @@ mod tests {
 
         assert!(text.contains("Dashboard"));
         assert!(text.contains("BTCUSDT"));
-        assert!(text.contains("1.2500"));
+        assert!(text.contains("3.5000"));
         assert!(text.contains("Execution"));
         assert!(text.contains("open (1)"));
     }

@@ -151,8 +151,8 @@ mod tests {
     };
     use grid_engine::runtime::PendingOrder;
     use grid_protocol::{
-        GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
-        GridStatus,
+        ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, GridCommandAccepted,
+        GridCommandRequest, GridCommandType, GridDetailView, GridListResponse, GridStatus,
     };
     use grid_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
@@ -309,6 +309,11 @@ mod tests {
         assert_eq!(payload.items.len(), 1);
         assert_eq!(payload.items[0].id, "btc-core");
         assert_eq!(payload.items[0].instrument.symbol, "BTCUSDT");
+        assert_eq!(
+            payload.items[0].execution.execution_status,
+            ExecutionStatusView::Normal
+        );
+        assert_eq!(payload.items[0].execution.active_slot_count, 1);
     }
 
     #[tokio::test]
@@ -332,22 +337,23 @@ mod tests {
         assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
         assert!((payload.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((payload.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
-        assert!(!payload.available_commands.is_empty());
         assert_eq!(
-            payload
-                .execution
-                .pending_order
-                .as_ref()
-                .unwrap()
-                .order_id
-                .as_deref(),
-            Some("order-1")
+            payload.execution.execution_status,
+            ExecutionStatusView::Normal
         );
-        assert!(
-            payload_json["execution"]["pending_order"]
-                .get("client_order_id")
-                .is_none()
+        assert_eq!(payload.execution.active_slot_count, 1);
+        assert_eq!(payload.execution.slots.len(), 1);
+        assert_eq!(payload.execution.slots[0].label, "inventory_core");
+        assert_eq!(
+            payload.execution.slots[0].phase,
+            ExecutionSlotPhaseView::Opening
         );
+        assert_eq!(
+            payload.execution.slots[0].intent,
+            ExecutionIntentView::IncreaseInventory
+        );
+        assert!(!payload.available_commands.is_empty());
+        assert!(payload_json["execution"]["slots"][0].get("state").is_none());
         assert!(
             !payload
                 .activity

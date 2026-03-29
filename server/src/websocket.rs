@@ -119,7 +119,9 @@ mod tests {
         StoredDomainEvent, StoredGridSnapshot,
     };
     use grid_engine::transition::GridEffect;
-    use grid_protocol::{ExecutionStateView, GridStatus, GridStreamEvent, GridStreamPayload};
+    use grid_protocol::{
+        ExecutionStateView, ExecutionStatusView, GridStatus, GridStreamEvent, GridStreamPayload,
+    };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
@@ -276,7 +278,8 @@ mod tests {
             })
             .expect("should emit projected list item change");
         assert_eq!(item.id, "btc-core");
-        assert_eq!(item.execution.pending_order_count, 1);
+        assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
+        assert_eq!(item.execution.active_slot_count, 1);
         assert!(
             events
                 .iter()

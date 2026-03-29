@@ -612,7 +612,8 @@ mod tests {
             },
             execution: crate::protocol::ExecutionBadgeView {
                 state: detail.execution.state,
-                pending_order_count: u32::from(detail.execution.pending_order.is_some()),
+                execution_status: detail.execution.execution_status,
+                active_slot_count: detail.execution.active_slot_count,
             },
         }
     }
