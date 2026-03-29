@@ -9,17 +9,14 @@ use grid_core::types::ExchangeRules;
 use grid_core::types::Exposure;
 
 use crate::command::GridCommand;
-use crate::executor::{self, OrderRole, OrderSlot};
+use crate::executor;
 use crate::grid::{GridId, Instrument};
 use crate::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
 };
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
-use crate::runtime::{
-    ExecutionSlot, ExecutorState, GridRuntime, GridStatus, SlotState, SubmitRecoveryAnchor,
-    WorkingOrder,
-};
+use crate::runtime::{ExecutorState, GridRuntime, GridStatus, SubmitRecoveryAnchor};
 use crate::snapshot::GridRuntimeSnapshot;
 use crate::transition::{GridEffect, GridTransition};
 
@@ -254,25 +251,12 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        upsert_inventory_core_slot(
-            grid,
-            self.clock.now(),
-            WorkingOrder {
-                order_id: None,
-                client_order_id: request.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                target_exposure,
-                status: crate::ports::OrderStatus::Submitting,
-                role: match request.side {
-                    grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
-                    grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
-                },
-            },
-            SlotState::SubmitPending,
-        );
-        grid.replacement_gate_reason = None;
+        let next_state =
+            executor::record_submit_request(&grid.executor_state, request, target_exposure);
+        if next_state != grid.executor_state {
+            grid.executor_state = next_state;
+            grid.replacement_gate_reason = None;
+        }
         Ok(())
     }
 
@@ -287,58 +271,41 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        upsert_inventory_core_slot(
-            grid,
-            self.clock.now(),
-            WorkingOrder {
-                order_id: Some(receipt.order_id.clone()),
-                client_order_id: receipt.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                target_exposure,
-                status: receipt.status,
-                role: match request.side {
-                    grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
-                    grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
-                },
-            },
-            SlotState::Working,
+        let next_state = executor::record_submit_receipt(
+            &grid.executor_state,
+            request,
+            target_exposure,
+            receipt,
         );
-        grid.replacement_gate_reason = None;
+        if next_state != grid.executor_state {
+            grid.executor_state = next_state;
+            grid.replacement_gate_reason = None;
+        }
         Ok(())
     }
 
-    pub fn restore_live_open_order(
-        &mut self,
-        id: &GridId,
-        order: &ExchangeOrder,
-        target_exposure: grid_core::types::Exposure,
-    ) -> Result<()> {
+    fn observe_live_open_order(&mut self, id: &GridId, order: &ExchangeOrder) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         if order.status.keeps_working_order() {
-            upsert_inventory_core_slot(
-                grid,
-                self.clock.now(),
-                WorkingOrder {
-                    order_id: Some(order.order_id.clone()),
+            let next_state = executor::apply_order_observation(
+                &grid.executor_state,
+                &OrderObservation {
+                    order_id: order.order_id.clone(),
                     client_order_id: order.client_order_id.clone(),
                     side: order.side,
                     price: order.price,
                     quantity: order.qty,
-                    target_exposure,
+                    realized_pnl: 0.0,
                     status: order.status,
-                    role: match order.side {
-                        grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
-                        grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
-                    },
                 },
-                SlotState::Working,
             );
-            grid.replacement_gate_reason = None;
+            if next_state != grid.executor_state {
+                grid.executor_state = next_state;
+                grid.replacement_gate_reason = None;
+            }
         }
         Ok(())
     }
@@ -348,8 +315,9 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let cleared_slot = clear_executor_slot(grid, client_order_id, None);
-        if cleared_slot {
+        let next_state = executor::clear_pending_submit(&grid.executor_state, client_order_id);
+        if next_state != grid.executor_state {
+            grid.executor_state = next_state;
             grid.replacement_gate_reason = None;
         }
         Ok(())
@@ -360,8 +328,9 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let cleared_slot = clear_executor_slot(grid, "", Some(order_id));
-        if cleared_slot {
+        let next_state = executor::clear_working_order_by_order_id(&grid.executor_state, order_id);
+        if next_state != grid.executor_state {
+            grid.executor_state = next_state;
             grid.replacement_gate_reason = None;
         }
         Ok(())
@@ -372,8 +341,9 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        if !grid.executor_state.slots.is_empty() {
-            grid.executor_state.slots.clear();
+        let next_state = executor::clear_all_working_orders(&grid.executor_state);
+        if next_state != grid.executor_state {
+            grid.executor_state = next_state;
             grid.replacement_gate_reason = None;
         }
         Ok(())
@@ -405,7 +375,7 @@ impl GridManager {
             }),
             SubmitRecoveryAction::RestoreLiveOrder => {
                 let order = live_order.expect("live order must exist for restore");
-                self.restore_live_open_order(id, order, target_exposure)?;
+                self.observe_live_open_order(id, order)?;
                 Ok(SubmitRecoveryPlan {
                     resolution: SubmitRecoveryResolution::Succeeded,
                     effects: vec![],
@@ -537,39 +507,10 @@ impl GridManager {
             return Ok(());
         }
 
-        if observation.status.keeps_working_order() {
-            let target_exposure = Self::resolve_pending_target_exposure(grid);
-            upsert_inventory_core_slot(
-                grid,
-                self.clock.now(),
-                WorkingOrder {
-                    order_id: Some(observation.order_id.clone()),
-                    client_order_id: observation.client_order_id.clone(),
-                    side: observation.side,
-                    price: observation.price,
-                    quantity: observation.quantity,
-                    target_exposure,
-                    status: observation.status,
-                    role: match observation.side {
-                        grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
-                        grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
-                    },
-                },
-                SlotState::Working,
-            );
+        let next_state = executor::apply_order_observation(&grid.executor_state, &observation);
+        if next_state != grid.executor_state {
+            grid.executor_state = next_state;
             grid.replacement_gate_reason = None;
-            return Ok(());
-        }
-
-        if observation.status.clears_working_order() {
-            let cleared_slot = clear_executor_slot(
-                grid,
-                &observation.client_order_id,
-                Some(&observation.order_id),
-            );
-            if cleared_slot {
-                grid.replacement_gate_reason = None;
-            }
         }
 
         Ok(())
@@ -655,16 +596,6 @@ impl GridManager {
                 Ok((planned.events, planned.effects))
             }
         }
-    }
-
-    fn resolve_pending_target_exposure(grid: &GridRuntime) -> grid_core::types::Exposure {
-        grid.executor_state
-            .slots
-            .first()
-            .and_then(|slot| slot.working_order.as_ref())
-            .map(|order| order.target_exposure.clone())
-            .or_else(|| grid.target_exposure.clone())
-            .unwrap_or_else(|| grid.current_exposure.clone())
     }
 
     fn reconcile_grid(
@@ -881,42 +812,6 @@ struct PlannedInventoryExecution {
     executor_state: ExecutorState,
 }
 
-fn upsert_inventory_core_slot(
-    grid: &mut GridRuntime,
-    _observed_at: chrono::DateTime<chrono::Utc>,
-    working_order: WorkingOrder,
-    state: SlotState,
-) {
-    let executor_state = &mut grid.executor_state;
-    executor_state.slots = vec![ExecutionSlot {
-        slot: OrderSlot::new("inventory_core"),
-        state,
-        working_order: Some(working_order),
-    }];
-}
-
-fn clear_executor_slot(
-    grid: &mut GridRuntime,
-    client_order_id: &str,
-    order_id: Option<&str>,
-) -> bool {
-    let should_clear = grid.executor_state.slots.iter().any(|slot| {
-        slot.working_order
-            .as_ref()
-            .map(|order| {
-                order.client_order_id == client_order_id
-                    || order_id
-                        .map(|order_id| order.order_id.as_deref() == Some(order_id))
-                        .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    });
-    if should_clear {
-        grid.executor_state.slots.clear();
-    }
-    should_clear
-}
-
 fn order_requests_match(
     left: &OrderRequest,
     right: &OrderRequest,
@@ -1074,11 +969,16 @@ mod tests {
     }
 
     fn seed_executor_slot(grid: &mut GridRuntime, order: WorkingOrder, state: SlotState) {
-        upsert_inventory_core_slot(
-            grid,
-            Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
-            order,
-            state,
+        grid.executor_state
+            .slots
+            .retain(|slot| slot.slot != OrderSlot::new("inventory_core"));
+        grid.executor_state.slots.insert(
+            0,
+            ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state,
+                working_order: Some(order),
+            },
         );
     }
 
@@ -1100,7 +1000,8 @@ mod tests {
     fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
         grid.executor_state
             .slots
-            .first()
+            .iter()
+            .find(|slot| slot.slot == OrderSlot::new("inventory_core"))
             .and_then(|slot| slot.working_order.as_ref())
     }
 
@@ -1108,7 +1009,8 @@ mod tests {
         snapshot
             .executor_state
             .slots
-            .first()
+            .iter()
+            .find(|slot| slot.slot == OrderSlot::new("inventory_core"))
             .and_then(|slot| slot.working_order.as_ref())
     }
 
@@ -2006,6 +1908,13 @@ mod tests {
         };
 
         manager
+            .record_submit_request(
+                &GridId::new("btc1"),
+                &request,
+                grid_core::types::Exposure(4.0),
+            )
+            .unwrap();
+        manager
             .record_submit_receipt(
                 &GridId::new("btc1"),
                 &request,
@@ -2574,15 +2483,24 @@ mod tests {
     }
 
     #[test]
-    fn observe_order_rebuilds_inventory_core_slot_for_open_status() {
+    fn observe_order_promotes_matching_pending_slot_for_open_status() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
+        let request = OrderRequest {
+            instrument: test_instrument("BTCUSDT"),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 94.5,
+            quantity: 0.25,
+        };
         manager
-            .grids
-            .get_mut(&GridId::new("btc1"))
-            .unwrap()
-            .target_exposure = Some(grid_core::types::Exposure(6.0));
+            .record_submit_request(
+                &GridId::new("btc1"),
+                &request,
+                grid_core::types::Exposure(6.0),
+            )
+            .unwrap();
 
         manager
             .observe(
@@ -2854,8 +2772,9 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         seed_executor_slot(
-            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            grid,
             working_order(
                 Some("order-1"),
                 "client-1",
@@ -2867,6 +2786,19 @@ mod tests {
             ),
             SlotState::Working,
         );
+        grid.executor_state.slots.push(ExecutionSlot {
+            slot: OrderSlot::new("inventory_followup"),
+            state: SlotState::Working,
+            working_order: Some(working_order(
+                Some("order-2"),
+                "client-2",
+                grid_core::types::Side::Sell,
+                95.5,
+                0.15,
+                grid_core::types::Exposure(2.0),
+                OrderStatus::PartiallyFilled,
+            )),
+        });
 
         manager
             .observe(
@@ -2885,6 +2817,18 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         assert!(inventory_core_order(grid).is_none());
+        assert_eq!(grid.executor_state.slots.len(), 1);
+        assert_eq!(
+            grid.executor_state.slots[0].slot,
+            OrderSlot::new("inventory_followup")
+        );
+        assert_eq!(
+            grid.executor_state.slots[0]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-2")
+        );
     }
 
     #[test]

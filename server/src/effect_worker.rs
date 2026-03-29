@@ -341,7 +341,24 @@ mod tests {
         {
             let manager_handle = state.write_service.manager();
             let mut manager = manager_handle.write().await;
-            let snapshot = manager.snapshot("btc-core").unwrap();
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot
+                .executor_state
+                .slots
+                .push(grid_engine::runtime::ExecutionSlot {
+                    slot: grid_engine::executor::OrderSlot::new("inventory_followup"),
+                    state: SlotState::Working,
+                    working_order: Some(grid_engine::runtime::WorkingOrder {
+                        order_id: Some("order-2".into()),
+                        client_order_id: "client-2".into(),
+                        side: Side::Sell,
+                        price: 96.0,
+                        quantity: 0.1,
+                        target_exposure: Exposure(2.0),
+                        status: OrderStatus::PartiallyFilled,
+                        role: grid_engine::executor::OrderRole::DecreaseInventory,
+                    }),
+                });
             manager.restore_grid_state(&snapshot).unwrap();
             repository.seed_snapshot("btc-core", snapshot).await;
         }
@@ -368,6 +385,18 @@ mod tests {
             .expect("slot should keep working order after receipt");
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
         assert_eq!(order.status, OrderStatus::New);
+        assert_eq!(snapshot.executor_state.slots.len(), 2);
+        assert_eq!(
+            snapshot.executor_state.slots[1].slot,
+            grid_engine::executor::OrderSlot::new("inventory_followup")
+        );
+        assert_eq!(
+            snapshot.executor_state.slots[1]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-2")
+        );
 
         let effect = repository
             .list_all_effects()

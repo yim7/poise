@@ -8,7 +8,7 @@ use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::grid::{GridId, Instrument};
 use crate::observation::OrderObservation;
-use crate::ports::{OrderRequest, OrderStatus};
+use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
 use crate::runtime::{
     ExecutionSlot, ExecutionStats, ExecutorState, SlotState, SubmitRecoveryAnchor,
     SubmitRecoveryKind, WorkingOrder,
@@ -183,6 +183,184 @@ pub fn refresh_state(
         recovery_anomaly: previous_state.recovery_anomaly.clone(),
         stats,
     }
+}
+
+pub fn record_submit_request(
+    previous_state: &ExecutorState,
+    request: &OrderRequest,
+    target_exposure: Exposure,
+) -> ExecutorState {
+    let mut state = previous_state.clone();
+    state.slots = upsert_slot_by_name(
+        &previous_state.slots,
+        ExecutionSlot {
+            slot: OrderSlot::new(INVENTORY_CORE_SLOT),
+            state: SlotState::SubmitPending,
+            working_order: Some(WorkingOrder {
+                order_id: None,
+                client_order_id: request.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure,
+                status: OrderStatus::Submitting,
+                role: role_for_side(request.side),
+            }),
+        },
+    );
+    state
+}
+
+pub fn record_submit_receipt(
+    previous_state: &ExecutorState,
+    request: &OrderRequest,
+    target_exposure: Exposure,
+    receipt: &OrderReceipt,
+) -> ExecutorState {
+    let Some(slot) = previous_state.slots.iter().find(|slot| {
+        slot_matches_order(
+            slot,
+            &request.client_order_id,
+            Some(receipt.order_id.as_str()),
+        )
+    }) else {
+        return previous_state.clone();
+    };
+    let Some(existing_order) = slot.working_order.as_ref() else {
+        return previous_state.clone();
+    };
+
+    let mut state = previous_state.clone();
+    state.slots = replace_first_matching_slot(
+        &previous_state.slots,
+        |candidate| {
+            slot_matches_order(
+                candidate,
+                &request.client_order_id,
+                Some(receipt.order_id.as_str()),
+            )
+        },
+        ExecutionSlot {
+            slot: slot.slot.clone(),
+            state: SlotState::Working,
+            working_order: Some(WorkingOrder {
+                order_id: Some(receipt.order_id.clone()),
+                client_order_id: receipt.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure,
+                status: receipt.status,
+                role: existing_order.role.clone(),
+            }),
+        },
+    )
+    .unwrap_or_else(|| previous_state.slots.clone());
+    state
+}
+
+pub fn apply_order_observation(
+    previous_state: &ExecutorState,
+    observation: &OrderObservation,
+) -> ExecutorState {
+    if observation.status.keeps_working_order() {
+        let Some(slot) = previous_state.slots.iter().find(|slot| {
+            slot_matches_order(
+                slot,
+                &observation.client_order_id,
+                Some(observation.order_id.as_str()),
+            )
+        }) else {
+            return previous_state.clone();
+        };
+        let Some(existing_order) = slot.working_order.as_ref() else {
+            return previous_state.clone();
+        };
+
+        let mut state = previous_state.clone();
+        state.slots = replace_first_matching_slot(
+            &previous_state.slots,
+            |candidate| {
+                slot_matches_order(
+                    candidate,
+                    &observation.client_order_id,
+                    Some(observation.order_id.as_str()),
+                )
+            },
+            ExecutionSlot {
+                slot: slot.slot.clone(),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some(observation.order_id.clone()),
+                    client_order_id: observation.client_order_id.clone(),
+                    side: observation.side,
+                    price: observation.price,
+                    quantity: observation.quantity,
+                    target_exposure: existing_order.target_exposure.clone(),
+                    status: observation.status,
+                    role: existing_order.role.clone(),
+                }),
+            },
+        )
+        .unwrap_or_else(|| previous_state.slots.clone());
+        return state;
+    }
+
+    if observation.status.clears_working_order() {
+        let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+            slot_matches_order(
+                slot,
+                &observation.client_order_id,
+                Some(observation.order_id.as_str()),
+            )
+        }) else {
+            return previous_state.clone();
+        };
+        let mut state = previous_state.clone();
+        state.slots = slots;
+        return state;
+    }
+
+    previous_state.clone()
+}
+
+pub fn clear_pending_submit(
+    previous_state: &ExecutorState,
+    client_order_id: &str,
+) -> ExecutorState {
+    let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+        slot_matches_order(slot, client_order_id, None)
+    }) else {
+        return previous_state.clone();
+    };
+    let mut state = previous_state.clone();
+    state.slots = slots;
+    state
+}
+
+pub fn clear_working_order_by_order_id(
+    previous_state: &ExecutorState,
+    order_id: &str,
+) -> ExecutorState {
+    let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+        slot_matches_order(slot, "", Some(order_id))
+    }) else {
+        return previous_state.clone();
+    };
+    let mut state = previous_state.clone();
+    state.slots = slots;
+    state
+}
+
+pub fn clear_all_working_orders(previous_state: &ExecutorState) -> ExecutorState {
+    let mut state = previous_state.clone();
+    state.slots = previous_state
+        .slots
+        .iter()
+        .filter(|slot| slot.state != SlotState::Working)
+        .cloned()
+        .collect();
+    state
 }
 
 pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
@@ -403,19 +581,11 @@ fn diff_desired_orders(
     Vec<ExecutionSlot>,
     Option<ReplacementGateReason>,
 ) {
-    let current_slot = input
-        .executor_state
-        .and_then(|state| {
-            state
-                .slots
-                .iter()
-                .find(|slot| slot.slot.0 == INVENTORY_CORE_SLOT)
-        })
-        .cloned();
+    let (current_slot, sibling_slots) = split_inventory_core_slot(input.executor_state);
     let desired_order = desired_orders.first();
 
     match (current_slot, desired_order) {
-        (None, None) => (vec![ExecutionAction::NoOp], Vec::new(), None),
+        (None, None) => (vec![ExecutionAction::NoOp], sibling_slots, None),
         (Some(current_slot), None) => {
             if let Some(order_id) = current_slot
                 .working_order
@@ -427,11 +597,15 @@ fn diff_desired_orders(
                         instrument: input.instrument.clone(),
                         order_id,
                     }],
-                    vec![current_slot],
+                    with_inventory_core_slot(sibling_slots, Some(current_slot)),
                     None,
                 );
             }
-            (vec![ExecutionAction::NoOp], Vec::new(), None)
+            (
+                vec![ExecutionAction::NoOp],
+                with_inventory_core_slot(sibling_slots, None),
+                None,
+            )
         }
         (None, Some(desired_order)) => {
             let request = desired_order_to_request(input, desired_order);
@@ -440,7 +614,10 @@ fn diff_desired_orders(
                     request: request.clone(),
                     target_exposure: desired_order.target_exposure.clone(),
                 }],
-                vec![submit_pending_slot(desired_order, &request)],
+                with_inventory_core_slot(
+                    sibling_slots,
+                    Some(submit_pending_slot(desired_order, &request)),
+                ),
                 None,
             )
         }
@@ -451,7 +628,7 @@ fn diff_desired_orders(
                 {
                     return (
                         vec![ExecutionAction::NoOp],
-                        vec![current_slot],
+                        with_inventory_core_slot(sibling_slots, Some(current_slot)),
                         Some(ReplacementGateReason::RoundedMatch),
                     );
                 }
@@ -464,7 +641,7 @@ fn diff_desired_orders(
                 ) {
                     return (
                         vec![ExecutionAction::NoOp],
-                        vec![current_slot],
+                        with_inventory_core_slot(sibling_slots, Some(current_slot)),
                         Some(reason),
                     );
                 }
@@ -482,13 +659,17 @@ fn diff_desired_orders(
                                 target_exposure: desired_order.target_exposure.clone(),
                             },
                         ],
-                        vec![current_slot],
+                        with_inventory_core_slot(sibling_slots, Some(current_slot)),
                         None,
                     );
                 }
             }
 
-            (vec![ExecutionAction::NoOp], vec![current_slot], None)
+            (
+                vec![ExecutionAction::NoOp],
+                with_inventory_core_slot(sibling_slots, Some(current_slot)),
+                None,
+            )
         }
     }
 }
@@ -520,6 +701,107 @@ fn submit_pending_slot(desired_order: &DesiredOrder, request: &OrderRequest) -> 
             status: OrderStatus::Submitting,
             role: desired_order.role.clone(),
         }),
+    }
+}
+
+fn split_inventory_core_slot(
+    executor_state: Option<&ExecutorState>,
+) -> (Option<ExecutionSlot>, Vec<ExecutionSlot>) {
+    let Some(executor_state) = executor_state else {
+        return (None, Vec::new());
+    };
+
+    let mut current_slot = None;
+    let mut sibling_slots = Vec::new();
+    for slot in &executor_state.slots {
+        if slot.slot.0 == INVENTORY_CORE_SLOT {
+            if current_slot.is_none() {
+                current_slot = Some(slot.clone());
+            }
+            continue;
+        }
+        sibling_slots.push(slot.clone());
+    }
+
+    (current_slot, sibling_slots)
+}
+
+fn with_inventory_core_slot(
+    mut sibling_slots: Vec<ExecutionSlot>,
+    inventory_core_slot: Option<ExecutionSlot>,
+) -> Vec<ExecutionSlot> {
+    let mut slots =
+        Vec::with_capacity(sibling_slots.len() + usize::from(inventory_core_slot.is_some()));
+    if let Some(slot) = inventory_core_slot {
+        slots.push(slot);
+    }
+    slots.append(&mut sibling_slots);
+    slots
+}
+
+fn upsert_slot_by_name(
+    previous_slots: &[ExecutionSlot],
+    new_slot: ExecutionSlot,
+) -> Vec<ExecutionSlot> {
+    let mut slots = previous_slots.to_vec();
+    if let Some(index) = slots.iter().position(|slot| slot.slot == new_slot.slot) {
+        slots[index] = new_slot;
+    } else {
+        slots.push(new_slot);
+    }
+    slots
+}
+
+fn replace_first_matching_slot<F>(
+    previous_slots: &[ExecutionSlot],
+    matcher: F,
+    new_slot: ExecutionSlot,
+) -> Option<Vec<ExecutionSlot>>
+where
+    F: Fn(&ExecutionSlot) -> bool,
+{
+    let mut slots = previous_slots.to_vec();
+    let index = slots.iter().position(matcher)?;
+    slots[index] = new_slot;
+    Some(slots)
+}
+
+fn remove_matching_slots<F>(
+    previous_slots: &[ExecutionSlot],
+    matcher: F,
+) -> Option<Vec<ExecutionSlot>>
+where
+    F: Fn(&ExecutionSlot) -> bool,
+{
+    let mut removed = false;
+    let slots = previous_slots
+        .iter()
+        .filter(|slot| {
+            let matches = matcher(slot);
+            removed |= matches;
+            !matches
+        })
+        .cloned()
+        .collect();
+    removed.then_some(slots)
+}
+
+fn slot_matches_order(slot: &ExecutionSlot, client_order_id: &str, order_id: Option<&str>) -> bool {
+    slot.working_order
+        .as_ref()
+        .map(|order| {
+            (!client_order_id.is_empty() && order.client_order_id == client_order_id)
+                || order_id
+                    .map(|order_id| order.order_id.as_deref() == Some(order_id))
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn role_for_side(side: Side) -> OrderRole {
+    match side {
+        Side::Buy => OrderRole::IncreaseInventory,
+        Side::Sell => OrderRole::DecreaseInventory,
     }
 }
 
@@ -603,7 +885,7 @@ mod tests {
     use super::*;
     use crate::grid::GridId;
     use crate::grid::Venue;
-    use crate::ports::OrderStatus;
+    use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
     use crate::runtime::{ExecutionSlot, ExecutionStats, SlotState, WorkingOrder};
 
     fn test_grid_id() -> GridId {
@@ -653,6 +935,23 @@ mod tests {
                 max_inventory_gap_abs: Exposure(4.0),
                 max_gap_age_ms: 60_000,
             },
+        }
+    }
+
+    fn sibling_slot() -> ExecutionSlot {
+        ExecutionSlot {
+            slot: OrderSlot::new("inventory_followup"),
+            state: SlotState::Working,
+            working_order: Some(WorkingOrder {
+                order_id: Some("order-2".into()),
+                client_order_id: "client-2".into(),
+                side: Side::Sell,
+                price: 96.0,
+                quantity: 12.0,
+                target_exposure: Exposure(2.0),
+                status: OrderStatus::PartiallyFilled,
+                role: OrderRole::DecreaseInventory,
+            }),
         }
     }
 
@@ -731,7 +1030,8 @@ mod tests {
         let rules = test_exchange_rules();
         let grid_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+        let mut existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+        existing_state.slots.push(sibling_slot());
 
         let plan = plan(ExecutorInput {
             grid_id: &grid_id,
@@ -780,6 +1080,137 @@ mod tests {
             ] if order_id == "order-1"
         ));
         assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn submit_receipt_promotes_submit_pending_slot_to_working() {
+        let instrument = test_instrument();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument,
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+
+        let pending = record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+        assert_eq!(pending.slots.len(), 1);
+        assert_eq!(pending.slots[0].slot, OrderSlot::new("inventory_core"));
+        assert_eq!(pending.slots[0].state, SlotState::SubmitPending);
+        assert_eq!(
+            pending.slots[0]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            None
+        );
+
+        let working = record_submit_receipt(
+            &pending,
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        );
+        assert_eq!(working.slots.len(), 1);
+        assert_eq!(working.slots[0].state, SlotState::Working);
+        assert_eq!(
+            working.slots[0]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-1")
+        );
+        assert_eq!(
+            working.slots[0]
+                .working_order
+                .as_ref()
+                .map(|order| order.status),
+            Some(OrderStatus::New)
+        );
+    }
+
+    #[test]
+    fn submit_receipt_without_matching_slot_keeps_state_unchanged() {
+        let instrument = test_instrument();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument,
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+        let mut state = ExecutorState::empty(now);
+        state.slots.push(sibling_slot());
+
+        let next_state = record_submit_receipt(
+            &state,
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        );
+
+        assert_eq!(next_state.slots, state.slots);
+    }
+
+    #[test]
+    fn terminal_order_clears_matching_slot() {
+        let instrument = test_instrument();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument,
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+        let working = record_submit_receipt(
+            &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        );
+
+        let cleared = apply_order_observation(
+            &working,
+            &OrderObservation {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 95.0,
+                quantity: 15.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::Filled,
+            },
+        );
+        assert!(cleared.slots.is_empty());
+
+        let unchanged = apply_order_observation(
+            &working,
+            &OrderObservation {
+                order_id: "order-2".into(),
+                client_order_id: "client-2".into(),
+                side: Side::Buy,
+                price: 95.0,
+                quantity: 15.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::Filled,
+            },
+        );
+        assert_eq!(unchanged.slots, working.slots);
     }
 
     #[test]
