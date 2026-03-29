@@ -55,10 +55,7 @@ impl EffectService {
         let Some(snapshot) = self.load_grid_state(id).await? else {
             return Ok(None);
         };
-        let Some(anchor) = snapshot
-            .executor_state
-            .as_ref()
-            .and_then(SubmitRecoveryAnchor::from_executor_state)
+        let Some(anchor) = SubmitRecoveryAnchor::from_executor_state(&snapshot.executor_state)
         else {
             return Ok(None);
         };
@@ -167,12 +164,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_recovery_anchor_returns_none_without_executor_state() {
+    async fn submit_recovery_anchor_returns_none_without_matching_executor_slot() {
         let repository = Arc::new(MemoryRepository::default());
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let service = EffectService::new(repository.clone(), notifications);
 
-        repository.seed_snapshot(snapshot_without_executor_state());
+        repository.seed_snapshot(snapshot_without_matching_executor_slot());
         repository.seed_effect(submit_effect("btc-core:batch:legacy", "client-legacy"));
 
         assert_eq!(
@@ -218,7 +215,7 @@ mod tests {
         );
     }
 
-    fn snapshot_without_executor_state() -> GridRuntimeSnapshot {
+    fn snapshot_without_matching_executor_slot() -> GridRuntimeSnapshot {
         GridRuntimeSnapshot {
             grid_id: GridId::new("btc-core"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -234,7 +231,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            executor_state: None,
+            executor_state: ExecutorState::empty(Utc::now()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {
@@ -260,7 +257,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            executor_state: Some(ExecutorState {
+            executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),
                 gap_started_at: Some(Utc::now()),
@@ -281,7 +278,7 @@ mod tests {
                     max_inventory_gap_abs: Exposure(0.0),
                     max_gap_age_ms: 0,
                 },
-            }),
+            },
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {

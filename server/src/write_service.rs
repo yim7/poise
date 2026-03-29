@@ -238,6 +238,24 @@ impl GridWriteService {
         .map_err(anyhow::Error::new)
     }
 
+    pub async fn clear_working_order_by_order_id(&self, id: &str, order_id: &str) -> Result<()> {
+        self.mutate_grid(id, |manager| {
+            manager.clear_working_order_by_order_id(&GridId::new(id), order_id)?;
+            Ok(())
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn clear_all_working_orders(&self, id: &str) -> Result<()> {
+        self.mutate_grid(id, |manager| {
+            manager.clear_all_working_orders(&GridId::new(id))?;
+            Ok(())
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
     pub async fn recover_submit_effect(
         &self,
         id: &str,
@@ -365,6 +383,7 @@ impl GridWriteService {
 
         self.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
             grid_id: GridId::new(id),
+            recovery_anomaly_active: next_snapshot.executor_state.recovery_anomaly.is_some(),
         });
         if effect_status_update.is_some() {
             self.emit_internal_notification(GridInternalNotification::GridEffectStateChanged {
@@ -434,6 +453,7 @@ mod tests {
             notification,
             GridInternalNotification::GridWriteCommitted {
                 grid_id: GridId::new("btc-core"),
+                recovery_anomaly_active: false,
             }
         );
     }
@@ -533,6 +553,43 @@ mod tests {
             notification,
             GridInternalNotification::GridWriteCommitted {
                 grid_id: GridId::new("btc-core"),
+                recovery_anomaly_active: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_exchange_state_emits_recovery_anomaly_flag_when_attention_is_required() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository as Arc<dyn StateRepositoryPort>);
+        let mut receiver = service.subscribe_notifications();
+
+        service
+            .sync_exchange_state(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                vec![OrderObservation {
+                    order_id: "live-1".into(),
+                    client_order_id: "unexpected-live".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    realized_pnl: 0.0,
+                    status: grid_engine::ports::OrderStatus::New,
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            GridInternalNotification::GridWriteCommitted {
+                grid_id: GridId::new("btc-core"),
+                recovery_anomaly_active: true,
             }
         );
     }
@@ -541,6 +598,30 @@ mod tests {
     async fn recovers_slot_workset_from_live_exchange_state() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        snapshot.current_exposure = Exposure(2.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "restore-1",
+                Side::Buy,
+                94.5,
+                0.25,
+                Exposure(2.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
 
         let transition = service
             .sync_exchange_state(
@@ -565,9 +646,7 @@ mod tests {
         assert_eq!(transition.effects, vec![]);
 
         let snapshot = repository.snapshot_for("btc-core").unwrap();
-        let executor_state = snapshot
-            .executor_state
-            .expect("startup sync should rebuild slot workset");
+        let executor_state = snapshot.executor_state;
         assert_eq!(
             executor_state.slots,
             vec![grid_engine::runtime::ExecutionSlot {
@@ -631,7 +710,7 @@ mod tests {
         order: WorkingOrder,
         state: SlotState,
     ) {
-        snapshot.executor_state = Some(ExecutorState {
+        snapshot.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
             inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
@@ -648,7 +727,7 @@ mod tests {
                 max_inventory_gap_abs: Exposure(0.0),
                 max_gap_age_ms: 0,
             },
-        });
+        };
     }
 
     #[tokio::test]
@@ -683,7 +762,7 @@ mod tests {
         assert_eq!(
             repository
                 .snapshot_for("btc-core")
-                .and_then(|snapshot| snapshot.executor_state)
+                .map(|snapshot| snapshot.executor_state)
                 .and_then(|state| state.slots.into_iter().next())
                 .and_then(|slot| slot.working_order),
             Some(working_order_from_submit_request(
@@ -696,7 +775,7 @@ mod tests {
         assert_eq!(
             manager
                 .snapshot("btc-core")
-                .and_then(|snapshot| snapshot.executor_state)
+                .map(|snapshot| snapshot.executor_state)
                 .and_then(|state| state.slots.into_iter().next())
                 .and_then(|slot| slot.working_order),
             Some(working_order_from_submit_request(&request, target_exposure))
@@ -809,7 +888,7 @@ mod tests {
         assert_eq!(
             repository
                 .snapshot_for("btc-core")
-                .and_then(|snapshot| snapshot.executor_state)
+                .map(|snapshot| snapshot.executor_state)
                 .and_then(|state| state.slots.into_iter().next())
                 .and_then(|slot| slot.working_order),
             replacement_pending

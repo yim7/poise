@@ -83,38 +83,20 @@ impl GridProjector {
                 total_pnl: source.snapshot.risk.realized_pnl_cumulative
                     + source.snapshot.risk.unrealized_pnl,
                 realized_pnl: source.snapshot.risk.realized_pnl_cumulative,
-                max_inventory_gap_abs: source
-                    .snapshot
-                    .executor_state
-                    .as_ref()
-                    .map(|state| state.stats.max_inventory_gap_abs.0)
-                    .unwrap_or(0.0),
-                max_gap_age_ms: source
-                    .snapshot
-                    .executor_state
-                    .as_ref()
-                    .map(|state| state.stats.max_gap_age_ms)
-                    .unwrap_or(0),
-                stats_started_at: source
-                    .snapshot
-                    .executor_state
-                    .as_ref()
-                    .map(|state| state.stats.started_at.to_rfc3339()),
+                max_inventory_gap_abs: source.snapshot.executor_state.stats.max_inventory_gap_abs.0,
+                max_gap_age_ms: source.snapshot.executor_state.stats.max_gap_age_ms,
+                stats_started_at: Some(
+                    source.snapshot.executor_state.stats.started_at.to_rfc3339(),
+                ),
             },
             execution: GridExecutionView {
                 state: project_execution_state(source),
                 execution_status: project_execution_status(source),
-                inventory_gap: source
-                    .snapshot
-                    .executor_state
-                    .as_ref()
-                    .map(|state| state.inventory_gap.0)
-                    .unwrap_or(0.0),
+                inventory_gap: source.snapshot.executor_state.inventory_gap.0,
                 gap_age_ms: source
                     .snapshot
                     .executor_state
-                    .as_ref()
-                    .and_then(|state| state.gap_started_at)
+                    .gap_started_at
                     .map(|started_at| {
                         (source.snapshot_updated_at - started_at)
                             .num_milliseconds()
@@ -233,13 +215,7 @@ fn project_execution_state(source: &GridReadModelSource) -> ExecutionStateView {
 }
 
 fn project_execution_status(source: &GridReadModelSource) -> ExecutionStatusView {
-    if source
-        .snapshot
-        .executor_state
-        .as_ref()
-        .and_then(|state| state.recovery_anomaly.as_ref())
-        .is_some()
-    {
+    if source.snapshot.executor_state.recovery_anomaly.is_some() {
         ExecutionStatusView::AttentionRequired
     } else {
         ExecutionStatusView::Normal
@@ -254,42 +230,46 @@ fn project_execution_slots(source: &GridReadModelSource) -> Vec<ExecutionSlotVie
     source
         .snapshot
         .executor_state
-        .as_ref()
-        .map(|state| {
-            state
-                .slots
-                .iter()
-                .filter_map(|slot| {
-                    let order = slot.working_order.as_ref()?;
-                    Some(ExecutionSlotView {
-                        label: slot.slot.0.clone(),
-                        phase: match slot.state {
-                            grid_engine::runtime::SlotState::SubmitPending => {
-                                ExecutionSlotPhaseView::Opening
-                            }
-                            grid_engine::runtime::SlotState::Working => {
-                                ExecutionSlotPhaseView::Working
-                            }
-                            grid_engine::runtime::SlotState::Empty => return None,
-                        },
-                        intent: match order.role {
-                            grid_engine::executor::OrderRole::IncreaseInventory => {
-                                ExecutionIntentView::IncreaseInventory
-                            }
-                            grid_engine::executor::OrderRole::DecreaseInventory => {
-                                ExecutionIntentView::DecreaseInventory
-                            }
-                        },
-                        order: Some(ExecutionSlotOrderView {
-                            side: project_side(order.side),
-                            price: order.price,
-                            quantity: order.quantity,
-                        }),
-                    })
-                })
-                .collect()
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let order = slot.working_order.as_ref()?;
+            Some(ExecutionSlotView {
+                label: project_execution_slot_label(index, slot),
+                phase: match slot.state {
+                    grid_engine::runtime::SlotState::SubmitPending => {
+                        ExecutionSlotPhaseView::Opening
+                    }
+                    grid_engine::runtime::SlotState::Working => ExecutionSlotPhaseView::Working,
+                    grid_engine::runtime::SlotState::Empty => return None,
+                },
+                intent: match order.role {
+                    grid_engine::executor::OrderRole::IncreaseInventory => {
+                        ExecutionIntentView::IncreaseInventory
+                    }
+                    grid_engine::executor::OrderRole::DecreaseInventory => {
+                        ExecutionIntentView::DecreaseInventory
+                    }
+                },
+                order: Some(ExecutionSlotOrderView {
+                    side: project_side(order.side),
+                    price: order.price,
+                    quantity: order.quantity,
+                }),
+            })
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+fn project_execution_slot_label(
+    index: usize,
+    slot: &grid_engine::runtime::ExecutionSlot,
+) -> String {
+    match slot.slot.0.as_str() {
+        "inventory_core" => "inventory".to_string(),
+        _ => format!("slot {}", index + 1),
+    }
 }
 
 fn project_available_commands(status: &EngineGridStatus) -> Vec<GridCommandView> {
@@ -452,12 +432,8 @@ mod tests {
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
 
         let mut anomaly_source = source_with_submitting_effect();
-        anomaly_source
-            .snapshot
-            .executor_state
-            .as_mut()
-            .unwrap()
-            .recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+        anomaly_source.snapshot.executor_state.recovery_anomaly =
+            Some(RecoveryAnomaly::UnknownLiveOrder);
         let anomaly_item = GridProjector::new().project_list_item(&anomaly_source);
         assert_eq!(
             anomaly_item.execution.execution_status,
@@ -516,7 +492,7 @@ mod tests {
             detail.execution.slots.len() as u32
         );
         assert_eq!(detail.execution.slots.len(), 1);
-        assert_eq!(detail.execution.slots[0].label, "inventory_core");
+        assert_eq!(detail.execution.slots[0].label, "inventory");
         assert_eq!(
             detail.execution.slots[0].phase,
             ExecutionSlotPhaseView::Working
@@ -674,7 +650,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
-            executor_state: Some(ExecutorState {
+            executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(0.5),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
@@ -700,7 +676,7 @@ mod tests {
                     max_inventory_gap_abs: Exposure(1.5),
                     max_gap_age_ms: 120_000,
                 },
-            }),
+            },
             replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,

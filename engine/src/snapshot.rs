@@ -22,8 +22,7 @@ pub struct GridRuntimeSnapshot {
     pub status: GridStatus,
     pub current_exposure: Exposure,
     pub target_exposure: Option<Exposure>,
-    #[serde(default)]
-    pub executor_state: Option<ExecutorState>,
+    pub executor_state: ExecutorState,
     #[serde(default)]
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk: RiskState,

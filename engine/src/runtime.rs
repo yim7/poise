@@ -73,6 +73,16 @@ pub struct ExecutionStats {
     pub max_gap_age_ms: i64,
 }
 
+impl ExecutionStats {
+    pub fn new(started_at: DateTime<Utc>) -> Self {
+        Self {
+            started_at,
+            max_inventory_gap_abs: Exposure(0.0),
+            max_gap_age_ms: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotState {
@@ -114,6 +124,30 @@ pub struct ExecutorState {
     pub stats: ExecutionStats,
 }
 
+impl ExecutorState {
+    pub fn empty(started_at: DateTime<Utc>) -> Self {
+        Self {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(0.0),
+            gap_started_at: None,
+            last_reprice_at: None,
+            slots: Vec::new(),
+            last_execution_reason: None,
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(started_at),
+        }
+    }
+
+    pub fn reset_for_activation(&self, started_at: DateTime<Utc>) -> Self {
+        let mut reset = self.clone();
+        reset.gap_started_at = (!reset.inventory_gap.is_zero()).then_some(started_at);
+        reset.last_reprice_at = None;
+        reset.last_execution_reason = None;
+        reset.stats = ExecutionStats::new(started_at);
+        reset
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GridRuntime {
     pub id: GridId,
@@ -125,7 +159,7 @@ pub struct GridRuntime {
     pub current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
-    pub executor_state: Option<ExecutorState>,
+    pub executor_state: ExecutorState,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk_state: RiskState,
     pub reference_price: Option<f64>,
@@ -139,6 +173,7 @@ impl GridRuntime {
         config: GridConfig,
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
+        started_at: DateTime<Utc>,
     ) -> Self {
         Self {
             id,
@@ -149,7 +184,7 @@ impl GridRuntime {
             status: GridStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
-            executor_state: None,
+            executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
             risk_state: RiskState::default(),
             reference_price: None,
@@ -216,7 +251,7 @@ impl GridRuntime {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use grid_core::events::ReplacementGateReason;
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
@@ -255,6 +290,7 @@ mod tests {
                 min_qty: 0.01,
                 min_notional: 5.0,
             },
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         )
     }
 
@@ -356,10 +392,9 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
         );
-        runtime.executor_state = Some(test_executor_state());
+        runtime.executor_state = test_executor_state();
 
         let snapshot = runtime.snapshot();
-        assert!(snapshot.executor_state.is_some());
         assert_eq!(snapshot.executor_state, runtime.executor_state);
 
         let serialized = serde_json::to_value(&snapshot).unwrap();
@@ -381,8 +416,8 @@ mod tests {
         assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.executor_state, runtime.executor_state);
         assert_eq!(
-            restored.executor_state.as_ref().unwrap().stats.started_at,
-            runtime.executor_state.as_ref().unwrap().stats.started_at
+            restored.executor_state.stats.started_at,
+            runtime.executor_state.stats.started_at
         );
     }
 }

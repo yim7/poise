@@ -8,9 +8,11 @@ use grid_engine::ports::{
 };
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
+use crate::notifications::GridInternalNotification;
 use crate::write_service::GridMutationError;
 
 #[derive(Clone)]
@@ -18,6 +20,7 @@ pub struct ServerRuntime {
     state: ServerState,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
+    recovery_retry_interval: Duration,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -28,6 +31,14 @@ pub struct RuntimeHandles {
     pub user_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub effect_task: JoinHandle<()>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub recovery_task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryTrackedGrid {
+    instrument: grid_engine::grid::Instrument,
+    next_retry_at: Instant,
 }
 
 impl ServerRuntime {
@@ -36,10 +47,20 @@ impl ServerRuntime {
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
+        Self::with_recovery_retry_interval(state, exchange, market_data, Duration::from_secs(1))
+    }
+
+    fn with_recovery_retry_interval(
+        state: ServerState,
+        exchange: Arc<dyn ExchangePort>,
+        market_data: Arc<dyn MarketDataPort>,
+        recovery_retry_interval: Duration,
+    ) -> Self {
         Self {
             state,
             exchange,
             market_data,
+            recovery_retry_interval,
         }
     }
 
@@ -49,6 +70,7 @@ impl ServerRuntime {
         self.startup_sync().await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
+        let recovery_task = self.spawn_recovery_task();
         let effect_task = self.spawn_effect_task();
         let user_task = self.spawn_user_task(user_receiver, startup_cutoff);
         let market_task = self.spawn_market_task();
@@ -57,6 +79,7 @@ impl ServerRuntime {
             market_task,
             user_task,
             effect_task,
+            recovery_task,
         })
     }
 
@@ -69,8 +92,7 @@ impl ServerRuntime {
                 .effect_service
                 .submit_recovery_anchor(&grid.id)
                 .await?;
-            let _ = self
-                .state
+            self.state
                 .write_service
                 .sync_exchange_state(
                     &grid.id,
@@ -107,7 +129,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                apply_user_data_event(&self.state, &self.exchange, &grid_id, event)
+                apply_user_data_event(&self.state, &grid_id, event)
                     .await
                     .map_err(mutate_error)?;
             }
@@ -174,13 +196,82 @@ impl ServerRuntime {
         .spawn()
     }
 
+    fn spawn_recovery_task(&self) -> JoinHandle<()> {
+        let state = self.state.clone();
+        let exchange = Arc::clone(&self.exchange);
+        let retry_interval = self.recovery_retry_interval;
+
+        tokio::spawn(async move {
+            let instruments = state.write_service.grid_instruments().await;
+            let mut tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
+            let mut notifications = state.write_service.subscribe_notifications();
+            let mut ticker = tokio::time::interval(Duration::from_millis(50));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let now = Instant::now();
+                        let due_grids: Vec<(String, grid_engine::grid::Instrument)> = tracked
+                            .iter()
+                            .filter(|(_, tracked_grid)| tracked_grid.next_retry_at <= now)
+                            .map(|(grid_id, tracked_grid)| (grid_id.clone(), tracked_grid.instrument.clone()))
+                            .collect();
+
+                        for (grid_id, instrument) in due_grids {
+                            if let Some(tracked_grid) = tracked.get_mut(&grid_id) {
+                                tracked_grid.next_retry_at = Instant::now() + retry_interval;
+                            }
+                            if let Err(error) = sync_exchange_state_from_exchange(
+                                &state,
+                                &exchange,
+                                &grid_id,
+                                &instrument,
+                            )
+                            .await {
+                                tracing::warn!(
+                                    "failed to auto-resync recovery anomaly for {}: {}",
+                                    instrument.symbol,
+                                    error.message()
+                                );
+                            }
+                        }
+                    }
+                    notification = notifications.recv() => {
+                        match notification {
+                            Ok(GridInternalNotification::GridWriteCommitted {
+                                grid_id,
+                                recovery_anomaly_active,
+                            }) => {
+                                update_recovery_tracking(
+                                    &mut tracked,
+                                    &instruments,
+                                    grid_id.as_str(),
+                                    recovery_anomaly_active,
+                                    retry_interval,
+                                );
+                            }
+                            Ok(GridInternalNotification::GridEffectStateChanged { .. }) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    "recovery notification stream lagged by {skipped} messages; reseeding recovery tracking"
+                                );
+                                tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn spawn_user_task(
         &self,
         mut receiver: mpsc::Receiver<UserDataEvent>,
         startup_cutoff: chrono::DateTime<chrono::Utc>,
     ) -> JoinHandle<()> {
         let state = self.state.clone();
-        let exchange = Arc::clone(&self.exchange);
 
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
@@ -197,8 +288,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                if let Err(error) = apply_user_data_event(&state, &exchange, &grid_id, event).await
-                {
+                if let Err(error) = apply_user_data_event(&state, &grid_id, event).await {
                     tracing::warn!(
                         "failed to apply user data update for {}: {}",
                         instrument.symbol,
@@ -213,15 +303,9 @@ impl ServerRuntime {
 
 async fn apply_user_data_event(
     state: &ServerState,
-    exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), GridMutationError> {
-    if grid_has_recovery_anomaly(state, grid_id).await? {
-        return sync_exchange_state_from_exchange(state, exchange, grid_id, event.instrument())
-            .await;
-    }
-
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
@@ -240,23 +324,6 @@ async fn apply_user_data_event(
     }
 
     Ok(())
-}
-
-async fn grid_has_recovery_anomaly(
-    state: &ServerState,
-    grid_id: &str,
-) -> std::result::Result<bool, GridMutationError> {
-    let snapshot = state
-        .effect_service
-        .load_grid_state(grid_id)
-        .await
-        .map_err(GridMutationError::Persistence)?
-        .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{grid_id}` not found")))?;
-    Ok(snapshot
-        .executor_state
-        .as_ref()
-        .and_then(|executor_state| executor_state.recovery_anomaly.as_ref())
-        .is_some())
 }
 
 async fn sync_exchange_state_from_exchange(
@@ -289,6 +356,55 @@ async fn sync_exchange_state_from_exchange(
         .await
         .map_err(preserve_grid_mutation_error)?;
     Ok(())
+}
+
+fn update_recovery_tracking(
+    tracked: &mut std::collections::HashMap<String, RecoveryTrackedGrid>,
+    instruments: &[crate::write_service::GridInstrument],
+    grid_id: &str,
+    recovery_anomaly_active: bool,
+    retry_interval: Duration,
+) {
+    if !recovery_anomaly_active {
+        tracked.remove(grid_id);
+        return;
+    }
+
+    let Some(instrument) = instruments
+        .iter()
+        .find(|grid| grid.id == grid_id)
+        .map(|grid| grid.instrument.clone())
+    else {
+        return;
+    };
+
+    tracked
+        .entry(grid_id.to_string())
+        .or_insert_with(|| RecoveryTrackedGrid {
+            instrument,
+            next_retry_at: Instant::now() + retry_interval,
+        });
+}
+
+async fn seed_recovery_tracking(
+    state: &ServerState,
+    instruments: &[crate::write_service::GridInstrument],
+    retry_interval: Duration,
+) -> std::collections::HashMap<String, RecoveryTrackedGrid> {
+    let mut tracked = std::collections::HashMap::new();
+    for grid in instruments {
+        let Ok(Some(snapshot)) = state.effect_service.load_grid_state(&grid.id).await else {
+            continue;
+        };
+        update_recovery_tracking(
+            &mut tracked,
+            instruments,
+            &grid.id,
+            snapshot.executor_state.recovery_anomaly.is_some(),
+            retry_interval,
+        );
+    }
+    tracked
 }
 
 fn preserve_grid_mutation_error(error: anyhow::Error) -> GridMutationError {
@@ -674,7 +790,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
             persistence.clone(),
@@ -768,7 +884,7 @@ mod tests {
         let mut snapshot = test_snapshot_with_config(config.clone());
         snapshot.current_exposure = Exposure(2.0);
         snapshot.target_exposure = Some(Exposure(3.0));
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
         let state = test_state_with_config(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1085,10 +1201,7 @@ mod tests {
         assert!(inventory_core_order(&instance).is_none());
         assert_eq!(instance.current_exposure, Exposure(6.0));
         assert_eq!(
-            instance
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            instance.executor_state.recovery_anomaly.as_ref(),
             Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
 
@@ -1100,7 +1213,7 @@ mod tests {
         let exchange = Arc::new(FakeExchange::new(btc_position(22.5, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.current_exposure = Exposure(6.0);
         snapshot.target_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(92.5);
@@ -1519,7 +1632,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
         manager.restore_grid_state(&snapshot).unwrap();
         persistence
@@ -1586,7 +1699,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(4.0));
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
 
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
@@ -1667,7 +1780,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(0.0));
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(100.0);
         snapshot.risk.unrealized_pnl = 0.0;
 
@@ -1795,7 +1908,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(0.0)),
-            executor_state: None,
+            executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
@@ -1900,10 +2013,7 @@ mod tests {
             instance.out_of_band_since,
             Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap())
         );
-        let executor_state = instance
-            .executor_state
-            .as_ref()
-            .expect("startup sync should rebuild slot workset");
+        let executor_state = &instance.executor_state;
         assert_eq!(
             executor_state.slots.as_slice(),
             [grid_engine::runtime::ExecutionSlot {
@@ -1943,10 +2053,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_sync_replans_even_when_submit_recovery_anchor_is_present() {
+        let snapshot = test_snapshot();
+        let live_order = btc_exchange_order(
+            "live-1",
+            "snapshot-1",
+            Side::Buy,
+            94.5,
+            0.25,
+            0.0,
+            OrderStatus::New,
+        );
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(7.5, 3.0),
+            vec![live_order],
+            test_budget(),
+        )
+        .await;
+        fixture
+            .persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:startup:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "startup".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "snapshot-1".into(),
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        let effects = fixture.persistence.all_effects().await;
+        assert!(effects.iter().any(|effect| {
+            matches!(
+                &effect.effect,
+                ExecutionAction::CancelOrder { order_id, .. } if order_id == "live-1"
+            )
+        }));
+        assert!(effects.iter().any(|effect| {
+            matches!(
+                &effect.effect,
+                ExecutionAction::SubmitOrder { request, target_exposure }
+                    if request.client_order_id == "BTCUSDT-reconcile"
+                        && (request.price - 95.0).abs() < f64::EPSILON
+                        && (request.quantity - 7.5).abs() < f64::EPSILON
+                        && *target_exposure == Exposure(4.0)
+            )
+        }));
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn startup_sync_marks_attention_required_when_live_order_cannot_be_claimed() {
         let mut snapshot = test_snapshot();
         snapshot.target_exposure = Some(Exposure(0.0));
-        snapshot.executor_state = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture(
             Some(snapshot),
             btc_position(0.0, 0.0),
@@ -1969,10 +2146,7 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(0.0));
         assert_eq!(instance.target_exposure, Some(Exposure(0.0)));
         assert_eq!(
-            instance
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            instance.executor_state.recovery_anomaly.as_ref(),
             Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -2122,10 +2296,7 @@ mod tests {
         let handles = fixture.runtime.start().await.unwrap();
 
         wait_until_instance(&fixture.state, |instance| {
-            instance
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref())
+            instance.executor_state.recovery_anomaly.as_ref()
                 == Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -2218,10 +2389,7 @@ mod tests {
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(
-            instance
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            instance.executor_state.recovery_anomaly.as_ref(),
             Some(&grid_engine::executor::RecoveryAnomaly::DuplicateLiveOrders)
         );
         assert!(inventory_core_order(&instance).is_none());
@@ -2230,11 +2398,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_data_event_resyncs_recovery_anomaly_automatically() {
+    async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data() {
         let mut snapshot = test_snapshot();
         snapshot.target_exposure = Some(Exposure(0.0));
-        snapshot.executor_state = None;
-        let fixture = runtime_fixture(
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
             btc_position(0.0, 0.0),
             vec![btc_exchange_order(
@@ -2247,42 +2415,75 @@ mod tests {
                 OrderStatus::New,
             )],
             test_budget(),
+            Duration::from_millis(50),
         )
         .await;
 
-        let handles = fixture.runtime.start().await.unwrap();
+        let RuntimeHandles {
+            market_task,
+            user_task,
+            effect_task,
+            recovery_task,
+        } = fixture.runtime.start().await.unwrap();
+        market_task.abort();
+        let _ = market_task.await;
+        effect_task.abort();
+        let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref())
+            instance.executor_state.recovery_anomaly.as_ref()
                 == Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
+        assert_eq!(
+            fixture.exchange.get_position_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            fixture
+                .exchange
+                .get_open_orders_calls
+                .load(Ordering::SeqCst),
+            1
+        );
 
-        fixture.exchange.open_orders.lock().unwrap().clear();
-        fixture
-            .user_sender
-            .send(position_event_at(
-                test_server_time() + chrono::Duration::milliseconds(1),
-                0.0,
-                0.0,
-            ))
-            .await
-            .unwrap();
-
-        wait_until_instance(&fixture.state, |instance| {
-            instance
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref())
-                .is_none()
+        wait_until(|| {
+            fixture
+                .exchange
+                .get_open_orders_calls
+                .load(Ordering::SeqCst)
+                >= 2
         })
         .await;
+        assert!(fixture.exchange.get_position_calls.load(Ordering::SeqCst) >= 2);
+        assert!(
+            fixture
+                .exchange
+                .get_open_orders_calls
+                .load(Ordering::SeqCst)
+                >= 2
+        );
+
+        fixture.exchange.open_orders.lock().unwrap().clear();
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.executor_state.recovery_anomaly.as_ref().is_none()
+        })
+        .await;
+        assert!(fixture.exchange.get_position_calls.load(Ordering::SeqCst) >= 3);
+        assert!(
+            fixture
+                .exchange
+                .get_open_orders_calls
+                .load(Ordering::SeqCst)
+                >= 3
+        );
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
 
-        shutdown(handles).await;
+        recovery_task.abort();
+        let _ = recovery_task.await;
+        user_task.abort();
+        let _ = user_task.await;
     }
 
     #[tokio::test]
@@ -2410,11 +2611,8 @@ mod tests {
             Arc::new(GridProjector::new()),
         );
 
-        let exchange =
-            Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![])) as Arc<dyn ExchangePort>;
         let error = super::apply_user_data_event(
             &state,
-            &exchange,
             "missing-grid",
             position_event_at(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 1).unwrap(),
@@ -2568,6 +2766,23 @@ mod tests {
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
     ) -> RuntimeFixture {
+        runtime_fixture_with_recovery_retry_interval(
+            restored_snapshot,
+            position,
+            open_orders,
+            budget,
+            Duration::from_secs(1),
+        )
+        .await
+    }
+
+    async fn runtime_fixture_with_recovery_retry_interval(
+        restored_snapshot: Option<GridSnapshot>,
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        budget: CapacityBudget,
+        recovery_retry_interval: Duration,
+    ) -> RuntimeFixture {
         let exchange = Arc::new(FakeExchange::new(position, open_orders));
         let persistence = Arc::new(MemoryPersistence::default());
         let (price_sender, price_receiver) = mpsc::channel(8);
@@ -2613,10 +2828,11 @@ mod tests {
         );
 
         RuntimeFixture {
-            runtime: ServerRuntime::new(
+            runtime: ServerRuntime::with_recovery_retry_interval(
                 state.clone(),
                 exchange.clone() as Arc<dyn ExchangePort>,
                 market_data as Arc<dyn MarketDataPort>,
+                recovery_retry_interval,
             ),
             state,
             exchange,
@@ -2725,9 +2941,11 @@ mod tests {
         handles.market_task.abort();
         handles.user_task.abort();
         handles.effect_task.abort();
+        handles.recovery_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.effect_task.await;
+        let _ = handles.recovery_task.await;
     }
 
     async fn wait_until<F>(condition: F)
@@ -2940,7 +3158,7 @@ mod tests {
     }
 
     fn set_executor_state(snapshot: &mut GridSnapshot, order: WorkingOrder, state: SlotState) {
-        snapshot.executor_state = Some(ExecutorState {
+        snapshot.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
             inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
             gap_started_at: Some(test_server_time()),
@@ -2957,13 +3175,13 @@ mod tests {
                 max_inventory_gap_abs: Exposure(0.0),
                 max_gap_age_ms: 0,
             },
-        });
+        };
     }
 
     fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
         grid.executor_state
-            .as_ref()
-            .and_then(|state| state.slots.first())
+            .slots
+            .first()
             .and_then(|slot| slot.working_order.as_ref())
     }
 
@@ -2975,7 +3193,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            executor_state: None,
+            executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
@@ -3014,6 +3232,8 @@ mod tests {
         submitted_orders: Mutex<Vec<OrderRequest>>,
         canceled_order_ids: Mutex<Vec<String>>,
         cancel_all_symbols: Mutex<Vec<String>>,
+        get_position_calls: AtomicUsize,
+        get_open_orders_calls: AtomicUsize,
         submit_error: Mutex<Option<String>>,
         cancel_order_error: Mutex<Option<String>>,
         cancel_all_error: Mutex<Option<String>>,
@@ -3040,6 +3260,8 @@ mod tests {
                 submitted_orders: Mutex::new(Vec::new()),
                 canceled_order_ids: Mutex::new(Vec::new()),
                 cancel_all_symbols: Mutex::new(Vec::new()),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
                 submit_error: Mutex::new(None),
                 cancel_order_error: Mutex::new(None),
                 cancel_all_error: Mutex::new(None),
@@ -3128,10 +3350,12 @@ mod tests {
         }
 
         async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+            self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.position.lock().unwrap().clone())
         }
 
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+            self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.open_orders.lock().unwrap().clone())
         }
 
@@ -3348,8 +3572,8 @@ mod tests {
         ) -> Result<CommittedGridWrite> {
             if state
                 .executor_state
-                .as_ref()
-                .and_then(|executor_state| executor_state.slots.first())
+                .slots
+                .first()
                 .and_then(|slot| slot.working_order.as_ref())
                 .and_then(|order| order.order_id.as_ref())
                 .is_some()

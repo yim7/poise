@@ -15,7 +15,7 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 
     loop {
         let grid_id = match receiver.recv().await {
-            Ok(GridInternalNotification::GridWriteCommitted { grid_id })
+            Ok(GridInternalNotification::GridWriteCommitted { grid_id, .. })
             | Ok(GridInternalNotification::GridEffectStateChanged { grid_id }) => grid_id,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
@@ -208,6 +208,7 @@ mod tests {
 
         service.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
             grid_id: GridId::new("btc-core"),
+            recovery_anomaly_active: false,
         });
 
         let payload_a = recv_event(&mut stream_a).await;
@@ -300,6 +301,7 @@ mod tests {
         for _ in 0..8 {
             service.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
                 grid_id: GridId::new("btc-core"),
+                recovery_anomaly_active: false,
             });
         }
 
@@ -333,6 +335,7 @@ mod tests {
 
         service.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
             grid_id: GridId::new("btc-core"),
+            recovery_anomaly_active: false,
         });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
@@ -365,6 +368,7 @@ mod tests {
 
         service.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
             grid_id: GridId::new("btc-core"),
+            recovery_anomaly_active: false,
         });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {

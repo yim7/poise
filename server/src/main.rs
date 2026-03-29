@@ -178,9 +178,11 @@ notional_per_unit = 375.0
         runtime_handles.market_task.abort();
         runtime_handles.user_task.abort();
         runtime_handles.effect_task.abort();
+        runtime_handles.recovery_task.abort();
         let _ = runtime_handles.market_task.await;
         let _ = runtime_handles.user_task.await;
         let _ = runtime_handles.effect_task.await;
+        let _ = runtime_handles.recovery_task.await;
         let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 

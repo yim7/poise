@@ -262,8 +262,8 @@ mod tests {
         let mut snapshot = grid.snapshot();
         let slot_order = snapshot
             .executor_state
-            .as_mut()
-            .and_then(|state| state.slots.first_mut())
+            .slots
+            .first_mut()
             .and_then(|slot| slot.working_order.as_mut())
             .expect("market observe should seed inventory_core working order");
         slot_order.order_id = Some("order-1".into());
@@ -325,7 +325,7 @@ mod tests {
         );
         assert_eq!(payload.execution.active_slot_count, 1);
         assert_eq!(payload.execution.slots.len(), 1);
-        assert_eq!(payload.execution.slots[0].label, "inventory_core");
+        assert_eq!(payload.execution.slots[0].label, "inventory");
         assert_eq!(
             payload.execution.slots[0].phase,
             ExecutionSlotPhaseView::Opening

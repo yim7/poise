@@ -118,6 +118,7 @@ fn apply_out_of_band(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
     use grid_core::risk::CapacityBudget;
     use grid_core::strategy::*;
 
@@ -141,6 +142,7 @@ mod tests {
                 min_qty: 0.0,
                 min_notional: 0.0,
             },
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         )
     }
 

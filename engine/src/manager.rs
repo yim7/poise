@@ -9,7 +9,7 @@ use grid_core::types::ExchangeRules;
 use grid_core::types::Exposure;
 
 use crate::command::GridCommand;
-use crate::executor::{self, ExecutionMode, OrderRole, OrderSlot};
+use crate::executor::{self, OrderRole, OrderSlot};
 use crate::grid::{GridId, Instrument};
 use crate::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
@@ -17,8 +17,8 @@ use crate::observation::{
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
 use crate::runtime::{
-    ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, SlotState,
-    SubmitRecoveryAnchor, WorkingOrder,
+    ExecutionSlot, ExecutorState, GridRuntime, GridStatus, SlotState, SubmitRecoveryAnchor,
+    WorkingOrder,
 };
 use crate::snapshot::GridRuntimeSnapshot;
 use crate::transition::{GridEffect, GridTransition};
@@ -87,6 +87,7 @@ impl GridManager {
             config,
             budget,
             exchange_rules,
+            self.clock.now(),
         );
         self.grids.insert(id.clone(), grid);
         self.instruments.insert(instrument, id);
@@ -170,6 +171,7 @@ impl GridManager {
     }
 
     pub fn resume_grid(&mut self, id: &str) -> Result<()> {
+        let resumed_at = self.clock.now();
         let resumed_state = {
             let grid = self
                 .grids
@@ -180,19 +182,29 @@ impl GridManager {
                 bail!("cannot resume grid `{id}` from status {:?}", grid.status);
             }
 
-            match grid.reference_price {
-                Some(reference_price) => {
-                    let mut resumed = grid.clone();
-                    resumed.status = GridStatus::WaitingMarketData;
-                    let result =
-                        self.plan_inventory_execution_for_grid(&resumed, reference_price)?;
-                    Some((
-                        result.new_status.unwrap_or(GridStatus::Active),
-                        result.target_exposure,
-                        result.replacement_gate_reason,
-                    ))
-                }
-                None => None,
+            if let Some(reference_price) = grid.reference_price {
+                let mut resumed = grid.clone();
+                resumed.status = GridStatus::WaitingMarketData;
+                resumed.executor_state = grid.executor_state.reset_for_activation(resumed_at);
+                let result = self.plan_inventory_execution_for_grid(&resumed, reference_price)?;
+                (
+                    result.new_status.unwrap_or(GridStatus::Active),
+                    Some(result.target_exposure.clone()),
+                    result.replacement_gate_reason,
+                    executor::refresh_state(
+                        &resumed.executor_state,
+                        &resumed.current_exposure,
+                        &result.target_exposure,
+                        resumed_at,
+                    ),
+                )
+            } else {
+                (
+                    GridStatus::WaitingMarketData,
+                    None,
+                    None,
+                    grid.executor_state.reset_for_activation(resumed_at),
+                )
             }
         };
 
@@ -200,18 +212,11 @@ impl GridManager {
             .grids
             .get_mut(&GridId::from(id))
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
-        match resumed_state {
-            Some((status, exposure, replacement_gate_reason)) => {
-                grid.status = status;
-                grid.target_exposure = Some(exposure);
-                grid.replacement_gate_reason = replacement_gate_reason;
-            }
-            None => {
-                grid.status = GridStatus::WaitingMarketData;
-                grid.target_exposure = None;
-                grid.replacement_gate_reason = None;
-            }
-        }
+        let (status, exposure, replacement_gate_reason, executor_state) = resumed_state;
+        grid.status = status;
+        grid.target_exposure = exposure;
+        grid.replacement_gate_reason = replacement_gate_reason;
+        grid.executor_state = executor_state;
 
         Ok(())
     }
@@ -350,6 +355,30 @@ impl GridManager {
         Ok(())
     }
 
+    pub fn clear_working_order_by_order_id(&mut self, id: &GridId, order_id: &str) -> Result<()> {
+        let grid = self
+            .grids
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+        let cleared_slot = clear_executor_slot(grid, "", Some(order_id));
+        if cleared_slot {
+            grid.replacement_gate_reason = None;
+        }
+        Ok(())
+    }
+
+    pub fn clear_all_working_orders(&mut self, id: &GridId) -> Result<()> {
+        let grid = self
+            .grids
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+        if !grid.executor_state.slots.is_empty() {
+            grid.executor_state.slots.clear();
+            grid.replacement_gate_reason = None;
+        }
+        Ok(())
+    }
+
     pub fn recover_submit_effect(
         &mut self,
         id: &GridId,
@@ -415,7 +444,7 @@ impl GridManager {
         }
 
         let mut planned_grid = grid.clone();
-        planned_grid.executor_state = None;
+        planned_grid.executor_state = ExecutorState::empty(self.clock.now());
         let result = self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
 
         Ok(matches!(
@@ -504,12 +533,7 @@ impl GridManager {
             grid.risk_state.realized_pnl_cumulative += observation.realized_pnl;
         }
 
-        if grid
-            .executor_state
-            .as_ref()
-            .and_then(|state| state.recovery_anomaly.as_ref())
-            .is_some()
-        {
+        if grid.executor_state.recovery_anomaly.is_some() {
             return Ok(());
         }
 
@@ -565,14 +589,14 @@ impl GridManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?
             .clone();
-        let previous_state = grid.executor_state.as_ref().cloned();
+        let previous_state = grid.executor_state.clone();
         let recovery = executor::recover_working_orders(executor::RecoveryInput {
             exchange_rules: &grid.exchange_rules,
             base_qty_per_unit: grid.config.base_qty_per_unit(),
             current_exposure: &grid.current_exposure,
             target_exposure: grid.target_exposure.as_ref(),
             reference_price: grid.reference_price,
-            previous_state: previous_state.as_ref(),
+            previous_state: Some(&previous_state),
             live_orders: &open_orders,
             submit_recovery_anchor: submit_recovery_anchor.as_ref(),
             observed_at,
@@ -584,24 +608,16 @@ impl GridManager {
                     .grids
                     .get_mut(id)
                     .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-                let mut state = previous_state.unwrap_or_else(|| {
-                    empty_executor_state(
-                        observed_at,
-                        grid.current_exposure.clone(),
-                        grid.target_exposure
-                            .clone()
-                            .unwrap_or_else(|| grid.current_exposure.clone()),
-                    )
-                });
+                let mut state = previous_state;
                 state.slots.clear();
                 state.recovery_anomaly = Some(anomaly);
-                grid.executor_state = Some(state);
+                grid.executor_state = state;
                 grid.replacement_gate_reason = None;
                 Ok((vec![], vec![GridEffect::NoOp]))
             }
             executor::RecoveryResolution::Rebuilt { state } => {
                 let mut planned_grid = grid.clone();
-                planned_grid.executor_state = Some(state);
+                planned_grid.executor_state = state;
 
                 if matches!(planned_grid.status, GridStatus::Paused) {
                     let grid = self
@@ -623,22 +639,6 @@ impl GridManager {
                     return Ok((vec![], vec![]));
                 };
 
-                if submit_recovery_anchor.is_some() {
-                    let target = reconciler::reconcile_target(&planned_grid, reference_price);
-                    let grid = self
-                        .grids
-                        .get_mut(id)
-                        .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-                    if let Some(new_status) = target.new_status {
-                        grid.status = new_status;
-                    }
-                    grid.target_exposure = Some(target.target_exposure);
-                    grid.reference_price = Some(reference_price);
-                    grid.replacement_gate_reason = None;
-                    grid.executor_state = planned_grid.executor_state;
-                    return Ok((target.events, vec![]));
-                }
-
                 let planned =
                     self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
                 let grid = self
@@ -651,7 +651,7 @@ impl GridManager {
                 grid.target_exposure = Some(planned.target_exposure);
                 grid.reference_price = Some(reference_price);
                 grid.replacement_gate_reason = planned.replacement_gate_reason;
-                grid.executor_state = Some(planned.executor_state);
+                grid.executor_state = planned.executor_state;
                 Ok((planned.events, planned.effects))
             }
         }
@@ -659,8 +659,8 @@ impl GridManager {
 
     fn resolve_pending_target_exposure(grid: &GridRuntime) -> grid_core::types::Exposure {
         grid.executor_state
-            .as_ref()
-            .and_then(|state| state.slots.first())
+            .slots
+            .first()
             .and_then(|slot| slot.working_order.as_ref())
             .map(|order| order.target_exposure.clone())
             .or_else(|| grid.target_exposure.clone())
@@ -680,12 +680,10 @@ impl GridManager {
             return Ok((vec![], vec![]));
         }
 
-        let suppress_effects_during_submit_recovery = self.grids[&id]
-            .executor_state
-            .as_ref()
-            .and_then(SubmitRecoveryAnchor::from_executor_state)
-            .map(|anchor| anchor.kind == crate::runtime::SubmitRecoveryKind::Submitting)
-            .unwrap_or(false);
+        let suppress_effects_during_submit_recovery =
+            SubmitRecoveryAnchor::from_executor_state(&self.grids[&id].executor_state)
+                .map(|anchor| anchor.kind == crate::runtime::SubmitRecoveryKind::Submitting)
+                .unwrap_or(false);
 
         let grid = self
             .grids
@@ -716,7 +714,7 @@ impl GridManager {
         grid.target_exposure = Some(target_exposure);
         grid.reference_price = Some(reference_price);
         grid.replacement_gate_reason = replacement_gate_reason;
-        grid.executor_state = Some(executor_state);
+        grid.executor_state = executor_state;
 
         if let Some(event) = replacement_gate_event {
             events.push(event);
@@ -770,48 +768,34 @@ impl GridManager {
         reference_price: f64,
     ) -> Result<PlannedInventoryExecution> {
         let target = reconciler::reconcile_target(grid, reference_price);
-        if let Some(executor_state) = grid
-            .executor_state
-            .as_ref()
-            .filter(|state| state.recovery_anomaly.is_some())
-        {
+        if grid.executor_state.recovery_anomaly.is_some() {
             return Ok(PlannedInventoryExecution {
                 events: target.events,
                 effects: vec![GridEffect::NoOp],
                 target_exposure: target.target_exposure,
                 new_status: target.new_status,
                 replacement_gate_reason: None,
-                executor_state: executor_state.clone(),
+                executor_state: grid.executor_state.clone(),
             });
         }
         let observed_at = self.clock.now();
         if target.suppress_execution {
+            let executor_state = executor::refresh_state(
+                &grid.executor_state,
+                &grid.current_exposure,
+                &target.target_exposure,
+                observed_at,
+            );
             return Ok(PlannedInventoryExecution {
                 events: target.events,
                 effects: vec![GridEffect::NoOp],
                 target_exposure: target.target_exposure.clone(),
                 new_status: target.new_status,
                 replacement_gate_reason: None,
-                executor_state: grid
-                    .executor_state
-                    .clone()
-                    .unwrap_or_else(|| ExecutorState {
-                        mode: ExecutionMode::Passive,
-                        inventory_gap: grid.current_exposure.delta(&target.target_exposure),
-                        gap_started_at: None,
-                        last_reprice_at: None,
-                        slots: vec![],
-                        last_execution_reason: None,
-                        recovery_anomaly: None,
-                        stats: ExecutionStats {
-                            started_at: observed_at,
-                            max_inventory_gap_abs: Exposure(0.0),
-                            max_gap_age_ms: 0,
-                        },
-                    }),
+                executor_state,
             });
         }
-        let executor_state = grid.executor_state.as_ref();
+        let executor_state = Some(&grid.executor_state);
         let plan = executor::plan(executor::ExecutorInput {
             grid_id: &grid.id,
             instrument: &grid.instrument,
@@ -845,24 +829,15 @@ impl GridManager {
             .grids
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        if grid
-            .executor_state
-            .as_ref()
-            .and_then(|state| state.recovery_anomaly.as_ref())
-            .is_some()
-        {
+        if grid.executor_state.recovery_anomaly.is_some() {
             return Ok(SubmitRecoveryAction::AwaitExchangeState);
         }
         let receipt_backed = grid
             .executor_state
-            .as_ref()
-            .and_then(|state| {
-                state
-                    .slots
-                    .iter()
-                    .filter_map(|slot| slot.working_order.as_ref())
-                    .find(|order| order.client_order_id == request.client_order_id)
-            })
+            .slots
+            .iter()
+            .filter_map(|slot| slot.working_order.as_ref())
+            .find(|order| order.client_order_id == request.client_order_id)
             .and_then(|order| order.order_id.as_ref())
             .is_some();
         let still_targeting_effect = grid
@@ -906,41 +881,13 @@ struct PlannedInventoryExecution {
     executor_state: ExecutorState,
 }
 
-fn empty_executor_state(
-    observed_at: chrono::DateTime<chrono::Utc>,
-    current_exposure: Exposure,
-    target_exposure: Exposure,
-) -> ExecutorState {
-    ExecutorState {
-        mode: ExecutionMode::Passive,
-        inventory_gap: current_exposure.delta(&target_exposure),
-        gap_started_at: None,
-        last_reprice_at: None,
-        slots: vec![],
-        last_execution_reason: None,
-        recovery_anomaly: None,
-        stats: ExecutionStats {
-            started_at: observed_at,
-            max_inventory_gap_abs: Exposure(0.0),
-            max_gap_age_ms: 0,
-        },
-    }
-}
-
 fn upsert_inventory_core_slot(
     grid: &mut GridRuntime,
-    observed_at: chrono::DateTime<chrono::Utc>,
+    _observed_at: chrono::DateTime<chrono::Utc>,
     working_order: WorkingOrder,
     state: SlotState,
 ) {
-    let target_exposure = working_order.target_exposure.clone();
-    let executor_state = grid.executor_state.get_or_insert_with(|| {
-        empty_executor_state(
-            observed_at,
-            grid.current_exposure.clone(),
-            target_exposure.clone(),
-        )
-    });
+    let executor_state = &mut grid.executor_state;
     executor_state.slots = vec![ExecutionSlot {
         slot: OrderSlot::new("inventory_core"),
         state,
@@ -953,10 +900,7 @@ fn clear_executor_slot(
     client_order_id: &str,
     order_id: Option<&str>,
 ) -> bool {
-    let Some(executor_state) = grid.executor_state.as_mut() else {
-        return false;
-    };
-    let should_clear = executor_state.slots.iter().any(|slot| {
+    let should_clear = grid.executor_state.slots.iter().any(|slot| {
         slot.working_order
             .as_ref()
             .map(|order| {
@@ -968,7 +912,7 @@ fn clear_executor_slot(
             .unwrap_or(false)
     });
     if should_clear {
-        executor_state.slots.clear();
+        grid.executor_state.slots.clear();
     }
     should_clear
 }
@@ -1027,6 +971,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use grid_core::events::ReplacementGateReason;
     use grid_core::strategy::*;
+    use grid_core::types::Side;
 
     struct FakeClock;
 
@@ -1154,16 +1099,16 @@ mod tests {
 
     fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
         grid.executor_state
-            .as_ref()
-            .and_then(|state| state.slots.first())
+            .slots
+            .first()
             .and_then(|slot| slot.working_order.as_ref())
     }
 
     fn inventory_core_order_from_snapshot(snapshot: &GridRuntimeSnapshot) -> Option<&WorkingOrder> {
         snapshot
             .executor_state
-            .as_ref()
-            .and_then(|state| state.slots.first())
+            .slots
+            .first()
             .and_then(|slot| slot.working_order.as_ref())
     }
 
@@ -1174,6 +1119,7 @@ mod tests {
             test_config(),
             test_budget(),
             test_exchange_rules(),
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(4.0);
@@ -1292,6 +1238,21 @@ mod tests {
     }
 
     #[test]
+    fn add_grid_initializes_executor_state_from_activation_clock() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap();
+        let mut manager = test_manager_with_clock(Arc::new(FixedClock(started_at)));
+
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+
+        let grid = manager.get_grid("btc1").unwrap();
+        let executor_state = &grid.executor_state;
+        assert!(executor_state.slots.is_empty());
+        assert_eq!(executor_state.inventory_gap, Exposure(0.0));
+        assert_eq!(executor_state.gap_started_at, None);
+        assert_eq!(executor_state.stats.started_at, started_at);
+    }
+
+    #[test]
     fn add_grid_rejects_duplicate_grid_ids() {
         let mut manager = test_manager();
         let grid_id = GridId::new("btc-core");
@@ -1365,6 +1326,7 @@ mod tests {
             test_config(),
             test_budget(),
             test_exchange_rules(),
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
         restored.restore_from_snapshot(&snapshot).unwrap();
 
@@ -1384,6 +1346,7 @@ mod tests {
                 },
                 test_budget(),
                 test_exchange_rules(),
+                Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
             );
             runtime.status = GridStatus::Active;
             runtime.current_exposure = grid_core::types::Exposure(0.0);
@@ -1403,6 +1366,7 @@ mod tests {
             test_config(),
             budget_with_max_notional(1500.0),
             test_exchange_rules(),
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
         runtime.status = GridStatus::Active;
         runtime.current_exposure = grid_core::types::Exposure(0.0);
@@ -1415,6 +1379,7 @@ mod tests {
                 test_config(),
                 test_budget(),
                 test_exchange_rules(),
+                Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
             );
             source.status = GridStatus::Active;
             source.current_exposure = grid_core::types::Exposure(0.0);
@@ -1466,14 +1431,7 @@ mod tests {
             transition.effects.as_slice(),
             [GridEffect::SubmitOrder { .. }]
         ));
-        assert!(
-            transition
-                .snapshot
-                .executor_state
-                .as_ref()
-                .map(|state| !state.slots.is_empty())
-                .unwrap_or(false)
-        );
+        assert!(!transition.snapshot.executor_state.slots.is_empty());
         assert!(
             !transition
                 .effects
@@ -1488,7 +1446,7 @@ mod tests {
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(0.0);
-        grid.executor_state = Some(passive_executor_state_with_matching_buy_order());
+        grid.executor_state = passive_executor_state_with_matching_buy_order();
 
         let transition = manager
             .observe(
@@ -1502,7 +1460,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(transition.effects, vec![GridEffect::NoOp]);
-        let executor_state = transition.snapshot.executor_state.unwrap();
+        let executor_state = transition.snapshot.executor_state;
         assert_eq!(executor_state.slots.len(), 1);
         assert_eq!(
             executor_state.slots,
@@ -1944,6 +1902,88 @@ mod tests {
         assert_eq!(
             grid.replacement_gate_reason,
             Some(ReplacementGateReason::RoundedMatch)
+        );
+    }
+
+    #[test]
+    fn resume_grid_resets_execution_stats_for_new_activation() {
+        let resumed_at = Utc.with_ymd_and_hms(2026, 3, 29, 10, 30, 0).unwrap();
+        let mut manager = test_manager_with_clock(Arc::new(FixedClock(resumed_at)));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Paused;
+        grid.current_exposure = Exposure(2.0);
+        grid.reference_price = Some(95.0);
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                Side::Buy,
+                95.0,
+                2.0,
+                Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        let executor_state = &mut grid.executor_state;
+        executor_state.inventory_gap = Exposure(2.0);
+        executor_state.gap_started_at = Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap());
+        executor_state.stats.started_at = Utc.with_ymd_and_hms(2026, 3, 29, 7, 30, 0).unwrap();
+        executor_state.stats.max_inventory_gap_abs = Exposure(6.0);
+        executor_state.stats.max_gap_age_ms = 120_000;
+
+        manager.resume_grid("btc1").unwrap();
+
+        let grid = manager.get_grid("btc1").unwrap();
+        let executor_state = &grid.executor_state;
+        assert_eq!(executor_state.slots.len(), 1);
+        assert_eq!(executor_state.stats.started_at, resumed_at);
+        assert_eq!(executor_state.stats.max_inventory_gap_abs, Exposure(2.0));
+        assert_eq!(executor_state.stats.max_gap_age_ms, 0);
+        assert_eq!(executor_state.gap_started_at, Some(resumed_at));
+    }
+
+    #[test]
+    fn resume_grid_does_not_stage_submit_pending_without_emitting_effects() {
+        let resumed_at = Utc.with_ymd_and_hms(2026, 3, 29, 10, 30, 0).unwrap();
+        let mut manager = test_manager_with_clock(Arc::new(FixedClock(resumed_at)));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Paused;
+        grid.current_exposure = Exposure(0.0);
+        grid.reference_price = Some(95.0);
+
+        manager.resume_grid("btc1").unwrap();
+
+        let grid = manager.get_grid("btc1").unwrap();
+        assert!(grid.executor_state.slots.is_empty());
+        assert_eq!(grid.executor_state.last_reprice_at, None);
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [GridEffect::SubmitOrder { .. }]
+        ));
+        assert_eq!(
+            transition
+                .snapshot
+                .executor_state
+                .slots
+                .first()
+                .map(|slot| slot.state.clone()),
+            Some(SlotState::SubmitPending)
         );
     }
 
@@ -2401,9 +2441,7 @@ mod tests {
         assert_eq!(grid.target_exposure, Some(grid_core::types::Exposure(6.0)));
         assert!(inventory_core_order(grid).is_none());
         assert_eq!(
-            grid.executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            grid.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
     }
@@ -2432,12 +2470,7 @@ mod tests {
         assert!(transition.effects.is_empty());
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert!(
-            grid.executor_state
-                .as_ref()
-                .map(|state| state.slots.is_empty())
-                .unwrap_or(true)
-        );
+        assert!(grid.executor_state.slots.is_empty());
         assert!(inventory_core_order(grid).is_none());
     }
 
@@ -2535,9 +2568,7 @@ mod tests {
         assert_eq!(transition.effects, vec![GridEffect::NoOp]);
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(
-            grid.executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            grid.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::DuplicateLiveOrders)
         );
     }
@@ -2589,7 +2620,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.target_exposure = Some(grid_core::types::Exposure(6.0));
-        grid.executor_state = Some(ExecutorState {
+        grid.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
             inventory_gap: grid_core::types::Exposure(6.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
@@ -2602,7 +2633,7 @@ mod tests {
                 max_inventory_gap_abs: grid_core::types::Exposure(6.0),
                 max_gap_age_ms: 0,
             },
-        });
+        };
 
         manager
             .observe(
@@ -2622,17 +2653,10 @@ mod tests {
         let grid = manager.get_grid("btc1").unwrap();
         assert!(inventory_core_order(grid).is_none());
         assert_eq!(
-            grid.executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            grid.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
-        assert!(
-            grid.executor_state
-                .as_ref()
-                .map(|state| state.slots.is_empty())
-                .unwrap_or(true)
-        );
+        assert!(grid.executor_state.slots.is_empty());
     }
 
     #[test]
@@ -2640,7 +2664,7 @@ mod tests {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.target_exposure = Some(grid_core::types::Exposure(4.0));
-        grid.executor_state = Some(ExecutorState {
+        grid.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
             inventory_gap: grid_core::types::Exposure(4.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
@@ -2653,7 +2677,7 @@ mod tests {
                 max_inventory_gap_abs: grid_core::types::Exposure(4.0),
                 max_gap_age_ms: 0,
             },
-        });
+        };
 
         let transition = manager
             .observe(
@@ -2672,14 +2696,58 @@ mod tests {
 
         assert_eq!(transition.effects, vec![GridEffect::NoOp]);
         assert_eq!(
-            transition
-                .snapshot
-                .executor_state
-                .as_ref()
-                .and_then(|state| state.recovery_anomaly.as_ref()),
+            transition.snapshot.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(inventory_core_order_from_snapshot(&transition.snapshot).is_none());
+    }
+
+    #[test]
+    fn observe_market_updates_gap_stats_when_execution_is_suppressed() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 3, 29, 10, 30, 0).unwrap();
+        let mut manager = test_manager_with_clock(Arc::new(FixedClock(observed_at)));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        grid.status = GridStatus::Active;
+        grid.current_exposure = Exposure(2.0);
+        grid.target_exposure = Some(Exposure(4.0));
+        grid.executor_state.inventory_gap = Exposure(2.0);
+        grid.executor_state.gap_started_at =
+            Some(Utc.with_ymd_and_hms(2026, 3, 29, 10, 0, 0).unwrap());
+        grid.executor_state.stats.started_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 45, 0).unwrap();
+
+        let transition = manager
+            .observe(
+                &GridId::new("btc1"),
+                GridObservation::Market(MarketObservation {
+                    reference_price: 85.0,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert_eq!(transition.snapshot.status, GridStatus::Frozen);
+        assert_eq!(
+            transition.snapshot.executor_state.inventory_gap,
+            Exposure(2.0)
+        );
+        assert_eq!(
+            transition.snapshot.executor_state.gap_started_at,
+            Some(Utc.with_ymd_and_hms(2026, 3, 29, 10, 0, 0).unwrap())
+        );
+        assert_eq!(
+            transition
+                .snapshot
+                .executor_state
+                .stats
+                .max_inventory_gap_abs,
+            Exposure(2.0)
+        );
+        assert_eq!(
+            transition.snapshot.executor_state.stats.max_gap_age_ms,
+            30 * 60 * 1000
+        );
     }
 
     #[test]

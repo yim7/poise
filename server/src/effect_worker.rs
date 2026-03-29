@@ -219,14 +219,39 @@ impl EffectWorker {
     ) -> Result<()> {
         let result = match cancellation {
             Cancellation::One {
-                instrument,
-                order_id,
-            } => self.exchange.cancel_order(&instrument, &order_id).await,
-            Cancellation::All { instrument } => self.exchange.cancel_all(&instrument).await,
+                ref instrument,
+                ref order_id,
+            } => self.exchange.cancel_order(instrument, order_id).await,
+            Cancellation::All { ref instrument } => self.exchange.cancel_all(instrument).await,
         };
 
         match result {
             Ok(()) => {
+                let writeback = match &cancellation {
+                    Cancellation::One { order_id, .. } => {
+                        self.state
+                            .write_service
+                            .clear_working_order_by_order_id(persisted.grid_id.as_str(), order_id)
+                            .await
+                    }
+                    Cancellation::All { .. } => {
+                        self.state
+                            .write_service
+                            .clear_all_working_orders(persisted.grid_id.as_str())
+                            .await
+                    }
+                };
+                if let Err(error) = writeback {
+                    self.state
+                        .effect_service
+                        .complete_effect_failed(
+                            persisted.grid_id.as_str(),
+                            &persisted.effect_id,
+                            &error.to_string(),
+                        )
+                        .await?;
+                    return Err(error);
+                }
                 self.state
                     .effect_service
                     .complete_effect_succeeded(persisted.grid_id.as_str(), &persisted.effect_id)
@@ -333,8 +358,8 @@ mod tests {
         let snapshot = manager.snapshot("btc-core").unwrap();
         let slot = snapshot
             .executor_state
-            .as_ref()
-            .and_then(|state| state.slots.first())
+            .slots
+            .first()
             .expect("submit receipt should update working order slot");
         assert_eq!(slot.state, SlotState::Working);
         let order = slot
@@ -410,6 +435,58 @@ mod tests {
         assert_eq!(effect.status, EffectStatus::Pending);
     }
 
+    #[tokio::test]
+    async fn cancel_success_clears_working_order_slot_without_waiting_for_order_event() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_grid_state(&snapshot).unwrap();
+        }
+        repository
+            .seed_effect(PersistedGridEffect {
+                effect_id: "btc-core:batch:0".into(),
+                grid_id: GridId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: GridEffect::CancelOrder {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        let manager_handle = state.write_service.manager();
+        let manager = manager_handle.read().await;
+        let snapshot = manager.snapshot("btc-core").unwrap();
+        assert!(snapshot.executor_state.slots.is_empty());
+
+        let effect = repository
+            .list_all_effects()
+            .await
+            .into_iter()
+            .next()
+            .expect("cancel effect should remain persisted");
+        assert_eq!(effect.status, EffectStatus::Succeeded);
+    }
+
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
@@ -461,7 +538,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
-            executor_state: Some(ExecutorState {
+            executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
@@ -474,7 +551,51 @@ mod tests {
                     max_inventory_gap_abs: Exposure(6.0),
                     max_gap_age_ms: 0,
                 },
-            }),
+            },
+            replacement_gate_reason: None,
+            risk: RiskState::default(),
+            observed: ObservedState {
+                reference_price: Some(95.0),
+                out_of_band_since: None,
+            },
+        }
+    }
+
+    fn snapshot_with_working_order() -> GridRuntimeSnapshot {
+        GridRuntimeSnapshot {
+            grid_id: GridId::new("btc-core"),
+            instrument: btc_instrument(),
+            config: test_config(),
+            status: GridStatus::Active,
+            current_exposure: Exposure(2.0),
+            target_exposure: Some(Exposure(6.0)),
+            executor_state: ExecutorState {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(4.0),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                slots: vec![grid_engine::runtime::ExecutionSlot {
+                    slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                    state: SlotState::Working,
+                    working_order: Some(grid_engine::runtime::WorkingOrder {
+                        order_id: Some("order-1".into()),
+                        client_order_id: "client-1".into(),
+                        side: Side::Buy,
+                        price: 95.0,
+                        quantity: 15.0,
+                        target_exposure: Exposure(6.0),
+                        status: OrderStatus::New,
+                        role: grid_engine::executor::OrderRole::IncreaseInventory,
+                    }),
+                }],
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+                stats: ExecutionStats {
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
+                    max_inventory_gap_abs: Exposure(4.0),
+                    max_gap_age_ms: 0,
+                },
+            },
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {

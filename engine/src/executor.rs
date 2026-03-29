@@ -153,6 +153,38 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     }
 }
 
+pub fn refresh_state(
+    previous_state: &ExecutorState,
+    current_exposure: &Exposure,
+    target_exposure: &Exposure,
+    observed_at: DateTime<Utc>,
+) -> ExecutorState {
+    let inventory_gap = current_exposure.delta(target_exposure);
+    let gap_started_at = resolve_gap_started_at(Some(previous_state), &inventory_gap, observed_at);
+    let gap_age_ms = gap_started_at
+        .map(|started_at| (observed_at - started_at).num_milliseconds().max(0))
+        .unwrap_or(0);
+    let mode = resolve_mode(&inventory_gap, gap_age_ms);
+    let last_execution_reason = resolve_reason(Some(previous_state), &mode);
+    let stats = update_stats(
+        Some(previous_state),
+        observed_at,
+        &inventory_gap,
+        gap_age_ms,
+    );
+
+    ExecutorState {
+        mode,
+        inventory_gap,
+        gap_started_at,
+        last_reprice_at: previous_state.last_reprice_at,
+        slots: previous_state.slots.clone(),
+        last_execution_reason,
+        recovery_anomaly: previous_state.recovery_anomaly.clone(),
+        stats,
+    }
+}
+
 pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
     if input.live_orders.len() > 1 {
         return RecoveryResolution::Anomaly(RecoveryAnomaly::DuplicateLiveOrders);
@@ -207,20 +239,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         return RecoveryResolution::Rebuilt { state };
     }
 
-    let candidate_slot = base_state
-        .slots
-        .first()
-        .cloned()
-        .or_else(|| infer_recovery_slot(&input))
-        .or_else(|| {
-            (input.target_exposure.is_none() && input.reference_price.is_none()).then(|| {
-                ExecutionSlot {
-                    slot: OrderSlot::new(INVENTORY_CORE_SLOT),
-                    state: SlotState::Empty,
-                    working_order: None,
-                }
-            })
-        });
+    let candidate_slot = base_state.slots.first().cloned();
 
     let Some(mut slot) = candidate_slot else {
         return RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder);
@@ -262,32 +281,6 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
     state.slots = vec![slot];
     state.recovery_anomaly = None;
     RecoveryResolution::Rebuilt { state }
-}
-
-fn infer_recovery_slot(input: &RecoveryInput<'_>) -> Option<ExecutionSlot> {
-    let target_exposure = input.target_exposure?;
-    let reference_price = input.reference_price?;
-    desired_inventory_order(
-        input.exchange_rules,
-        input.base_qty_per_unit,
-        input.current_exposure,
-        target_exposure,
-        reference_price,
-    )
-    .map(|desired_order| ExecutionSlot {
-        slot: desired_order.slot.clone(),
-        state: SlotState::Empty,
-        working_order: Some(WorkingOrder {
-            order_id: None,
-            client_order_id: String::new(),
-            side: desired_order.side,
-            price: desired_order.price,
-            quantity: desired_order.quantity,
-            target_exposure: desired_order.target_exposure.clone(),
-            status: OrderStatus::Submitting,
-            role: desired_order.role.clone(),
-        }),
-    })
 }
 
 fn resolve_gap_started_at(
@@ -787,5 +780,67 @@ mod tests {
             ] if order_id == "order-1"
         ));
         assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn recovery_marks_unknown_live_order_when_no_slot_can_be_inferred() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let recovery = recover_working_orders(RecoveryInput {
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: &Exposure(0.0),
+            target_exposure: None,
+            reference_price: None,
+            previous_state: Some(&ExecutorState::empty(now)),
+            live_orders: &[OrderObservation {
+                order_id: "live-1".into(),
+                client_order_id: "unexpected-live".into(),
+                side: Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            }],
+            submit_recovery_anchor: None,
+            observed_at: now,
+        });
+
+        assert!(matches!(
+            recovery,
+            RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder)
+        ));
+    }
+
+    #[test]
+    fn recovery_marks_unknown_live_order_without_historical_slot_even_when_target_exists() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let recovery = recover_working_orders(RecoveryInput {
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: &Exposure(2.0),
+            target_exposure: Some(&Exposure(4.0)),
+            reference_price: Some(95.0),
+            previous_state: Some(&ExecutorState::empty(now)),
+            live_orders: &[OrderObservation {
+                order_id: "live-1".into(),
+                client_order_id: "unexpected-live".into(),
+                side: Side::Buy,
+                price: 94.5,
+                quantity: 0.25,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            }],
+            submit_recovery_anchor: None,
+            observed_at: now,
+        });
+
+        assert!(matches!(
+            recovery,
+            RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder)
+        ));
     }
 }

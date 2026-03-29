@@ -269,7 +269,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
-            executor_state: Some(ExecutorState {
+            executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(0.5),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
@@ -295,7 +295,7 @@ mod tests {
                     max_inventory_gap_abs: Exposure(0.5),
                     max_gap_age_ms: 0,
                 },
-            }),
+            },
             replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,

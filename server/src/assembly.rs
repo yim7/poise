@@ -502,9 +502,11 @@ mod tests {
         handles.market_task.abort();
         handles.user_task.abort();
         handles.effect_task.abort();
+        handles.recovery_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.effect_task.await;
+        let _ = handles.recovery_task.await;
     }
 
     #[tokio::test]

@@ -164,11 +164,7 @@ impl SqliteStorage {
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
         let status_json =
             serde_json::to_string(&state.status).context("failed to serialize grid status")?;
-        let executor_state_json = state
-            .executor_state
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
+        let executor_state_json = serde_json::to_string(&state.executor_state)
             .context("failed to serialize executor state")?;
         let replacement_gate_reason_json = state
             .replacement_gate_reason
@@ -380,24 +376,21 @@ impl SqliteStorage {
         let venue: String = row.get(1)?;
         let config_json: String = row.get(3)?;
         let status_json: String = row.get(4)?;
-        let executor_state_json: Option<String> = row.get(7)?;
+        let executor_state_json: String = row.get(7)?;
         let replacement_gate_reason_json: Option<String> = row.get(8)?;
         let realized_pnl_day: Option<String> = row.get(9)?;
         let out_of_band_since: Option<String> = row.get(14)?;
         let config = Self::deserialize_grid_config(&config_json)?;
         let status = Self::deserialize_grid_status(&status_json)?;
         let venue = Self::deserialize_venue(&venue)?;
-        let executor_state = executor_state_json
-            .map(|json| {
-                serde_json::from_str::<ExecutorState>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        7,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
+        let executor_state =
+            serde_json::from_str::<ExecutorState>(&executor_state_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
         let replacement_gate_reason = replacement_gate_reason_json
             .map(|json| {
                 serde_json::from_str::<ReplacementGateReason>(&json).map_err(|err| {
@@ -857,7 +850,7 @@ mod tests {
                 realized_pnl_cumulative: 17.5,
                 unrealized_pnl: -3.0,
             },
-            executor_state: Some(ExecutorState {
+            executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(2.0),
                 gap_started_at: Some(
@@ -893,7 +886,7 @@ mod tests {
                     max_inventory_gap_abs: Exposure(3.5),
                     max_gap_age_ms: 42_000,
                 },
-            }),
+            },
             observed: ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: Some(
@@ -1156,8 +1149,8 @@ mod tests {
 
         assert_eq!(loaded.executor_state, snapshot.executor_state);
         assert_eq!(
-            loaded.executor_state.as_ref().unwrap().stats.started_at,
-            snapshot.executor_state.as_ref().unwrap().stats.started_at
+            loaded.executor_state.stats.started_at,
+            snapshot.executor_state.stats.started_at
         );
     }
 
