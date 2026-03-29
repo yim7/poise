@@ -107,7 +107,10 @@ Run:
 Expected:
 两组测试通过。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
+
+Task 1 code commit:
+`7217931c7f4d852e6dd8056372b6737ad2d84420`
 
 ```bash
 git add engine/src/lib.rs engine/src/executor.rs engine/src/runtime.rs engine/src/snapshot.rs storage/src/schema.rs storage/src/sqlite.rs
