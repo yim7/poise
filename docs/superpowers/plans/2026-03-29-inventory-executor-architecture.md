@@ -183,7 +183,10 @@ Run:
 Expected:
 执行器模式与 diff 相关测试通过。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
+
+Task 2 code commit:
+`1499e2d89a6b4f72e59454eb0ee98cbca58eaf8c`
 
 ```bash
 git add engine/src/executor.rs engine/src/reconciler.rs engine/src/manager.rs
