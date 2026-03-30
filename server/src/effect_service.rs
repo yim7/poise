@@ -138,12 +138,15 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState::empty(Utc::now()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }
@@ -164,6 +167,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),
@@ -191,6 +195,8 @@ mod tests {
             observed: ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }
@@ -208,6 +214,7 @@ mod tests {
                     price: 94.0,
                     quantity: 0.25,
                     client_order_id: client_order_id.into(),
+                    reduce_only: false,
                 },
                 target_exposure: Exposure(6.0),
             },

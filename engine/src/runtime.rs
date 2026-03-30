@@ -131,11 +131,15 @@ pub struct GridRuntime {
     pub current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
+    pub manual_target_override: Option<Exposure>,
     pub executor_state: ExecutorState,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk_state: RiskState,
     pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
+    pub last_tick_at: Option<DateTime<Utc>>,
+    pub market_data_stale_since: Option<DateTime<Utc>>,
+    pub tick_timeout_secs: u64,
 }
 
 impl GridRuntime {
@@ -147,6 +151,26 @@ impl GridRuntime {
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
     ) -> Self {
+        Self::with_tick_timeout_secs(
+            id,
+            instrument,
+            config,
+            budget,
+            exchange_rules,
+            started_at,
+            30,
+        )
+    }
+
+    pub fn with_tick_timeout_secs(
+        id: GridId,
+        instrument: Instrument,
+        config: GridConfig,
+        budget: CapacityBudget,
+        exchange_rules: ExchangeRules,
+        started_at: DateTime<Utc>,
+        tick_timeout_secs: u64,
+    ) -> Self {
         Self {
             id,
             instrument,
@@ -156,11 +180,15 @@ impl GridRuntime {
             status: GridStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
+            manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
             risk_state: RiskState::default(),
             reference_price: None,
             out_of_band_since: None,
+            last_tick_at: None,
+            market_data_stale_since: None,
+            tick_timeout_secs,
         }
     }
 
@@ -176,12 +204,15 @@ impl GridRuntime {
             status: self.status.clone(),
             current_exposure: self.current_exposure.clone(),
             target_exposure: self.target_exposure.clone(),
+            manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
                 reference_price: self.reference_price,
                 out_of_band_since: self.out_of_band_since,
+                last_tick_at: self.last_tick_at,
+                market_data_stale_since: self.market_data_stale_since,
             },
         }
     }
@@ -211,11 +242,14 @@ impl GridRuntime {
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
         self.target_exposure = snapshot.target_exposure.clone();
+        self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.risk_state = snapshot.risk.clone();
         self.reference_price = snapshot.observed.reference_price;
         self.out_of_band_since = snapshot.observed.out_of_band_since;
+        self.last_tick_at = snapshot.observed.last_tick_at;
+        self.market_data_stale_since = snapshot.observed.market_data_stale_since;
 
         Ok(())
     }
@@ -314,6 +348,18 @@ mod tests {
         runtime.status = GridStatus::Active;
         runtime.current_exposure = Exposure(4.0);
         runtime.target_exposure = Some(Exposure(6.0));
+        runtime.manual_target_override = Some(Exposure(0.0));
+        runtime.last_tick_at = Some(
+            DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        runtime.market_data_stale_since = Some(
+            DateTime::parse_from_rfc3339("2026-03-29T08:01:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        runtime.tick_timeout_secs = 45;
         runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
         runtime.risk_state = RiskState {
             realized_pnl_day: None,
@@ -344,11 +390,19 @@ mod tests {
         );
 
         let mut restored = test_runtime();
+        restored.tick_timeout_secs = 45;
         restored.restore_from_snapshot(&snapshot).unwrap();
 
         assert_eq!(restored.status, GridStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
         assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(restored.last_tick_at, runtime.last_tick_at);
+        assert_eq!(
+            restored.market_data_stale_since,
+            runtime.market_data_stale_since
+        );
+        assert_eq!(restored.tick_timeout_secs, 45);
         assert_eq!(restored.executor_state, runtime.executor_state);
         assert_eq!(
             restored.executor_state.stats.started_at,

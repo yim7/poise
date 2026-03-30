@@ -6,7 +6,7 @@ use grid_engine::observation::{OrderObservation, PositionObservation};
 use grid_engine::ports::{
     ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -21,6 +21,7 @@ pub struct ServerRuntime {
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
     recovery_retry_interval: Duration,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -56,11 +57,13 @@ impl ServerRuntime {
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
     ) -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             state,
             exchange,
             market_data,
             recovery_retry_interval,
+            shutdown_tx,
         }
     }
 
@@ -70,10 +73,11 @@ impl ServerRuntime {
         self.startup_sync().await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
-        let recovery_task = self.spawn_recovery_task();
-        let effect_task = self.spawn_effect_task();
-        let user_task = self.spawn_user_task(user_receiver, startup_cutoff);
-        let market_task = self.spawn_market_task();
+        let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
+        let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
+        let user_task =
+            self.spawn_user_task(user_receiver, startup_cutoff, self.shutdown_tx.subscribe());
+        let market_task = self.spawn_market_task(self.shutdown_tx.subscribe());
 
         Ok(RuntimeHandles {
             market_task,
@@ -81,6 +85,57 @@ impl ServerRuntime {
             effect_task,
             recovery_task,
         })
+    }
+
+    pub async fn shutdown(&self, mut handles: RuntimeHandles) {
+        let _ = self.shutdown_tx.send(true);
+        tracing::info!("shutdown signal sent");
+
+        let drain_timeout = Duration::from_secs(30);
+        if tokio::time::timeout(drain_timeout, &mut handles.effect_task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("effect worker drain timed out after {drain_timeout:?}");
+            handles.effect_task.abort();
+            let _ = handles.effect_task.await;
+        }
+
+        let grids = self.state.write_service.grid_instruments().await;
+        for grid in &grids {
+            if let Err(error) = self.exchange.cancel_all(&grid.instrument).await {
+                tracing::warn!(
+                    "failed to cancel all orders for {} during shutdown: {error}",
+                    grid.instrument.symbol
+                );
+                continue;
+            }
+
+            if let Err(error) = sync_exchange_state_from_exchange(
+                &self.state,
+                &self.exchange,
+                &grid.id,
+                &grid.instrument,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "failed to persist final exchange state for {} during shutdown: {}",
+                    grid.instrument.symbol,
+                    error.message()
+                );
+            }
+        }
+
+        handles.market_task.abort();
+        handles.user_task.abort();
+        handles.recovery_task.abort();
+        let _ = handles.market_task.await;
+        let _ = handles.user_task.await;
+        let _ = handles.recovery_task.await;
+
+        tracing::info!("shutdown complete");
     }
 
     async fn startup_sync(&self) -> Result<()> {
@@ -132,7 +187,7 @@ impl ServerRuntime {
         Ok(())
     }
 
-    fn spawn_market_task(&self) -> JoinHandle<()> {
+    fn spawn_market_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         let state = self.state.clone();
         let market_data = Arc::clone(&self.market_data);
 
@@ -141,24 +196,47 @@ impl ServerRuntime {
             let mut workers = JoinSet::new();
 
             for grid in grids {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 let instrument = grid.instrument.clone();
                 match market_data.subscribe_prices(&instrument).await {
                     Ok(mut receiver) => {
                         let state = state.clone();
+                        let mut worker_shutdown_rx = shutdown_rx.clone();
                         workers.spawn(async move {
-                            while let Some(tick) = receiver.recv().await {
-                                match state
-                                    .write_service
-                                    .observe_market(&grid.id, tick.reference_price)
-                                    .await
-                                {
-                                    Ok(_) => {}
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            "failed to apply market data update for {}: {}",
-                                            instrument.symbol,
-                                            error
-                                        );
+                            loop {
+                                if *worker_shutdown_rx.borrow() {
+                                    break;
+                                }
+
+                                tokio::select! {
+                                    biased;
+                                    changed = worker_shutdown_rx.changed() => {
+                                        if changed.is_err() || *worker_shutdown_rx.borrow() {
+                                            break;
+                                        }
+                                    }
+                                    tick = receiver.recv() => {
+                                        let Some(tick) = tick else {
+                                            break;
+                                        };
+
+                                        match state
+                                            .write_service
+                                            .observe_market(&grid.id, tick.reference_price)
+                                            .await
+                                        {
+                                            Ok(_) => {}
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    "failed to apply market data update for {}: {}",
+                                                    instrument.symbol,
+                                                    error
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -181,16 +259,17 @@ impl ServerRuntime {
         })
     }
 
-    fn spawn_effect_task(&self) -> JoinHandle<()> {
-        EffectWorker::new(
+    fn spawn_effect_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        EffectWorker::with_shutdown_rx(
             self.state.clone(),
             Arc::clone(&self.exchange),
             Duration::from_millis(10),
+            shutdown_rx,
         )
         .spawn()
     }
 
-    fn spawn_recovery_task(&self) -> JoinHandle<()> {
+    fn spawn_recovery_task(&self, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         let state = self.state.clone();
         let exchange = Arc::clone(&self.exchange);
         let retry_interval = self.recovery_retry_interval;
@@ -203,8 +282,32 @@ impl ServerRuntime {
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
             loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
                     _ = ticker.tick() => {
+                        for grid in &instruments {
+                            if let Err(error) = state
+                                .write_service
+                                .refresh_market_data_health(&grid.id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "failed to refresh market data health for {}: {}",
+                                    grid.instrument.symbol,
+                                    error
+                                );
+                            }
+                        }
+
                         let now = Instant::now();
                         let due_grids: Vec<(String, grid_engine::grid::Instrument)> = tracked
                             .iter()
@@ -221,6 +324,7 @@ impl ServerRuntime {
                                 &exchange,
                                 &grid_id,
                                 &instrument,
+                                true,
                             )
                             .await {
                                 tracing::warn!(
@@ -264,11 +368,31 @@ impl ServerRuntime {
         &self,
         mut receiver: mpsc::Receiver<UserDataEvent>,
         startup_cutoff: chrono::DateTime<chrono::Utc>,
+        mut shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
         let state = self.state.clone();
 
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
+                let event = tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    event = receiver.recv() => event,
+                };
+
+                let Some(event) = event else {
+                    break;
+                };
+
                 if event.event_time <= startup_cutoff {
                     continue;
                 }
@@ -325,6 +449,7 @@ async fn sync_exchange_state_from_exchange(
     exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
     instrument: &grid_engine::grid::Instrument,
+    allow_follow_up_reconcile: bool,
 ) -> std::result::Result<(), GridMutationError> {
     let position = exchange
         .get_position(instrument)
@@ -334,15 +459,27 @@ async fn sync_exchange_state_from_exchange(
         .get_open_orders(instrument)
         .await
         .map_err(GridMutationError::Persistence)?;
-    let _ = state
-        .write_service
-        .sync_exchange_state(
-            grid_id,
-            position_observation(&position),
-            open_orders.iter().map(order_observation).collect(),
-        )
-        .await
-        .map_err(preserve_grid_mutation_error)?;
+    if allow_follow_up_reconcile {
+        let _ = state
+            .write_service
+            .sync_exchange_state(
+                grid_id,
+                position_observation(&position),
+                open_orders.iter().map(order_observation).collect(),
+            )
+            .await
+            .map_err(preserve_grid_mutation_error)?;
+    } else {
+        let _ = state
+            .write_service
+            .sync_exchange_state_without_reconcile(
+                grid_id,
+                position_observation(&position),
+                open_orders.iter().map(order_observation).collect(),
+            )
+            .await
+            .map_err(preserve_grid_mutation_error)?;
+    }
     Ok(())
 }
 
@@ -826,6 +963,7 @@ mod tests {
                         price: 94.0,
                         quantity: test_config().base_qty_per_unit() * 4.0,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(4.0),
                 },
@@ -922,6 +1060,7 @@ mod tests {
                         price: 95.0,
                         quantity: 3.3,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(3.0),
                 },
@@ -993,6 +1132,7 @@ mod tests {
                         price: 94.0,
                         quantity: 0.25,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -1085,6 +1225,7 @@ mod tests {
                         price: 94.0,
                         quantity: test_config().base_qty_per_unit() * 6.0,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -1183,6 +1324,7 @@ mod tests {
                         price: 94.0,
                         quantity: 0.25,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -1252,6 +1394,7 @@ mod tests {
                         price: 92.5,
                         quantity: test_config().base_qty_per_unit() * 6.0,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -1451,6 +1594,7 @@ mod tests {
                         price: 94.0,
                         quantity: 0.25,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -1755,7 +1899,11 @@ mod tests {
             market_data as Arc<dyn MarketDataPort>,
         );
 
-        let user_task = runtime.spawn_user_task(user_receiver, test_server_time());
+        let user_task = runtime.spawn_user_task(
+            user_receiver,
+            test_server_time(),
+            runtime.shutdown_tx.subscribe(),
+        );
         let save_count_before_event = persistence.save_transition_count();
         user_sender
             .send(position_event_at(
@@ -1841,8 +1989,12 @@ mod tests {
             market_data as Arc<dyn MarketDataPort>,
         );
 
-        let user_task = runtime.spawn_user_task(user_receiver, test_server_time());
-        let effect_task = runtime.spawn_effect_task();
+        let user_task = runtime.spawn_user_task(
+            user_receiver,
+            test_server_time(),
+            runtime.shutdown_tx.subscribe(),
+        );
+        let effect_task = runtime.spawn_effect_task(runtime.shutdown_tx.subscribe());
         user_sender
             .send(position_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
@@ -2002,12 +2154,15 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(0.0)),
+            manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
                 reference_price: Some(100.0),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         };
         set_executor_state(
@@ -2136,7 +2291,7 @@ mod tests {
             matches!(
                 &effect.effect,
                 ExecutionAction::SubmitOrder { request, target_exposure }
-                    if request.client_order_id == "BTCUSDT-reconcile"
+                    if request.client_order_id.starts_with("BTCUSDT-")
                         && (request.price - 95.0).abs() < f64::EPSILON
                         && (request.quantity - 7.5).abs() < f64::EPSILON
                         && *target_exposure == Exposure(4.0)
@@ -2181,6 +2336,7 @@ mod tests {
                         price: 94.0,
                         quantity: 0.25,
                         client_order_id: "snapshot-1".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -2196,8 +2352,9 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+            inventory_core_order(&instance)
+                .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
+            Some(true)
         );
 
         let effects = fixture.persistence.all_effects().await;
@@ -2205,7 +2362,7 @@ mod tests {
             matches!(
                 &effect.effect,
                 ExecutionAction::SubmitOrder { request, target_exposure }
-                    if request.client_order_id == "BTCUSDT-reconcile"
+                    if request.client_order_id.starts_with("BTCUSDT-")
                         && (request.price - 95.0).abs() < f64::EPSILON
                         && (request.quantity - 15.0).abs() < f64::EPSILON
                         && *target_exposure == Exposure(4.0)
@@ -2253,6 +2410,7 @@ mod tests {
                         price: 92.5,
                         quantity: 22.5,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -2339,8 +2497,9 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+            inventory_core_order(&instance)
+                .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
+            Some(true)
         );
         assert_ne!(
             inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
@@ -2385,6 +2544,7 @@ mod tests {
                         price: 94.0,
                         quantity: 0.25,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -2398,18 +2558,14 @@ mod tests {
         fixture.runtime.startup_sync().await.unwrap();
 
         let instance = current_instance(&fixture.state).await;
-        assert_eq!(
-            inventory_core_order(&instance),
-            Some(&working_order(
-                None,
-                "BTCUSDT-reconcile",
-                Side::Buy,
-                95.0,
-                7.5,
-                Exposure(4.0),
-                OrderStatus::Submitting,
-            ))
-        );
+        let order = inventory_core_order(&instance).expect("expected submit pending working order");
+        assert!(order.client_order_id.starts_with("BTCUSDT-"));
+        assert_eq!(order.order_id, None);
+        assert_eq!(order.side, Side::Buy);
+        assert_eq!(order.price, 95.0);
+        assert_eq!(order.quantity, 7.5);
+        assert_eq!(order.target_exposure, Exposure(4.0));
+        assert_eq!(order.status, OrderStatus::Submitting);
 
         let transition = fixture
             .state
@@ -2457,6 +2613,7 @@ mod tests {
                         price: 94.0,
                         quantity: 0.25,
                         client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(6.0),
                 },
@@ -2508,8 +2665,9 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+            inventory_core_order(&instance)
+                .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
+            Some(true)
         );
 
         let transition = fixture
@@ -2611,6 +2769,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_cancels_orders_and_persists_final_exchange_state() {
+        let mut snapshot = test_snapshot();
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("live-1"),
+                "live-1",
+                Side::Buy,
+                94.5,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(7.5, 3.0),
+            vec![btc_exchange_order(
+                "live-1",
+                "live-1",
+                Side::Buy,
+                94.5,
+                0.25,
+                0.0,
+                OrderStatus::New,
+            )],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        fixture.runtime.shutdown(handles).await;
+
+        assert_eq!(
+            fixture.exchange.cancel_all_symbols.lock().unwrap().as_slice(),
+            ["BTCUSDT"]
+        );
+        let snapshot = fixture
+            .persistence
+            .load_grid_state("BTCUSDT")
+            .await
+            .unwrap()
+            .expect("final snapshot should be persisted");
+        assert_eq!(snapshot.current_exposure, Exposure(2.0));
+        assert_eq!(snapshot.executor_state.recovery_anomaly, None);
+        assert_eq!(
+            snapshot.executor_state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data() {
         let mut snapshot = test_snapshot();
         snapshot.target_exposure = Some(Exposure(0.0));
@@ -2697,6 +2913,43 @@ mod tests {
         let _ = recovery_task.await;
         user_task.abort();
         let _ = user_task.await;
+    }
+
+    #[tokio::test]
+    async fn background_health_check_marks_market_data_stale_without_follow_up_events() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
+        let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
+        let mut snapshot = test_snapshot();
+        snapshot.status = GridStatus::Paused;
+        snapshot.target_exposure = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
+            Some(snapshot),
+            btc_position(0.0, 0.0),
+            vec![],
+            test_budget(),
+            Duration::from_millis(50),
+            clock.clone() as Arc<dyn ClockPort>,
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
+
+        wait_until_instance(&fixture.state, |instance| instance.last_tick_at.is_some()).await;
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 31).unwrap());
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.market_data_stale_since.is_some()
+        })
+        .await;
+
+        let instance = current_instance(&fixture.state).await;
+        assert!(instance.market_data_stale_since.is_some());
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
+
+        shutdown(handles).await;
     }
 
     #[tokio::test]
@@ -2995,14 +3248,32 @@ mod tests {
         budget: CapacityBudget,
         recovery_retry_interval: Duration,
     ) -> RuntimeFixture {
+        runtime_fixture_with_clock_and_recovery_retry_interval(
+            restored_snapshot,
+            position,
+            open_orders,
+            budget,
+            recovery_retry_interval,
+            Arc::new(FixedClock(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+            )),
+        )
+        .await
+    }
+
+    async fn runtime_fixture_with_clock_and_recovery_retry_interval(
+        restored_snapshot: Option<GridSnapshot>,
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        budget: CapacityBudget,
+        recovery_retry_interval: Duration,
+        clock: Arc<dyn ClockPort>,
+    ) -> RuntimeFixture {
         let exchange = Arc::new(FakeExchange::new(position, open_orders));
         let persistence = Arc::new(MemoryPersistence::default());
         let (price_sender, price_receiver) = mpsc::channel(8);
         let (user_sender, user_receiver) = mpsc::channel(8);
         let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
-        let clock = Arc::new(FixedClock(
-            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-        ));
 
         let mut manager = GridManager::new(clock);
         manager
@@ -3405,12 +3676,15 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
             observed: grid_engine::snapshot::ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         };
         set_executor_state(
@@ -3434,6 +3708,21 @@ mod tests {
     impl ClockPort for FixedClock {
         fn now(&self) -> chrono::DateTime<Utc> {
             self.0
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableClock(Arc<Mutex<chrono::DateTime<Utc>>>);
+
+    impl ClockPort for MutableClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    impl MutableClock {
+        fn set(&self, value: chrono::DateTime<Utc>) {
+            *self.0.lock().unwrap() = value;
         }
     }
 

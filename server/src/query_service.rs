@@ -185,6 +185,7 @@ mod tests {
                         price: 100.5,
                         quantity: 0.1,
                         client_order_id: "client-1".into(),
+                        reduce_only: false,
                     },
                     target_exposure: Exposure(4.0),
                 },
@@ -269,6 +270,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(0.5),
@@ -306,6 +308,8 @@ mod tests {
             observed: ObservedState {
                 reference_price: Some(101.25),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }

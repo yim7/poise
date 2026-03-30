@@ -206,6 +206,14 @@ impl GridWriteService {
         .map_err(anyhow::Error::new)
     }
 
+    pub async fn refresh_market_data_health(&self, id: &str) -> Result<GridTransition> {
+        self.mutate_grid_skip_noop(id, |manager| {
+            manager.refresh_market_data_health(&GridId::new(id))
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
     pub async fn observe_position(
         &self,
         id: &str,
@@ -242,6 +250,27 @@ impl GridWriteService {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
     ) -> Result<GridTransition> {
+        self.sync_exchange_state_inner(id, position, open_orders, true)
+            .await
+    }
+
+    pub async fn sync_exchange_state_without_reconcile(
+        &self,
+        id: &str,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+    ) -> Result<GridTransition> {
+        self.sync_exchange_state_inner(id, position, open_orders, false)
+            .await
+    }
+
+    async fn sync_exchange_state_inner(
+        &self,
+        id: &str,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+        allow_follow_up_reconcile: bool,
+    ) -> Result<GridTransition> {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let pending_submit_hints = self
             .repository
@@ -265,14 +294,25 @@ impl GridWriteService {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
-            let transition = manager
-                .sync_exchange_state(
-                    &GridId::new(id),
-                    position,
-                    open_orders,
-                    pending_submit_hints,
-                )
-                .map_err(GridMutationError::Mutation)?;
+            let transition = if allow_follow_up_reconcile {
+                manager
+                    .sync_exchange_state(
+                        &GridId::new(id),
+                        position,
+                        open_orders,
+                        pending_submit_hints,
+                    )
+                    .map_err(GridMutationError::Mutation)?
+            } else {
+                manager
+                    .sync_exchange_state_without_reconcile(
+                        &GridId::new(id),
+                        position,
+                        open_orders,
+                        pending_submit_hints,
+                    )
+                    .map_err(GridMutationError::Mutation)?
+            };
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
@@ -515,6 +555,31 @@ impl GridWriteService {
         F: FnOnce(&mut GridManager) -> Result<R>,
         R: TransitionResult,
     {
+        self.mutate_grid_with_options(id, false, mutate).await
+    }
+
+    async fn mutate_grid_skip_noop<R, F>(
+        &self,
+        id: &str,
+        mutate: F,
+    ) -> std::result::Result<R, GridMutationError>
+    where
+        F: FnOnce(&mut GridManager) -> Result<R>,
+        R: TransitionResult,
+    {
+        self.mutate_grid_with_options(id, true, mutate).await
+    }
+
+    async fn mutate_grid_with_options<R, F>(
+        &self,
+        id: &str,
+        skip_when_noop: bool,
+        mutate: F,
+    ) -> std::result::Result<R, GridMutationError>
+    where
+        F: FnOnce(&mut GridManager) -> Result<R>,
+        R: TransitionResult,
+    {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
@@ -528,8 +593,15 @@ impl GridWriteService {
             (previous_snapshot, result, next_snapshot)
         };
 
-        self.commit_grid_mutation(id, &previous_snapshot, &next_snapshot, &result, None, false)
-            .await?;
+        self.commit_grid_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &result,
+            None,
+            skip_when_noop,
+        )
+        .await?;
         Ok(result)
     }
 
@@ -925,6 +997,7 @@ mod tests {
             side: Side::Buy,
             price: 94.0,
             quantity: snapshot.config.base_qty_per_unit() * 6.0,
+            reduce_only: false,
         };
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(6.0));
@@ -1116,6 +1189,7 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 Exposure(4.0),
                 &OrderReceipt {
@@ -1204,6 +1278,7 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 Exposure(4.0),
                 None,
@@ -1353,6 +1428,7 @@ mod tests {
             side: Side::Buy,
             price: 94.0,
             quantity: snapshot.config.base_qty_per_unit() * 6.0,
+            reduce_only: false,
         };
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(6.0));

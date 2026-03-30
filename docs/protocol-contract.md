@@ -134,12 +134,13 @@
 
 - `pause`
 - `resume`
+- `flatten`
 
-`terminate` 和 `flatten` 目前会返回 `400`，错误消息形如：
+`terminate` 目前会返回 `400`，错误消息形如：
 
 ```json
 {
-  "error": "command `flatten` is not implemented"
+  "error": "command `terminate` is not implemented"
 }
 ```
 

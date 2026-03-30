@@ -20,6 +20,8 @@ use crate::runtime::{ExecutorState, GridRuntime, GridStatus};
 use crate::snapshot::GridRuntimeSnapshot;
 use crate::transition::{GridEffect, GridTransition};
 
+const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
+
 pub struct GridManager {
     grids: HashMap<GridId, GridRuntime>,
     instruments: HashMap<Instrument, GridId>,
@@ -43,6 +45,25 @@ impl GridManager {
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
     ) -> Result<()> {
+        self.add_grid_with_tick_timeout_secs(
+            id,
+            instrument,
+            config,
+            budget,
+            exchange_rules,
+            DEFAULT_TICK_TIMEOUT_SECS,
+        )
+    }
+
+    pub fn add_grid_with_tick_timeout_secs(
+        &mut self,
+        id: GridId,
+        instrument: Instrument,
+        config: GridConfig,
+        budget: CapacityBudget,
+        exchange_rules: ExchangeRules,
+        tick_timeout_secs: u64,
+    ) -> Result<()> {
         if self.grids.contains_key(&id) {
             bail!("duplicate grid id `{}`", id.as_str());
         }
@@ -63,6 +84,8 @@ impl GridManager {
             exchange_rules,
             self.clock.now(),
         );
+        let mut grid = grid;
+        grid.tick_timeout_secs = tick_timeout_secs;
         self.grids.insert(id.clone(), grid);
         self.instruments.insert(instrument, id);
         Ok(())
@@ -102,8 +125,30 @@ impl GridManager {
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<GridTransition> {
-        let (events, effects) =
-            self.apply_startup_exchange_state(id, position, open_orders, pending_submit_hints)?;
+        let (events, effects) = self.apply_startup_exchange_state(
+            id,
+            position,
+            open_orders,
+            pending_submit_hints,
+            true,
+        )?;
+        self.transition_for(id, events, effects)
+    }
+
+    pub fn sync_exchange_state_without_reconcile(
+        &mut self,
+        id: &GridId,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+        pending_submit_hints: Vec<executor::PendingSubmitHint>,
+    ) -> Result<GridTransition> {
+        let (events, effects) = self.apply_startup_exchange_state(
+            id,
+            position,
+            open_orders,
+            pending_submit_hints,
+            false,
+        )?;
         self.transition_for(id, events, effects)
     }
 
@@ -113,10 +158,7 @@ impl GridManager {
                 self.pause_grid(id.as_str())?;
                 (vec![], vec![])
             }
-            GridCommand::Resume => {
-                self.resume_grid(id.as_str())?;
-                (vec![], vec![])
-            }
+            GridCommand::Resume => self.resume_grid(id.as_str())?,
             GridCommand::Reconcile => {
                 let Some(reference_price) = self
                     .grids
@@ -128,9 +170,15 @@ impl GridManager {
                 };
                 self.reconcile_grid(id, reference_price)?
             }
+            GridCommand::Flatten => self.flatten_grid(id)?,
         };
 
         self.transition_for(id, events, effects)
+    }
+
+    pub fn refresh_market_data_health(&mut self, id: &GridId) -> Result<GridTransition> {
+        let _ = self.guard_market_data_freshness(id)?;
+        self.transition_for(id, vec![], vec![])
     }
 
     pub fn pause_grid(&mut self, id: &str) -> Result<()> {
@@ -144,12 +192,38 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn resume_grid(&mut self, id: &str) -> Result<()> {
+    pub fn resume_grid(&mut self, id: &str) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        let grid_id = GridId::from(id);
+        if self
+            .grids
+            .get(&grid_id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?
+            .manual_target_override
+            .is_some()
+        {
+            let reference_price = {
+                let grid = self
+                    .grids
+                    .get_mut(&grid_id)
+                    .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
+                grid.manual_target_override = None;
+                grid.status = GridStatus::WaitingMarketData;
+                grid.target_exposure = None;
+                grid.replacement_gate_reason = None;
+                grid.reference_price
+            };
+
+            return match reference_price {
+                Some(reference_price) => self.reconcile_grid(&grid_id, reference_price),
+                None => Ok((vec![], vec![])),
+            };
+        }
+
         let resumed_at = self.clock.now();
         let resumed_state = {
             let grid = self
                 .grids
-                .get(&GridId::from(id))
+                .get(&grid_id)
                 .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
 
             if !matches!(grid.status, GridStatus::Paused) {
@@ -184,7 +258,7 @@ impl GridManager {
 
         let grid = self
             .grids
-            .get_mut(&GridId::from(id))
+            .get_mut(&grid_id)
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
         let (status, exposure, replacement_gate_reason, executor_state) = resumed_state;
         grid.status = status;
@@ -192,7 +266,29 @@ impl GridManager {
         grid.replacement_gate_reason = replacement_gate_reason;
         grid.executor_state = executor_state;
 
-        Ok(())
+        Ok((vec![], vec![]))
+    }
+
+    fn flatten_grid(&mut self, id: &GridId) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        let reference_price = {
+            let grid = self
+                .grids
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+
+            if matches!(grid.status, GridStatus::Terminated) {
+                bail!("cannot flatten terminated grid `{}`", id.as_str());
+            }
+
+            grid.manual_target_override = Some(Exposure(0.0));
+            grid.status = GridStatus::ReducingOnly;
+            grid.reference_price
+        };
+
+        match reference_price {
+            Some(reference_price) => self.reconcile_grid(id, reference_price),
+            None => Ok((vec![], vec![])),
+        }
     }
 
     pub fn snapshot(&self, id: &str) -> Option<GridRuntimeSnapshot> {
@@ -412,6 +508,13 @@ impl GridManager {
         id: &GridId,
         observation: MarketObservation,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        let now = self.clock.now();
+        let grid = self
+            .grids
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+        grid.last_tick_at = Some(now);
+        grid.market_data_stale_since = None;
         self.reconcile_grid(id, observation.reference_price)
     }
 
@@ -465,6 +568,7 @@ impl GridManager {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
+        allow_follow_up_reconcile: bool,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
         self.observe_position(id, position)?;
         let observed_at = self.clock.now();
@@ -520,6 +624,26 @@ impl GridManager {
                     return Ok((vec![], vec![]));
                 };
 
+                if !allow_follow_up_reconcile {
+                    let grid = self
+                        .grids
+                        .get_mut(id)
+                        .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                    grid.executor_state = planned_grid.executor_state;
+                    grid.replacement_gate_reason = None;
+                    return Ok((vec![], vec![]));
+                }
+
+                if self.guard_market_data_freshness(id)? {
+                    let grid = self
+                        .grids
+                        .get_mut(id)
+                        .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                    grid.executor_state = planned_grid.executor_state;
+                    grid.replacement_gate_reason = None;
+                    return Ok((vec![], vec![]));
+                }
+
                 let planned =
                     self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
                 let effects = planned
@@ -560,6 +684,10 @@ impl GridManager {
         id: &GridId,
         reference_price: f64,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        if self.guard_market_data_freshness(id)? {
+            return Ok((vec![], vec![]));
+        }
+
         if matches!(self.grids[&id].status, GridStatus::Paused) {
             let grid = self.grids.get_mut(id).unwrap();
             grid.reference_price = Some(reference_price);
@@ -600,6 +728,33 @@ impl GridManager {
         }
 
         Ok((events, effects))
+    }
+
+    fn guard_market_data_freshness(&mut self, id: &GridId) -> Result<bool> {
+        let now = self.clock.now();
+        let grid = self
+            .grids
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+
+        let Some(last_tick_at) = grid.last_tick_at else {
+            return Ok(false);
+        };
+
+        let age_ms = (now - last_tick_at).num_milliseconds().max(0);
+        if age_ms
+            <= i64::try_from(grid.tick_timeout_secs)
+                .unwrap_or(i64::try_from(DEFAULT_TICK_TIMEOUT_SECS).unwrap_or(30))
+                * 1000
+        {
+            return Ok(false);
+        }
+
+        if grid.market_data_stale_since.is_none() {
+            grid.market_data_stale_since = Some(now);
+        }
+
+        Ok(true)
     }
 
     fn submit_recovery_plan_context<'a>(
@@ -701,6 +856,8 @@ fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
@@ -726,6 +883,21 @@ mod tests {
     impl ClockPort for FixedClock {
         fn now(&self) -> chrono::DateTime<Utc> {
             self.0
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableClock(Arc<Mutex<chrono::DateTime<Utc>>>);
+
+    impl ClockPort for MutableClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    impl MutableClock {
+        fn set(&self, value: chrono::DateTime<Utc>) {
+            *self.0.lock().unwrap() = value;
         }
     }
 
@@ -1625,6 +1797,53 @@ mod tests {
     }
 
     #[test]
+    fn flatten_persists_manual_target_override_and_targets_zero() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid_id = GridId::new("btc-core");
+
+        let transition = manager.command(&grid_id, GridCommand::Flatten).unwrap();
+
+        let grid = manager.get_grid("btc-core").unwrap();
+        assert_eq!(grid.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(grid.status, GridStatus::ReducingOnly);
+        assert_eq!(transition.snapshot.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
+    }
+
+    #[test]
+    fn flatten_keeps_zero_target_even_when_price_is_in_band() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid_id = GridId::new("btc-core");
+
+        manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        let transition = manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 100.0,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.snapshot.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
+        assert_eq!(transition.snapshot.status, GridStatus::ReducingOnly);
+    }
+
+    #[test]
+    fn resume_clears_manual_target_override_after_flatten() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid_id = GridId::new("btc-core");
+
+        manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        manager.resume_grid("btc-core").unwrap();
+
+        let grid = manager.get_grid("btc-core").unwrap();
+        assert!(grid.manual_target_override.is_none());
+        assert_ne!(grid.status, GridStatus::ReducingOnly);
+    }
+
+    #[test]
     fn resume_grid_recomputes_status_from_last_price() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
@@ -1781,6 +2000,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 95.0,
             quantity: 0.4,
+            reduce_only: false,
         };
         let receipt = OrderReceipt {
             order_id: "order-1".into(),
@@ -1833,6 +2053,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(4.0),
                 &OrderReceipt {
@@ -1873,6 +2094,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(4.0),
                 &OrderReceipt {
@@ -1908,6 +2130,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
+            reduce_only: false,
         };
         seed_executor_slot(
             manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
@@ -1939,6 +2162,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 92.5,
                     quantity: test_config().base_qty_per_unit() * 6.0,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(6.0),
                 None,
@@ -1982,6 +2206,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 94.0,
                     quantity: test_config().base_qty_per_unit() * 6.0,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(6.0),
                 None,
@@ -2068,6 +2293,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 90.0,
                     quantity: 4.0,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(4.0),
                 None,
@@ -2150,6 +2376,79 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, GridEffect::SubmitOrder { .. }))
         );
+    }
+
+    #[test]
+    fn stale_market_data_suspends_follow_up_reconcile_without_overwriting_status() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid_id = GridId::new("btc1");
+
+        manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        let transition = manager
+            .observe(
+                &grid_id,
+                GridObservation::Position(PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                }),
+            )
+            .unwrap();
+
+        assert!(transition.effects.is_empty());
+        assert!(transition.snapshot.observed.market_data_stale_since.is_some());
+        assert_eq!(transition.snapshot.status, GridStatus::Active);
+    }
+
+    #[test]
+    fn fresh_tick_clears_market_data_stale_flag() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid_id = GridId::new("btc1");
+
+        manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        let _ = manager
+            .observe(
+                &grid_id,
+                GridObservation::Position(PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                }),
+            )
+            .unwrap();
+
+        let transition = manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 96.0,
+                }),
+            )
+            .unwrap();
+
+        assert!(transition.snapshot.observed.market_data_stale_since.is_none());
     }
 
     #[test]
@@ -2250,6 +2549,40 @@ mod tests {
     }
 
     #[test]
+    fn sync_exchange_state_skips_follow_up_reconcile_when_market_data_is_stale() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid_id = GridId::new("btc1");
+
+        manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        let transition = manager
+            .sync_exchange_state(
+                &grid_id,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                vec![],
+                vec![],
+            )
+            .unwrap();
+
+        assert!(transition.effects.is_empty());
+        assert!(transition.snapshot.observed.market_data_stale_since.is_some());
+    }
+
+    #[test]
     fn sync_exchange_state_keeps_paused_grid_target_none() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
@@ -2317,6 +2650,7 @@ mod tests {
                         side: grid_core::types::Side::Buy,
                         price: 94.5,
                         quantity: 0.25,
+                        reduce_only: false,
                     },
                     target_exposure: grid_core::types::Exposure(6.0),
                 }],
@@ -2518,6 +2852,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
+            reduce_only: false,
         };
         manager
             .record_submit_request(

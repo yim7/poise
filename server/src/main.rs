@@ -24,14 +24,43 @@ async fn main() -> Result<()> {
     let config_path = parse_config_path(env::args().skip(1))?;
     let config = config::load_config(&config_path)?;
     let platform = assembly::assemble(&config).await?;
-    let _runtime_handles = platform.runtime.start().await?;
+    let runtime_handles = platform.runtime.start().await?;
 
     let app = http::router(platform.state());
     let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    platform.runtime.shutdown(runtime_handles).await;
+    serve_result?;
 
     Ok(())
 }
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl+c handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
 fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
     let mut config_path = None;
 

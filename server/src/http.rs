@@ -84,7 +84,8 @@ fn map_command(command: GridCommandType) -> Result<GridCommand, (StatusCode, Jso
     match command {
         GridCommandType::Pause => Ok(GridCommand::Pause),
         GridCommandType::Resume => Ok(GridCommand::Resume),
-        GridCommandType::Terminate | GridCommandType::Flatten => Err(bad_request(format!(
+        GridCommandType::Flatten => Ok(GridCommand::Flatten),
+        GridCommandType::Terminate => Err(bad_request(format!(
             "command `{}` is not implemented",
             command_name(command)
         ))),
@@ -373,7 +374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_command_rejects_unimplemented_command() {
+    async fn submit_command_accepts_flatten() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -391,10 +392,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["error"], "command `flatten` is not implemented");
+        let payload: GridCommandAccepted = serde_json::from_slice(&body).unwrap();
+        assert!(payload.accepted);
+        assert_eq!(payload.grid_id, "btc-core");
+        assert_eq!(payload.command, GridCommandType::Flatten);
     }
 
     #[tokio::test]

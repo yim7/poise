@@ -11,6 +11,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL,
             current_exposure REAL NOT NULL,
             target_exposure REAL,
+            manual_target_override REAL,
             executor_state_json TEXT,
             replacement_gate_reason_json TEXT,
             realized_pnl_day TEXT,
@@ -19,6 +20,8 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             unrealized_pnl REAL NOT NULL DEFAULT 0,
             reference_price REAL,
             out_of_band_since TEXT,
+            last_tick_at TEXT,
+            market_data_stale_since TEXT,
             updated_at TEXT NOT NULL
         );
 
@@ -44,6 +47,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
 
     add_column_if_missing(conn, "grid_snapshots", "executor_state_json", "TEXT")?;
+    add_column_if_missing(conn, "grid_snapshots", "manual_target_override", "REAL")?;
     add_column_if_missing(
         conn,
         "grid_snapshots",
@@ -56,6 +60,8 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "realized_pnl_cumulative",
         "REAL NOT NULL DEFAULT 0",
     )?;
+    add_column_if_missing(conn, "grid_snapshots", "last_tick_at", "TEXT")?;
+    add_column_if_missing(conn, "grid_snapshots", "market_data_stale_since", "TEXT")?;
 
     ensure_columns_present(
         &conn,
@@ -68,6 +74,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "status",
             "current_exposure",
             "target_exposure",
+            "manual_target_override",
             "executor_state_json",
             "replacement_gate_reason_json",
             "realized_pnl_day",
@@ -76,6 +83,8 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "unrealized_pnl",
             "reference_price",
             "out_of_band_since",
+            "last_tick_at",
+            "market_data_stale_since",
             "updated_at",
         ],
     )?;

@@ -5,4 +5,5 @@ pub enum GridCommand {
     Pause,
     Resume,
     Reconcile,
+    Flatten,
 }
