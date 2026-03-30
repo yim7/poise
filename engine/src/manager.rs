@@ -591,11 +591,8 @@ impl GridManager {
             .clone();
         let previous_state = grid.executor_state.clone();
         let recovery = executor::recover_working_orders(executor::RecoveryInput {
-            exchange_rules: &grid.exchange_rules,
-            base_qty_per_unit: grid.config.base_qty_per_unit(),
             current_exposure: &grid.current_exposure,
             target_exposure: grid.target_exposure.as_ref(),
-            reference_price: grid.reference_price,
             previous_state: Some(&previous_state),
             live_orders: &open_orders,
             pending_submit_hints: &pending_submit_hints,
