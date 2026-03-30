@@ -413,14 +413,14 @@ git commit -m "refactor(storage): remove direct effect status writes from reposi
 - Test: `engine/src/executor.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: 写失败测试，锁住当前 submit hint 由 engine 负责推导**
+- [x] **Step 1: 写失败测试，锁住当前 submit hint 由 engine 负责推导**
 
 测试至少覆盖：
 - 当前计划只存在一个 `SubmitOrder` 时，engine 能返回稳定的 `PendingSubmitHint`
 - 当前计划不是单 submit 时，不返回 hint
 - manager 的 submit recovery 不再手工构造“空 executor state + 重跑规划”的旁路推导
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine executor::tests::current_submit_hint_returns_single_submit_effect_from_plan -- --exact`
@@ -429,14 +429,14 @@ Run:
 Expected:
 测试失败，因为当前推导逻辑还留在 `manager::current_submit_recovery_request()`。
 
-- [ ] **Step 3: 做最小实现，把当前 submit hint 推导收回 engine**
+- [x] **Step 3: 做最小实现，把当前 submit hint 推导收回 engine**
 
 要求：
 - engine 提供显式能力，返回当前计划对应的 `PendingSubmitHint`
 - manager 只组装输入并消费结果
 - 不再在 manager 里手工拼“空 executor state + 计划结果筛单”的旁路逻辑
 
-- [ ] **Step 4: 运行 Task 7 的定向测试**
+- [x] **Step 4: 运行 Task 7 的定向测试**
 
 Run:
 `cargo test -p grid-engine executor::tests:: -- --nocapture`
@@ -445,10 +445,10 @@ Run:
 Expected:
 当前 submit hint 的推导边界回到 engine，相关测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 Task 7 code commit:
-`TODO`
+`fa83414eb4594c4a2f9e8b9a5a99b95fa62853a8`
 
 ```bash
 git add engine/src/executor.rs engine/src/manager.rs docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
