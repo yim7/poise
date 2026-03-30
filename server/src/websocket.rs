@@ -15,8 +15,8 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 
     loop {
         let track_id = match receiver.recv().await {
-            Ok(TrackInternalNotification::GridWriteCommitted { track_id, .. })
-            | Ok(TrackInternalNotification::GridEffectStateChanged { track_id }) => track_id,
+            Ok(TrackInternalNotification::TrackWriteCommitted { track_id, .. })
+            | Ok(TrackInternalNotification::TrackEffectStateChanged { track_id }) => track_id,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     "websocket notification stream lagged by {skipped} messages; closing socket for resync"
@@ -38,7 +38,7 @@ async fn push_projected_updates(
     state: &ServerState,
     grid_id: poise_engine::track::TrackId,
 ) -> bool {
-    let source = match state.query_service.load_detail_source(&grid_id).await {
+    let source = match state.query_service.load_track_detail_source(&grid_id).await {
         Ok(Some(source)) => source,
         Ok(None) => {
             tracing::warn!(
@@ -110,7 +110,7 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::ExchangeRules;
-    use poise_engine::command::GridCommand;
+    use poise_engine::command::TrackCommand;
     use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
@@ -202,7 +202,7 @@ mod tests {
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(TrackInternalNotification::GridWriteCommitted { track_id: TrackId::new("btc-core"),
+        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
             recovery_anomaly_active: false,
         });
 
@@ -225,7 +225,7 @@ mod tests {
         let (_, mut stream) = client.split();
 
         service
-            .command("btc-core", GridCommand::Pause)
+            .command("btc-core", TrackCommand::Pause)
             .await
             .unwrap();
 
@@ -294,7 +294,7 @@ mod tests {
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(TrackInternalNotification::GridWriteCommitted { track_id: TrackId::new("btc-core"),
+            service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
                 recovery_anomaly_active: false,
             });
         }
@@ -327,7 +327,7 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::GridWriteCommitted { track_id: TrackId::new("btc-core"),
+        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
             recovery_anomaly_active: false,
         });
 
@@ -359,7 +359,7 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::GridWriteCommitted { track_id: TrackId::new("btc-core"),
+        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
             recovery_anomaly_active: false,
         });
 
@@ -386,7 +386,7 @@ mod tests {
     fn test_manager() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 TrackConfig {
@@ -565,7 +565,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(
+        async fn load_track_state(
             &self,
             id: &str,
         ) -> Result<Option<poise_engine::ports::TrackSnapshot>> {
@@ -602,7 +602,7 @@ mod tests {
                 .collect())
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
@@ -621,12 +621,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for TestRepository {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             self.maybe_delay_read().await;
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())
         }
 
-        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             self.maybe_delay_read().await;
             if let Some(error) = self.load_snapshot_error.lock().unwrap().clone() {
                 return Err(anyhow!(error));
@@ -639,7 +639,7 @@ mod tests {
                 .cloned())
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
             track_id: &TrackId,
             limit: usize,
@@ -658,7 +658,7 @@ mod tests {
             Ok(events)
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             track_id: &TrackId,
             limit: usize,

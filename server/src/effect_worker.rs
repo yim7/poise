@@ -199,7 +199,7 @@ impl EffectWorker {
                 {
                     Ok(()) => Err(anyhow!(failure_message)),
                     Err(clear_error)
-                        if crate::write_service::is_loaded_grid_invariant_violation(
+                        if crate::write_service::is_loaded_track_invariant_violation(
                             &clear_error,
                         ) =>
                     {
@@ -384,7 +384,7 @@ mod tests {
                         role: poise_engine::executor::OrderRole::DecreaseInventory,
                     }),
                 });
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
             repository.seed_snapshot("btc-core", snapshot).await;
         }
 
@@ -470,7 +470,7 @@ mod tests {
             let manager_handle = state.write_service.manager();
             let mut manager = manager_handle.write().await;
             let snapshot = snapshot_with_recovery_anomaly();
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
 
         let worker = EffectWorker::new(
@@ -501,7 +501,7 @@ mod tests {
         {
             let manager_handle = state.write_service.manager();
             let mut manager = manager_handle.write().await;
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
         repository
             .seed_effect(PersistedTrackEffect {
@@ -597,7 +597,7 @@ mod tests {
         {
             let manager_handle = state.write_service.manager();
             let mut manager = manager_handle.write().await;
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
         repository
             .seed_effect(PersistedTrackEffect {
@@ -751,7 +751,7 @@ mod tests {
         let mut manager = TrackManager::new(clock);
         let instrument = btc_instrument();
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("btc-core"),
                 instrument.clone(),
                 config,
@@ -1098,7 +1098,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(
+        async fn load_track_state(
             &self,
             id: &str,
         ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
@@ -1120,7 +1120,7 @@ mod tests {
                 .collect())
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
@@ -1139,7 +1139,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for MemoryRepository {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -1153,7 +1153,7 @@ mod tests {
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -1166,7 +1166,7 @@ mod tests {
                 }))
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
             _grid_id: &TrackId,
             _limit: usize,
@@ -1174,7 +1174,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             track_id: &TrackId,
             _limit: usize,

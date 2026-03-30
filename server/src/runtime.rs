@@ -14,7 +14,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
 use crate::notifications::TrackInternalNotification;
-use crate::write_service::GridMutationError;
+use crate::write_service::TrackMutationError;
 
 #[derive(Clone)]
 pub struct ServerRuntime {
@@ -102,12 +102,12 @@ impl ServerRuntime {
             let _ = handles.effect_task.await;
         }
 
-        let grids = self.state.write_service.grid_instruments().await;
-        for grid in &grids {
-            if let Err(error) = self.exchange.cancel_all(&grid.instrument).await {
+        let tracks = self.state.write_service.track_instruments().await;
+        for track in &tracks {
+            if let Err(error) = self.exchange.cancel_all(&track.instrument).await {
                 tracing::warn!(
                     "failed to cancel all orders for {} during shutdown: {error}",
-                    grid.instrument.symbol
+                    track.instrument.symbol
                 );
                 continue;
             }
@@ -115,15 +115,15 @@ impl ServerRuntime {
             if let Err(error) = sync_exchange_state_from_exchange(
                 &self.state,
                 &self.exchange,
-                &grid.id,
-                &grid.instrument,
+                &track.id,
+                &track.instrument,
                 ExchangeSyncMode::RecoverOnly,
             )
             .await
             {
                 tracing::warn!(
                     "failed to persist final exchange state for {} during shutdown: {}",
-                    grid.instrument.symbol,
+                    track.instrument.symbol,
                     error.message()
                 );
             }
@@ -140,13 +140,13 @@ impl ServerRuntime {
     }
 
     async fn startup_sync(&self) -> Result<()> {
-        for grid in self.state.write_service.grid_instruments().await {
-            let position = self.exchange.get_position(&grid.instrument).await?;
-            let open_orders = self.exchange.get_open_orders(&grid.instrument).await?;
+        for track in self.state.write_service.track_instruments().await {
+            let position = self.exchange.get_position(&track.instrument).await?;
+            let open_orders = self.exchange.get_open_orders(&track.instrument).await?;
             self.state
                 .write_service
                 .sync_exchange_state(
-                    &grid.id,
+                    &track.id,
                     position_observation(&position),
                     open_orders.iter().map(order_observation).collect(),
                 )
@@ -170,7 +170,7 @@ impl ServerRuntime {
         for event in buffered_events {
             if event.event_time > startup_cutoff {
                 let instrument = event.instrument().clone();
-                let Some(grid_id) = self.state.write_service.resolve_grid_id(&instrument).await
+                let Some(track_id) = self.state.write_service.resolve_track_id(&instrument).await
                 else {
                     tracing::warn!(
                         "received user data for unknown instrument {}:{}",
@@ -179,7 +179,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                apply_user_data_event(&self.state, &grid_id, event)
+                apply_user_data_event(&self.state, &track_id, event)
                     .await
                     .map_err(mutate_error)?;
             }
@@ -193,15 +193,15 @@ impl ServerRuntime {
         let market_data = Arc::clone(&self.market_data);
 
         tokio::spawn(async move {
-            let grids = state.write_service.grid_instruments().await;
+            let tracks = state.write_service.track_instruments().await;
             let mut workers = JoinSet::new();
 
-            for grid in grids {
+            for track in tracks {
                 if *shutdown_rx.borrow() {
                     break;
                 }
 
-                let instrument = grid.instrument.clone();
+                let instrument = track.instrument.clone();
                 match market_data.subscribe_prices(&instrument).await {
                     Ok(mut receiver) => {
                         let state = state.clone();
@@ -226,7 +226,7 @@ impl ServerRuntime {
 
                                         match state
                                             .write_service
-                                            .observe_market(&grid.id, tick.reference_price)
+                                            .observe_market(&track.id, tick.reference_price)
                                             .await
                                         {
                                             Ok(_) => {}
@@ -276,7 +276,7 @@ impl ServerRuntime {
         let retry_interval = self.recovery_retry_interval;
 
         tokio::spawn(async move {
-            let instruments = state.write_service.grid_instruments().await;
+            let instruments = state.write_service.track_instruments().await;
             let mut tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
             let mut notifications = state.write_service.subscribe_notifications();
             let mut ticker = tokio::time::interval(Duration::from_millis(50));
@@ -295,35 +295,35 @@ impl ServerRuntime {
                         }
                     }
                     _ = ticker.tick() => {
-                        for grid in &instruments {
+                        for track in &instruments {
                             if let Err(error) = state
                                 .write_service
-                                .refresh_market_data_health(&grid.id)
+                                .refresh_market_data_health(&track.id)
                                 .await
                             {
                                 tracing::warn!(
                                     "failed to refresh market data health for {}: {}",
-                                    grid.instrument.symbol,
+                                    track.instrument.symbol,
                                     error
                                 );
                             }
                         }
 
                         let now = Instant::now();
-                        let due_grids: Vec<(String, poise_engine::track::Instrument)> = tracked
+                        let due_tracks: Vec<(String, poise_engine::track::Instrument)> = tracked
                             .iter()
-                            .filter(|(_, tracked_grid)| tracked_grid.next_retry_at <= now)
-                            .map(|(grid_id, tracked_grid)| (grid_id.clone(), tracked_grid.instrument.clone()))
+                            .filter(|(_, tracked_track)| tracked_track.next_retry_at <= now)
+                            .map(|(track_id, tracked_track)| (track_id.clone(), tracked_track.instrument.clone()))
                             .collect();
 
-                        for (grid_id, instrument) in due_grids {
-                            if let Some(tracked_grid) = tracked.get_mut(&grid_id) {
-                                tracked_grid.next_retry_at = Instant::now() + retry_interval;
+                        for (track_id, instrument) in due_tracks {
+                            if let Some(tracked_track) = tracked.get_mut(&track_id) {
+                                tracked_track.next_retry_at = Instant::now() + retry_interval;
                             }
                             if let Err(error) = sync_exchange_state_from_exchange(
                                 &state,
                                 &exchange,
-                                &grid_id,
+                                &track_id,
                                 &instrument,
                                 ExchangeSyncMode::RecoverAndReconcile,
                             )
@@ -338,7 +338,7 @@ impl ServerRuntime {
                     }
                     notification = notifications.recv() => {
                         match notification {
-                            Ok(TrackInternalNotification::GridWriteCommitted {
+                            Ok(TrackInternalNotification::TrackWriteCommitted {
                                 track_id,
                                 recovery_anomaly_active,
                             }) => {
@@ -350,7 +350,7 @@ impl ServerRuntime {
                                     retry_interval,
                                 );
                             }
-                            Ok(TrackInternalNotification::GridEffectStateChanged { .. }) => {}
+                            Ok(TrackInternalNotification::TrackEffectStateChanged { .. }) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                                 tracing::warn!(
                                     "recovery notification stream lagged by {skipped} messages; reseeding recovery tracking"
@@ -399,7 +399,7 @@ impl ServerRuntime {
                 }
 
                 let instrument = event.instrument().clone();
-                let Some(grid_id) = state.write_service.resolve_grid_id(&instrument).await else {
+                let Some(track_id) = state.write_service.resolve_track_id(&instrument).await else {
                     tracing::warn!(
                         "received user data for unknown instrument {}:{}",
                         instrument.venue.as_str(),
@@ -407,7 +407,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                if let Err(error) = apply_user_data_event(&state, &grid_id, event).await {
+                if let Err(error) = apply_user_data_event(&state, &track_id, event).await {
                     tracing::warn!(
                         "failed to apply user data update for {}: {}",
                         instrument.symbol,
@@ -424,21 +424,21 @@ async fn apply_user_data_event(
     state: &ServerState,
     track_id: &str,
     event: UserDataEvent,
-) -> std::result::Result<(), GridMutationError> {
+) -> std::result::Result<(), TrackMutationError> {
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
                 .write_service
                 .observe_position(track_id, position_observation(&position))
                 .await
-                .map_err(preserve_grid_mutation_error)?;
+                .map_err(preserve_track_mutation_error)?;
         }
         UserDataPayload::OrderUpdate(order) => {
             let _ = state
                 .write_service
                 .observe_order(track_id, order_observation(&order))
                 .await
-                .map_err(preserve_grid_mutation_error)?;
+                .map_err(preserve_track_mutation_error)?;
         }
     }
 
@@ -451,15 +451,15 @@ async fn sync_exchange_state_from_exchange(
     track_id: &str,
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
-) -> std::result::Result<(), GridMutationError> {
+) -> std::result::Result<(), TrackMutationError> {
     let position = exchange
         .get_position(instrument)
         .await
-        .map_err(GridMutationError::Persistence)?;
+        .map_err(TrackMutationError::Persistence)?;
     let open_orders = exchange
         .get_open_orders(instrument)
         .await
-        .map_err(GridMutationError::Persistence)?;
+        .map_err(TrackMutationError::Persistence)?;
     if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
         let _ = state
             .write_service
@@ -469,7 +469,7 @@ async fn sync_exchange_state_from_exchange(
                 open_orders.iter().map(order_observation).collect(),
             )
             .await
-            .map_err(preserve_grid_mutation_error)?;
+            .map_err(preserve_track_mutation_error)?;
     } else {
         let _ = state
             .write_service
@@ -479,14 +479,14 @@ async fn sync_exchange_state_from_exchange(
                 open_orders.iter().map(order_observation).collect(),
             )
             .await
-            .map_err(preserve_grid_mutation_error)?;
+            .map_err(preserve_track_mutation_error)?;
     }
     Ok(())
 }
 
 fn update_recovery_tracking(
     tracked: &mut std::collections::HashMap<String, RecoveryTrackedGrid>,
-    instruments: &[crate::write_service::GridInstrument],
+    instruments: &[crate::write_service::TrackInstrument],
     track_id: &str,
     recovery_anomaly_active: bool,
     retry_interval: Duration,
@@ -498,8 +498,8 @@ fn update_recovery_tracking(
 
     let Some(instrument) = instruments
         .iter()
-        .find(|grid| grid.id == track_id)
-        .map(|grid| grid.instrument.clone())
+        .find(|track| track.id == track_id)
+        .map(|track| track.instrument.clone())
     else {
         return;
     };
@@ -514,18 +514,18 @@ fn update_recovery_tracking(
 
 async fn seed_recovery_tracking(
     state: &ServerState,
-    instruments: &[crate::write_service::GridInstrument],
+    instruments: &[crate::write_service::TrackInstrument],
     retry_interval: Duration,
 ) -> std::collections::HashMap<String, RecoveryTrackedGrid> {
     let mut tracked = std::collections::HashMap::new();
-    for grid in instruments {
-        let Ok(Some(snapshot)) = state.state_repository.load_grid_state(&grid.id).await else {
+    for track in instruments {
+        let Ok(Some(snapshot)) = state.state_repository.load_track_state(&track.id).await else {
             continue;
         };
         update_recovery_tracking(
             &mut tracked,
             instruments,
-            &grid.id,
+            &track.id,
             snapshot.executor_state.recovery_anomaly.is_some(),
             retry_interval,
         );
@@ -533,14 +533,14 @@ async fn seed_recovery_tracking(
     tracked
 }
 
-fn preserve_grid_mutation_error(error: anyhow::Error) -> GridMutationError {
-    match error.downcast::<GridMutationError>() {
+fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {
+    match error.downcast::<TrackMutationError>() {
         Ok(error) => error,
-        Err(other) => GridMutationError::Persistence(other),
+        Err(other) => TrackMutationError::Persistence(other),
     }
 }
 
-fn mutate_error(error: GridMutationError) -> anyhow::Error {
+fn mutate_error(error: TrackMutationError) -> anyhow::Error {
     anyhow!(error.message())
 }
 
@@ -578,7 +578,7 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{ExchangeRules, Exposure, Side};
-    use poise_engine::command::GridCommand;
+    use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::ExecutionAction;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::track::{TrackId, Instrument, Venue};
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_worker_skips_stale_submit_when_grid_is_paused_before_execution() {
+    async fn effect_worker_skips_stale_submit_when_track_is_paused_before_execution() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         let transition = fixture
@@ -905,7 +905,7 @@ mod tests {
         fixture
             .state
             .write_service
-            .command("BTCUSDT", GridCommand::Pause)
+            .command("BTCUSDT", TrackCommand::Pause)
             .await
             .unwrap();
         let handles = fixture.runtime.start().await.unwrap();
@@ -925,7 +925,7 @@ mod tests {
         assert!(inventory_core_order(&instance).is_none());
         assert!(
             fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
-            "paused grid should not execute stale submit effects"
+            "paused track should not execute stale submit effects"
         );
 
         shutdown(handles).await;
@@ -1622,7 +1622,7 @@ mod tests {
                 .unwrap();
             if matches!(
                 event,
-                crate::notifications::TrackInternalNotification::GridEffectStateChanged { .. }
+                crate::notifications::TrackInternalNotification::TrackEffectStateChanged { .. }
             ) {
                 saw_effect_state_changed = true;
                 break;
@@ -1661,7 +1661,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::TrackInternalNotification::GridWriteCommitted { .. }
+            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
         ));
         worker.run_once().await.unwrap();
 
@@ -1671,7 +1671,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::TrackInternalNotification::GridEffectStateChanged { .. }
+            crate::notifications::TrackInternalNotification::TrackEffectStateChanged { .. }
         ));
     }
 
@@ -1744,7 +1744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_worker_reports_missing_loaded_grid_for_effect_writeback() {
+    async fn effect_worker_reports_missing_loaded_track_for_effect_writeback() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         persistence
@@ -1798,7 +1798,7 @@ mod tests {
         worker.run_once().await.unwrap();
 
         let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-        assert!(captured.contains("loaded-grid invariant violated"));
+        assert!(captured.contains("loaded-track invariant violated"));
         assert!(!captured.contains("submit order failed"));
     }
 
@@ -1859,7 +1859,7 @@ mod tests {
 
         let mut manager = TrackManager::new(clock);
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
@@ -1872,7 +1872,7 @@ mod tests {
         snapshot.target_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
-        manager.restore_grid_state(&snapshot).unwrap();
+        manager.restore_track_state(&snapshot).unwrap();
         persistence
             .save_transition("BTCUSDT", &snapshot, &[], &[])
             .await
@@ -1953,7 +1953,7 @@ mod tests {
 
         let mut manager = TrackManager::new(clock);
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
@@ -1961,7 +1961,7 @@ mod tests {
                 exchange.exchange_info.rules.clone(),
             )
             .unwrap();
-        manager.restore_grid_state(&snapshot).unwrap();
+        manager.restore_track_state(&snapshot).unwrap();
         persistence
             .save_transition("BTCUSDT", &snapshot, &[], &[])
             .await
@@ -2054,7 +2054,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::TrackInternalNotification::GridWriteCommitted { .. }
+            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
         ));
 
         shutdown(handles).await;
@@ -2219,7 +2219,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::TrackInternalNotification::GridWriteCommitted { .. }
+            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
         ));
 
         shutdown(handles).await;
@@ -2813,7 +2813,7 @@ mod tests {
         );
         let snapshot = fixture
             .persistence
-            .load_grid_state("BTCUSDT")
+            .load_track_state("BTCUSDT")
             .await
             .unwrap()
             .expect("final snapshot should be persisted");
@@ -3017,7 +3017,7 @@ mod tests {
 
         let mut manager = TrackManager::new(clock);
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
@@ -3080,7 +3080,7 @@ mod tests {
 
         let error = super::apply_user_data_event(
             &state,
-            "missing-grid",
+            "missing-track",
             position_event_at(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 1).unwrap(),
                 1.0,
@@ -3092,7 +3092,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            crate::write_service::GridMutationError::Mutation(_)
+            crate::write_service::TrackMutationError::Mutation(_)
         ));
     }
 
@@ -3183,7 +3183,7 @@ mod tests {
 
         let mut manager = TrackManager::new(clock);
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
@@ -3278,7 +3278,7 @@ mod tests {
 
         let mut manager = TrackManager::new(clock);
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
@@ -3288,7 +3288,7 @@ mod tests {
             .unwrap();
 
         if let Some(snapshot) = restored_snapshot.clone() {
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
             persistence
                 .save_transition("BTCUSDT", &snapshot, &[], &[])
                 .await
@@ -3340,7 +3340,7 @@ mod tests {
         let mut manager = TrackManager::new(clock);
         let instrument = btc_instrument();
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 instrument.clone(),
                 test_config(),
@@ -3349,7 +3349,7 @@ mod tests {
             )
             .unwrap();
         if let Some(snapshot) = restored_snapshot {
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
 
         let (events, _) = broadcast::channel(16);
@@ -3384,7 +3384,7 @@ mod tests {
         let mut manager = TrackManager::new(clock);
         let instrument = btc_instrument();
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("BTCUSDT"),
                 instrument.clone(),
                 config,
@@ -3393,7 +3393,7 @@ mod tests {
             )
             .unwrap();
         if let Some(snapshot) = restored_snapshot {
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
 
         let (events, _) = broadcast::channel(16);
@@ -3415,7 +3415,7 @@ mod tests {
     async fn current_instance(state: &ServerState) -> poise_engine::snapshot::TrackRuntimeSnapshot {
         let manager_handle = state.write_service.manager();
         let manager = manager_handle.read().await;
-        manager.get_grid("BTCUSDT").unwrap().snapshot()
+        manager.get_track("BTCUSDT").unwrap().snapshot()
     }
 
     async fn shutdown(handles: RuntimeHandles) {
@@ -3660,9 +3660,9 @@ mod tests {
     }
 
     fn inventory_core_order(
-        grid: &poise_engine::snapshot::TrackRuntimeSnapshot,
+        track: &poise_engine::snapshot::TrackRuntimeSnapshot,
     ) -> Option<&WorkingOrder> {
-        grid.executor_state
+        track.executor_state
             .slots
             .first()
             .and_then(|slot| slot.working_order.as_ref())
@@ -3927,7 +3927,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -3940,7 +3940,7 @@ mod tests {
             Ok(ready_pending_effects(&effects))
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
@@ -3969,7 +3969,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for MemoryPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -3983,7 +3983,7 @@ mod tests {
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -3996,15 +3996,15 @@ mod tests {
                 }))
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             track_id: &TrackId,
             _limit: usize,
@@ -4085,7 +4085,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -4098,7 +4098,7 @@ mod tests {
             Ok(ready_pending_effects(&effects))
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
@@ -4119,7 +4119,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for FailOnReceiptPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -4133,7 +4133,7 @@ mod tests {
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -4146,15 +4146,15 @@ mod tests {
                 }))
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             track_id: &TrackId,
             _limit: usize,
@@ -4246,7 +4246,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -4259,7 +4259,7 @@ mod tests {
             Ok(ready_pending_effects(&effects))
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
@@ -4274,7 +4274,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for FailOnSavePersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -4288,7 +4288,7 @@ mod tests {
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -4301,15 +4301,15 @@ mod tests {
                 }))
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             track_id: &TrackId,
             _limit: usize,

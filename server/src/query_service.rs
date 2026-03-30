@@ -19,8 +19,8 @@ impl TrackQueryService {
         Self { repository }
     }
 
-    pub async fn list_grid_sources(&self) -> Result<Vec<TrackReadModel>> {
-        let mut snapshots = self.repository.list_grid_snapshots().await?;
+    pub async fn list_track_sources(&self) -> Result<Vec<TrackReadModel>> {
+        let mut snapshots = self.repository.list_track_snapshots().await?;
         snapshots.sort_by(|left, right| {
             left.snapshot
                 .track_id
@@ -32,7 +32,7 @@ impl TrackQueryService {
         for snapshot in snapshots {
             let recent_effects = self
                 .repository
-                .list_recent_grid_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
+                .list_recent_track_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
                 .await?;
 
             sources.push(TrackReadModel::from_snapshot(
@@ -46,18 +46,18 @@ impl TrackQueryService {
         Ok(sources)
     }
 
-    pub async fn load_detail_source(&self, track_id: &TrackId) -> Result<Option<TrackReadModel>> {
-        let Some(snapshot) = self.repository.load_grid_snapshot(track_id).await? else {
+    pub async fn load_track_detail_source(&self, track_id: &TrackId) -> Result<Option<TrackReadModel>> {
+        let Some(snapshot) = self.repository.load_track_snapshot(track_id).await? else {
             return Ok(None);
         };
 
         let recent_domain_events = self
             .repository
-            .list_recent_grid_events(track_id, DETAIL_EVENTS_LIMIT)
+            .list_recent_track_events(track_id, DETAIL_EVENTS_LIMIT)
             .await?;
         let recent_effects = self
             .repository
-            .list_recent_grid_effects(track_id, DETAIL_EFFECTS_LIMIT)
+            .list_recent_track_effects(track_id, DETAIL_EFFECTS_LIMIT)
             .await?;
 
         Ok(Some(TrackReadModel::from_snapshot(
@@ -98,9 +98,9 @@ mod tests {
     use super::TrackQueryService;
 
     #[tokio::test]
-    async fn list_grid_sources_reads_all_registered_snapshots() {
+    async fn list_track_sources_reads_all_registered_snapshots() {
         let (service, repository) = test_query_service();
-        let sources = service.list_grid_sources().await.unwrap();
+        let sources = service.list_track_sources().await.unwrap();
 
         assert!(!sources.is_empty());
         assert_eq!(sources[0].track_id, "btc-core");
@@ -121,7 +121,7 @@ mod tests {
     async fn load_detail_source_reads_snapshot_events_and_effects() {
         let (service, _) = test_query_service();
         let source = service
-            .load_detail_source(&TrackId::new("btc-core"))
+            .load_track_detail_source(&TrackId::new("btc-core"))
             .await
             .unwrap()
             .unwrap();
@@ -184,7 +184,7 @@ mod tests {
     impl FakeReadRepository {
         fn new() -> Self {
             let snapshot = test_snapshot();
-            let grid_id = snapshot.track_id.as_str().to_string();
+            let track_id = snapshot.track_id.as_str().to_string();
             let snapshot_updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
 
             let event = StoredDomainEvent {
@@ -222,14 +222,14 @@ mod tests {
 
             Self {
                 snapshots: HashMap::from([(
-                    grid_id.clone(),
+                    track_id.clone(),
                     StoredTrackSnapshot {
                         snapshot,
                         updated_at: snapshot_updated_at,
                     },
                 )]),
-                events: HashMap::from([(grid_id.clone(), vec![event])]),
-                effects: HashMap::from([(grid_id, vec![effect])]),
+                events: HashMap::from([(track_id.clone(), vec![event])]),
+                effects: HashMap::from([(track_id, vec![effect])]),
                 effect_limits: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -241,15 +241,15 @@ mod tests {
 
     #[async_trait]
     impl TrackReadRepositoryPort for FakeReadRepository {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.values().cloned().collect())
         }
 
-        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self.snapshots.get(track_id.as_str()).cloned())
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
             track_id: &TrackId,
             _limit: usize,
@@ -261,7 +261,7 @@ mod tests {
                 .unwrap_or_default())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             track_id: &TrackId,
             limit: usize,

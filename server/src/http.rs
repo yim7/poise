@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use poise_engine::command::GridCommand;
+use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
     GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
@@ -11,7 +11,7 @@ use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
 use crate::assembly::ServerState;
-use crate::write_service::GridMutationError;
+use crate::write_service::TrackMutationError;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ErrorResponse {
@@ -20,7 +20,7 @@ struct ErrorResponse {
 
 pub fn router(state: ServerState) -> Router {
     Router::new()
-        .route("/grids", get(list_grids))
+        .route("/grids", get(list_tracks))
         .route("/grids/:id", get(get_grid_detail))
         .route("/grids/:id/commands", post(submit_command))
         .route("/ws", get(crate::websocket::ws_handler))
@@ -28,12 +28,12 @@ pub fn router(state: ServerState) -> Router {
         .with_state(state)
 }
 
-async fn list_grids(
+async fn list_tracks(
     State(state): State<ServerState>,
 ) -> Result<Json<GridListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let sources = state
         .query_service
-        .list_grid_sources()
+        .list_track_sources()
         .await
         .map_err(map_query_error)?;
     let items = sources
@@ -50,7 +50,7 @@ async fn get_grid_detail(
     let grid_id = TrackId::new(id.clone());
     let source = state
         .query_service
-        .load_detail_source(&grid_id)
+        .load_track_detail_source(&grid_id)
         .await
         .map_err(map_query_error)?
         .ok_or_else(|| not_found(format!("grid `{id}` not found")))?;
@@ -62,7 +62,7 @@ async fn submit_command(
     State(state): State<ServerState>,
     Json(request): Json<GridCommandRequest>,
 ) -> Result<Json<GridCommandAccepted>, (StatusCode, Json<ErrorResponse>)> {
-    if !state.write_service.has_grid(&id).await {
+    if !state.write_service.has_track(&id).await {
         return Err(not_found(format!("grid `{id}` not found")));
     }
 
@@ -80,11 +80,11 @@ async fn submit_command(
     }))
 }
 
-fn map_command(command: GridCommandType) -> Result<GridCommand, (StatusCode, Json<ErrorResponse>)> {
+fn map_command(command: GridCommandType) -> Result<TrackCommand, (StatusCode, Json<ErrorResponse>)> {
     match command {
-        GridCommandType::Pause => Ok(GridCommand::Pause),
-        GridCommandType::Resume => Ok(GridCommand::Resume),
-        GridCommandType::Flatten => Ok(GridCommand::Flatten),
+        GridCommandType::Pause => Ok(TrackCommand::Pause),
+        GridCommandType::Resume => Ok(TrackCommand::Resume),
+        GridCommandType::Flatten => Ok(TrackCommand::Flatten),
         GridCommandType::Terminate => Err(bad_request(format!(
             "command `{}` is not implemented",
             command_name(command)
@@ -127,12 +127,12 @@ fn map_query_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
 }
 
 fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    match error.downcast::<GridMutationError>() {
-        Ok(GridMutationError::LoadedGridInvariant { track_id }) => {
-            internal_error(GridMutationError::LoadedGridInvariant { track_id }.to_string())
+    match error.downcast::<TrackMutationError>() {
+        Ok(TrackMutationError::LoadedTrackInvariant { track_id }) => {
+            internal_error(TrackMutationError::LoadedTrackInvariant { track_id }.to_string())
         }
-        Ok(GridMutationError::Mutation(error)) => bad_request(error.to_string()),
-        Ok(GridMutationError::Persistence(error)) => internal_error(error.to_string()),
+        Ok(TrackMutationError::Mutation(error)) => bad_request(error.to_string()),
+        Ok(TrackMutationError::Persistence(error)) => internal_error(error.to_string()),
         Err(error) => internal_error(error.to_string()),
     }
 }
@@ -226,7 +226,7 @@ mod tests {
     fn test_manager() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 TrackConfig {
@@ -257,7 +257,7 @@ mod tests {
             )
             .unwrap();
         let grid = manager
-            .get_grid("btc-core")
+            .get_track("btc-core")
             .expect("grid should still exist")
             .clone();
         let mut snapshot = grid.snapshot();
@@ -269,7 +269,7 @@ mod tests {
             .expect("market observe should seed inventory_core working order");
         slot_order.order_id = Some("order-1".into());
         slot_order.status = OrderStatus::New;
-        manager.restore_grid_state(&snapshot).unwrap();
+        manager.restore_track_state(&snapshot).unwrap();
         manager
     }
 
@@ -621,7 +621,7 @@ mod tests {
             Err(anyhow!("persistence unavailable"))
         }
 
-        async fn load_grid_state(
+        async fn load_track_state(
             &self,
             _id: &str,
         ) -> anyhow::Result<Option<poise_engine::ports::TrackSnapshot>> {
@@ -641,7 +641,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             _grid_id: &TrackId,
         ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
@@ -651,11 +651,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for FailingRepository {
-        async fn list_grid_snapshots(&self) -> anyhow::Result<Vec<StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> anyhow::Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())
         }
 
-        async fn load_grid_snapshot(
+        async fn load_track_snapshot(
             &self,
             grid_id: &TrackId,
         ) -> anyhow::Result<Option<StoredTrackSnapshot>> {
@@ -667,7 +667,7 @@ mod tests {
                 .cloned())
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
             _grid_id: &TrackId,
             _limit: usize,
@@ -675,7 +675,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             _grid_id: &TrackId,
             _limit: usize,

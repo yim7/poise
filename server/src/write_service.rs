@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
-use poise_engine::command::GridCommand;
+use poise_engine::command::TrackCommand;
 use poise_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
 use poise_engine::track::{TrackId, Instrument};
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
@@ -21,11 +21,11 @@ use crate::notifications::TrackInternalNotification;
 pub type SharedManager = Arc<RwLock<TrackManager>>;
 
 #[derive(Default)]
-struct GridMutationGuards {
+struct TrackMutationGuards {
     locks: Mutex<HashMap<TrackId, Arc<Mutex<()>>>>,
 }
 
-impl GridMutationGuards {
+impl TrackMutationGuards {
     async fn lock(&self, id: &str) -> OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.locks.lock().await;
@@ -44,12 +44,12 @@ impl GridMutationGuards {
 pub struct TrackWriteService {
     manager: SharedManager,
     repository: Arc<dyn StateRepositoryPort>,
-    mutation_guards: Arc<GridMutationGuards>,
+    mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<TrackInternalNotification>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GridInstrument {
+pub struct TrackInstrument {
     pub id: String,
     pub instrument: Instrument,
 }
@@ -60,45 +60,45 @@ pub struct PreparedSubmitExecution {
 }
 
 #[derive(Debug)]
-pub enum GridMutationError {
-    LoadedGridInvariant { track_id: String },
+pub enum TrackMutationError {
+    LoadedTrackInvariant { track_id: String },
     Mutation(anyhow::Error),
     Persistence(anyhow::Error),
 }
 
-impl std::fmt::Display for GridMutationError {
+impl std::fmt::Display for TrackMutationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message())
     }
 }
 
-impl std::error::Error for GridMutationError {}
+impl std::error::Error for TrackMutationError {}
 
-impl GridMutationError {
+impl TrackMutationError {
     pub fn message(&self) -> String {
         match self {
-            Self::LoadedGridInvariant { track_id } => format!(
-                "loaded-grid invariant violated for effect writeback: grid `{track_id}` is not loaded in write-side runtime"
+            Self::LoadedTrackInvariant { track_id } => format!(
+                "loaded-track invariant violated for effect writeback: track `{track_id}` is not loaded in write-side runtime"
             ),
             Self::Mutation(error) | Self::Persistence(error) => error.to_string(),
         }
     }
 
-    fn loaded_grid_invariant(track_id: &str) -> Self {
-        Self::LoadedGridInvariant {
+    fn loaded_track_invariant(track_id: &str) -> Self {
+        Self::LoadedTrackInvariant {
             track_id: track_id.to_string(),
         }
     }
 
-    fn is_loaded_grid_invariant_violation(&self) -> bool {
-        matches!(self, Self::LoadedGridInvariant { .. })
+    fn is_loaded_track_invariant_violation(&self) -> bool {
+        matches!(self, Self::LoadedTrackInvariant { .. })
     }
 }
 
-pub(crate) fn is_loaded_grid_invariant_violation(error: &anyhow::Error) -> bool {
+pub(crate) fn is_loaded_track_invariant_violation(error: &anyhow::Error) -> bool {
     error
-        .downcast_ref::<GridMutationError>()
-        .is_some_and(GridMutationError::is_loaded_grid_invariant_violation)
+        .downcast_ref::<TrackMutationError>()
+        .is_some_and(TrackMutationError::is_loaded_track_invariant_violation)
 }
 
 pub(crate) trait TransitionResult {
@@ -145,7 +145,7 @@ impl TrackWriteService {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             repository,
-            mutation_guards: Arc::new(GridMutationGuards::default()),
+            mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
         }
     }
@@ -163,32 +163,32 @@ impl TrackWriteService {
         let _ = self.notifications.send(notification);
     }
 
-    pub async fn has_grid(&self, id: &str) -> bool {
+    pub async fn has_track(&self, id: &str) -> bool {
         let manager = self.manager.read().await;
-        manager.get_grid(id).is_some()
+        manager.get_track(id).is_some()
     }
 
-    pub async fn grid_instruments(&self) -> Vec<GridInstrument> {
+    pub async fn track_instruments(&self) -> Vec<TrackInstrument> {
         let manager = self.manager.read().await;
         manager
-            .list_grids()
+            .list_tracks()
             .into_iter()
-            .map(|grid| GridInstrument {
-                id: grid.id().as_str().to_string(),
-                instrument: grid.instrument().clone(),
+            .map(|track| TrackInstrument {
+                id: track.id().as_str().to_string(),
+                instrument: track.instrument().clone(),
             })
             .collect()
     }
 
-    pub async fn resolve_grid_id(&self, instrument: &Instrument) -> Option<String> {
+    pub async fn resolve_track_id(&self, instrument: &Instrument) -> Option<String> {
         let manager = self.manager.read().await;
         manager
-            .resolve_grid_id(instrument)
-            .map(|grid_id| grid_id.as_str().to_string())
+            .resolve_track_id(instrument)
+            .map(|track_id| track_id.as_str().to_string())
     }
 
     pub async fn observe_market(&self, id: &str, reference_price: f64) -> Result<TrackTransition> {
-        self.mutate_grid(id, |manager| {
+        self.mutate_track(id, |manager| {
             manager.observe(
                 &TrackId::new(id),
                 TrackObservation::Market(MarketObservation { reference_price }),
@@ -198,8 +198,8 @@ impl TrackWriteService {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn command(&self, id: &str, command: GridCommand) -> Result<TrackTransition> {
-        self.mutate_grid(id, |manager| {
+    pub async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
+        self.mutate_track(id, |manager| {
             manager.command(&TrackId::new(id), command.clone())
         })
         .await
@@ -207,7 +207,7 @@ impl TrackWriteService {
     }
 
     pub async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
-        self.mutate_grid_skip_noop(id, |manager| {
+        self.mutate_track_skip_noop(id, |manager| {
             manager.refresh_market_data_health(&TrackId::new(id))
         })
         .await
@@ -219,7 +219,7 @@ impl TrackWriteService {
         id: &str,
         observation: PositionObservation,
     ) -> Result<TrackTransition> {
-        self.mutate_grid(id, |manager| {
+        self.mutate_track(id, |manager| {
             manager.observe(
                 &TrackId::new(id),
                 TrackObservation::Position(observation.clone()),
@@ -234,7 +234,7 @@ impl TrackWriteService {
         id: &str,
         observation: OrderObservation,
     ) -> Result<TrackTransition> {
-        self.mutate_grid(id, |manager| {
+        self.mutate_track(id, |manager| {
             manager.observe(
                 &TrackId::new(id),
                 TrackObservation::Order(observation.clone()),
@@ -276,12 +276,12 @@ impl TrackWriteService {
         open_orders: Vec<OrderObservation>,
         mode: ExchangeSyncMode,
     ) -> Result<TrackTransition> {
-        let _mutation_guard = self.lock_grid_mutation(id).await;
+        let _mutation_guard = self.lock_track_mutation(id).await;
         let pending_submit_hints = self
             .repository
-            .list_pending_submit_effects_for_grid(&TrackId::new(id))
+            .list_pending_submit_effects_for_track(&TrackId::new(id))
             .await
-            .map_err(GridMutationError::Persistence)?
+            .map_err(TrackMutationError::Persistence)?
             .into_iter()
             .filter_map(|effect| match effect.effect {
                 TrackEffect::SubmitOrder {
@@ -298,7 +298,7 @@ impl TrackWriteService {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             let transition = if mode.allows_follow_up_reconcile() {
                 manager
                     .sync_exchange_state(
@@ -307,7 +307,7 @@ impl TrackWriteService {
                         open_orders,
                         pending_submit_hints,
                     )
-                    .map_err(GridMutationError::Mutation)?
+                    .map_err(TrackMutationError::Mutation)?
             } else {
                 manager
                     .sync_exchange_state_without_reconcile(
@@ -316,15 +316,15 @@ impl TrackWriteService {
                         open_orders,
                         pending_submit_hints,
                     )
-                    .map_err(GridMutationError::Mutation)?
+                    .map_err(TrackMutationError::Mutation)?
             };
             let next_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             (previous_snapshot, transition, next_snapshot)
         };
 
-        self.commit_grid_mutation(
+        self.commit_track_mutation(
             id,
             &previous_snapshot,
             &next_snapshot,
@@ -346,7 +346,7 @@ impl TrackWriteService {
         target_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
     ) -> Result<()> {
-        self.mutate_grid_with_effect_status(
+        self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
             |manager| {
@@ -371,7 +371,7 @@ impl TrackWriteService {
         client_order_id: &str,
         error: &str,
     ) -> Result<()> {
-        self.mutate_grid_with_effect_status(id, effect_status_failed(effect_id, error), |manager| {
+        self.mutate_track_with_effect_status(id, effect_status_failed(effect_id, error), |manager| {
             manager.record_submit_failure(&TrackId::new(id), client_order_id)?;
             Ok(())
         })
@@ -386,7 +386,7 @@ impl TrackWriteService {
         effect_id: &str,
         order_id: &str,
     ) -> Result<()> {
-        self.mutate_grid_with_effect_status(
+        self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
             |manager| {
@@ -400,7 +400,7 @@ impl TrackWriteService {
     }
 
     pub async fn record_cancel_all_success(&self, id: &str, effect_id: &str) -> Result<()> {
-        self.mutate_grid_with_effect_status(
+        self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
             |manager| {
@@ -414,7 +414,7 @@ impl TrackWriteService {
     }
 
     pub async fn complete_effect_succeeded(&self, id: &str, effect_id: &str) -> Result<()> {
-        self.mutate_grid_with_effect_status(
+        self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
             |_manager| Ok(()),
@@ -430,7 +430,7 @@ impl TrackWriteService {
         effect_id: &str,
         error: &str,
     ) -> Result<()> {
-        self.mutate_grid_with_effect_status(
+        self.mutate_track_with_effect_status(
             id,
             effect_status_failed(effect_id, error),
             |_manager| Ok(()),
@@ -471,12 +471,12 @@ impl TrackWriteService {
         target_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitRecoveryResolution> {
-        let _mutation_guard = self.lock_grid_mutation(id).await;
+        let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, plan, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             let plan = manager
                 .recover_submit_effect(
                     &TrackId::new(id),
@@ -484,10 +484,10 @@ impl TrackWriteService {
                     target_exposure.clone(),
                     live_order,
                 )
-                .map_err(GridMutationError::Mutation)?;
+                .map_err(TrackMutationError::Mutation)?;
             let next_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             (previous_snapshot, plan, next_snapshot)
         };
 
@@ -502,7 +502,7 @@ impl TrackWriteService {
             | SubmitRecoveryResolution::AwaitExchangeState => None,
         };
 
-        self.commit_grid_mutation(
+        self.commit_track_mutation(
             id,
             &previous_snapshot,
             &next_snapshot,
@@ -516,30 +516,30 @@ impl TrackWriteService {
         Ok(plan.resolution)
     }
 
-    async fn mutate_grid_with_effect_status<R, F>(
+    async fn mutate_track_with_effect_status<R, F>(
         &self,
         id: &str,
         effect_status_update: EffectStatusUpdate,
         mutate: F,
-    ) -> std::result::Result<R, GridMutationError>
+    ) -> std::result::Result<R, TrackMutationError>
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
         R: TransitionResult,
     {
-        let _mutation_guard = self.lock_grid_mutation(id).await;
+        let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
-            let result = mutate(&mut manager).map_err(GridMutationError::Mutation)?;
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            let result = mutate(&mut manager).map_err(TrackMutationError::Mutation)?;
             let next_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             (previous_snapshot, result, next_snapshot)
         };
 
-        self.commit_grid_mutation(
+        self.commit_track_mutation(
             id,
             &previous_snapshot,
             &next_snapshot,
@@ -551,54 +551,54 @@ impl TrackWriteService {
         Ok(result)
     }
 
-    async fn mutate_grid<R, F>(
+    async fn mutate_track<R, F>(
         &self,
         id: &str,
         mutate: F,
-    ) -> std::result::Result<R, GridMutationError>
+    ) -> std::result::Result<R, TrackMutationError>
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
         R: TransitionResult,
     {
-        self.mutate_grid_with_options(id, false, mutate).await
+        self.mutate_track_with_options(id, false, mutate).await
     }
 
-    async fn mutate_grid_skip_noop<R, F>(
+    async fn mutate_track_skip_noop<R, F>(
         &self,
         id: &str,
         mutate: F,
-    ) -> std::result::Result<R, GridMutationError>
+    ) -> std::result::Result<R, TrackMutationError>
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
         R: TransitionResult,
     {
-        self.mutate_grid_with_options(id, true, mutate).await
+        self.mutate_track_with_options(id, true, mutate).await
     }
 
-    async fn mutate_grid_with_options<R, F>(
+    async fn mutate_track_with_options<R, F>(
         &self,
         id: &str,
         skip_when_noop: bool,
         mutate: F,
-    ) -> std::result::Result<R, GridMutationError>
+    ) -> std::result::Result<R, TrackMutationError>
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
         R: TransitionResult,
     {
-        let _mutation_guard = self.lock_grid_mutation(id).await;
+        let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
-            let result = mutate(&mut manager).map_err(GridMutationError::Mutation)?;
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+            let result = mutate(&mut manager).map_err(TrackMutationError::Mutation)?;
             let next_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             (previous_snapshot, result, next_snapshot)
         };
 
-        self.commit_grid_mutation(
+        self.commit_track_mutation(
             id,
             &previous_snapshot,
             &next_snapshot,
@@ -610,11 +610,11 @@ impl TrackWriteService {
         Ok(result)
     }
 
-    async fn lock_grid_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
+    async fn lock_track_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
         self.mutation_guards.lock(id).await
     }
 
-    async fn commit_grid_mutation<R>(
+    async fn commit_track_mutation<R>(
         &self,
         id: &str,
         previous_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
@@ -622,15 +622,15 @@ impl TrackWriteService {
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_noop: bool,
-    ) -> std::result::Result<(), GridMutationError>
+    ) -> std::result::Result<(), TrackMutationError>
     where
         R: TransitionResult,
     {
-        let has_grid_write = previous_snapshot != next_snapshot
+        let has_track_write = previous_snapshot != next_snapshot
             || !result.domain_events().is_empty()
             || !result.effects().is_empty();
         let has_effect_status_update = effect_status_update.is_some();
-        let has_persistence_work = has_grid_write || has_effect_status_update;
+        let has_persistence_work = has_track_write || has_effect_status_update;
         if skip_when_noop && !has_persistence_work {
             return Ok(());
         }
@@ -648,24 +648,24 @@ impl TrackWriteService {
         {
             let rollback_result = {
                 let mut manager = self.manager.write().await;
-                manager.restore_grid_state(previous_snapshot)
+                manager.restore_track_state(previous_snapshot)
             };
             if let Err(rollback_error) = rollback_result {
-                return Err(GridMutationError::Persistence(anyhow!(
-                    "failed to persist grid `{id}`: {error}; rollback failed: {rollback_error}"
+                return Err(TrackMutationError::Persistence(anyhow!(
+                    "failed to persist track `{id}`: {error}; rollback failed: {rollback_error}"
                 )));
             }
-            return Err(GridMutationError::Persistence(error));
+            return Err(TrackMutationError::Persistence(error));
         }
 
-        if has_grid_write {
-            self.emit_internal_notification(TrackInternalNotification::GridWriteCommitted {
+        if has_track_write {
+            self.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
                 track_id: TrackId::new(id),
                 recovery_anomaly_active: next_snapshot.executor_state.recovery_anomaly.is_some(),
             });
         }
         if has_effect_status_update {
-            self.emit_internal_notification(TrackInternalNotification::GridEffectStateChanged {
+            self.emit_internal_notification(TrackInternalNotification::TrackEffectStateChanged {
                 track_id: TrackId::new(id),
             });
         }
@@ -696,7 +696,7 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{ExchangeRules, Exposure, Side};
-    use poise_engine::command::GridCommand;
+    use poise_engine::command::TrackCommand;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
     use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::{ExchangeSyncMode, TrackManager};
@@ -720,13 +720,13 @@ mod tests {
     use super::TrackWriteService;
 
     #[tokio::test]
-    async fn mutate_grid_persists_tick_events_and_emits_notification_after_save() {
+    async fn mutate_track_persists_tick_events_and_emits_notification_after_save() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_notifications();
 
         let outcome = service
-            .mutate_grid("btc-core", |manager| {
+            .mutate_track("btc-core", |manager| {
                 manager.observe(
                     &TrackId::new("btc-core"),
                     TrackObservation::Market(MarketObservation {
@@ -743,7 +743,7 @@ mod tests {
         let notification = receiver.recv().await.unwrap();
         assert_eq!(
             notification,
-            TrackInternalNotification::GridWriteCommitted {
+            TrackInternalNotification::TrackWriteCommitted {
                 track_id: TrackId::new("btc-core"),
                 recovery_anomaly_active: false,
             }
@@ -751,12 +751,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutate_grid_persists_engine_snapshot_without_server_side_snapshot_builder() {
+    async fn mutate_track_persists_engine_snapshot_without_server_side_snapshot_builder() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
 
         service
-            .mutate_grid("btc-core", |manager| {
+            .mutate_track("btc-core", |manager| {
                 manager.observe(
                     &TrackId::new("btc-core"),
                     TrackObservation::Market(MarketObservation {
@@ -769,13 +769,13 @@ mod tests {
 
         let manager_handle = service.manager();
         let manager = manager_handle.read().await;
-        let expected = manager.get_grid("btc-core").unwrap().snapshot();
+        let expected = manager.get_track("btc-core").unwrap().snapshot();
 
         assert_eq!(repository.snapshot_for("btc-core"), Some(expected));
     }
 
     #[tokio::test]
-    async fn mutate_grid_persists_effects_with_snapshot_and_events() {
+    async fn mutate_track_persists_effects_with_snapshot_and_events() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
 
@@ -797,13 +797,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutate_grid_rolls_back_and_does_not_broadcast_when_save_fails() {
+    async fn mutate_track_rolls_back_and_does_not_broadcast_when_save_fails() {
         let repository = Arc::new(FailOnSaveRepository);
         let service = test_service(repository as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_notifications();
 
         let error = match service
-            .mutate_grid("btc-core", |manager| {
+            .mutate_track("btc-core", |manager| {
                 manager.observe(
                     &TrackId::new("btc-core"),
                     TrackObservation::Market(MarketObservation {
@@ -816,7 +816,7 @@ mod tests {
             Ok(_) => panic!("mutation should fail when save fails"),
             Err(error) => error,
         };
-        assert!(matches!(error, super::GridMutationError::Persistence(_)));
+        assert!(matches!(error, super::TrackMutationError::Persistence(_)));
 
         let manager_handle = service.manager();
         let manager = manager_handle.read().await;
@@ -830,20 +830,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_persists_transition_and_emits_grid_write_committed() {
+    async fn command_persists_transition_and_emits_track_write_committed() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_notifications();
 
         service
-            .command("btc-core", GridCommand::Pause)
+            .command("btc-core", TrackCommand::Pause)
             .await
             .unwrap();
 
         let notification = receiver.recv().await.unwrap();
         assert_eq!(
             notification,
-            TrackInternalNotification::GridWriteCommitted {
+            TrackInternalNotification::TrackWriteCommitted {
                 track_id: TrackId::new("btc-core"),
                 recovery_anomaly_active: false,
             }
@@ -884,7 +884,7 @@ mod tests {
 
         assert_eq!(
             receiver.recv().await.unwrap(),
-            TrackInternalNotification::GridWriteCommitted {
+            TrackInternalNotification::TrackWriteCommitted {
                 track_id: TrackId::new("btc-core"),
                 recovery_anomaly_active: true,
             }
@@ -911,7 +911,7 @@ mod tests {
         assert_eq!(
             repository.global_pending_effect_queries(),
             0,
-            "startup sync should read grid-scoped pending submit hints instead of the global pending effect list",
+            "startup sync should read track-scoped pending submit hints instead of the global pending effect list",
         );
         assert_eq!(
             repository.pending_submit_hint_queries(),
@@ -920,7 +920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutations_for_same_grid_remain_serialized() {
+    async fn mutations_for_same_track_remain_serialized() {
         let repository = Arc::new(MemoryRepository::default());
         repository.block_next_save("btc-core");
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
@@ -933,7 +933,7 @@ mod tests {
         let second_service = service.clone();
         let second_mutation =
             tokio::spawn(
-                async move { second_service.command("btc-core", GridCommand::Pause).await },
+                async move { second_service.command("btc-core", TrackCommand::Pause).await },
             );
 
         assert!(
@@ -943,7 +943,7 @@ mod tests {
             )
             .await
             .is_err(),
-            "same-grid mutation should wait for the in-flight commit"
+            "same-track mutation should wait for the in-flight commit"
         );
 
         repository.release_save("btc-core");
@@ -953,10 +953,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutations_for_different_grids_do_not_share_global_lock() {
+    async fn mutations_for_different_tracks_do_not_share_global_lock() {
         let repository = Arc::new(MemoryRepository::default());
         repository.block_next_save("btc-core");
-        let service = multi_grid_service(
+        let service = multi_track_service(
             repository.clone() as Arc<dyn StateRepositoryPort>,
             &[("btc-core", "BTCUSDT"), ("eth-core", "ETHUSDT")],
         );
@@ -969,7 +969,7 @@ mod tests {
         let second_service = service.clone();
         let second_mutation =
             tokio::spawn(
-                async move { second_service.command("eth-core", GridCommand::Pause).await },
+                async move { second_service.command("eth-core", TrackCommand::Pause).await },
             );
 
         let completed_before_release = timeout(
@@ -985,15 +985,15 @@ mod tests {
 
         assert!(
             completed_before_release.is_ok(),
-            "different grids should not share a global write lock"
+            "different tracks should not share a global write lock"
         );
         assert_eq!(completed_snapshot, vec!["eth-core".to_string()]);
     }
 
     #[tokio::test]
-    async fn recover_submit_effect_uses_same_per_grid_guard_as_regular_mutations() {
+    async fn recover_submit_effect_uses_same_per_track_guard_as_regular_mutations() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = multi_grid_service(
+        let service = multi_track_service(
             repository.clone() as Arc<dyn StateRepositoryPort>,
             &[("btc-core", "BTCUSDT"), ("eth-core", "ETHUSDT")],
         );
@@ -1020,7 +1020,7 @@ mod tests {
         );
         {
             let mut manager = manager_handle.write().await;
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
         repository.seed_snapshot("btc-core", snapshot);
 
@@ -1079,17 +1079,17 @@ mod tests {
         }
         assert!(
             recovery_started.is_ok(),
-            "recover_submit_effect should reach persistence before this test checks cross-grid isolation"
+            "recover_submit_effect should reach persistence before this test checks cross-track isolation"
         );
 
-        let other_grid_service = service.clone();
-        let other_grid_mutation = tokio::spawn(async move {
-            other_grid_service
-                .command("eth-core", GridCommand::Pause)
+        let other_track_service = service.clone();
+        let other_track_mutation = tokio::spawn(async move {
+            other_track_service
+                .command("eth-core", TrackCommand::Pause)
                 .await
         });
 
-        let other_grid_completed = timeout(
+        let other_track_completed = timeout(
             Duration::from_millis(100),
             repository.wait_for_completed_save_count(completed_before_recovery + 1),
         )
@@ -1102,11 +1102,11 @@ mod tests {
             recover_task.await.unwrap().unwrap(),
             SubmitRecoveryResolution::Superseded { .. }
         ));
-        other_grid_mutation.await.unwrap().unwrap();
+        other_track_mutation.await.unwrap().unwrap();
 
         assert!(
-            other_grid_completed.is_ok(),
-            "other grids should remain writable while recovery is persisting"
+            other_track_completed.is_ok(),
+            "other tracks should remain writable while recovery is persisting"
         );
         assert_eq!(
             completed_snapshot,
@@ -1139,7 +1139,7 @@ mod tests {
         );
         {
             let mut manager = manager_handle.write().await;
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
         repository.seed_snapshot("btc-core", snapshot);
 
@@ -1260,24 +1260,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_effect_failed_returns_invariant_violation_when_grid_is_not_loaded() {
+    async fn complete_effect_failed_returns_invariant_violation_when_track_is_not_loaded() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = multi_grid_service(repository as Arc<dyn StateRepositoryPort>, &[]);
+        let service = multi_track_service(repository as Arc<dyn StateRepositoryPort>, &[]);
 
         let error = service
             .complete_effect_failed("btc-core", "btc-core:batch:0", "submit order rejected")
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("loaded-grid invariant violated"));
+        assert!(error.to_string().contains("loaded-track invariant violated"));
         assert!(error.to_string().contains("btc-core"));
-        assert!(!error.to_string().contains("grid `btc-core` not found"));
+        assert!(!error.to_string().contains("track `btc-core` not found"));
     }
 
     #[tokio::test]
-    async fn recover_submit_effect_returns_invariant_violation_when_grid_is_not_loaded() {
+    async fn recover_submit_effect_returns_invariant_violation_when_track_is_not_loaded() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = multi_grid_service(repository as Arc<dyn StateRepositoryPort>, &[]);
+        let service = multi_track_service(repository as Arc<dyn StateRepositoryPort>, &[]);
 
         let error = match service
             .recover_submit_effect(
@@ -1296,13 +1296,13 @@ mod tests {
             )
             .await
         {
-            Ok(_) => panic!("submit recovery should fail when grid is not loaded"),
+            Ok(_) => panic!("submit recovery should fail when track is not loaded"),
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("loaded-grid invariant violated"));
+        assert!(error.to_string().contains("loaded-track invariant violated"));
         assert!(error.to_string().contains("btc-core"));
-        assert!(!error.to_string().contains("grid `btc-core` not found"));
+        assert!(!error.to_string().contains("track `btc-core` not found"));
     }
 
     fn working_order(
@@ -1451,7 +1451,7 @@ mod tests {
         );
         {
             let mut manager = manager_handle.write().await;
-            manager.restore_grid_state(&snapshot).unwrap();
+            manager.restore_track_state(&snapshot).unwrap();
         }
         repository.seed_snapshot("btc-core", snapshot.clone());
 
@@ -1556,30 +1556,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolves_grid_id_from_instrument() {
+    async fn resolves_track_id_from_instrument() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
 
-        let grid_id = service
-            .resolve_grid_id(&Instrument::new(Venue::Binance, "BTCUSDT"))
+        let track_id = service
+            .resolve_track_id(&Instrument::new(Venue::Binance, "BTCUSDT"))
             .await;
 
-        assert_eq!(grid_id, Some("btc-core".to_string()));
+        assert_eq!(track_id, Some("btc-core".to_string()));
     }
 
     fn test_service(repository: Arc<dyn StateRepositoryPort>) -> TrackWriteService {
-        multi_grid_service(repository, &[("btc-core", "BTCUSDT")])
+        multi_track_service(repository, &[("btc-core", "BTCUSDT")])
     }
 
-    fn multi_grid_service(
+    fn multi_track_service(
         repository: Arc<dyn StateRepositoryPort>,
-        grids: &[(&str, &str)],
+        tracks: &[(&str, &str)],
     ) -> TrackWriteService {
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mut manager = TrackManager::new(Arc::new(FixedClock));
-        for (id, symbol) in grids {
+        for (id, symbol) in tracks {
             manager
-                .add_grid(
+                .add_track(
                     TrackId::new(*id),
                     Instrument::new(Venue::Binance, *symbol),
                     TrackConfig {
@@ -1789,7 +1789,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
             Ok(self.snapshots.lock().unwrap().get(id).cloned())
         }
 
@@ -1803,7 +1803,7 @@ mod tests {
             Ok(self.pending_effects())
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
@@ -1836,7 +1836,7 @@ mod tests {
             Err(anyhow!("injected save failure"))
         }
 
-        async fn load_grid_state(&self, _id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
+        async fn load_track_state(&self, _id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
             Ok(None)
         }
 
@@ -1848,9 +1848,9 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
@@ -1877,7 +1877,7 @@ mod tests {
         test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>)
             .manager
             .blocking_read()
-            .get_grid("btc-core")
+            .get_track("btc-core")
             .unwrap()
             .snapshot()
     }

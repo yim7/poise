@@ -56,13 +56,13 @@ fn validate_unique_instruments(
     Ok(())
 }
 
-fn validate_unique_grid_ids(
-    grid_ids: impl IntoIterator<Item = TrackId>,
+fn validate_unique_track_ids(
+    track_ids: impl IntoIterator<Item = TrackId>,
 ) -> Result<(), anyhow::Error> {
-    let mut known_grid_ids = HashSet::new();
-    for grid_id in grid_ids {
-        if !known_grid_ids.insert(grid_id.as_str().to_string()) {
-            return Err(anyhow!("duplicate grid id `{}`", grid_id.as_str()));
+    let mut known_track_ids = HashSet::new();
+    for track_id in track_ids {
+        if !known_track_ids.insert(track_id.as_str().to_string()) {
+            return Err(anyhow!("duplicate grid id `{}`", track_id.as_str()));
         }
     }
     Ok(())
@@ -95,7 +95,7 @@ fn validate_exchange_runtime_config(
 
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
     validate_unique_instruments(config.grids.iter().map(|track| track.instrument()))?;
-    validate_unique_grid_ids(config.grids.iter().map(|track| track.track_id()))?;
+    validate_unique_track_ids(config.grids.iter().map(|track| track.track_id()))?;
     let exchange_config = validate_exchange_runtime_config(&config.exchange)?;
 
     let adapter = Arc::new(BinanceAdapter::new(
@@ -140,13 +140,13 @@ where
     R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
 {
     validate_unique_instruments(config.grids.iter().map(|track| track.instrument()))?;
-    validate_unique_grid_ids(config.grids.iter().map(|track| track.track_id()))?;
+    validate_unique_track_ids(config.grids.iter().map(|track| track.track_id()))?;
 
     let mut manager = TrackManager::new(clock);
     for track in &config.grids {
         let track_id = track.track_id();
         let info = exchange.get_exchange_info(&track.instrument()).await?;
-        manager.add_grid_with_tick_timeout_secs(
+        manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             track.instrument(),
             track.track_config(),
@@ -154,8 +154,8 @@ where
             info.rules,
             track.tick_timeout_secs(),
         )?;
-        if let Some(snapshot) = repository.load_grid_state(track_id.as_str()).await? {
-            manager.restore_grid_state(&snapshot)?;
+        if let Some(snapshot) = repository.load_track_state(track_id.as_str()).await? {
+            manager.restore_track_state(&snapshot)?;
         }
     }
 
@@ -248,7 +248,7 @@ mod tests {
     use crate::write_service::TrackWriteService;
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_grid_ids,
+        ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_track_ids,
         validate_unique_instruments,
     };
 
@@ -324,8 +324,8 @@ mod tests {
         let manager_handle = platform.state().write_service.manager();
         let manager = manager_handle.read().await;
 
-        assert_eq!(manager.list_grids().len(), 2);
-        let grid = manager.get_grid("btc-core").unwrap();
+        assert_eq!(manager.list_tracks().len(), 2);
+        let grid = manager.get_track("btc-core").unwrap();
         assert_eq!(grid.budget().max_notional, 3000.0);
         assert!(
             std::path::Path::new(".data")
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn assemble_rejects_duplicate_grid_ids() {
         let error =
-            validate_unique_grid_ids([TrackId::new("alpha"), TrackId::new("alpha")]).unwrap_err();
+            validate_unique_track_ids([TrackId::new("alpha"), TrackId::new("alpha")]).unwrap_err();
         assert!(error.to_string().contains("duplicate grid id"));
     }
 
@@ -579,7 +579,7 @@ mod tests {
         let second = assemble_with_fake_ports(&config).await.unwrap();
         let manager_handle = second.state().write_service.manager();
         let manager = manager_handle.read().await;
-        let grid = manager.get_grid("btc-core").unwrap();
+        let grid = manager.get_track("btc-core").unwrap();
 
         assert_eq!(grid.status(), &poise_engine::runtime::TrackStatus::Paused);
 
@@ -607,7 +607,7 @@ mod tests {
                     reference_price: tick.reference_price,
                 }),
             );
-            manager.pause_grid("btc-core").unwrap();
+            manager.pause_track("btc-core").unwrap();
         }
 
         let resume_request = tokio::spawn(async move {
@@ -660,7 +660,7 @@ mod tests {
         );
 
         let snapshot = persistence
-            .load_grid_state("btc-core")
+            .load_track_state("btc-core")
             .await
             .unwrap()
             .unwrap();
@@ -703,7 +703,7 @@ mod tests {
 
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
-            .add_grid(
+            .add_track(
                 TrackId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 poise_core::strategy::TrackConfig {
@@ -850,7 +850,7 @@ mod tests {
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -864,7 +864,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_submit_effects_for_grid(
+        async fn list_pending_submit_effects_for_track(
             &self,
             _grid_id: &TrackId,
         ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
@@ -874,7 +874,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for BlockingPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<poise_engine::ports::StoredTrackSnapshot>> {
+        async fn list_track_snapshots(&self) -> Result<Vec<poise_engine::ports::StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -888,7 +888,7 @@ mod tests {
                 .collect())
         }
 
-        async fn load_grid_snapshot(
+        async fn load_track_snapshot(
             &self,
             track_id: &TrackId,
         ) -> Result<Option<poise_engine::ports::StoredTrackSnapshot>> {
@@ -904,7 +904,7 @@ mod tests {
                 }))
         }
 
-        async fn list_recent_grid_events(
+        async fn list_recent_track_events(
             &self,
             _grid_id: &TrackId,
             _limit: usize,
@@ -912,7 +912,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_recent_grid_effects(
+        async fn list_recent_track_effects(
             &self,
             _grid_id: &TrackId,
             _limit: usize,

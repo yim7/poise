@@ -48,7 +48,7 @@ mod tests {
     use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
     use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
 
-    fn test_grid_id() -> TrackId {
+    fn test_track_id() -> TrackId {
         TrackId::new("btc-core")
     }
 
@@ -121,7 +121,7 @@ mod tests {
     fn plans_execution_mode_from_gap_and_age() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let passive = plan(ExecutorInput {
@@ -190,7 +190,7 @@ mod tests {
     fn cancel_plan_keeps_live_slot_until_cancel_effect_completes() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let mut existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
         existing_state.slots.push(sibling_slot());
@@ -218,7 +218,7 @@ mod tests {
     fn replace_plan_keeps_live_slot_until_cancel_effect_completes() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
@@ -248,7 +248,7 @@ mod tests {
     fn current_submit_hint_returns_single_submit_effect_from_plan() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let hint = current_submit_hint(ExecutorInput {
@@ -280,7 +280,7 @@ mod tests {
     fn current_submit_hint_returns_none_when_plan_is_not_single_submit() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
@@ -303,7 +303,7 @@ mod tests {
     fn plan_sets_reduce_only_for_decrease_inventory_order() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let plan = plan(ExecutorInput {
@@ -330,7 +330,7 @@ mod tests {
     fn plan_does_not_set_reduce_only_for_increase_inventory_order() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let plan = plan(ExecutorInput {
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn replacement_gate_threshold_uses_exchange_maker_and_taker_fee_rate() {
         let instrument = test_instrument();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
@@ -920,7 +920,7 @@ mod tests {
     fn submit_recovery_supersedes_stale_effect_when_current_plan_changed() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let track_id = TrackId::new("grid-1");
+        let track_id = TrackId::new("track-1");
         let instrument = test_instrument();
         let request = OrderRequest {
             instrument: instrument.clone(),
@@ -965,7 +965,7 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    client_order_id: format!("grid-1-{}", now.timestamp_millis()),
+                    client_order_id: format!("track-1-{}", now.timestamp_millis()),
                     reduce_only: false,
                 },
                 target_exposure: Exposure(4.0),
@@ -978,7 +978,7 @@ mod tests {
                 state: SlotState::SubmitPending,
                 working_order: Some(WorkingOrder {
                     order_id: None,
-                    client_order_id: format!("grid-1-{}", now.timestamp_millis()),
+                    client_order_id: format!("track-1-{}", now.timestamp_millis()),
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
@@ -1040,7 +1040,7 @@ mod tests {
     fn plan_generates_unique_client_order_ids_across_calls() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_grid_id();
+        let track_id = test_track_id();
         let t1 = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let t2 = t1 + Duration::milliseconds(1);
 
@@ -1086,14 +1086,14 @@ mod tests {
     fn submit_recovery_proceed_updates_slot_target_to_current_plan_target() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let track_id = TrackId::new("grid-1");
+        let track_id = TrackId::new("track-1");
         let instrument = test_instrument();
         let request = OrderRequest {
             instrument: instrument.clone(),
             side: Side::Buy,
             price: 90.0,
             quantity: 4.0,
-            client_order_id: "grid-1-reconcile".into(),
+            client_order_id: "track-1-reconcile".into(),
             reduce_only: false,
         };
         let previous_state =

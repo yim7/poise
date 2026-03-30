@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GridCommand {
+pub enum TrackCommand {
     Pause,
     Resume,
     Reconcile,

@@ -161,12 +161,12 @@ pub trait StateRepositoryPort: Send + Sync {
         self.save_transition_with_effect_status(id, state, events, effects, None)
             .await
     }
-    async fn load_grid_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
+    async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
     async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
     async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
-    async fn list_pending_submit_effects_for_grid(
+    async fn list_pending_submit_effects_for_track(
         &self,
-        grid_id: &TrackId,
+        track_id: &TrackId,
     ) -> Result<Vec<PersistedTrackEffect>>;
 }
 
@@ -187,18 +187,21 @@ pub struct StoredTrackSnapshot {
 
 #[async_trait]
 pub trait TrackReadRepositoryPort: Send + Sync {
-    async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>>;
-    async fn load_grid_snapshot(&self, grid_id: &TrackId) -> Result<Option<StoredTrackSnapshot>>;
-    async fn list_recent_grid_events(
+    async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>>;
+    async fn load_track_snapshot(
         &self,
-        grid_id: &TrackId,
+        track_id: &TrackId,
+    ) -> Result<Option<StoredTrackSnapshot>>;
+    async fn list_recent_track_events(
+        &self,
+        track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<StoredDomainEvent>>;
     /// Returns effects selected from the most recent `updated_at` window,
     /// ordered by `updated_at` ascending.
-    async fn list_recent_grid_effects(
+    async fn list_recent_track_effects(
         &self,
-        grid_id: &TrackId,
+        track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<PersistedTrackEffect>>;
 }
