@@ -1,6 +1,8 @@
-# 网格平台
+# Poise
 
-`grid-platform` 是一个面向 Binance USDⓈ-M Futures 的探索型网格交易项目。当前主线实现已经统一到下面这套结构：
+`Poise` 是一个面向 Binance USDⓈ-M Futures 的探索型策略运行项目。当前主线把策略定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
+
+当前工作区仍保留 `grid-*` crate、二进制名，以及 `grid_id` 等内部术语；本次只统一产品名与对外文案。当前主线实现已经统一到下面这套结构：
 
 - `grid-server` 负责运行态、控制面、持久化和交易所接入
 - `grid-tui` 负责本地值守、联调和操作入口
@@ -70,6 +72,8 @@ notional_per_unit = 375.0
 
 ### 2. 启动服务端
 
+`Poise` 服务端当前仍通过 `grid-server` 二进制启动。
+
 ```bash
 cargo run -p grid-server -- --config configs/binance-testnet.toml
 ```
@@ -83,6 +87,8 @@ cargo run -p grid-server -- --config configs/binance-testnet.toml
 
 ### 3. 启动 TUI
 
+`Poise` 终端界面当前仍通过 `grid-tui` 二进制启动。
+
 ```bash
 cargo run -p grid-tui
 ```
@@ -93,6 +99,8 @@ cargo run -p grid-tui
 - WebSocket：`ws://127.0.0.1:8000/ws`
 
 如果要改地址，可以在启动前设置：
+
+当前环境变量名仍保持兼容，继续使用 `GRID_PLATFORM_BASE_URL` 和 `GRID_PLATFORM_WS_URL`。
 
 ```bash
 export GRID_PLATFORM_BASE_URL=http://127.0.0.1:9000
@@ -143,4 +151,4 @@ cargo test
 - [`docs/grid-strategy-product-theory-research.md`](docs/grid-strategy-product-theory-research.md)：当前策略研究与产品侧约束
 - [`docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md`](docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md)：当前架构 spec
 - [`docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md`](docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md)：当前策略族模型设计
-- [`docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md`](docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md)：当前收敛计划与验收标准
+- [`docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md`](docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md)：Poise 当前收敛计划与验收标准

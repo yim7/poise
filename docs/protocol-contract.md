@@ -1,6 +1,8 @@
-# 协议契约
+# Poise 协议契约
 
-本文档描述当前 `grid-server` 与 `grid-tui` 实际使用的 HTTP / WebSocket 协议。Rust 类型定义以 `protocol/src/lib.rs` 为准；本文档只说明当前线协议和接口语义。
+本文档描述 `Poise` 当前 `grid-server` 与 `grid-tui` 实际使用的 HTTP / WebSocket 协议。Rust 类型定义以 `protocol/src/lib.rs` 为准；本文档只说明当前线协议和接口语义。
+
+为保持兼容，当前线协议中的稳定标识和代码术语仍沿用 `grid` / `grid_id` 命名。
 
 ## 1. HTTP 路由
 

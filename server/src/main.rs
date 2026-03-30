@@ -20,7 +20,7 @@ use anyhow::Result;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    tracing::info!("grid-server starting");
+    tracing::info!("Poise server starting");
 
     let config_path = parse_config_path(env::args().skip(1))?;
     let config = config::load_config(&config_path)?;

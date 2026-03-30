@@ -1,6 +1,8 @@
-# 网格平台架构设计
+# Poise 架构设计
 
-基于[网格策略族模型设计](2026-03-24-grid-strategy-family-design.md)，从零定义整个平台的技术架构。
+基于[网格策略族模型设计](2026-03-24-grid-strategy-family-design.md)，从零定义 `Poise` 的技术架构。
+
+当前工作区仍保留 `grid-*` crate、二进制和 `Grid*` 类型命名；本文只统一产品名与对外文案。
 
 补充说明：身份模型、运行态边界和 transport/application 的职责划分，以
 [`2026-03-25-grid-runtime-boundary-redesign.md`](2026-03-25-grid-runtime-boundary-redesign.md)
@@ -27,7 +29,7 @@
 ## 3. Crate 结构
 
 ```
-grid-platform/
+poise/
 ├── core/           # grid-core (library)
 ├── engine/         # grid-engine (library)
 ├── protocol/       # grid-protocol (library)
