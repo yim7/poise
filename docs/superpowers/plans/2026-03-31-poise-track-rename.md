@@ -420,37 +420,37 @@ Task 4 code commits:
 - Modify: `configs/test.toml`
 - Test: `rg`
 
-- [ ] **Step 1: 先用搜索命令盘点文档里的旧命名残留**
+- [x] **Step 1: 先用搜索命令盘点文档里的旧命名残留**
 
 Run:
-`rg -n "grid-platform|poise-server|poise-tui|poise-protocol|poise-core|poise-engine|poise-storage|poise-binance|Grid[A-Z]|track_id|\\[\\[grids\\]\\]|/tracks|GRID_PLATFORM|GRID_TUI" README.md docs configs`
+`rg -n "grid-platform|grid-server|grid-tui|grid-protocol|grid-core|grid-engine|grid-storage|grid-binance|Grid[A-Z]|grid_id|\\[\\[grids\\]\\]|/grids|GRID_PLATFORM|GRID_TUI" README.md docs configs`
 
 Expected:
 输出大量旧引用，确认文档和示例还未完成收敛。
 
-- [ ] **Step 2: 修改 README、协议文档、配置示例和当前架构入口文档**
+- [x] **Step 2: 修改 README、协议文档、配置示例和当前架构入口文档**
 
 要求：
 - README 的启动命令、环境变量、路由、配置块、包名全部切到 `poise-*` / `track_*`
 - `docs/protocol-contract.md` 改成 `/tracks` 和 `track_id`
 - 当前架构 spec、当前 rename spec、当前主线引用文档不再把当前系统称为 `grid-platform`
 
-- [ ] **Step 3: 批量清理仍描述现行行为的 spec / plan 正文**
+- [x] **Step 3: 批量清理仍描述现行行为的 spec / plan 正文**
 
 要求：
 - 所有当前仍被入口文档引用、且正文在描述现行系统行为的 spec / plan，统一把当前主语改为 `Poise` / `track`
 - 历史文件名可保留，但正文中不再把现行入口、现行命令、现行配置称为 `grid-*`
 - 引用链接同步修正到新的 package / binary / route / config 名
 
-- [ ] **Step 4: 用搜索命令做文档收尾验证**
+- [x] **Step 4: 用搜索命令做文档收尾验证**
 
 Run:
-`rg -n "grid-platform|poise-server|poise-tui|poise-protocol|poise-core|poise-engine|poise-storage|poise-binance|track_id|\\[\\[grids\\]\\]|/tracks|GRID_PLATFORM|GRID_TUI" README.md docs configs`
+`rg -n "grid-platform|grid-server|grid-tui|grid-protocol|grid-core|grid-engine|grid-storage|grid-binance|grid_id|\\[\\[grids\\]\\]|/grids|GRID_PLATFORM|GRID_TUI" README.md docs configs`
 
 Expected:
 当前文档入口、示例配置和现行说明不再命中旧命名。若历史说明中必须保留旧名，只能出现在明确的历史语境里，不能出现在现行入口段落。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add README.md docs configs
@@ -458,7 +458,11 @@ git commit -m "docs: rename current product language to poise track"
 ```
 
 Task 5 code commit:
-`TODO`
+`f086e9d3903e5f3f224030d79cfcf447ad4ac2fd`
+
+Residual search hits after Task 5:
+- 历史文件名中的 `grid-platform`
+- rename 设计与执行计划里显式保留的旧名到新名映射
 
 ---
 
