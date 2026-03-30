@@ -484,16 +484,18 @@ per-grid actor 也延后到下一阶段。
 - live position
 - live open orders
 - 已持久化的 `executor_state`
+- 已持久化且尚未终结的 `submit effect`，作为 `pending_submit_hints`
 
 ### 6.2 启动恢复顺序
 
 启动时对每个 grid 的处理顺序固定为：
 
 1. 吸收 live position，更新 `current_exposure`
-2. 吸收 live open orders，并由执行器负责重建 `slot -> working_order` 关系
-3. 基于最新 `target_exposure`、`current_exposure`、`reference_price` 重新规划 `DesiredOrders`
-4. 对比 `DesiredOrders` 与当前槽位工作集
-5. 生成需要的定点 `cancel / submit` effect
+2. 读取当前仍处于 pending 的 `submit effect`，提炼成 `pending_submit_hints`
+3. 吸收 live open orders，并由执行器负责重建 `slot -> working_order` 关系
+4. 基于最新 `target_exposure`、`current_exposure`、`reference_price` 重新规划 `DesiredOrders`
+5. 对比 `DesiredOrders` 与当前槽位工作集，并对仍在 pending 的提交 effect 做去重
+6. 生成需要的定点 `cancel / submit` effect
 
 也就是说，恢复之后不是“尽量延续那一笔旧单”，而是“先恢复当前槽位工作集，再重新规划当前应有工作集”。
 
@@ -510,9 +512,9 @@ per-grid actor 也延后到下一阶段。
 因此本阶段要求：
 
 - `submit recovery` 的判断逻辑下沉到 `engine executor`
-- `effect_worker` 只负责拿到回执、live order、effect 状态这些事实并回写
-- `write_service` 只负责持久化执行器 transition，不再拥有独立的 submit recovery 状态机
-- `effect_service` 只提供 effect 查询和 effect 状态更新，不再承载恢复判断
+- `effect_worker` 只负责拿到回执、live order、错误等事实，并调用写侧服务提交
+- `write_service` 在每个 `grid` 的串行事务边界内统一持久化执行器 transition 与 effect 状态更新，不再拥有独立的 submit recovery 状态机
+- `effect_service` 只提供 grid snapshot / pending effect 查询，不再承载恢复判断或任何写路径
 
 ### 6.4 恢复认领决策表
 
@@ -522,12 +524,18 @@ per-grid actor 也延后到下一阶段。
 
 ```rust
 pub enum RecoveryResolution {
-    Rebuilt { slots: Vec<ExecutionSlot> },
-    Anomaly(RecoveryAnomaly),
+    Rebuilt { state: ExecutorState },
+    Anomaly {
+        state: ExecutorState,
+        anomaly: RecoveryAnomaly,
+    },
 }
 ```
 
-其中 `RecoveryAnomaly` 只表达稳定异常类别，不夹带恢复动作。
+其中：
+
+- `RecoveryAnomaly` 只表达稳定异常类别，不夹带恢复动作
+- `Anomaly.state` 表示执行器给出的异常恢复状态。当前阶段它必须清空无法确认归属的 `slots`，并设置 `recovery_anomaly`
 
 槽位认领规则由执行器统一决定：
 
@@ -544,27 +552,34 @@ pub enum RecoveryResolution {
 
 出现 `RecoveryAnomaly` 时，不做部分认领；启动异常恢复路径。
 
+`submit receipt` 的回写也必须遵守同一条边界：
+
+- receipt 只能认领已存在且唯一匹配的 slot
+- 如果无法匹配 slot，写侧必须把它暴露成失败，不能静默 no-op 后继续把 effect 标成 `succeeded`
+
 只要异常恢复路径仍未解除，对外 `execution_status` 必须保持为 `attention_required`。
 
 模块责任固定为：
 
 - `server runtime` 拉取 live facts
+- `write_service` 拉取 `pending_submit_hints` 并提交 per-grid 写事务
 - `engine executor` 产出 `RecoveryResolution`
-- `effect_service` 只提供 effect 查询和状态更新
+- `effect_service` 只提供查询
 
 ### 6.5 `effect worker` 的边界收窄
 
 [`server/src/effect_worker.rs`](../../../server/src/effect_worker.rs) 改造后只负责：
 
 - 执行 `submit / cancel`
-- 回写订单结果
-- 更新 effect 状态
+- 收集订单结果和失败事实
+- 调用 `write_service` 提交写回
 
 它不再负责：
 
 - 执行策略判断
 - 是否应该继续追价
 - 是否应该触发整格重算
+- 直接持久化 effect 状态
 
 它也不再负责：
 
@@ -628,6 +643,14 @@ pub enum RecoveryResolution {
 
 - 每个 `grid` 的持久化事务边界
 - 每个 `grid` 的写侧串行控制
+- `pending_submit_hints` 的读取与去重
+- effect 状态与 grid mutation 的统一提交
+
+并且要明确一个运行时不变量：
+
+- 已持久化 effect 的状态写回依赖该 `grid` 已经加载到 write-side runtime
+- 如果这个前提不成立，`write_service` 必须返回稳定、可诊断的 invariant violation
+- `effect_worker` / `server runtime` 不得把这类错误包装成“交易所执行失败”
 
 不拥有：
 

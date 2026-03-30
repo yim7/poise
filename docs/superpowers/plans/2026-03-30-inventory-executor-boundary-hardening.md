@@ -465,13 +465,13 @@ git commit -m "refactor(engine): internalize current submit hint planning"
 - Test: `server/src/write_service.rs`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 写失败测试，锁住不变量与错误语义**
+- [x] **Step 1: 写失败测试，锁住不变量与错误语义**
 
 测试至少覆盖：
 - effect 状态写回在 `grid` 未加载时返回显式 invariant violation
 - runtime 在这类错误上保留清晰日志/错误信息，不把它伪装成交易所执行失败
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-server write_service::tests::complete_effect_failed_returns_invariant_violation_when_grid_is_not_loaded -- --exact`
@@ -480,14 +480,14 @@ Run:
 Expected:
 测试失败，因为当前只返回泛化的 `grid not found`。
 
-- [ ] **Step 3: 做最小实现，明确并文档化这个不变量**
+- [x] **Step 3: 做最小实现，明确并文档化这个不变量**
 
 要求：
 - 写侧 effect 状态更新在 `grid` 缺失时返回稳定、可诊断的错误
 - spec / plan 明确“persisted effect 的写回依赖该 grid 已加载到 write-side runtime”
 - 不为了处理这个异常重新引入第二条 effect 状态写旁路
 
-- [ ] **Step 4: 运行 Task 8 的定向测试**
+- [x] **Step 4: 运行 Task 8 的定向测试**
 
 Run:
 `cargo test -p grid-server write_service::tests:: -- --nocapture`
@@ -496,10 +496,10 @@ Run:
 Expected:
 不变量和错误语义被稳定锁住，相关测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 Task 8 code commit:
-`TODO`
+`53f3c8194d9e99fc2434dfd1588519730c91dfde`
 
 ```bash
 git add server/src/write_service.rs server/src/effect_worker.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
