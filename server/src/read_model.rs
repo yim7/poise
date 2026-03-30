@@ -3,7 +3,7 @@ use poise_core::events::ReplacementGateReason;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole};
-use poise_engine::ports::{PersistedTrackEffect, StoredDomainEvent};
+use poise_engine::ports::{PersistedTrackEffect, StoredTrackEvent};
 use poise_engine::runtime::{TrackStatus, SlotState};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 
@@ -34,7 +34,7 @@ pub struct TrackReadModel {
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub slots: Vec<ReadModelSlot>,
     pub manual_target_override: Option<f64>,
-    pub recent_domain_events: Vec<StoredDomainEvent>,
+    pub recent_track_events: Vec<StoredTrackEvent>,
     pub recent_effects: Vec<PersistedTrackEffect>,
 }
 
@@ -52,7 +52,7 @@ impl TrackReadModel {
     pub fn from_snapshot(
         snapshot: TrackRuntimeSnapshot,
         updated_at: DateTime<Utc>,
-        recent_domain_events: Vec<StoredDomainEvent>,
+        recent_track_events: Vec<StoredTrackEvent>,
         recent_effects: Vec<PersistedTrackEffect>,
     ) -> Self {
         let TrackRuntimeSnapshot {
@@ -112,7 +112,7 @@ impl TrackReadModel {
             replacement_gate_reason,
             slots,
             manual_target_override: manual_target_override.map(|value| value.0),
-            recent_domain_events,
+            recent_track_events,
             recent_effects,
         }
     }

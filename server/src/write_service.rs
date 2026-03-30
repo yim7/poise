@@ -1793,7 +1793,7 @@ mod tests {
             Ok(self.snapshots.lock().unwrap().get(id).cloned())
         }
 
-        async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
+        async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
             Ok(self.events_for(id))
         }
 
@@ -1840,7 +1840,7 @@ mod tests {
             Ok(None)
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<DomainEvent>> {
+        async fn list_track_events(&self, _id: &str) -> Result<Vec<DomainEvent>> {
             Ok(Vec::new())
         }
 

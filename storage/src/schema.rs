@@ -3,8 +3,8 @@ use rusqlite::Connection;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS grid_snapshots (
-            grid_id TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS track_snapshots (
+            track_id TEXT PRIMARY KEY,
             venue TEXT NOT NULL,
             symbol TEXT NOT NULL,
             config_json TEXT NOT NULL,
@@ -25,16 +25,16 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS domain_events (
+        CREATE TABLE IF NOT EXISTS track_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            grid_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
             event_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS grid_effects (
+        CREATE TABLE IF NOT EXISTS track_effects (
             effect_id TEXT PRIMARY KEY,
-            grid_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
             batch_id TEXT NOT NULL,
             sequence INTEGER NOT NULL,
             effect_json TEXT NOT NULL,
@@ -46,28 +46,28 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    add_column_if_missing(conn, "grid_snapshots", "executor_state_json", "TEXT")?;
-    add_column_if_missing(conn, "grid_snapshots", "manual_target_override", "REAL")?;
+    add_column_if_missing(conn, "track_snapshots", "executor_state_json", "TEXT")?;
+    add_column_if_missing(conn, "track_snapshots", "manual_target_override", "REAL")?;
     add_column_if_missing(
         conn,
-        "grid_snapshots",
+        "track_snapshots",
         "replacement_gate_reason_json",
         "TEXT",
     )?;
     add_column_if_missing(
         conn,
-        "grid_snapshots",
+        "track_snapshots",
         "realized_pnl_cumulative",
         "REAL NOT NULL DEFAULT 0",
     )?;
-    add_column_if_missing(conn, "grid_snapshots", "last_tick_at", "TEXT")?;
-    add_column_if_missing(conn, "grid_snapshots", "market_data_stale_since", "TEXT")?;
+    add_column_if_missing(conn, "track_snapshots", "last_tick_at", "TEXT")?;
+    add_column_if_missing(conn, "track_snapshots", "market_data_stale_since", "TEXT")?;
 
     ensure_columns_present(
         &conn,
-        "grid_snapshots",
+        "track_snapshots",
         &[
-            "grid_id",
+            "track_id",
             "venue",
             "symbol",
             "config_json",
@@ -88,13 +88,13 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "updated_at",
         ],
     )?;
-    ensure_columns_present(&conn, "domain_events", &["grid_id"])?;
+    ensure_columns_present(&conn, "track_events", &["track_id"])?;
     ensure_columns_present(
         &conn,
-        "grid_effects",
+        "track_effects",
         &[
             "effect_id",
-            "grid_id",
+            "track_id",
             "batch_id",
             "sequence",
             "effect_json",
@@ -107,14 +107,14 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
 
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_events_grid
-         ON domain_events(grid_id, created_at);
+        "CREATE INDEX IF NOT EXISTS idx_track_events_created_at
+         ON track_events(track_id, created_at);
 
-         CREATE INDEX IF NOT EXISTS idx_grid_effects_pending
-         ON grid_effects(status, created_at, batch_id, sequence, effect_id);
+         CREATE INDEX IF NOT EXISTS idx_track_effects_pending
+         ON track_effects(status, created_at, batch_id, sequence, effect_id);
 
-         CREATE INDEX IF NOT EXISTS idx_grid_effects_batch_sequence
-         ON grid_effects(grid_id, batch_id, sequence, status);",
+         CREATE INDEX IF NOT EXISTS idx_track_effects_batch_sequence
+         ON track_effects(track_id, batch_id, sequence, status);",
     )?;
     Ok(())
 }
@@ -169,7 +169,7 @@ mod tests {
 
         let snapshots_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='grid_snapshots'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_snapshots'",
                 [],
                 |row| row.get(0),
             )
@@ -178,7 +178,7 @@ mod tests {
 
         let events_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='domain_events'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_events'",
                 [],
                 |row| row.get(0),
             )
@@ -187,7 +187,7 @@ mod tests {
 
         let effects_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='grid_effects'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_effects'",
                 [],
                 |row| row.get(0),
             )
@@ -196,7 +196,7 @@ mod tests {
 
         let index_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_events_grid'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_events_created_at'",
                 [],
                 |row| row.get(0),
             )
@@ -205,7 +205,7 @@ mod tests {
 
         let effects_index_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_grid_effects_pending'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_effects_pending'",
                 [],
                 |row| row.get(0),
             )
@@ -214,19 +214,20 @@ mod tests {
 
         let effects_batch_index_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_grid_effects_batch_sequence'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_effects_batch_sequence'",
                 [],
                 |row| row.get(0),
         )
         .unwrap();
         assert_eq!(effects_batch_index_count, 1);
 
-        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(track_snapshots)").unwrap();
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get(1))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
+        assert!(columns.contains(&"track_id".to_string()));
         assert!(!columns.contains(&"pending_order_json".to_string()));
     }
 
@@ -241,8 +242,8 @@ mod tests {
     fn initialize_upgrades_snapshot_table_missing_only_replacement_gate_column() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE grid_snapshots (
-                grid_id TEXT PRIMARY KEY,
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
                 venue TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
@@ -263,7 +264,7 @@ mod tests {
 
         initialize(&conn).unwrap();
 
-        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(track_snapshots)").unwrap();
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get(1))
             .unwrap()
@@ -274,11 +275,11 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_legacy_grid_snapshots_table_without_required_columns() {
+    fn initialize_rejects_legacy_track_snapshots_table_without_required_columns() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE grid_snapshots (
-                grid_id TEXT PRIMARY KEY,
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
                 venue TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
@@ -292,7 +293,7 @@ mod tests {
 
         assert!(initialize(&conn).is_err());
 
-        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(track_snapshots)").unwrap();
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get(1))
             .unwrap()
@@ -312,8 +313,8 @@ mod tests {
     fn initialize_upgrades_snapshot_table_missing_realized_pnl_cumulative() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE grid_snapshots (
-                grid_id TEXT PRIMARY KEY,
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
                 venue TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
@@ -332,7 +333,7 @@ mod tests {
 
         initialize(&conn).unwrap();
 
-        let mut stmt = conn.prepare("PRAGMA table_info(grid_snapshots)").unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(track_snapshots)").unwrap();
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get(1))
             .unwrap()
@@ -343,17 +344,17 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_legacy_domain_events_table() {
+    fn initialize_rejects_legacy_track_events_table() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE domain_events (
+            "CREATE TABLE track_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 instance_id TEXT NOT NULL,
                 event_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
 
-            INSERT INTO domain_events (instance_id, event_json, created_at)
+            INSERT INTO track_events (instance_id, event_json, created_at)
             VALUES ('BTCUSDT', '{\"band_reentered\":{\"price\":99.0}}', '2026-03-25T00:00:00Z');",
         )
         .unwrap();
@@ -362,12 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_legacy_grid_effects_table_without_batch_sequence() {
+    fn initialize_rejects_legacy_track_effects_table_without_batch_sequence() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE grid_effects (
+            "CREATE TABLE track_effects (
                 effect_id TEXT PRIMARY KEY,
-                grid_id TEXT NOT NULL,
+                track_id TEXT NOT NULL,
                 effect_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -376,11 +377,11 @@ mod tests {
                 updated_at TEXT NOT NULL
             );
 
-            CREATE INDEX idx_grid_effects_pending
-            ON grid_effects(status, created_at, effect_id);
+            CREATE INDEX idx_track_effects_pending
+            ON track_effects(status, created_at, effect_id);
 
-            CREATE INDEX idx_grid_effects_batch_sequence
-            ON grid_effects(grid_id, status);",
+            CREATE INDEX idx_track_effects_batch_sequence
+            ON track_effects(track_id, status);",
         )
         .unwrap();
 

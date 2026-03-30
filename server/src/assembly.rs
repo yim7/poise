@@ -855,7 +855,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
+        async fn list_track_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -911,7 +911,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<poise_engine::ports::StoredDomainEvent>> {
+        ) -> Result<Vec<poise_engine::ports::StoredTrackEvent>> {
             Ok(Vec::new())
         }
 

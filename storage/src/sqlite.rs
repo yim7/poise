@@ -13,7 +13,7 @@ use poise_core::types::Exposure;
 use poise_engine::track::{TrackId, Instrument, Venue};
 use poise_engine::ports::{
     CommittedTrackWrite, EffectStatus, EffectStatusUpdate, TrackReadRepositoryPort,
-    PersistedTrackEffect, StateRepositoryPort, StoredDomainEvent, StoredTrackSnapshot,
+    PersistedTrackEffect, StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot,
 };
 use poise_engine::runtime::{ExecutorState, TrackStatus, RiskState};
 use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
@@ -197,8 +197,8 @@ impl SqliteStorage {
             .transaction()
             .context("failed to start sqlite transition transaction")?;
         tx.execute(
-            "INSERT OR REPLACE INTO grid_snapshots (
-                grid_id,
+            "INSERT OR REPLACE INTO track_snapshots (
+                track_id,
                 venue,
                 symbol,
                 config_json,
@@ -246,7 +246,7 @@ impl SqliteStorage {
             let event_json =
                 serde_json::to_string(&event).context("failed to serialize domain event")?;
             tx.execute(
-                "INSERT INTO domain_events (grid_id, event_json, created_at)
+                "INSERT INTO track_events (track_id, event_json, created_at)
                  VALUES (?1, ?2, ?3)",
                 params![id, event_json, updated_at_text],
             )
@@ -265,9 +265,9 @@ impl SqliteStorage {
             let effect_json =
                 serde_json::to_string(&effect).context("failed to serialize grid effect")?;
             tx.execute(
-                "INSERT INTO grid_effects (
+                "INSERT INTO track_effects (
                     effect_id,
-                    grid_id,
+                    track_id,
                     batch_id,
                     sequence,
                     effect_json,
@@ -309,7 +309,7 @@ impl SqliteStorage {
         if let Some(effect_status_update) = effect_status_update {
             let changed = tx
                 .execute(
-                    "UPDATE grid_effects
+                    "UPDATE track_effects
                      SET status = ?1,
                          attempt_count = attempt_count + ?2,
                          last_error = ?3,
@@ -346,13 +346,13 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT track_id, venue, symbol, config_json, status, current_exposure, target_exposure,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, last_tick_at, market_data_stale_since
-                 FROM grid_snapshots
-                 WHERE grid_id = ?1",
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
                 params![id],
                 Self::track_snapshot_from_row,
             )
@@ -369,13 +369,13 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT track_id, venue, symbol, config_json, status, current_exposure, target_exposure,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
-                 FROM grid_snapshots
-                 WHERE grid_id = ?1",
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
                 params![id],
                 Self::stored_track_snapshot_from_row,
             )
@@ -512,13 +512,13 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT grid_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT track_id, venue, symbol, config_json, status, current_exposure, target_exposure,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
-                 FROM grid_snapshots
-                 ORDER BY grid_id ASC",
+                 FROM track_snapshots
+                 ORDER BY track_id ASC",
             )
             .context("failed to prepare grid snapshot list query")?;
 
@@ -535,8 +535,8 @@ impl SqliteStorage {
         let mut stmt = conn
             .prepare(
                 "SELECT event_json
-                 FROM domain_events
-                 WHERE grid_id = ?1
+                 FROM track_events
+                 WHERE track_id = ?1
                  ORDER BY created_at ASC, id ASC",
             )
             .context("failed to prepare domain event query")?;
@@ -558,7 +558,7 @@ impl SqliteStorage {
         conn: Arc<Mutex<Connection>>,
         track_id: TrackId,
         limit: usize,
-    ) -> Result<Vec<StoredDomainEvent>> {
+    ) -> Result<Vec<StoredTrackEvent>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -566,9 +566,9 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, grid_id, event_json, created_at
-                 FROM domain_events
-                 WHERE grid_id = ?1
+                "SELECT id, track_id, event_json, created_at
+                 FROM track_events
+                 WHERE track_id = ?1
                  ORDER BY created_at DESC, id DESC
                  LIMIT ?2",
             )
@@ -578,7 +578,7 @@ impl SqliteStorage {
             .query_map(params![track_id.as_str(), limit], |row| {
                 let event_json: String = row.get(2)?;
                 let created_at: String = row.get(3)?;
-                Ok(StoredDomainEvent {
+                Ok(StoredTrackEvent {
                     id: row.get(0)?,
                     track_id: TrackId::new(row.get::<_, String>(1)?),
                     event: Self::deserialize_domain_event(&event_json)?,
@@ -604,9 +604,9 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM grid_effects
-                 WHERE grid_id = ?1
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects
+                 WHERE track_id = ?1
                  ORDER BY updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC
                  LIMIT ?2",
             )
@@ -630,13 +630,13 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM grid_effects ge
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects ge
                  WHERE ge.status = ?1
                    AND NOT EXISTS (
                        SELECT 1
-                       FROM grid_effects prior
-                       WHERE prior.grid_id = ge.grid_id
+                       FROM track_effects prior
+                       WHERE prior.track_id = ge.track_id
                          AND prior.batch_id = ge.batch_id
                          AND prior.sequence < ge.sequence
                          AND prior.status NOT IN (?2, ?3)
@@ -668,14 +668,14 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM grid_effects ge
-                 WHERE ge.grid_id = ?1
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects ge
+                 WHERE ge.track_id = ?1
                    AND ge.status = ?2
                    AND NOT EXISTS (
                        SELECT 1
-                       FROM grid_effects prior
-                       WHERE prior.grid_id = ge.grid_id
+                       FROM track_effects prior
+                       WHERE prior.track_id = ge.track_id
                          AND prior.batch_id = ge.batch_id
                          AND prior.sequence < ge.sequence
                          AND prior.status NOT IN (?3, ?4)
@@ -744,7 +744,7 @@ impl StateRepositoryPort for SqliteStorage {
             .context("failed to join load_track_state blocking task")?
     }
 
-    async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
+    async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
 
@@ -799,7 +799,7 @@ impl TrackReadRepositoryPort for SqliteStorage {
         &self,
         track_id: &TrackId,
         limit: usize,
-    ) -> Result<Vec<StoredDomainEvent>> {
+    ) -> Result<Vec<StoredTrackEvent>> {
         let conn = Arc::clone(&self.conn);
         let track_id = track_id.clone();
 
@@ -1106,7 +1106,7 @@ mod tests {
     fn overwrite_effect_updated_at(storage: &SqliteStorage, effect_id: &str, updated_at: &str) {
         let conn = storage.conn.lock().unwrap();
         conn.execute(
-            "UPDATE grid_effects
+            "UPDATE track_effects
              SET updated_at = ?1
              WHERE effect_id = ?2",
             params![updated_at, effect_id],
@@ -1117,9 +1117,9 @@ mod tests {
     fn overwrite_snapshot_updated_at(storage: &SqliteStorage, track_id: &str, updated_at: &str) {
         let conn = storage.conn.lock().unwrap();
         conn.execute(
-            "UPDATE grid_snapshots
+            "UPDATE track_snapshots
              SET updated_at = ?1
-             WHERE grid_id = ?2",
+             WHERE track_id = ?2",
             params![updated_at, track_id],
         )
         .unwrap();
@@ -1222,7 +1222,7 @@ mod tests {
             .unwrap();
 
         let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
-        let events = storage.list_events("test-1").await.unwrap();
+        let events = storage.list_track_events("test-1").await.unwrap();
 
         assert_eq!(loaded.track_id.as_str(), "test-1");
         assert_eq!(events, vec![test_event()]);
@@ -1243,7 +1243,7 @@ mod tests {
             .unwrap();
 
         let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
-        let events = storage.list_events("test-1").await.unwrap();
+        let events = storage.list_track_events("test-1").await.unwrap();
         let pending = storage.list_dispatchable_effects().await.unwrap();
 
         assert_eq!(loaded.track_id.as_str(), "test-1");
@@ -1288,7 +1288,7 @@ mod tests {
         let effect_row = conn
             .query_row(
                 "SELECT status, attempt_count, last_error
-                 FROM grid_effects
+                 FROM track_effects
                  WHERE effect_id = ?1",
                 params![effect_id],
                 |row| {
@@ -1464,7 +1464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_recent_grid_events_returns_timestamped_records_in_order() {
+    async fn list_recent_track_events_returns_timestamped_records_in_order() {
         let storage = SqliteStorage::in_memory().unwrap();
         let expected_events = persist_two_events_for("btc-core", &storage).await;
 
@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_recent_grid_effects_filters_by_grid_id_and_limit() {
+    async fn list_recent_track_effects_filters_by_track_id_and_limit() {
         let storage = SqliteStorage::in_memory().unwrap();
         let [oldest_btc_effect, newest_btc_effect] =
             persist_effect_batches_for_two_grids(&storage).await;
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_recent_grid_effects_orders_results_by_updated_at() {
+    async fn list_recent_track_effects_orders_results_by_updated_at() {
         let storage = SqliteStorage::in_memory().unwrap();
         let [first, second, third] =
             persist_three_effect_batches_for_grid(&storage, "btc-core", "BTCUSDT").await;
@@ -1534,7 +1534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_recent_grid_effects_includes_status_updated_effect_in_recent_window() {
+    async fn list_recent_track_effects_includes_status_updated_effect_in_recent_window() {
         let storage = SqliteStorage::in_memory().unwrap();
         let [first, second, third] =
             persist_three_effect_batches_for_grid(&storage, "btc-core", "BTCUSDT").await;
@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_grid_snapshots_returns_persisted_updated_at() {
+    async fn list_track_snapshots_returns_persisted_updated_at() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
 
@@ -1704,11 +1704,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_grid_state_rejects_legacy_snapshot_json() {
+    async fn load_track_state_rejects_legacy_snapshot_json() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE grid_snapshots (
-                grid_id TEXT PRIMARY KEY,
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
                 venue TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 config_json TEXT NOT NULL,
@@ -1728,8 +1728,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO grid_snapshots (
-                grid_id,
+            "INSERT INTO track_snapshots (
+                track_id,
                 venue,
                 symbol,
                 config_json,
@@ -1778,7 +1778,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         schema::initialize(&conn).unwrap();
         conn.execute(
-            "INSERT INTO domain_events (grid_id, event_json, created_at)
+            "INSERT INTO track_events (track_id, event_json, created_at)
              VALUES (?1, ?2, ?3)",
             params![
                 "BTCUSDT",
@@ -1789,7 +1789,7 @@ mod tests {
         .unwrap();
 
         let storage = SqliteStorage::from_connection(conn).unwrap();
-        let result = storage.list_events("BTCUSDT").await;
+        let result = storage.list_track_events("BTCUSDT").await;
         assert!(result.is_err());
     }
 }

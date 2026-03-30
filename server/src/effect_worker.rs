@@ -328,7 +328,7 @@ mod tests {
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect,
-        Position, StateRepositoryPort, StoredDomainEvent, StoredTrackSnapshot,
+        Position, StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot,
         TrackReadRepositoryPort,
     };
     use poise_engine::runtime::{
@@ -1105,7 +1105,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -1173,7 +1173,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<StoredDomainEvent>> {
+        ) -> Result<Vec<StoredTrackEvent>> {
             Ok(Vec::new())
         }
 

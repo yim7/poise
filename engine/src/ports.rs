@@ -162,7 +162,7 @@ pub trait StateRepositoryPort: Send + Sync {
             .await
     }
     async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
-    async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
+    async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
     async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
     async fn list_pending_submit_effects_for_track(
         &self,
@@ -171,9 +171,8 @@ pub trait StateRepositoryPort: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoredDomainEvent {
+pub struct StoredTrackEvent {
     pub id: i64,
-    #[serde(alias = "grid_id")]
     pub track_id: TrackId,
     pub event: DomainEvent,
     pub created_at: DateTime<Utc>,
@@ -196,7 +195,7 @@ pub trait TrackReadRepositoryPort: Send + Sync {
         &self,
         track_id: &TrackId,
         limit: usize,
-    ) -> Result<Vec<StoredDomainEvent>>;
+    ) -> Result<Vec<StoredTrackEvent>>;
     /// Returns effects selected from the most recent `updated_at` window,
     /// ordered by `updated_at` ascending.
     async fn list_recent_track_effects(
@@ -212,7 +211,6 @@ pub trait ClockPort: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommittedTrackWrite {
-    #[serde(alias = "grid_id")]
     pub track_id: TrackId,
     pub effects: Vec<PersistedTrackEffect>,
 }
@@ -248,7 +246,6 @@ impl EffectStatusUpdate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedTrackEffect {
     pub effect_id: String,
-    #[serde(alias = "grid_id")]
     pub track_id: TrackId,
     pub batch_id: String,
     pub sequence: u32,

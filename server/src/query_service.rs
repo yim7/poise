@@ -51,7 +51,7 @@ impl TrackQueryService {
             return Ok(None);
         };
 
-        let recent_domain_events = self
+        let recent_track_events = self
             .repository
             .list_recent_track_events(track_id, DETAIL_EVENTS_LIMIT)
             .await?;
@@ -63,7 +63,7 @@ impl TrackQueryService {
         Ok(Some(TrackReadModel::from_snapshot(
             snapshot.snapshot,
             snapshot.updated_at,
-            recent_domain_events,
+            recent_track_events,
             recent_effects,
         )))
     }
@@ -84,7 +84,7 @@ mod tests {
     use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
         EffectStatus, TrackReadRepositoryPort, OrderRequest, OrderStatus, PersistedTrackEffect,
-        StoredDomainEvent, StoredTrackSnapshot,
+        StoredTrackEvent, StoredTrackSnapshot,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
@@ -108,7 +108,7 @@ mod tests {
             sources[0].updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
-        assert_eq!(sources[0].recent_domain_events.len(), 0);
+        assert_eq!(sources[0].recent_track_events.len(), 0);
         assert_eq!(sources[0].recent_effects.len(), 1);
         assert_eq!(sources[0].recent_effects[0].status, EffectStatus::Executing);
         assert_eq!(
@@ -131,7 +131,7 @@ mod tests {
             source.updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
-        assert_eq!(source.recent_domain_events.len(), 1);
+        assert_eq!(source.recent_track_events.len(), 1);
         assert_eq!(source.recent_effects.len(), 1);
     }
 
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(read_model.slots.len(), 1);
         assert_eq!(read_model.slots[0].label, "inventory");
         assert!(!read_model.slots[0].is_submit_pending);
-        assert_eq!(read_model.recent_domain_events.len(), 1);
+        assert_eq!(read_model.recent_track_events.len(), 1);
         assert_eq!(read_model.recent_effects.len(), 1);
     }
 
@@ -176,7 +176,7 @@ mod tests {
 
     struct FakeReadRepository {
         snapshots: HashMap<String, StoredTrackSnapshot>,
-        events: HashMap<String, Vec<StoredDomainEvent>>,
+        events: HashMap<String, Vec<StoredTrackEvent>>,
         effects: HashMap<String, Vec<PersistedTrackEffect>>,
         effect_limits: std::sync::Mutex<Vec<usize>>,
     }
@@ -187,7 +187,7 @@ mod tests {
             let track_id = snapshot.track_id.as_str().to_string();
             let snapshot_updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
 
-            let event = StoredDomainEvent {
+            let event = StoredTrackEvent {
                 id: 1,
                 track_id: snapshot.track_id.clone(),
                 event: DomainEvent::BandBreached {
@@ -253,7 +253,7 @@ mod tests {
             &self,
             track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<StoredDomainEvent>> {
+        ) -> Result<Vec<StoredTrackEvent>> {
             Ok(self
                 .events
                 .get(track_id.as_str())
