@@ -343,7 +343,7 @@ Task 3 code commit:
 - Test: `cargo test -p poise-server write_service::tests:: -- --nocapture`
 - Test: `cargo test -p poise-server effect_worker::tests:: -- --nocapture`
 
-- [ ] **Step 1: 先写 / 调整失败测试，锁住新 schema 名和列名**
+- [x] **Step 1: 先写 / 调整失败测试，锁住新 schema 名和列名**
 
 至少覆盖：
 - `track_snapshots`
@@ -354,7 +354,7 @@ Task 3 code commit:
 
 如果现有测试直接断言旧表名，先把断言改成新名字，确认红灯。
 
-- [ ] **Step 2: 运行 storage 定向测试确认失败**
+- [x] **Step 2: 运行 storage 定向测试确认失败**
 
 Run:
 `cargo test -p poise-storage schema::tests:: -- --nocapture`
@@ -362,7 +362,7 @@ Run:
 Expected:
 失败，因为 schema 仍是 `grid_*`。
 
-- [ ] **Step 3: 做最小实现，统一 schema / SQL / repository 命名**
+- [x] **Step 3: 做最小实现，统一 schema / SQL / repository 命名**
 
 要求：
 - `grid_snapshots` -> `track_snapshots`
@@ -372,7 +372,7 @@ Expected:
 - 索引名同步改为 `idx_track_*`
 - `StoredGridSnapshot` / `CommittedGridWrite` / `PersistedGridEffect` 等存储接口类型统一切到 `Track*`
 
-- [ ] **Step 4: 运行 storage 和写侧定向测试**
+- [x] **Step 4: 运行 storage 和写侧定向测试**
 
 Run:
 `cargo test -p poise-storage`
@@ -382,7 +382,7 @@ Run:
 Expected:
 存储层测试通过；server 写侧和 effect worker 不再依赖旧表名 / 旧列名。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add storage/src/schema.rs storage/src/sqlite.rs engine/src/ports.rs server/src/read_model.rs server/src/query_service.rs server/src/write_service.rs server/src/effect_worker.rs
@@ -390,7 +390,7 @@ git commit -m "refactor(storage): rename sqlite grid schema to track"
 ```
 
 Task 4 code commit:
-`TODO`
+`c087adc7a5da174b8fed3e8d10bc09f51c07e773`
 
 ---
 
