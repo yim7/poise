@@ -431,7 +431,7 @@ impl GridWriteService {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
             let plan = manager
                 .recover_submit_effect(
                     &GridId::new(id),
@@ -442,7 +442,7 @@ impl GridWriteService {
                 .map_err(GridMutationError::Mutation)?;
             let next_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
             (previous_snapshot, plan, next_snapshot)
         };
 
@@ -1176,6 +1176,36 @@ mod tests {
             .complete_effect_failed("btc-core", "btc-core:batch:0", "submit order rejected")
             .await
             .unwrap_err();
+
+        assert!(error.to_string().contains("loaded-grid invariant violated"));
+        assert!(error.to_string().contains("btc-core"));
+        assert!(!error.to_string().contains("grid `btc-core` not found"));
+    }
+
+    #[tokio::test]
+    async fn recover_submit_effect_returns_invariant_violation_when_grid_is_not_loaded() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = multi_grid_service(repository as Arc<dyn StateRepositoryPort>, &[]);
+
+        let error = match service
+            .recover_submit_effect(
+                "btc-core",
+                "btc-core:batch:0",
+                &OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "btc-core-reconcile".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                },
+                Exposure(4.0),
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("submit recovery should fail when grid is not loaded"),
+            Err(error) => error,
+        };
 
         assert!(error.to_string().contains("loaded-grid invariant violated"));
         assert!(error.to_string().contains("btc-core"));
