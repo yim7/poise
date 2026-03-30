@@ -557,20 +557,22 @@ git commit -m "fix(server): unify submit recovery loaded-grid invariant"
 - Modify: `engine/src/executor.rs`
 - Modify: `engine/src/manager.rs`
 - Modify: `engine/src/runtime.rs`
+- Modify: `server/src/effect_worker.rs`
 - Modify: `server/src/write_service.rs`
 - Modify: `docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md`
 - Test: `engine/src/executor.rs`
 - Test: `engine/src/manager.rs`
+- Test: `server/src/effect_worker.rs`
 - Test: `server/src/write_service.rs`
 
-- [ ] **Step 1: 写失败测试，锁住固定 slot 常驻和 executor-owned recovery 决策**
+- [x] **Step 1: 写失败测试，锁住固定 slot 常驻和 executor-owned recovery 决策**
 
 测试至少覆盖：
 - 固定 slot 在清理后推进到 `Empty`，而不是从 `ExecutorState` 删除
 - `recover_submit_effect()` 由 executor 直接返回 supersede 后续 effect，不再依赖 manager 侧二次重规划
 - manager 不再自己推导 `current_submit_hint_for_grid()` 这类旁路协议
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-engine executor::tests::terminal_order_clears_matching_slot_to_empty -- --exact`
@@ -579,7 +581,7 @@ Run:
 Expected:
 测试失败，因为当前固定 slot 仍通过删除表达空态，submit recovery 的后续 effect 仍有 manager 侧协议。
 
-- [ ] **Step 3: 做最小实现，把剩余边界彻底收紧**
+- [x] **Step 3: 做最小实现，把剩余边界彻底收紧**
 
 要求：
 - 固定 slot 常驻 `ExecutorState`，只推进 `Empty / SubmitPending / Working`
@@ -587,7 +589,7 @@ Expected:
 - manager 只传递事实和消费 executor 结果，不再持有 `current_submit_hint_for_grid()` / `stage_superseding_effects()` 这类 submit recovery 专属协议
 - 相应 spec 文案改成“已按显式 slot 状态落地”，不保留口头约定
 
-- [ ] **Step 4: 运行 Task 10 的定向测试**
+- [x] **Step 4: 运行 Task 10 的定向测试**
 
 Run:
 `cargo test -p grid-engine -- --nocapture`
@@ -597,12 +599,12 @@ Run:
 Expected:
 固定 slot 与 submit recovery 边界完全收紧，相关测试和格式检查通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 Task 10 code commit:
-`TODO`
+`dd27e3f28102f4cbffaba77742f0e74f809da103`
 
 ```bash
-git add engine/src/executor.rs engine/src/manager.rs engine/src/runtime.rs server/src/write_service.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
+git add engine/src/executor.rs engine/src/manager.rs engine/src/runtime.rs server/src/effect_worker.rs server/src/write_service.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
 git commit -m "refactor(engine): finalize slot and submit recovery ownership"
 ```

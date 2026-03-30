@@ -9,7 +9,8 @@
 > 本轮边界收紧已经完成，当前实现与本文对齐：
 >
 > - `slot` 生命周期统一由 `engine executor` transition 吸收
-> - `submit recovery` 已并回执行器，server 侧只传递事实和回写结果
+> - `inventory_core` 固定 `slot` 已改为显式 `Empty / SubmitPending / Working` 常驻状态，不再用“删除 slot”表达空态
+> - `submit recovery` 已并回执行器，supersede 后续 effect 也由 executor 直接产出，server 侧只传递事实和回写结果
 > - `write_service` 已从全局串行锁收紧为按 `grid` 串行
 >
 > 本次落地不改变主架构方向：
@@ -236,6 +237,8 @@ pub enum SlotState {
 - `working_order` 是该槽位当前绑定的订单事实
 
 执行器当前“工作集”定义为：所有非 `Empty` 槽位里的 `working_order` 集合。
+
+当前一期落地中，`inventory_core` 是常驻固定槽位：`ExecutorState::empty()` 会初始化该槽位，终态清理、取消成功和 submit failure 都只把它推进回 `SlotState::Empty`，不再从运行态删除。
 
 ### 5.4 槽位不变量
 
