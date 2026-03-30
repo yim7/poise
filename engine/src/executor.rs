@@ -198,6 +198,22 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     }
 }
 
+pub fn current_submit_hint(input: ExecutorInput<'_>) -> Option<PendingSubmitHint> {
+    let plan = plan(input);
+    match plan.effects.as_slice() {
+        [
+            ExecutionAction::SubmitOrder {
+                request,
+                target_exposure,
+            },
+        ] => Some(PendingSubmitHint {
+            request: request.clone(),
+            target_exposure: target_exposure.clone(),
+        }),
+        _ => None,
+    }
+}
+
 pub fn refresh_state(
     previous_state: &ExecutorState,
     current_exposure: &Exposure,
@@ -1289,6 +1305,57 @@ mod tests {
             ] if order_id == "order-1"
         ));
         assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn current_submit_hint_returns_single_submit_effect_from_plan() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let hint = current_submit_hint(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        let hint = hint.expect("expected current plan to expose a single submit hint");
+        assert_eq!(hint.request.instrument, instrument);
+        assert_eq!(hint.request.client_order_id, "btc-core-reconcile");
+        assert_eq!(hint.request.side, Side::Buy);
+        assert_eq!(hint.request.price, 95.0);
+        assert_eq!(hint.request.quantity, 15.0);
+        assert_eq!(hint.target_exposure, Exposure(4.0));
+    }
+
+    #[test]
+    fn current_submit_hint_returns_none_when_plan_is_not_single_submit() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+
+        let hint = current_submit_hint(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 90.0,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        assert!(hint.is_none());
     }
 
     #[test]

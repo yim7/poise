@@ -325,7 +325,7 @@ impl GridManager {
         target_exposure: grid_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<executor::SubmitRecoveryPlan> {
-        let current_plan_submit = self.current_submit_recovery_request(id)?;
+        let current_plan_submit = self.current_submit_hint_for_grid(id)?;
         let live_order_observation = live_order.map(|order| OrderObservation {
             order_id: order.order_id.clone(),
             client_order_id: order.client_order_id.clone(),
@@ -377,7 +377,7 @@ impl GridManager {
         })
     }
 
-    fn current_submit_recovery_request(
+    fn current_submit_hint_for_grid(
         &self,
         id: &GridId,
     ) -> Result<Option<executor::PendingSubmitHint>> {
@@ -393,22 +393,22 @@ impl GridManager {
             return Ok(None);
         }
 
-        let mut planned_grid = grid.clone();
-        planned_grid.executor_state = ExecutorState::empty(self.clock.now());
-        let result = self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;
+        let target = reconciler::reconcile_target(grid, reference_price);
+        if target.suppress_execution {
+            return Ok(None);
+        }
 
-        Ok(match result.effects.as_slice() {
-            [
-                GridEffect::SubmitOrder {
-                    request: planned_request,
-                    target_exposure,
-                },
-            ] => Some(executor::PendingSubmitHint {
-                request: planned_request.clone(),
-                target_exposure: target_exposure.clone(),
-            }),
-            _ => None,
-        })
+        Ok(executor::current_submit_hint(executor::ExecutorInput {
+            grid_id: &grid.id,
+            instrument: &grid.instrument,
+            exchange_rules: &grid.exchange_rules,
+            base_qty_per_unit: grid.config.base_qty_per_unit(),
+            current_exposure: grid.current_exposure.clone(),
+            target_exposure: target.target_exposure,
+            reference_price,
+            executor_state: None,
+            observed_at: self.clock.now(),
+        }))
     }
 
     pub fn list_grids(&self) -> Vec<&GridRuntime> {
@@ -2001,7 +2001,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_clears_submit_pending_slot_and_replans_current_target() {
+    fn recover_submit_effect_reads_current_submit_hint_from_executor() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.current_exposure = grid_core::types::Exposure(0.0);
