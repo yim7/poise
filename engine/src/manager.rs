@@ -2257,6 +2257,93 @@ mod tests {
     }
 
     #[test]
+    fn recover_submit_effect_supersedes_when_reduce_only_semantics_change() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.executor_state.slots = vec![ExecutionSlot {
+            slot: OrderSlot::new("inventory_core"),
+            state: SlotState::SubmitPending,
+            working_order: Some(WorkingOrder {
+                order_id: None,
+                client_order_id: "btc-core-reconcile".into(),
+                side: grid_core::types::Side::Buy,
+                price: 95.0,
+                quantity: test_config().base_qty_per_unit() * 4.0,
+                target_exposure: grid_core::types::Exposure(-2.0),
+                status: OrderStatus::Submitting,
+                role: OrderRole::DecreaseInventory,
+            }),
+        }];
+
+        let recovery = manager
+            .recover_submit_effect(
+                &GridId::new("btc-core"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "btc-core-reconcile".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 95.0,
+                    quantity: test_config().base_qty_per_unit() * 4.0,
+                    reduce_only: true,
+                },
+                grid_core::types::Exposure(-2.0),
+                None,
+            )
+            .unwrap();
+
+        let executor::SubmitRecoveryResolution::Superseded { state } = &recovery.resolution else {
+            panic!("expected reduce_only mismatch to supersede stale submit effect");
+        };
+        assert!(matches!(
+            recovery.effects.as_slice(),
+            [GridEffect::SubmitOrder {
+                request,
+                target_exposure,
+            }] if request.side == grid_core::types::Side::Buy
+                && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
+                && rounded_values_match(
+                    request.quantity,
+                    test_config().base_qty_per_unit() * 4.0,
+                    test_exchange_rules().quantity_step,
+                )
+                && !request.reduce_only
+                && *target_exposure == grid_core::types::Exposure(4.0)
+        ));
+        let replacement_pending = match recovery.effects.as_slice() {
+            [
+                GridEffect::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] => Some(WorkingOrder {
+                order_id: None,
+                client_order_id: request.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                target_exposure: target_exposure.clone(),
+                status: OrderStatus::Submitting,
+                role: OrderRole::IncreaseInventory,
+            }),
+            _ => None,
+        };
+        assert_eq!(
+            state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::SubmitPending,
+                working_order: replacement_pending.clone(),
+            }]
+        );
+        assert_eq!(
+            inventory_core_order(manager.get_grid("btc-core").unwrap()),
+            replacement_pending.as_ref()
+        );
+    }
+
+    #[test]
     fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request() {
         let mut manager = test_manager_with_cached_price(94.99);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();

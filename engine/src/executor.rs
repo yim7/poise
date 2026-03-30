@@ -1484,6 +1484,33 @@ mod tests {
     }
 
     #[test]
+    fn plan_does_not_set_reduce_only_for_increase_inventory_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        let submit = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request),
+            _ => None,
+        });
+        assert!(submit.is_some());
+        assert!(!submit.unwrap().reduce_only);
+    }
+
+    #[test]
     fn submit_receipt_promotes_submit_pending_slot_to_working() {
         let instrument = test_instrument();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();

@@ -170,6 +170,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_non_reduce_only_order_omits_reduce_only_param() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{
+                "orderId": 20072994039,
+                "clientOrderId": "grid-order-007",
+                "status": "NEW"
+            }"#,
+        )])
+        .await;
+        let adapter = BinanceAdapter::new(
+            "api-key",
+            "secret-key",
+            server.base_url(),
+            "ws://127.0.0.1:1",
+        );
+
+        adapter
+            .submit_order(OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: Side::Buy,
+                price: 64000.5,
+                quantity: 0.01,
+                client_order_id: "grid-order-007".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+
+        assert!(!requests[0].path.contains("reduceOnly="));
+    }
+
+    #[tokio::test]
     async fn cancel_order_calls_rest_endpoint() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
