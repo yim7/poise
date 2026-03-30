@@ -206,6 +206,14 @@ impl GridWriteService {
         .map_err(anyhow::Error::new)
     }
 
+    pub async fn refresh_market_data_health(&self, id: &str) -> Result<GridTransition> {
+        self.mutate_grid_skip_noop(id, |manager| {
+            manager.refresh_market_data_health(&GridId::new(id))
+        })
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
     pub async fn observe_position(
         &self,
         id: &str,
@@ -547,6 +555,31 @@ impl GridWriteService {
         F: FnOnce(&mut GridManager) -> Result<R>,
         R: TransitionResult,
     {
+        self.mutate_grid_with_options(id, false, mutate).await
+    }
+
+    async fn mutate_grid_skip_noop<R, F>(
+        &self,
+        id: &str,
+        mutate: F,
+    ) -> std::result::Result<R, GridMutationError>
+    where
+        F: FnOnce(&mut GridManager) -> Result<R>,
+        R: TransitionResult,
+    {
+        self.mutate_grid_with_options(id, true, mutate).await
+    }
+
+    async fn mutate_grid_with_options<R, F>(
+        &self,
+        id: &str,
+        skip_when_noop: bool,
+        mutate: F,
+    ) -> std::result::Result<R, GridMutationError>
+    where
+        F: FnOnce(&mut GridManager) -> Result<R>,
+        R: TransitionResult,
+    {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
@@ -560,8 +593,15 @@ impl GridWriteService {
             (previous_snapshot, result, next_snapshot)
         };
 
-        self.commit_grid_mutation(id, &previous_snapshot, &next_snapshot, &result, None, false)
-            .await?;
+        self.commit_grid_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &result,
+            None,
+            skip_when_noop,
+        )
+        .await?;
         Ok(result)
     }
 

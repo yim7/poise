@@ -294,6 +294,20 @@ impl ServerRuntime {
                         }
                     }
                     _ = ticker.tick() => {
+                        for grid in &instruments {
+                            if let Err(error) = state
+                                .write_service
+                                .refresh_market_data_health(&grid.id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "failed to refresh market data health for {}: {}",
+                                    grid.instrument.symbol,
+                                    error
+                                );
+                            }
+                        }
+
                         let now = Instant::now();
                         let due_grids: Vec<(String, grid_engine::grid::Instrument)> = tracked
                             .iter()
@@ -2902,6 +2916,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_health_check_marks_market_data_stale_without_follow_up_events() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
+        let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
+        let mut snapshot = test_snapshot();
+        snapshot.status = GridStatus::Paused;
+        snapshot.target_exposure = None;
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
+            Some(snapshot),
+            btc_position(0.0, 0.0),
+            vec![],
+            test_budget(),
+            Duration::from_millis(50),
+            clock.clone() as Arc<dyn ClockPort>,
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+        fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
+
+        wait_until_instance(&fixture.state, |instance| instance.last_tick_at.is_some()).await;
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 31).unwrap());
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.market_data_stale_since.is_some()
+        })
+        .await;
+
+        let instance = current_instance(&fixture.state).await;
+        assert!(instance.market_data_stale_since.is_some());
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn startup_sync_replays_buffered_user_event_before_first_tick() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
         fixture
@@ -3197,14 +3248,32 @@ mod tests {
         budget: CapacityBudget,
         recovery_retry_interval: Duration,
     ) -> RuntimeFixture {
+        runtime_fixture_with_clock_and_recovery_retry_interval(
+            restored_snapshot,
+            position,
+            open_orders,
+            budget,
+            recovery_retry_interval,
+            Arc::new(FixedClock(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+            )),
+        )
+        .await
+    }
+
+    async fn runtime_fixture_with_clock_and_recovery_retry_interval(
+        restored_snapshot: Option<GridSnapshot>,
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        budget: CapacityBudget,
+        recovery_retry_interval: Duration,
+        clock: Arc<dyn ClockPort>,
+    ) -> RuntimeFixture {
         let exchange = Arc::new(FakeExchange::new(position, open_orders));
         let persistence = Arc::new(MemoryPersistence::default());
         let (price_sender, price_receiver) = mpsc::channel(8);
         let (user_sender, user_receiver) = mpsc::channel(8);
         let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
-        let clock = Arc::new(FixedClock(
-            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-        ));
 
         let mut manager = GridManager::new(clock);
         manager
@@ -3639,6 +3708,21 @@ mod tests {
     impl ClockPort for FixedClock {
         fn now(&self) -> chrono::DateTime<Utc> {
             self.0
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableClock(Arc<Mutex<chrono::DateTime<Utc>>>);
+
+    impl ClockPort for MutableClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    impl MutableClock {
+        fn set(&self, value: chrono::DateTime<Utc>) {
+            *self.0.lock().unwrap() = value;
         }
     }
 

@@ -176,6 +176,11 @@ impl GridManager {
         self.transition_for(id, events, effects)
     }
 
+    pub fn refresh_market_data_health(&mut self, id: &GridId) -> Result<GridTransition> {
+        let _ = self.guard_market_data_freshness(id)?;
+        self.transition_for(id, vec![], vec![])
+    }
+
     pub fn pause_grid(&mut self, id: &str) -> Result<()> {
         let grid = self
             .grids
@@ -620,6 +625,16 @@ impl GridManager {
                 };
 
                 if !allow_follow_up_reconcile {
+                    let grid = self
+                        .grids
+                        .get_mut(id)
+                        .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                    grid.executor_state = planned_grid.executor_state;
+                    grid.replacement_gate_reason = None;
+                    return Ok((vec![], vec![]));
+                }
+
+                if self.guard_market_data_freshness(id)? {
                     let grid = self
                         .grids
                         .get_mut(id)
@@ -2531,6 +2546,40 @@ mod tests {
                 OrderStatus::New,
             ))
         );
+    }
+
+    #[test]
+    fn sync_exchange_state_skips_follow_up_reconcile_when_market_data_is_stale() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid_id = GridId::new("btc1");
+
+        manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        let transition = manager
+            .sync_exchange_state(
+                &grid_id,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                vec![],
+                vec![],
+            )
+            .unwrap();
+
+        assert!(transition.effects.is_empty());
+        assert!(transition.snapshot.observed.market_data_stale_since.is_some());
     }
 
     #[test]
