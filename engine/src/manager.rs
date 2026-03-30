@@ -248,25 +248,35 @@ impl GridManager {
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let next_state = executor::record_submit_receipt(
+        let resolution = executor::record_submit_receipt(
             &grid.executor_state,
             request,
             target_exposure,
             receipt,
         );
-        if next_state != grid.executor_state {
-            grid.executor_state = next_state;
-            grid.replacement_gate_reason = None;
+        match resolution {
+            executor::SubmitReceiptResolution::Recorded { state } => {
+                if state != grid.executor_state {
+                    grid.executor_state = state;
+                    grid.replacement_gate_reason = None;
+                }
+                Ok(())
+            }
+            executor::SubmitReceiptResolution::Unmatched => bail!(
+                "submit receipt did not match executor slot: grid=`{}`, client_order_id=`{}`, order_id=`{}`",
+                id.as_str(),
+                request.client_order_id,
+                receipt.order_id,
+            ),
         }
-        Ok(())
     }
 
-    pub fn clear_pending_submit(&mut self, id: &GridId, client_order_id: &str) -> Result<()> {
+    pub fn record_submit_failure(&mut self, id: &GridId, client_order_id: &str) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let next_state = executor::clear_pending_submit(&grid.executor_state, client_order_id);
+        let next_state = executor::record_submit_failure(&grid.executor_state, client_order_id);
         if next_state != grid.executor_state {
             grid.executor_state = next_state;
             grid.replacement_gate_reason = None;
@@ -274,7 +284,7 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn clear_working_order_by_order_id(&mut self, id: &GridId, order_id: &str) -> Result<()> {
+    fn clear_working_order_by_order_id(&mut self, id: &GridId, order_id: &str) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
@@ -287,7 +297,11 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn clear_all_working_orders(&mut self, id: &GridId) -> Result<()> {
+    pub fn record_cancel_order_success(&mut self, id: &GridId, order_id: &str) -> Result<()> {
+        self.clear_working_order_by_order_id(id, order_id)
+    }
+
+    fn clear_all_working_orders(&mut self, id: &GridId) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
@@ -298,6 +312,10 @@ impl GridManager {
             grid.replacement_gate_reason = None;
         }
         Ok(())
+    }
+
+    pub fn record_cancel_all_success(&mut self, id: &GridId) -> Result<()> {
+        self.clear_all_working_orders(id)
     }
 
     pub fn recover_submit_effect(
@@ -511,14 +529,11 @@ impl GridManager {
         });
 
         match recovery {
-            executor::RecoveryResolution::Anomaly(anomaly) => {
+            executor::RecoveryResolution::Anomaly { state, .. } => {
                 let grid = self
                     .grids
                     .get_mut(id)
                     .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-                let mut state = previous_state;
-                state.slots.clear();
-                state.recovery_anomaly = Some(anomaly);
                 grid.executor_state = state;
                 grid.replacement_gate_reason = None;
                 Ok((vec![], vec![GridEffect::NoOp]))
@@ -865,6 +880,22 @@ mod tests {
                 working_order: Some(order),
             },
         );
+    }
+
+    fn seed_named_executor_slot(
+        grid: &mut GridRuntime,
+        slot_name: &str,
+        order: WorkingOrder,
+        state: SlotState,
+    ) {
+        grid.executor_state
+            .slots
+            .retain(|slot| slot.slot != OrderSlot::new(slot_name));
+        grid.executor_state.slots.push(ExecutionSlot {
+            slot: OrderSlot::new(slot_name),
+            state,
+            working_order: Some(order),
+        });
     }
 
     fn working_order_from_submit_request(
@@ -1836,7 +1867,34 @@ mod tests {
     }
 
     #[test]
-    fn clear_pending_submit_clears_by_client_order_id() {
+    fn record_submit_receipt_rejects_receipt_without_matching_executor_slot() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+
+        let error = manager
+            .record_submit_receipt(
+                &GridId::new("btc1"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "client-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                },
+                grid_core::types::Exposure(4.0),
+                &OrderReceipt {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    status: OrderStatus::New,
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("submit receipt"));
+    }
+
+    #[test]
+    fn record_submit_receipt_accepts_matching_receipt_even_when_state_is_unchanged() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         seed_executor_slot(
@@ -1845,8 +1903,8 @@ mod tests {
                 Some("order-1"),
                 "client-1",
                 grid_core::types::Side::Buy,
-                94.5,
-                0.25,
+                95.0,
+                0.4,
                 grid_core::types::Exposure(4.0),
                 OrderStatus::New,
             ),
@@ -1854,7 +1912,58 @@ mod tests {
         );
 
         manager
-            .clear_pending_submit(&GridId::new("btc1"), "client-1")
+            .record_submit_receipt(
+                &GridId::new("btc1"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "client-1".into(),
+                    side: grid_core::types::Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                },
+                grid_core::types::Exposure(4.0),
+                &OrderReceipt {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    status: OrderStatus::New,
+                },
+            )
+            .unwrap();
+
+        let grid = manager.get_grid("btc1").unwrap();
+        assert_eq!(
+            inventory_core_order(grid),
+            Some(&working_order(
+                Some("order-1"),
+                "client-1",
+                grid_core::types::Side::Buy,
+                95.0,
+                0.4,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ))
+        );
+    }
+
+    #[test]
+    fn record_submit_failure_clears_submit_pending_slot_by_client_order_id() {
+        let mut manager = test_manager();
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let request = OrderRequest {
+            instrument: test_instrument("BTCUSDT"),
+            client_order_id: "client-1".into(),
+            side: grid_core::types::Side::Buy,
+            price: 94.5,
+            quantity: 0.25,
+        };
+        seed_executor_slot(
+            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            working_order_from_submit_request(&request, grid_core::types::Exposure(4.0)),
+            SlotState::SubmitPending,
+        );
+
+        manager
+            .record_submit_failure(&GridId::new("btc1"), &request.client_order_id)
             .unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
@@ -1892,7 +2001,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_clears_submit_anchor_and_replans_current_target() {
+    fn recover_submit_effect_clears_submit_pending_slot_and_replans_current_target() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.current_exposure = grid_core::types::Exposure(0.0);
@@ -2084,7 +2193,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_clears_stale_inventory_core_slot_when_submit_anchor_is_not_preserved() {
+    fn sync_exchange_state_clears_stale_inventory_core_slot_when_pending_submit_effect_is_not_preserved()
+     {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         seed_executor_slot(
@@ -2122,7 +2232,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_preserves_submit_anchor_before_replaying_open_orders() {
+    fn sync_exchange_state_preserves_submit_pending_slot_before_replaying_open_orders() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
@@ -2266,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_ignores_submit_anchor_without_matching_executor_slot() {
+    fn sync_exchange_state_ignores_pending_submit_effect_without_matching_executor_slot() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
@@ -2345,9 +2455,37 @@ mod tests {
     }
 
     #[test]
-    fn sync_exchange_state_rejects_multiple_live_open_orders() {
+    fn sync_exchange_state_rebuilds_multiple_live_open_orders_when_they_match_distinct_slots() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        seed_executor_slot(
+            grid,
+            working_order(
+                Some("order-a"),
+                "client-a",
+                grid_core::types::Side::Buy,
+                94.5,
+                0.25,
+                grid_core::types::Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        seed_named_executor_slot(
+            grid,
+            "inventory_followup",
+            working_order(
+                Some("order-b"),
+                "client-b",
+                grid_core::types::Side::Sell,
+                95.5,
+                0.15,
+                grid_core::types::Exposure(2.0),
+                OrderStatus::PartiallyFilled,
+            ),
+            SlotState::Working,
+        );
 
         let transition = manager
             .sync_exchange_state(
@@ -2359,18 +2497,18 @@ mod tests {
                 vec![
                     OrderObservation {
                         order_id: "order-b".into(),
-                        client_order_id: "b".into(),
-                        side: grid_core::types::Side::Buy,
-                        price: 94.5,
-                        quantity: 0.25,
+                        client_order_id: "client-b".into(),
+                        side: grid_core::types::Side::Sell,
+                        price: 95.5,
+                        quantity: 0.15,
                         realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                     OrderObservation {
                         order_id: "order-a".into(),
-                        client_order_id: "a".into(),
+                        client_order_id: "client-a".into(),
                         side: grid_core::types::Side::Buy,
-                        price: 94.0,
+                        price: 94.5,
                         quantity: 0.25,
                         realized_pnl: 0.0,
                         status: OrderStatus::New,
@@ -2381,11 +2519,31 @@ mod tests {
             .unwrap();
 
         assert!(transition.events.is_empty());
-        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert!(transition.effects.is_empty());
         let grid = manager.get_grid("btc1").unwrap();
+        assert!(grid.executor_state.recovery_anomaly.is_none());
+        assert_eq!(grid.executor_state.slots.len(), 2);
         assert_eq!(
-            grid.executor_state.recovery_anomaly.as_ref(),
-            Some(&crate::executor::RecoveryAnomaly::DuplicateLiveOrders)
+            grid.executor_state.slots[0].slot,
+            OrderSlot::new("inventory_core")
+        );
+        assert_eq!(
+            grid.executor_state.slots[0]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-a")
+        );
+        assert_eq!(
+            grid.executor_state.slots[1].slot,
+            OrderSlot::new("inventory_followup")
+        );
+        assert_eq!(
+            grid.executor_state.slots[1]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-b")
         );
     }
 

@@ -99,9 +99,21 @@ pub struct PendingSubmitHint {
     pub target_exposure: Exposure,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum RecoveryResolution {
-    Rebuilt { state: ExecutorState },
-    Anomaly(RecoveryAnomaly),
+    Rebuilt {
+        state: ExecutorState,
+    },
+    Anomaly {
+        state: ExecutorState,
+        anomaly: RecoveryAnomaly,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubmitReceiptResolution {
+    Recorded { state: ExecutorState },
+    Unmatched,
 }
 
 pub struct SubmitRecoveryInput<'a> {
@@ -249,46 +261,61 @@ pub fn record_submit_receipt(
     request: &OrderRequest,
     target_exposure: Exposure,
     receipt: &OrderReceipt,
-) -> ExecutorState {
-    let Some(slot) = previous_state.slots.iter().find(|slot| {
-        slot_matches_order(
-            slot,
-            &request.client_order_id,
-            Some(receipt.order_id.as_str()),
-        )
-    }) else {
-        return previous_state.clone();
-    };
-    let Some(existing_order) = slot.working_order.as_ref() else {
-        return previous_state.clone();
-    };
-
-    let mut state = previous_state.clone();
-    state.slots = replace_first_matching_slot(
-        &previous_state.slots,
-        |candidate| {
+) -> SubmitReceiptResolution {
+    let matching_indexes = previous_state
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
             slot_matches_order(
-                candidate,
+                slot,
                 &request.client_order_id,
                 Some(receipt.order_id.as_str()),
             )
-        },
-        ExecutionSlot {
-            slot: slot.slot.clone(),
-            state: SlotState::Working,
-            working_order: Some(WorkingOrder {
-                order_id: Some(receipt.order_id.clone()),
-                client_order_id: receipt.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                target_exposure,
-                status: receipt.status,
-                role: existing_order.role.clone(),
-            }),
-        },
-    )
-    .unwrap_or_else(|| previous_state.slots.clone());
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [slot_index] = matching_indexes.as_slice() else {
+        return SubmitReceiptResolution::Unmatched;
+    };
+    let slot = &previous_state.slots[*slot_index];
+    let Some(existing_order) = slot.working_order.as_ref() else {
+        return SubmitReceiptResolution::Unmatched;
+    };
+
+    let mut state = previous_state.clone();
+    state.slots[*slot_index] = ExecutionSlot {
+        slot: slot.slot.clone(),
+        state: SlotState::Working,
+        working_order: Some(WorkingOrder {
+            order_id: Some(receipt.order_id.clone()),
+            client_order_id: existing_order.client_order_id.clone(),
+            side: request.side,
+            price: request.price,
+            quantity: request.quantity,
+            target_exposure,
+            status: receipt.status,
+            role: existing_order.role.clone(),
+        }),
+    };
+    SubmitReceiptResolution::Recorded { state }
+}
+
+pub fn record_submit_failure(
+    previous_state: &ExecutorState,
+    client_order_id: &str,
+) -> ExecutorState {
+    let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+        slot.state == SlotState::SubmitPending
+            && slot
+                .working_order
+                .as_ref()
+                .is_some_and(|order| order.client_order_id == client_order_id)
+    }) else {
+        return previous_state.clone();
+    };
+    let mut state = previous_state.clone();
+    state.slots = slots;
     state
 }
 
@@ -452,10 +479,6 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryRe
 }
 
 pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
-    if input.live_orders.len() > 1 {
-        return RecoveryResolution::Anomaly(RecoveryAnomaly::DuplicateLiveOrders);
-    }
-
     let base_state = input
         .previous_state
         .cloned()
@@ -487,7 +510,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
             })
         });
         if has_pending_receipt_backed_slot {
-            return RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder);
+            return recovery_anomaly(&base_state, RecoveryAnomaly::UnknownLiveOrder);
         }
 
         let mut state = base_state;
@@ -496,63 +519,58 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         return RecoveryResolution::Rebuilt { state };
     }
 
-    let live_order = &input.live_orders[0];
-    let Some(slot) = base_state.slots.iter().find(|slot| {
-        slot_matches_order(
-            slot,
-            &live_order.client_order_id,
-            Some(live_order.order_id.as_str()),
-        )
-    }) else {
-        return RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder);
-    };
-    let expected_side = slot.working_order.as_ref().map(|order| order.side);
-    if expected_side.is_some() && expected_side != Some(live_order.side) {
-        return RecoveryResolution::Anomaly(RecoveryAnomaly::AmbiguousLiveOrder);
+    let mut claimed_orders = vec![None; base_state.slots.len()];
+    for live_order in input.live_orders {
+        let matching_indexes = base_state
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slot_matches_order(
+                    slot,
+                    &live_order.client_order_id,
+                    Some(live_order.order_id.as_str()),
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+
+        let matched_index = match matching_indexes.as_slice() {
+            [] => return recovery_anomaly(&base_state, RecoveryAnomaly::UnknownLiveOrder),
+            [index] => *index,
+            _ => return recovery_anomaly(&base_state, RecoveryAnomaly::AmbiguousLiveOrder),
+        };
+
+        let slot = &base_state.slots[matched_index];
+        let expected_side = slot.working_order.as_ref().map(|order| order.side);
+        if expected_side.is_some() && expected_side != Some(live_order.side) {
+            return recovery_anomaly(&base_state, RecoveryAnomaly::AmbiguousLiveOrder);
+        }
+
+        if claimed_orders[matched_index].is_some() {
+            return recovery_anomaly(&base_state, RecoveryAnomaly::DuplicateLiveOrders);
+        }
+        claimed_orders[matched_index] = Some(live_order);
     }
 
-    let target_exposure = slot
-        .working_order
-        .as_ref()
-        .map(|order| order.target_exposure.clone())
-        .or_else(|| input.target_exposure.cloned())
-        .unwrap_or_else(|| input.current_exposure.clone());
-    let role = slot
-        .working_order
-        .as_ref()
-        .map(|order| order.role.clone())
-        .unwrap_or_else(|| match live_order.side {
-            Side::Buy => OrderRole::IncreaseInventory,
-            Side::Sell => OrderRole::DecreaseInventory,
-        });
-    let updated_slot = ExecutionSlot {
-        slot: slot.slot.clone(),
-        state: SlotState::Working,
-        working_order: Some(WorkingOrder {
-            order_id: Some(live_order.order_id.clone()),
-            client_order_id: live_order.client_order_id.clone(),
-            side: live_order.side,
-            price: live_order.price,
-            quantity: live_order.quantity,
-            target_exposure,
-            status: live_order.status,
-            role,
-        }),
-    };
+    let rebuilt_slots = base_state
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            claimed_orders[index].map(|live_order| {
+                rebuild_slot_from_live_order(
+                    slot,
+                    live_order,
+                    input.target_exposure,
+                    input.current_exposure,
+                )
+            })
+        })
+        .collect();
 
     let mut state = base_state;
-    state.slots = replace_first_matching_slot(
-        &state.slots,
-        |candidate| {
-            slot_matches_order(
-                candidate,
-                &live_order.client_order_id,
-                Some(live_order.order_id.as_str()),
-            )
-        },
-        updated_slot,
-    )
-    .unwrap_or_else(|| state.slots.clone());
+    state.slots = rebuilt_slots;
     state.recovery_anomaly = None;
     RecoveryResolution::Rebuilt { state }
 }
@@ -883,15 +901,62 @@ where
 }
 
 fn slot_matches_order(slot: &ExecutionSlot, client_order_id: &str, order_id: Option<&str>) -> bool {
-    slot.working_order
+    let Some(order) = slot.working_order.as_ref() else {
+        return false;
+    };
+
+    if !client_order_id.is_empty() && order.client_order_id != client_order_id {
+        return false;
+    }
+
+    match order_id {
+        Some(order_id) => match order.order_id.as_deref() {
+            Some(existing_order_id) => existing_order_id == order_id,
+            None => !client_order_id.is_empty(),
+        },
+        None => !client_order_id.is_empty(),
+    }
+}
+
+fn rebuild_slot_from_live_order(
+    slot: &ExecutionSlot,
+    live_order: &OrderObservation,
+    target_exposure: Option<&Exposure>,
+    current_exposure: &Exposure,
+) -> ExecutionSlot {
+    let target_exposure = slot
+        .working_order
         .as_ref()
-        .map(|order| {
-            (!client_order_id.is_empty() && order.client_order_id == client_order_id)
-                || order_id
-                    .map(|order_id| order.order_id.as_deref() == Some(order_id))
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false)
+        .map(|order| order.target_exposure.clone())
+        .or_else(|| target_exposure.cloned())
+        .unwrap_or_else(|| current_exposure.clone());
+    let role = slot
+        .working_order
+        .as_ref()
+        .map(|order| order.role.clone())
+        .unwrap_or_else(|| role_for_side(live_order.side));
+
+    ExecutionSlot {
+        slot: slot.slot.clone(),
+        state: SlotState::Working,
+        working_order: Some(WorkingOrder {
+            order_id: Some(live_order.order_id.clone()),
+            client_order_id: live_order.client_order_id.clone(),
+            side: live_order.side,
+            price: live_order.price,
+            quantity: live_order.quantity,
+            target_exposure,
+            status: live_order.status,
+            role,
+        }),
+    }
+}
+
+fn recovery_anomaly(base_state: &ExecutorState, anomaly: RecoveryAnomaly) -> RecoveryResolution {
+    let mut state = base_state.clone();
+    state.slots.clear();
+    state.recovery_anomaly = Some(anomaly.clone());
+    RecoveryResolution::Anomaly { state, anomaly }
 }
 
 fn role_for_side(side: Side) -> OrderRole {
@@ -1250,7 +1315,7 @@ mod tests {
             None
         );
 
-        let working = record_submit_receipt(
+        let SubmitReceiptResolution::Recorded { state: working } = record_submit_receipt(
             &pending,
             &request,
             Exposure(4.0),
@@ -1259,7 +1324,9 @@ mod tests {
                 client_order_id: "client-1".into(),
                 status: OrderStatus::New,
             },
-        );
+        ) else {
+            panic!("expected matching submit receipt to promote slot");
+        };
         assert_eq!(working.slots.len(), 1);
         assert_eq!(working.slots[0].state, SlotState::Working);
         assert_eq!(
@@ -1279,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_receipt_without_matching_slot_keeps_state_unchanged() {
+    fn submit_receipt_without_matching_slot_is_rejected() {
         let instrument = test_instrument();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let request = OrderRequest {
@@ -1292,7 +1359,7 @@ mod tests {
         let mut state = ExecutorState::empty(now);
         state.slots.push(sibling_slot());
 
-        let next_state = record_submit_receipt(
+        let resolution = record_submit_receipt(
             &state,
             &request,
             Exposure(4.0),
@@ -1303,7 +1370,121 @@ mod tests {
             },
         );
 
-        assert_eq!(next_state.slots, state.slots);
+        assert!(matches!(resolution, SubmitReceiptResolution::Unmatched));
+    }
+
+    #[test]
+    fn submit_receipt_requires_matching_order_id_once_slot_is_receipt_backed() {
+        let instrument = test_instrument();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument,
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+        let SubmitReceiptResolution::Recorded {
+            state: receipt_backed,
+        } = record_submit_receipt(
+            &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        )
+        else {
+            panic!("expected initial receipt to be recorded");
+        };
+
+        let resolution = record_submit_receipt(
+            &receipt_backed,
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-2".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        );
+
+        assert!(matches!(resolution, SubmitReceiptResolution::Unmatched));
+    }
+
+    #[test]
+    fn submit_receipt_is_rejected_when_multiple_slots_match_same_client_order_id() {
+        let instrument = test_instrument();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument,
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+        let mut state = record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+        state.slots.push(ExecutionSlot {
+            slot: OrderSlot::new("inventory_followup"),
+            state: SlotState::SubmitPending,
+            working_order: Some(WorkingOrder {
+                order_id: None,
+                client_order_id: "client-1".into(),
+                side: Side::Sell,
+                price: 96.0,
+                quantity: 12.0,
+                target_exposure: Exposure(2.0),
+                status: OrderStatus::Submitting,
+                role: OrderRole::DecreaseInventory,
+            }),
+        });
+
+        let resolution = record_submit_receipt(
+            &state,
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        );
+
+        assert!(matches!(resolution, SubmitReceiptResolution::Unmatched));
+    }
+
+    #[test]
+    fn submit_failure_does_not_clear_receipt_backed_slot_with_same_client_order_id() {
+        let instrument = test_instrument();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument,
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+        let SubmitReceiptResolution::Recorded {
+            state: receipt_backed,
+        } = record_submit_receipt(
+            &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
+            &request,
+            Exposure(4.0),
+            &OrderReceipt {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                status: OrderStatus::New,
+            },
+        )
+        else {
+            panic!("expected initial receipt to be recorded");
+        };
+
+        let next_state = record_submit_failure(&receipt_backed, &request.client_order_id);
+
+        assert_eq!(next_state, receipt_backed);
     }
 
     #[test]
@@ -1317,7 +1498,7 @@ mod tests {
             quantity: 15.0,
             client_order_id: "client-1".into(),
         };
-        let working = record_submit_receipt(
+        let SubmitReceiptResolution::Recorded { state: working } = record_submit_receipt(
             &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
             &request,
             Exposure(4.0),
@@ -1326,7 +1507,9 @@ mod tests {
                 client_order_id: "client-1".into(),
                 status: OrderStatus::New,
             },
-        );
+        ) else {
+            panic!("expected initial receipt to be recorded");
+        };
 
         let cleared = apply_order_observation(
             &working,
@@ -1384,7 +1567,10 @@ mod tests {
 
         assert!(matches!(
             recovery,
-            RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder)
+            RecoveryResolution::Anomaly {
+                anomaly: RecoveryAnomaly::UnknownLiveOrder,
+                ..
+            }
         ));
     }
 
@@ -1415,8 +1601,142 @@ mod tests {
 
         assert!(matches!(
             recovery,
-            RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder)
+            RecoveryResolution::Anomaly {
+                anomaly: RecoveryAnomaly::UnknownLiveOrder,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn recovery_rebuilds_multiple_live_orders_into_distinct_slots() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let mut previous_state = test_executor_state(ExecutionMode::Passive, Some(now));
+        previous_state.slots.push(sibling_slot());
+
+        let recovery = recover_working_orders(RecoveryInput {
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: &Exposure(2.0),
+            target_exposure: Some(&Exposure(4.0)),
+            reference_price: Some(95.0),
+            previous_state: Some(&previous_state),
+            live_orders: &[
+                OrderObservation {
+                    order_id: "order-2".into(),
+                    client_order_id: "client-2".into(),
+                    side: Side::Sell,
+                    price: 96.0,
+                    quantity: 12.0,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::New,
+                },
+                OrderObservation {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::PartiallyFilled,
+                },
+            ],
+            pending_submit_hints: &[],
+            observed_at: now,
+        });
+
+        let RecoveryResolution::Rebuilt { state } = recovery else {
+            panic!("expected two uniquely matched live orders to be rebuilt");
+        };
+        assert!(state.recovery_anomaly.is_none());
+        assert_eq!(state.slots.len(), 2);
+        assert_eq!(state.slots[0].slot, OrderSlot::new("inventory_core"));
+        assert_eq!(
+            state.slots[0]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-1")
+        );
+        assert_eq!(
+            state.slots[0]
+                .working_order
+                .as_ref()
+                .map(|order| order.status),
+            Some(OrderStatus::PartiallyFilled)
+        );
+        assert_eq!(state.slots[1].slot, OrderSlot::new("inventory_followup"));
+        assert_eq!(
+            state.slots[1]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-2")
+        );
+        assert_eq!(
+            state.slots[1]
+                .working_order
+                .as_ref()
+                .map(|order| order.status),
+            Some(OrderStatus::New)
+        );
+    }
+
+    #[test]
+    fn recovery_returns_anomaly_state_when_multiple_live_orders_claim_same_slot() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-1".into(),
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+
+        let recovery = recover_working_orders(RecoveryInput {
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: &Exposure(0.0),
+            target_exposure: Some(&Exposure(4.0)),
+            reference_price: Some(95.0),
+            previous_state: Some(&previous_state),
+            live_orders: &[
+                OrderObservation {
+                    order_id: "live-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::New,
+                },
+                OrderObservation {
+                    order_id: "live-2".into(),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::PartiallyFilled,
+                },
+            ],
+            pending_submit_hints: &[],
+            observed_at: now,
+        });
+
+        let RecoveryResolution::Anomaly { state, anomaly } = recovery else {
+            panic!("expected duplicate live orders on one slot to raise anomaly");
+        };
+        assert_eq!(anomaly, RecoveryAnomaly::DuplicateLiveOrders);
+        assert!(state.slots.is_empty());
+        assert_eq!(
+            state.recovery_anomaly.as_ref(),
+            Some(&RecoveryAnomaly::DuplicateLiveOrders)
+        );
     }
 
     #[test]
@@ -1430,7 +1750,9 @@ mod tests {
             quantity: 15.0,
             client_order_id: "client-1".into(),
         };
-        let previous_state = record_submit_receipt(
+        let SubmitReceiptResolution::Recorded {
+            state: previous_state,
+        } = record_submit_receipt(
             &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
             &request,
             Exposure(4.0),
@@ -1439,7 +1761,10 @@ mod tests {
                 client_order_id: "client-1".into(),
                 status: OrderStatus::New,
             },
-        );
+        )
+        else {
+            panic!("expected initial receipt to be recorded");
+        };
         let current_plan_submit = PendingSubmitHint {
             request: request.clone(),
             target_exposure: Exposure(4.0),
@@ -1563,7 +1888,9 @@ mod tests {
             quantity: 15.0,
             client_order_id: "client-1".into(),
         };
-        let previous_state = record_submit_receipt(
+        let SubmitReceiptResolution::Recorded {
+            state: previous_state,
+        } = record_submit_receipt(
             &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
             &request,
             Exposure(4.0),
@@ -1572,7 +1899,10 @@ mod tests {
                 client_order_id: "client-1".into(),
                 status: OrderStatus::New,
             },
-        );
+        )
+        else {
+            panic!("expected initial receipt to be recorded");
+        };
 
         let recovery = recover_working_orders(RecoveryInput {
             exchange_rules: &rules,
@@ -1604,7 +1934,9 @@ mod tests {
             quantity: 15.0,
             client_order_id: "client-1".into(),
         };
-        let previous_state = record_submit_receipt(
+        let SubmitReceiptResolution::Recorded {
+            state: previous_state,
+        } = record_submit_receipt(
             &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
             &request,
             Exposure(4.0),
@@ -1613,7 +1945,10 @@ mod tests {
                 client_order_id: "client-1".into(),
                 status: OrderStatus::New,
             },
-        );
+        )
+        else {
+            panic!("expected initial receipt to be recorded");
+        };
         let pending_submit_hints = vec![PendingSubmitHint {
             request: request.clone(),
             target_exposure: Exposure(4.0),
@@ -1633,7 +1968,10 @@ mod tests {
 
         assert!(matches!(
             recovery,
-            RecoveryResolution::Anomaly(RecoveryAnomaly::UnknownLiveOrder)
+            RecoveryResolution::Anomaly {
+                anomaly: RecoveryAnomaly::UnknownLiveOrder,
+                ..
+            }
         ));
     }
 }
