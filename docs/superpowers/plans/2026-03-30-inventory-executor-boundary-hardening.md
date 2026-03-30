@@ -339,10 +339,10 @@ Run:
 Expected:
 查询边界收紧后的定向测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 Task 5 code commit:
-`TODO`
+`8c02e5b2286b822b0e0b7c8cc1b4fe5afafb14cd`
 
 ```bash
 git add engine/src/ports.rs storage/src/sqlite.rs server/src/effect_service.rs server/src/effect_worker.rs server/src/write_service.rs server/src/runtime.rs docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
