@@ -74,6 +74,25 @@ impl BinanceRestClient {
         }
     }
 
+    #[cfg(test)]
+    fn with_http_client_and_timestamp_provider(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+        timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        http: reqwest::Client,
+    ) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        Self {
+            http,
+            api_key: api_key.into(),
+            api_secret: api_secret.into(),
+            base_url,
+            timestamp_provider,
+            timestamp_offset_ms: AtomicI64::new(0),
+        }
+    }
+
     pub fn sign_query(&self, query: &str) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(self.api_secret.as_bytes())
             .expect("HMAC-SHA256 accepts any key length");
@@ -384,7 +403,9 @@ fn encode_query(params: &[(&str, String)]) -> String {
 }
 
 fn build_http_client(base_url: &str) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15));
     if should_bypass_proxy(base_url) {
         builder = builder.no_proxy();
     }
@@ -743,6 +764,31 @@ mod tests {
         assert!(requests[0].path.contains("quantity=0.024"));
         assert!(!requests[0].path.contains("price=0.30000000000000004"));
         assert!(!requests[0].path.contains("quantity=0.024000000000000004"));
+    }
+
+    #[tokio::test]
+    async fn request_times_out_when_server_does_not_respond() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::mem::forget(listener);
+
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let client = BinanceRestClient::with_http_client_and_timestamp_provider(
+            format!("http://{}", address),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            http,
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(2), client.get_server_time()).await;
+
+        assert!(result.is_ok(), "request should complete without external timeout");
+        assert!(result.unwrap().is_err(), "request should fail with timeout");
     }
 
     #[derive(Debug, Clone)]
