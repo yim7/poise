@@ -670,12 +670,12 @@ impl SqliteStorage {
             .prepare(
                 "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
                  FROM grid_effects ge
-                 WHERE ge.track_id = ?1
+                 WHERE ge.grid_id = ?1
                    AND ge.status = ?2
                    AND NOT EXISTS (
                        SELECT 1
                        FROM grid_effects prior
-                       WHERE prior.track_id = ge.track_id
+                       WHERE prior.grid_id = ge.grid_id
                          AND prior.batch_id = ge.batch_id
                          AND prior.sequence < ge.sequence
                          AND prior.status NOT IN (?3, ?4)

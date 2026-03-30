@@ -9,13 +9,13 @@ pub struct Config {
     pub environment: String,
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
-    pub grids: Vec<GridDefinition>,
+    pub grids: Vec<TrackDefinition>,
     #[serde(default)]
     pub exchange: ExchangeConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct GridDefinition {
+pub struct TrackDefinition {
     pub grid_id: String,
     pub venue: Venue,
     pub symbol: String,
@@ -60,12 +60,12 @@ impl Config {
     }
 }
 
-impl GridDefinition {
+impl TrackDefinition {
     pub fn tick_timeout_secs(&self) -> u64 {
         self.tick_timeout_secs.unwrap_or(30)
     }
 
-    pub fn grid_id(&self) -> TrackId {
+    pub fn track_id(&self) -> TrackId {
         TrackId::new(self.grid_id.clone())
     }
 
@@ -73,7 +73,7 @@ impl GridDefinition {
         Instrument::new(self.venue, self.symbol.clone())
     }
 
-    pub fn grid_config(&self) -> TrackConfig {
+    pub fn track_config(&self) -> TrackConfig {
         TrackConfig {
             lower_price: self.lower_price,
             upper_price: self.upper_price,
@@ -158,7 +158,7 @@ out_of_band_policy = "hold"
         assert_eq!(config.bind_address, "127.0.0.1:9000");
         assert_eq!(config.grids.len(), 2);
         assert_eq!(config.grids[0].symbol, "BTCUSDT");
-        assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
+        assert_eq!(config.grids[0].track_id().as_str(), "btc-core");
         assert_eq!(
             config.grids[1].shape_family,
             poise_core::strategy::ShapeFamily::Concave
@@ -197,11 +197,11 @@ notional_per_unit = 375.0
         assert_eq!(config.exchange.api_key, None);
         assert_eq!(config.exchange.api_secret, None);
         assert_eq!(
-            config.grids[0].grid_config().shape_family,
+            config.grids[0].track_config().shape_family,
             poise_core::strategy::ShapeFamily::Linear
         );
         assert_eq!(
-            config.grids[0].grid_config().out_of_band_policy,
+            config.grids[0].track_config().out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Freeze
         );
     }
@@ -347,7 +347,7 @@ notional_per_unit = 375.0
         .unwrap();
 
         assert_eq!(config.grids[0].symbol, "BTCUSDT");
-        assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
+        assert_eq!(config.grids[0].track_id().as_str(), "btc-core");
     }
 
     #[test]
@@ -367,7 +367,7 @@ notional_per_unit = 375.0
             Some("wss://fstream.binancefuture.com")
         );
         assert_eq!(config.grids.len(), 1);
-        assert_eq!(grid.grid_id().as_str(), "btc-core");
+        assert_eq!(grid.track_id().as_str(), "btc-core");
         assert_eq!(grid.upper_price - grid.lower_price, 2000.0);
         assert!((equivalent_grid_step - 100.0).abs() < f64::EPSILON);
     }

@@ -94,8 +94,8 @@ fn validate_exchange_runtime_config(
 }
 
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
-    validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
-    validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
+    validate_unique_instruments(config.grids.iter().map(|track| track.instrument()))?;
+    validate_unique_grid_ids(config.grids.iter().map(|track| track.track_id()))?;
     let exchange_config = validate_exchange_runtime_config(&config.exchange)?;
 
     let adapter = Arc::new(BinanceAdapter::new(
@@ -139,22 +139,22 @@ async fn assemble_with_components_with_repository<R>(
 where
     R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
 {
-    validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
-    validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
+    validate_unique_instruments(config.grids.iter().map(|track| track.instrument()))?;
+    validate_unique_grid_ids(config.grids.iter().map(|track| track.track_id()))?;
 
     let mut manager = TrackManager::new(clock);
-    for grid in &config.grids {
-        let grid_id = grid.grid_id();
-        let info = exchange.get_exchange_info(&grid.instrument()).await?;
+    for track in &config.grids {
+        let track_id = track.track_id();
+        let info = exchange.get_exchange_info(&track.instrument()).await?;
         manager.add_grid_with_tick_timeout_secs(
-            grid_id.clone(),
-            grid.instrument(),
-            grid.grid_config(),
-            grid.budget(),
+            track_id.clone(),
+            track.instrument(),
+            track.track_config(),
+            track.budget(),
             info.rules,
-            grid.tick_timeout_secs(),
+            track.tick_timeout_secs(),
         )?;
-        if let Some(snapshot) = repository.load_grid_state(grid_id.as_str()).await? {
+        if let Some(snapshot) = repository.load_grid_state(track_id.as_str()).await? {
             manager.restore_grid_state(&snapshot)?;
         }
     }
@@ -241,7 +241,7 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio_tungstenite::connect_async;
 
-    use crate::config::{Config, ExchangeConfig, GridDefinition};
+    use crate::config::{Config, ExchangeConfig, TrackDefinition};
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
@@ -280,7 +280,7 @@ mod tests {
             environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
             grids: vec![
-                GridDefinition {
+                TrackDefinition {
                     grid_id: "btc-core".into(),
                     venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
@@ -296,7 +296,7 @@ mod tests {
                     stop_loss_pct: None,
                     tick_timeout_secs: None,
                 },
-                GridDefinition {
+                TrackDefinition {
                     grid_id: "eth-core".into(),
                     venue: Venue::Binance,
                     symbol: "ETHUSDT".into(),
@@ -362,7 +362,7 @@ mod tests {
             environment: suffix,
             bind_address: "127.0.0.1:0".into(),
             grids: vec![
-                GridDefinition {
+                TrackDefinition {
                     grid_id: "btc-core".into(),
                     venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
@@ -378,7 +378,7 @@ mod tests {
                     stop_loss_pct: None,
                     tick_timeout_secs: None,
                 },
-                GridDefinition {
+                TrackDefinition {
                     grid_id: "btc-alt".into(),
                     venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
@@ -412,7 +412,7 @@ mod tests {
         let config = Config {
             environment: suffix,
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![GridDefinition {
+            grids: vec![TrackDefinition {
                 grid_id: "btc-core".into(),
                 venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
@@ -449,7 +449,7 @@ mod tests {
         let config = Config {
             environment: suffix,
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![GridDefinition {
+            grids: vec![TrackDefinition {
                 grid_id: "btc-core".into(),
                 venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
@@ -536,7 +536,7 @@ mod tests {
         let config = Config {
             environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![GridDefinition {
+            grids: vec![TrackDefinition {
                 grid_id: "btc-core".into(),
                 venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
