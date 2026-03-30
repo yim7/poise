@@ -42,6 +42,12 @@ struct RecoveryTrackedGrid {
     next_retry_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExchangeStateSyncMode {
+    RecoverOnly,
+    RecoverAndReconcile,
+}
+
 impl ServerRuntime {
     pub fn new(
         state: ServerState,
@@ -116,7 +122,7 @@ impl ServerRuntime {
                 &self.exchange,
                 &grid.id,
                 &grid.instrument,
-                false,
+                ExchangeStateSyncMode::RecoverOnly,
             )
             .await
             {
@@ -324,7 +330,7 @@ impl ServerRuntime {
                                 &exchange,
                                 &grid_id,
                                 &instrument,
-                                true,
+                                ExchangeStateSyncMode::RecoverAndReconcile,
                             )
                             .await {
                                 tracing::warn!(
@@ -449,7 +455,7 @@ async fn sync_exchange_state_from_exchange(
     exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
     instrument: &grid_engine::grid::Instrument,
-    allow_follow_up_reconcile: bool,
+    mode: ExchangeStateSyncMode,
 ) -> std::result::Result<(), GridMutationError> {
     let position = exchange
         .get_position(instrument)
@@ -459,7 +465,7 @@ async fn sync_exchange_state_from_exchange(
         .get_open_orders(instrument)
         .await
         .map_err(GridMutationError::Persistence)?;
-    if allow_follow_up_reconcile {
+    if matches!(mode, ExchangeStateSyncMode::RecoverAndReconcile) {
         let _ = state
             .write_service
             .sync_exchange_state(
@@ -2805,7 +2811,12 @@ mod tests {
         fixture.runtime.shutdown(handles).await;
 
         assert_eq!(
-            fixture.exchange.cancel_all_symbols.lock().unwrap().as_slice(),
+            fixture
+                .exchange
+                .cancel_all_symbols
+                .lock()
+                .unwrap()
+                .as_slice(),
             ["BTCUSDT"]
         );
         let snapshot = fixture

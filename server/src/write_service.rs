@@ -20,6 +20,18 @@ use crate::notifications::GridInternalNotification;
 
 pub type SharedManager = Arc<RwLock<GridManager>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupSyncMode {
+    RecoverOnly,
+    RecoverAndReconcile,
+}
+
+impl StartupSyncMode {
+    fn allows_follow_up_reconcile(self) -> bool {
+        matches!(self, Self::RecoverAndReconcile)
+    }
+}
+
 #[derive(Default)]
 struct GridMutationGuards {
     locks: Mutex<HashMap<GridId, Arc<Mutex<()>>>>,
@@ -250,8 +262,13 @@ impl GridWriteService {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
     ) -> Result<GridTransition> {
-        self.sync_exchange_state_inner(id, position, open_orders, true)
-            .await
+        self.sync_exchange_state_inner(
+            id,
+            position,
+            open_orders,
+            StartupSyncMode::RecoverAndReconcile,
+        )
+        .await
     }
 
     pub async fn sync_exchange_state_without_reconcile(
@@ -260,7 +277,7 @@ impl GridWriteService {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
     ) -> Result<GridTransition> {
-        self.sync_exchange_state_inner(id, position, open_orders, false)
+        self.sync_exchange_state_inner(id, position, open_orders, StartupSyncMode::RecoverOnly)
             .await
     }
 
@@ -269,7 +286,7 @@ impl GridWriteService {
         id: &str,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
-        allow_follow_up_reconcile: bool,
+        mode: StartupSyncMode,
     ) -> Result<GridTransition> {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let pending_submit_hints = self
@@ -294,7 +311,7 @@ impl GridWriteService {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
-            let transition = if allow_follow_up_reconcile {
+            let transition = if mode.allows_follow_up_reconcile() {
                 manager
                     .sync_exchange_state(
                         &GridId::new(id),
@@ -712,7 +729,7 @@ mod tests {
 
     use crate::notifications::GridInternalNotification;
 
-    use super::GridWriteService;
+    use super::{GridWriteService, StartupSyncMode};
 
     #[tokio::test]
     async fn mutate_grid_persists_tick_events_and_emits_notification_after_save() {
@@ -843,6 +860,12 @@ mod tests {
                 recovery_anomaly_active: false,
             }
         );
+    }
+
+    #[test]
+    fn startup_sync_mode_explicitly_controls_follow_up_reconcile() {
+        assert!(!StartupSyncMode::RecoverOnly.allows_follow_up_reconcile());
+        assert!(StartupSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
     }
 
     #[tokio::test]

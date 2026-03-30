@@ -22,6 +22,18 @@ use crate::transition::{GridEffect, GridTransition};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupSyncMode {
+    RecoverOnly,
+    RecoverAndReconcile,
+}
+
+impl StartupSyncMode {
+    fn allows_follow_up_reconcile(self) -> bool {
+        matches!(self, Self::RecoverAndReconcile)
+    }
+}
+
 pub struct GridManager {
     grids: HashMap<GridId, GridRuntime>,
     instruments: HashMap<Instrument, GridId>,
@@ -130,7 +142,7 @@ impl GridManager {
             position,
             open_orders,
             pending_submit_hints,
-            true,
+            StartupSyncMode::RecoverAndReconcile,
         )?;
         self.transition_for(id, events, effects)
     }
@@ -147,7 +159,7 @@ impl GridManager {
             position,
             open_orders,
             pending_submit_hints,
-            false,
+            StartupSyncMode::RecoverOnly,
         )?;
         self.transition_for(id, events, effects)
     }
@@ -568,7 +580,7 @@ impl GridManager {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
-        allow_follow_up_reconcile: bool,
+        mode: StartupSyncMode,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
         self.observe_position(id, position)?;
         let observed_at = self.clock.now();
@@ -624,7 +636,7 @@ impl GridManager {
                     return Ok((vec![], vec![]));
                 };
 
-                if !allow_follow_up_reconcile {
+                if !mode.allows_follow_up_reconcile() {
                     let grid = self
                         .grids
                         .get_mut(id)
@@ -899,6 +911,12 @@ mod tests {
         fn set(&self, value: chrono::DateTime<Utc>) {
             *self.0.lock().unwrap() = value;
         }
+    }
+
+    #[test]
+    fn startup_sync_mode_explicitly_controls_follow_up_reconcile() {
+        assert!(!StartupSyncMode::RecoverOnly.allows_follow_up_reconcile());
+        assert!(StartupSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
     }
 
     fn test_manager() -> GridManager {
@@ -1806,7 +1824,10 @@ mod tests {
         let grid = manager.get_grid("btc-core").unwrap();
         assert_eq!(grid.manual_target_override, Some(Exposure(0.0)));
         assert_eq!(grid.status, GridStatus::ReducingOnly);
-        assert_eq!(transition.snapshot.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(
+            transition.snapshot.manual_target_override,
+            Some(Exposure(0.0))
+        );
         assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
     }
 
@@ -1825,7 +1846,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.snapshot.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(
+            transition.snapshot.manual_target_override,
+            Some(Exposure(0.0))
+        );
         assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
         assert_eq!(transition.snapshot.status, GridStatus::ReducingOnly);
     }
@@ -2494,7 +2518,13 @@ mod tests {
             .unwrap();
 
         assert!(transition.effects.is_empty());
-        assert!(transition.snapshot.observed.market_data_stale_since.is_some());
+        assert!(
+            transition
+                .snapshot
+                .observed
+                .market_data_stale_since
+                .is_some()
+        );
         assert_eq!(transition.snapshot.status, GridStatus::Active);
     }
 
@@ -2535,7 +2565,13 @@ mod tests {
             )
             .unwrap();
 
-        assert!(transition.snapshot.observed.market_data_stale_since.is_none());
+        assert!(
+            transition
+                .snapshot
+                .observed
+                .market_data_stale_since
+                .is_none()
+        );
     }
 
     #[test]
@@ -2666,7 +2702,13 @@ mod tests {
             .unwrap();
 
         assert!(transition.effects.is_empty());
-        assert!(transition.snapshot.observed.market_data_stale_since.is_some());
+        assert!(
+            transition
+                .snapshot
+                .observed
+                .market_data_stale_since
+                .is_some()
+        );
     }
 
     #[test]
