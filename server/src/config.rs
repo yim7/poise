@@ -28,6 +28,9 @@ pub struct GridDefinition {
     pub shape_family: ShapeFamily,
     #[serde(default = "default_out_of_band_policy")]
     pub out_of_band_policy: OutOfBandPolicy,
+    pub max_notional: Option<f64>,
+    pub daily_loss_limit: Option<f64>,
+    pub stop_loss_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -78,11 +81,14 @@ impl GridDefinition {
     }
 
     pub fn budget(&self) -> CapacityBudget {
+        let implied_max_notional =
+            self.long_exposure_units.max(self.short_exposure_units) * self.notional_per_unit;
         CapacityBudget {
-            max_notional: self.long_exposure_units.max(self.short_exposure_units)
-                * self.notional_per_unit,
-            daily_loss_limit: f64::NEG_INFINITY,
-            stop_loss_pct: 100.0,
+            max_notional: self.max_notional.unwrap_or(implied_max_notional),
+            daily_loss_limit: self
+                .daily_loss_limit
+                .unwrap_or(-implied_max_notional * 0.1),
+            stop_loss_pct: self.stop_loss_pct.unwrap_or(10.0),
         }
     }
 }
@@ -220,6 +226,60 @@ out_of_band_policy = "reduce_only"
         assert_eq!(grid.shape_family, ShapeFamily::Concave);
         assert_eq!(grid.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
         assert_eq!(grid.budget().max_notional, 3000.0);
+    }
+
+    #[test]
+    fn budget_uses_explicit_risk_limits_when_configured() {
+        let config = parse_config(
+            r#"
+environment = "test"
+
+[[grids]]
+grid_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+max_notional = 5000.0
+daily_loss_limit = -200.0
+stop_loss_pct = 5.0
+"#,
+        )
+        .unwrap();
+
+        let budget = config.grids[0].budget();
+        assert!((budget.max_notional - 5000.0).abs() < f64::EPSILON);
+        assert!((budget.daily_loss_limit - (-200.0)).abs() < f64::EPSILON);
+        assert!((budget.stop_loss_pct - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn budget_uses_safe_defaults_when_risk_limits_omitted() {
+        let config = parse_config(
+            r#"
+environment = "test"
+
+[[grids]]
+grid_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+
+        let budget = config.grids[0].budget();
+        let implied_max = 8.0 * 375.0;
+        assert!((budget.max_notional - implied_max).abs() < f64::EPSILON);
+        assert!((budget.daily_loss_limit - (-implied_max * 0.1)).abs() < f64::EPSILON);
+        assert!((budget.stop_loss_pct - 10.0).abs() < f64::EPSILON);
     }
 
     #[test]

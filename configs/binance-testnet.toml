@@ -16,3 +16,6 @@ upper_price = 67500.0
 long_exposure_units = 10
 short_exposure_units = 10
 notional_per_unit = 1000
+max_notional = 10000
+daily_loss_limit = -500
+stop_loss_pct = 5.0

@@ -291,6 +291,9 @@ mod tests {
                     notional_per_unit: 375.0,
                     shape_family: grid_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    max_notional: None,
+                    daily_loss_limit: None,
+                    stop_loss_pct: None,
                 },
                 GridDefinition {
                     grid_id: "eth-core".into(),
@@ -303,6 +306,9 @@ mod tests {
                     notional_per_unit: 500.0,
                     shape_family: grid_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    max_notional: None,
+                    daily_loss_limit: None,
+                    stop_loss_pct: None,
                 },
             ],
             exchange: ExchangeConfig {
@@ -365,6 +371,9 @@ mod tests {
                     notional_per_unit: 375.0,
                     shape_family: grid_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    max_notional: None,
+                    daily_loss_limit: None,
+                    stop_loss_pct: None,
                 },
                 GridDefinition {
                     grid_id: "btc-alt".into(),
@@ -377,6 +386,9 @@ mod tests {
                     notional_per_unit: 250.0,
                     shape_family: grid_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    max_notional: None,
+                    daily_loss_limit: None,
+                    stop_loss_pct: None,
                 },
             ],
             exchange: ExchangeConfig {
@@ -407,6 +419,9 @@ mod tests {
                 notional_per_unit: 375.0,
                 shape_family: grid_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                max_notional: None,
+                daily_loss_limit: None,
+                stop_loss_pct: None,
             }],
             exchange: ExchangeConfig {
                 rest_base_url: Some("https://demo-fapi.binance.com".into()),
@@ -440,6 +455,9 @@ mod tests {
                 notional_per_unit: 375.0,
                 shape_family: grid_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                max_notional: None,
+                daily_loss_limit: None,
+                stop_loss_pct: None,
             }],
             exchange: ExchangeConfig {
                 api_key: Some("demo-key".into()),
@@ -523,6 +541,9 @@ mod tests {
                 notional_per_unit: 375.0,
                 shape_family: grid_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                max_notional: None,
+                daily_loss_limit: None,
+                stop_loss_pct: None,
             }],
             exchange: ExchangeConfig {
                 rest_base_url: Some("http://127.0.0.1:1".into()),
