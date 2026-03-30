@@ -660,12 +660,12 @@ Commit: `109a7f30f5414c6c7a44f7616086c9f2ee4df8af`
 - Modify: `docs/2026-03-30-architecture-review.md`
 - Modify: `docs/superpowers/plans/2026-03-30-architecture-review-remediation.md`
 
-- [ ] **Step 1: 全量验证**
+- [x] **Step 1: 全量验证**
 
 Run: `cargo test`
 Expected: workspace 全部通过。
 
-- [ ] **Step 2: 验证 finding 逐条消除**
+- [x] **Step 2: 验证 finding 逐条消除**
 
 逐条检查：
 1. `rg 'BINANCE_TAKER_FEE' engine/` → 无结果
@@ -675,7 +675,7 @@ Expected: workspace 全部通过。
 5. `rg 'pub [a-z]' engine/src/runtime.rs | grep 'GridRuntime' -A 20` → 字段为 pub(crate)
 6. `rg 'GridRuntimeSnapshot' server/src/projector.rs` → 无结果
 
-- [ ] **Step 3: 回写评审文档和本计划**
+- [x] **Step 3: 回写评审文档和本计划**
 
 在 `docs/2026-03-30-architecture-review.md` 末尾标记每条 finding 的完成状态。
 在本文件中勾选已完成步骤并记录 commit SHA。
@@ -686,6 +686,22 @@ Expected: workspace 全部通过。
 git add docs/2026-03-30-architecture-review.md docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
 git commit -m "docs: close architecture review remediation"
 ```
+
+Result:
+- `docs/2026-03-30-architecture-review.md` 已补充“整改完成状态（2026-03-30）”，逐条标记 6 条正式 finding、1 条 design debt 和 1 条 cleanup 的当前状态。
+- Task 6 验收过程中额外发现 `server/src/projector.rs` 测试 helper 仍通过 `GridRuntimeSnapshot` 构造读侧数据；已改为直接构造 `GridReadModel`，使 “`projector.rs` 无 snapshot 依赖” 这条对测试代码也成立。
+
+Verification:
+- `cargo test` 全量通过。
+- `rg 'BINANCE_TAKER_FEE' engine/` 无结果。
+- `rg 'StartupSyncMode|ExchangeStateSyncMode' server/src/write_service.rs server/src/runtime.rs` 无结果。
+- `wc -l engine/src/executor/mod.rs` 输出 `1232 engine/src/executor/mod.rs`。
+- `rg -n 'debug_assert_eq!' engine/src/runtime.rs` 命中 `restore_from_snapshot()` 内的 round-trip 保护。
+- `rg -n 'pub\(crate\)' engine/src/runtime.rs` 显示 `GridRuntime` 字段已全部收为 `pub(crate)`。
+- `rg -n 'GridRuntimeSnapshot' server/src/projector.rs` 无结果。
+
+Review:
+- 没有发现新的高信号问题。Task 6 主要做验收和文档收尾；唯一新增代码变更是把 `projector` 测试 helper 从 snapshot 构造改成 read model 直构，这个修改缩小了测试侧对 engine 结构的耦合，方向与 finding #6 保持一致。
 
 ---
 

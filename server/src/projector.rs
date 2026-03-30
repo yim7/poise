@@ -361,18 +361,14 @@ fn project_effect_level(status: EffectStatus) -> ActivityLevelView {
 mod tests {
     use chrono::{TimeZone, Utc};
     use grid_core::events::DomainEvent;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use grid_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
-    use grid_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use grid_engine::executor::{ExecutionMode, OrderRole};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::ports::{
-        EffectStatus, OrderRequest, OrderStatus, PersistedGridEffect, StoredDomainEvent,
+        EffectStatus, OrderRequest, PersistedGridEffect, StoredDomainEvent,
     };
-    use grid_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
-        WorkingOrder,
-    };
-    use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+    use grid_engine::runtime::GridStatus;
     use grid_engine::transition::GridEffect;
     use grid_protocol::{
         ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
@@ -380,7 +376,7 @@ mod tests {
     };
 
     use super::GridProjector;
-    use crate::read_model::GridReadModel;
+    use crate::read_model::{GridReadModel, ReadModelSlot};
 
     #[test]
     fn projects_execution_badge_from_working_orders() {
@@ -572,19 +568,47 @@ mod tests {
     }
 
     fn source_with_submitting_effect() -> GridReadModel {
-        GridReadModel::from_snapshot(
-            test_snapshot(),
-            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            Vec::new(),
-            vec![test_effect(EffectStatus::Executing, None)],
-        )
+        GridReadModel {
+            grid_id: "btc-core".into(),
+            venue: "binance".into(),
+            symbol: "BTCUSDT".into(),
+            status: GridStatus::Active,
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            lower_price: 90.0,
+            upper_price: 110.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+            reference_price: Some(101.25),
+            current_exposure: 3.5,
+            target_exposure: Some(4.0),
+            realized_pnl_cumulative: 980.1,
+            unrealized_pnl: 265.2,
+            executor_mode: ExecutionMode::Passive,
+            inventory_gap: 0.5,
+            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
+            max_inventory_gap_abs: 1.5,
+            max_gap_age_ms: 120_000,
+            stats_started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+            has_recovery_anomaly: false,
+            has_stale_market_data: false,
+            replacement_gate_reason: None,
+            slots: vec![ReadModelSlot {
+                label: "inventory".into(),
+                is_submit_pending: false,
+                side: Side::Buy,
+                price: 100.5,
+                quantity: 0.1,
+                role: OrderRole::IncreaseInventory,
+            }],
+            manual_target_override: None,
+            recent_domain_events: Vec::new(),
+            recent_effects: vec![test_effect(EffectStatus::Executing, None)],
+        }
     }
 
     fn source_with_failed_effect_and_recent_event() -> GridReadModel {
-        GridReadModel::from_snapshot(
-            test_snapshot(),
-            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            vec![StoredDomainEvent {
+        GridReadModel {
+            recent_domain_events: vec![StoredDomainEvent {
                 id: 1,
                 grid_id: GridId::new("btc-core"),
                 event: DomainEvent::ExposureTargetChanged {
@@ -593,11 +617,12 @@ mod tests {
                 },
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
             }],
-            vec![test_effect(
+            recent_effects: vec![test_effect(
                 EffectStatus::Failed,
                 Some("submit order rejected".into()),
             )],
-        )
+            ..source_with_submitting_effect()
+        }
     }
 
     fn test_effect(status: EffectStatus, last_error: Option<String>) -> PersistedGridEffect {
@@ -625,63 +650,4 @@ mod tests {
         }
     }
 
-    fn test_snapshot() -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: GridId::new("btc-core"),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: GridConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
-            status: GridStatus::Active,
-            current_exposure: Exposure(3.5),
-            target_exposure: Some(Exposure(4.0)),
-            manual_target_override: None,
-            executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(0.5),
-                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                last_reprice_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap()),
-                slots: vec![ExecutionSlot {
-                    slot: OrderSlot::new("inventory_core"),
-                    state: SlotState::Working,
-                    working_order: Some(WorkingOrder {
-                        order_id: Some("order-1".into()),
-                        client_order_id: "client-1".into(),
-                        side: Side::Buy,
-                        price: 100.5,
-                        quantity: 0.1,
-                        target_exposure: Exposure(4.0),
-                        status: OrderStatus::New,
-                        role: OrderRole::IncreaseInventory,
-                    }),
-                }],
-                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-                recovery_anomaly: None,
-                stats: ExecutionStats {
-                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    max_inventory_gap_abs: Exposure(1.5),
-                    max_gap_age_ms: 120_000,
-                },
-            },
-            replacement_gate_reason: None,
-            risk: RiskState {
-                realized_pnl_day: None,
-                realized_pnl_today: 0.0,
-                realized_pnl_cumulative: 980.1,
-                unrealized_pnl: 265.2,
-            },
-            observed: ObservedState {
-                reference_price: Some(101.25),
-                out_of_band_since: None,
-                last_tick_at: None,
-                market_data_stale_since: None,
-            },
-        }
-    }
 }
