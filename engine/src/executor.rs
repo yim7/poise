@@ -122,10 +122,21 @@ pub struct SubmitRecoveryInput<'a> {
     pub request: &'a OrderRequest,
     pub target_exposure: &'a Exposure,
     pub current_exposure: &'a Exposure,
-    pub current_plan_submit: Option<&'a PendingSubmitHint>,
     pub live_order: Option<&'a OrderObservation>,
+    pub current_plan: Option<SubmitRecoveryPlanContext<'a>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SubmitRecoveryPlanContext<'a> {
+    pub grid_id: &'a GridId,
+    pub instrument: &'a Instrument,
+    pub base_qty_per_unit: f64,
+    pub target_exposure: Exposure,
+    pub reference_price: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum SubmitRecoveryResolution {
     Proceed {
         state: ExecutorState,
@@ -140,6 +151,18 @@ pub enum SubmitRecoveryResolution {
     },
 }
 
+impl SubmitRecoveryResolution {
+    pub fn state(&self) -> Option<&ExecutorState> {
+        match self {
+            Self::Proceed { state, .. }
+            | Self::Recovered { state }
+            | Self::Superseded { state } => Some(state),
+            Self::AwaitExchangeState => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubmitRecoveryPlan {
     pub resolution: SubmitRecoveryResolution,
     pub effects: Vec<GridEffect>,
@@ -152,7 +175,7 @@ const CATCH_UP_AGE_MS: i64 = 180_000;
 const REPLACEMENT_SAFETY_BUFFER_BPS: f64 = 5.0;
 const BINANCE_TAKER_FEE_RATE: f64 = 0.0004;
 const BPS_DENOMINATOR: f64 = 10_000.0;
-const INVENTORY_CORE_SLOT: &str = "inventory_core";
+pub const INVENTORY_CORE_SLOT: &str = "inventory_core";
 
 pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     let inventory_gap = input.current_exposure.delta(&input.target_exposure);
@@ -251,9 +274,10 @@ pub fn record_submit_request(
     request: &OrderRequest,
     target_exposure: Exposure,
 ) -> ExecutorState {
+    let ((_, sibling_slots), _) = split_inventory_core_slot_from_slots(&previous_state.slots);
     let mut state = previous_state.clone();
-    state.slots = upsert_slot_by_name(
-        &previous_state.slots,
+    state.slots = with_inventory_core_slot(
+        sibling_slots,
         ExecutionSlot {
             slot: OrderSlot::new(INVENTORY_CORE_SLOT),
             state: SlotState::SubmitPending,
@@ -321,7 +345,7 @@ pub fn record_submit_failure(
     previous_state: &ExecutorState,
     client_order_id: &str,
 ) -> ExecutorState {
-    let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+    let Some(slots) = clear_matching_slots(&previous_state.slots, |slot| {
         slot.state == SlotState::SubmitPending
             && slot
                 .working_order
@@ -383,7 +407,7 @@ pub fn apply_order_observation(
     }
 
     if observation.status.clears_working_order() {
-        let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+        let Some(slots) = clear_matching_slots(&previous_state.slots, |slot| {
             slot_matches_order(
                 slot,
                 &observation.client_order_id,
@@ -404,7 +428,7 @@ pub fn clear_pending_submit(
     previous_state: &ExecutorState,
     client_order_id: &str,
 ) -> ExecutorState {
-    let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+    let Some(slots) = clear_matching_slots(&previous_state.slots, |slot| {
         slot_matches_order(slot, client_order_id, None)
     }) else {
         return previous_state.clone();
@@ -418,7 +442,7 @@ pub fn clear_working_order_by_order_id(
     previous_state: &ExecutorState,
     order_id: &str,
 ) -> ExecutorState {
-    let Some(slots) = remove_matching_slots(&previous_state.slots, |slot| {
+    let Some(slots) = clear_matching_slots(&previous_state.slots, |slot| {
         slot_matches_order(slot, "", Some(order_id))
     }) else {
         return previous_state.clone();
@@ -429,19 +453,22 @@ pub fn clear_working_order_by_order_id(
 }
 
 pub fn clear_all_working_orders(previous_state: &ExecutorState) -> ExecutorState {
+    let Some(slots) = clear_matching_slots(&previous_state.slots, |slot| {
+        slot.state == SlotState::Working
+    }) else {
+        return previous_state.clone();
+    };
     let mut state = previous_state.clone();
-    state.slots = previous_state
-        .slots
-        .iter()
-        .filter(|slot| slot.state != SlotState::Working)
-        .cloned()
-        .collect();
+    state.slots = slots;
     state
 }
 
-pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryResolution {
+pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPlan {
     if input.previous_state.recovery_anomaly.is_some() {
-        return SubmitRecoveryResolution::AwaitExchangeState;
+        return SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            effects: vec![],
+        };
     }
 
     let receipt_backed = input
@@ -455,42 +482,93 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryRe
 
     if receipt_backed {
         if let Some(live_order) = input.live_order {
-            return SubmitRecoveryResolution::Recovered {
-                state: apply_order_observation(input.previous_state, live_order),
+            return SubmitRecoveryPlan {
+                resolution: SubmitRecoveryResolution::Recovered {
+                    state: apply_order_observation(input.previous_state, live_order),
+                },
+                effects: vec![],
             };
         }
 
         if target_exposure_reached(input.current_exposure, input.target_exposure) {
-            return SubmitRecoveryResolution::Recovered {
-                state: clear_pending_submit(input.previous_state, &input.request.client_order_id),
+            return SubmitRecoveryPlan {
+                resolution: SubmitRecoveryResolution::Recovered {
+                    state: clear_pending_submit(
+                        input.previous_state,
+                        &input.request.client_order_id,
+                    ),
+                },
+                effects: vec![],
             };
         }
 
-        return SubmitRecoveryResolution::AwaitExchangeState;
+        return SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            effects: vec![],
+        };
     }
+
+    let current_plan_submit = input.current_plan.as_ref().and_then(|current_plan| {
+        current_submit_hint(ExecutorInput {
+            grid_id: current_plan.grid_id,
+            instrument: current_plan.instrument,
+            exchange_rules: input.exchange_rules,
+            base_qty_per_unit: current_plan.base_qty_per_unit,
+            current_exposure: input.current_exposure.clone(),
+            target_exposure: current_plan.target_exposure.clone(),
+            reference_price: current_plan.reference_price,
+            executor_state: None,
+            observed_at: current_plan.observed_at,
+        })
+    });
 
     if !submit_recovery_matches_current_plan(
         input.request,
-        input.current_plan_submit,
+        current_plan_submit.as_ref(),
         input.exchange_rules,
     ) {
-        return SubmitRecoveryResolution::Superseded {
-            state: clear_pending_submit(input.previous_state, &input.request.client_order_id),
+        let cleared_state =
+            clear_pending_submit(input.previous_state, &input.request.client_order_id);
+        if let Some(next_submit) = current_plan_submit {
+            return SubmitRecoveryPlan {
+                resolution: SubmitRecoveryResolution::Superseded {
+                    state: record_submit_request(
+                        &cleared_state,
+                        &next_submit.request,
+                        next_submit.target_exposure.clone(),
+                    ),
+                },
+                effects: vec![GridEffect::SubmitOrder {
+                    request: next_submit.request,
+                    target_exposure: next_submit.target_exposure,
+                }],
+            };
+        }
+        return SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded {
+                state: cleared_state,
+            },
+            effects: vec![],
         };
     }
 
     let next_target_exposure = input
-        .current_plan_submit
+        .current_plan
+        .as_ref()
+        .and_then(|_| current_plan_submit.as_ref())
         .map(|submit| submit.target_exposure.clone())
         .unwrap_or_else(|| input.target_exposure.clone());
 
-    SubmitRecoveryResolution::Proceed {
-        state: record_submit_request(
-            input.previous_state,
-            input.request,
-            next_target_exposure.clone(),
-        ),
-        target_exposure: next_target_exposure,
+    SubmitRecoveryPlan {
+        resolution: SubmitRecoveryResolution::Proceed {
+            state: record_submit_request(
+                input.previous_state,
+                input.request,
+                next_target_exposure.clone(),
+            ),
+            target_exposure: next_target_exposure,
+        },
+        effects: vec![],
     }
 }
 
@@ -505,7 +583,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
                 .delta(input.target_exposure.unwrap_or(input.current_exposure)),
             gap_started_at: None,
             last_reprice_at: None,
-            slots: Vec::new(),
+            slots: vec![empty_inventory_core_slot()],
             last_execution_reason: None,
             recovery_anomaly: None,
             stats: ExecutionStats {
@@ -530,7 +608,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         }
 
         let mut state = base_state;
-        state.slots.clear();
+        state.slots = vec![empty_inventory_core_slot()];
         state.recovery_anomaly = None;
         return RecoveryResolution::Rebuilt { state };
     }
@@ -714,9 +792,8 @@ fn diff_desired_orders(
     let (current_slot, sibling_slots) = split_inventory_core_slot(input.executor_state);
     let desired_order = desired_orders.first();
 
-    match (current_slot, desired_order) {
-        (None, None) => (vec![ExecutionAction::NoOp], sibling_slots, None),
-        (Some(current_slot), None) => {
+    match desired_order {
+        None => {
             if let Some(order_id) = current_slot
                 .working_order
                 .as_ref()
@@ -727,17 +804,17 @@ fn diff_desired_orders(
                         instrument: input.instrument.clone(),
                         order_id,
                     }],
-                    with_inventory_core_slot(sibling_slots, Some(current_slot)),
+                    with_inventory_core_slot(sibling_slots, current_slot),
                     None,
                 );
             }
             (
                 vec![ExecutionAction::NoOp],
-                with_inventory_core_slot(sibling_slots, None),
+                with_inventory_core_slot(sibling_slots, empty_inventory_core_slot()),
                 None,
             )
         }
-        (None, Some(desired_order)) => {
+        Some(desired_order) if current_slot.state == SlotState::Empty => {
             let request = desired_order_to_request(input, desired_order);
             (
                 vec![ExecutionAction::SubmitOrder {
@@ -746,19 +823,19 @@ fn diff_desired_orders(
                 }],
                 with_inventory_core_slot(
                     sibling_slots,
-                    Some(submit_pending_slot(desired_order, &request)),
+                    submit_pending_slot(desired_order, &request),
                 ),
                 None,
             )
         }
-        (Some(current_slot), Some(desired_order)) => {
+        Some(desired_order) => {
             let current_order = current_slot.working_order.as_ref();
             if let Some(current_order) = current_order {
                 if desired_matches_working_order(desired_order, current_order, input.exchange_rules)
                 {
                     return (
                         vec![ExecutionAction::NoOp],
-                        with_inventory_core_slot(sibling_slots, Some(current_slot)),
+                        with_inventory_core_slot(sibling_slots, current_slot),
                         Some(ReplacementGateReason::RoundedMatch),
                     );
                 }
@@ -771,7 +848,7 @@ fn diff_desired_orders(
                 ) {
                     return (
                         vec![ExecutionAction::NoOp],
-                        with_inventory_core_slot(sibling_slots, Some(current_slot)),
+                        with_inventory_core_slot(sibling_slots, current_slot),
                         Some(reason),
                     );
                 }
@@ -789,7 +866,7 @@ fn diff_desired_orders(
                                 target_exposure: desired_order.target_exposure.clone(),
                             },
                         ],
-                        with_inventory_core_slot(sibling_slots, Some(current_slot)),
+                        with_inventory_core_slot(sibling_slots, current_slot),
                         None,
                     );
                 }
@@ -797,7 +874,7 @@ fn diff_desired_orders(
 
             (
                 vec![ExecutionAction::NoOp],
-                with_inventory_core_slot(sibling_slots, Some(current_slot)),
+                with_inventory_core_slot(sibling_slots, current_slot),
                 None,
             )
         }
@@ -836,14 +913,20 @@ fn submit_pending_slot(desired_order: &DesiredOrder, request: &OrderRequest) -> 
 
 fn split_inventory_core_slot(
     executor_state: Option<&ExecutorState>,
-) -> (Option<ExecutionSlot>, Vec<ExecutionSlot>) {
+) -> (ExecutionSlot, Vec<ExecutionSlot>) {
     let Some(executor_state) = executor_state else {
-        return (None, Vec::new());
+        return (empty_inventory_core_slot(), Vec::new());
     };
 
+    split_inventory_core_slot_from_slots(&executor_state.slots).0
+}
+
+fn split_inventory_core_slot_from_slots(
+    previous_slots: &[ExecutionSlot],
+) -> ((ExecutionSlot, Vec<ExecutionSlot>), bool) {
     let mut current_slot = None;
     let mut sibling_slots = Vec::new();
-    for slot in &executor_state.slots {
+    for slot in previous_slots {
         if slot.slot.0 == INVENTORY_CORE_SLOT {
             if current_slot.is_none() {
                 current_slot = Some(slot.clone());
@@ -853,32 +936,23 @@ fn split_inventory_core_slot(
         sibling_slots.push(slot.clone());
     }
 
-    (current_slot, sibling_slots)
+    let had_inventory_core = current_slot.is_some();
+    (
+        (
+            current_slot.unwrap_or_else(empty_inventory_core_slot),
+            sibling_slots,
+        ),
+        had_inventory_core,
+    )
 }
 
 fn with_inventory_core_slot(
     mut sibling_slots: Vec<ExecutionSlot>,
-    inventory_core_slot: Option<ExecutionSlot>,
+    inventory_core_slot: ExecutionSlot,
 ) -> Vec<ExecutionSlot> {
-    let mut slots =
-        Vec::with_capacity(sibling_slots.len() + usize::from(inventory_core_slot.is_some()));
-    if let Some(slot) = inventory_core_slot {
-        slots.push(slot);
-    }
+    let mut slots = Vec::with_capacity(sibling_slots.len() + 1);
+    slots.push(inventory_core_slot);
     slots.append(&mut sibling_slots);
-    slots
-}
-
-fn upsert_slot_by_name(
-    previous_slots: &[ExecutionSlot],
-    new_slot: ExecutionSlot,
-) -> Vec<ExecutionSlot> {
-    let mut slots = previous_slots.to_vec();
-    if let Some(index) = slots.iter().position(|slot| slot.slot == new_slot.slot) {
-        slots[index] = new_slot;
-    } else {
-        slots.push(new_slot);
-    }
     slots
 }
 
@@ -896,24 +970,31 @@ where
     Some(slots)
 }
 
-fn remove_matching_slots<F>(
+fn clear_matching_slots<F>(
     previous_slots: &[ExecutionSlot],
     matcher: F,
 ) -> Option<Vec<ExecutionSlot>>
 where
     F: Fn(&ExecutionSlot) -> bool,
 {
-    let mut removed = false;
-    let slots = previous_slots
-        .iter()
+    let ((inventory_core_slot, sibling_slots), had_inventory_core) =
+        split_inventory_core_slot_from_slots(previous_slots);
+    let mut changed = !had_inventory_core;
+    let inventory_core_slot = if matcher(&inventory_core_slot) {
+        changed = true;
+        empty_slot(&inventory_core_slot.slot)
+    } else {
+        inventory_core_slot
+    };
+    let sibling_slots = sibling_slots
+        .into_iter()
         .filter(|slot| {
             let matches = matcher(slot);
-            removed |= matches;
+            changed |= matches;
             !matches
         })
-        .cloned()
-        .collect();
-    removed.then_some(slots)
+        .collect::<Vec<_>>();
+    changed.then_some(with_inventory_core_slot(sibling_slots, inventory_core_slot))
 }
 
 fn slot_matches_order(slot: &ExecutionSlot, client_order_id: &str, order_id: Option<&str>) -> bool {
@@ -970,9 +1051,21 @@ fn rebuild_slot_from_live_order(
 
 fn recovery_anomaly(base_state: &ExecutorState, anomaly: RecoveryAnomaly) -> RecoveryResolution {
     let mut state = base_state.clone();
-    state.slots.clear();
+    state.slots = vec![empty_inventory_core_slot()];
     state.recovery_anomaly = Some(anomaly.clone());
     RecoveryResolution::Anomaly { state, anomaly }
+}
+
+fn empty_inventory_core_slot() -> ExecutionSlot {
+    empty_slot(&OrderSlot::new(INVENTORY_CORE_SLOT))
+}
+
+fn empty_slot(slot: &OrderSlot) -> ExecutionSlot {
+    ExecutionSlot {
+        slot: slot.clone(),
+        state: SlotState::Empty,
+        working_order: None,
+    }
 }
 
 fn role_for_side(side: Side) -> OrderRole {
@@ -1555,7 +1648,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_order_clears_matching_slot() {
+    fn terminal_order_clears_matching_slot_to_empty() {
         let instrument = test_instrument();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let request = OrderRequest {
@@ -1590,7 +1683,14 @@ mod tests {
                 status: OrderStatus::Filled,
             },
         );
-        assert!(cleared.slots.is_empty());
+        assert_eq!(
+            cleared.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }]
+        );
 
         let unchanged = apply_order_observation(
             &working,
@@ -1799,7 +1899,7 @@ mod tests {
             panic!("expected duplicate live orders on one slot to raise anomaly");
         };
         assert_eq!(anomaly, RecoveryAnomaly::DuplicateLiveOrders);
-        assert!(state.slots.is_empty());
+        assert_eq!(state.slots, vec![empty_inventory_core_slot()]);
         assert_eq!(
             state.recovery_anomaly.as_ref(),
             Some(&RecoveryAnomaly::DuplicateLiveOrders)
@@ -1832,18 +1932,12 @@ mod tests {
         else {
             panic!("expected initial receipt to be recorded");
         };
-        let current_plan_submit = PendingSubmitHint {
-            request: request.clone(),
-            target_exposure: Exposure(4.0),
-        };
-
         let recovery = recover_submit_effect(SubmitRecoveryInput {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
             target_exposure: &Exposure(4.0),
             current_exposure: &Exposure(0.0),
-            current_plan_submit: Some(&current_plan_submit),
             live_order: Some(&OrderObservation {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
@@ -1853,11 +1947,17 @@ mod tests {
                 realized_pnl: 0.0,
                 status: OrderStatus::PartiallyFilled,
             }),
+            current_plan: None,
         });
 
-        let SubmitRecoveryResolution::Recovered { state } = recovery else {
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Recovered { state },
+            effects,
+        } = recovery
+        else {
             panic!("expected receipt-backed live order to be recovered");
         };
+        assert!(effects.is_empty());
         assert_eq!(state.slots.len(), 1);
         assert_eq!(state.slots[0].state, SlotState::Working);
         assert_eq!(
@@ -1873,8 +1973,10 @@ mod tests {
     fn submit_recovery_supersedes_stale_effect_when_current_plan_changed() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let grid_id = GridId::new("grid-1");
+        let instrument = test_instrument();
         let request = OrderRequest {
-            instrument: test_instrument(),
+            instrument: instrument.clone(),
             side: Side::Buy,
             price: 94.0,
             quantity: 22.5,
@@ -1889,33 +1991,71 @@ mod tests {
             request: &request,
             target_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
-            current_plan_submit: None,
             live_order: None,
+            current_plan: Some(SubmitRecoveryPlanContext {
+                grid_id: &grid_id,
+                instrument: &instrument,
+                base_qty_per_unit: 3.75,
+                target_exposure: Exposure(4.0),
+                reference_price: 95.0,
+                observed_at: now,
+            }),
         });
 
-        let SubmitRecoveryResolution::Superseded { state } = recovery else {
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { state },
+            effects,
+        } = recovery
+        else {
             panic!("expected stale submit effect to be superseded");
         };
-        assert!(state.slots.is_empty());
+        assert_eq!(
+            effects,
+            vec![ExecutionAction::SubmitOrder {
+                request: OrderRequest {
+                    instrument,
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    client_order_id: "grid-1-reconcile".into(),
+                },
+                target_exposure: Exposure(4.0),
+            }]
+        );
+        assert_eq!(
+            state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::SubmitPending,
+                working_order: Some(WorkingOrder {
+                    order_id: None,
+                    client_order_id: "grid-1-reconcile".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    target_exposure: Exposure(4.0),
+                    status: OrderStatus::Submitting,
+                    role: OrderRole::IncreaseInventory,
+                }),
+            }]
+        );
     }
 
     #[test]
     fn submit_recovery_proceed_updates_slot_target_to_current_plan_target() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let grid_id = GridId::new("grid-1");
+        let instrument = test_instrument();
         let request = OrderRequest {
-            instrument: test_instrument(),
+            instrument: instrument.clone(),
             side: Side::Buy,
             price: 90.0,
             quantity: 4.0,
-            client_order_id: "client-1".into(),
+            client_order_id: "grid-1-reconcile".into(),
         };
         let previous_state =
             record_submit_request(&ExecutorState::empty(now), &request, Exposure(6.0));
-        let current_plan_submit = PendingSubmitHint {
-            request: request.clone(),
-            target_exposure: Exposure(4.0),
-        };
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
             exchange_rules: &rules,
@@ -1923,17 +2063,29 @@ mod tests {
             request: &request,
             target_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
-            current_plan_submit: Some(&current_plan_submit),
             live_order: None,
+            current_plan: Some(SubmitRecoveryPlanContext {
+                grid_id: &grid_id,
+                instrument: &instrument,
+                base_qty_per_unit: 1.0,
+                target_exposure: Exposure(4.0),
+                reference_price: 90.0,
+                observed_at: now,
+            }),
         });
 
-        let SubmitRecoveryResolution::Proceed {
-            state,
-            target_exposure,
+        let SubmitRecoveryPlan {
+            resolution:
+                SubmitRecoveryResolution::Proceed {
+                    state,
+                    target_exposure,
+                },
+            effects,
         } = recovery
         else {
             panic!("expected matching request to keep proceed resolution");
         };
+        assert!(effects.is_empty());
         assert_eq!(target_exposure, Exposure(4.0));
         assert_eq!(
             state.slots[0]
@@ -1986,7 +2138,7 @@ mod tests {
         let RecoveryResolution::Rebuilt { state } = recovery else {
             panic!("expected stale receipt-backed slot to be cleared");
         };
-        assert!(state.slots.is_empty());
+        assert_eq!(state.slots, vec![empty_inventory_core_slot()]);
         assert!(state.recovery_anomaly.is_none());
     }
 

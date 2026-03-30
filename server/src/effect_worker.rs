@@ -493,7 +493,14 @@ mod tests {
         let manager_handle = state.write_service.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
-        assert!(snapshot.executor_state.slots.is_empty());
+        assert_eq!(
+            snapshot.executor_state.slots,
+            vec![grid_engine::runtime::ExecutionSlot {
+                slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }]
+        );
 
         let effect = repository
             .list_all_effects()
@@ -670,7 +677,11 @@ mod tests {
                 inventory_gap: Exposure(6.0),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                 last_reprice_at: None,
-                slots: vec![],
+                slots: vec![grid_engine::runtime::ExecutionSlot {
+                    slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                    state: SlotState::Empty,
+                    working_order: None,
+                }],
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
                 recovery_anomaly: Some(RecoveryAnomaly::UnknownLiveOrder),
                 stats: ExecutionStats {

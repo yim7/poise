@@ -7,7 +7,9 @@ use grid_core::risk::CapacityBudget;
 use grid_core::strategy::GridConfig;
 use grid_core::types::{ExchangeRules, Exposure, Side};
 
-use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot, RecoveryAnomaly};
+use crate::executor::{
+    ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
+};
 use crate::grid::{GridId, Instrument};
 use crate::ports::OrderStatus;
 use crate::snapshot::{GridRuntimeSnapshot, ObservedState};
@@ -97,7 +99,11 @@ impl ExecutorState {
             inventory_gap: Exposure(0.0),
             gap_started_at: None,
             last_reprice_at: None,
-            slots: Vec::new(),
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new(INVENTORY_CORE_SLOT),
+                state: SlotState::Empty,
+                working_order: None,
+            }],
             last_execution_reason: None,
             recovery_anomaly: None,
             stats: ExecutionStats::new(started_at),

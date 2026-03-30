@@ -325,7 +325,6 @@ impl GridManager {
         target_exposure: grid_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<executor::SubmitRecoveryPlan> {
-        let current_plan_submit = self.current_submit_hint_for_grid(id)?;
         let live_order_observation = live_order.map(|order| OrderObservation {
             order_id: order.order_id.clone(),
             client_order_id: order.client_order_id.clone(),
@@ -335,80 +334,39 @@ impl GridManager {
             realized_pnl: 0.0,
             status: order.status,
         });
+        let observed_at = self.clock.now();
 
-        let resolution = {
+        let plan = {
             let grid = self
                 .grids
-                .get_mut(id)
+                .get(id)
                 .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-            let resolution = executor::recover_submit_effect(executor::SubmitRecoveryInput {
+            let current_plan = self.submit_recovery_plan_context(grid, observed_at);
+            executor::recover_submit_effect(executor::SubmitRecoveryInput {
                 exchange_rules: &grid.exchange_rules,
                 previous_state: &grid.executor_state,
                 request,
                 target_exposure: &target_exposure,
                 current_exposure: &grid.current_exposure,
-                current_plan_submit: current_plan_submit.as_ref(),
                 live_order: live_order_observation.as_ref(),
-            });
-            match &resolution {
-                executor::SubmitRecoveryResolution::Proceed { state, .. }
-                | executor::SubmitRecoveryResolution::Recovered { state }
-                | executor::SubmitRecoveryResolution::Superseded { state } => {
-                    if state != &grid.executor_state {
-                        grid.executor_state = state.clone();
-                        grid.replacement_gate_reason = None;
-                    }
+                current_plan,
+            })
+        };
+
+        {
+            let grid = self
+                .grids
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+            if let Some(state) = plan.resolution.state() {
+                if state != &grid.executor_state {
+                    grid.executor_state = state.clone();
+                    grid.replacement_gate_reason = None;
                 }
-                executor::SubmitRecoveryResolution::AwaitExchangeState => {}
             }
-            resolution
         };
 
-        let effects = match resolution {
-            executor::SubmitRecoveryResolution::Superseded { .. } => {
-                self.stage_superseding_effects(id)?
-            }
-            _ => vec![],
-        };
-
-        Ok(executor::SubmitRecoveryPlan {
-            resolution,
-            effects,
-        })
-    }
-
-    fn current_submit_hint_for_grid(
-        &self,
-        id: &GridId,
-    ) -> Result<Option<executor::PendingSubmitHint>> {
-        let grid = self
-            .grids
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let Some(reference_price) = grid.reference_price else {
-            return Ok(None);
-        };
-
-        if matches!(grid.status, GridStatus::Paused) {
-            return Ok(None);
-        }
-
-        let target = reconciler::reconcile_target(grid, reference_price);
-        if target.suppress_execution {
-            return Ok(None);
-        }
-
-        Ok(executor::current_submit_hint(executor::ExecutorInput {
-            grid_id: &grid.id,
-            instrument: &grid.instrument,
-            exchange_rules: &grid.exchange_rules,
-            base_qty_per_unit: grid.config.base_qty_per_unit(),
-            current_exposure: grid.current_exposure.clone(),
-            target_exposure: target.target_exposure,
-            reference_price,
-            executor_state: None,
-            observed_at: self.clock.now(),
-        }))
+        Ok(plan)
     }
 
     pub fn list_grids(&self) -> Vec<&GridRuntime> {
@@ -644,38 +602,25 @@ impl GridManager {
         Ok((events, effects))
     }
 
-    fn stage_superseding_effects(&mut self, id: &GridId) -> Result<Vec<GridEffect>> {
-        let effects = self.plan_effects_for_current_state(id)?;
-        if let [
-            GridEffect::SubmitOrder {
-                request,
-                target_exposure,
-            },
-        ] = effects.as_slice()
-        {
-            self.record_submit_request(id, request, target_exposure.clone())?;
-        }
-        Ok(effects)
-    }
-
-    fn plan_effects_for_current_state(&self, id: &GridId) -> Result<Vec<GridEffect>> {
-        let grid = self
-            .grids
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
-        let Some(reference_price) = grid.reference_price else {
-            return Ok(vec![]);
-        };
+    fn submit_recovery_plan_context<'a>(
+        &self,
+        grid: &'a GridRuntime,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<executor::SubmitRecoveryPlanContext<'a>> {
+        let reference_price = grid.reference_price?;
         if matches!(grid.status, GridStatus::Paused) {
-            return Ok(vec![]);
+            return None;
         }
 
-        Ok(self
-            .plan_inventory_execution_for_grid(grid, reference_price)?
-            .effects
-            .into_iter()
-            .filter(|effect| !matches!(effect, GridEffect::NoOp))
-            .collect())
+        let target = reconciler::reconcile_target(grid, reference_price);
+        (!target.suppress_execution).then_some(executor::SubmitRecoveryPlanContext {
+            grid_id: &grid.id,
+            instrument: &grid.instrument,
+            base_qty_per_unit: grid.config.base_qty_per_unit(),
+            target_exposure: target.target_exposure,
+            reference_price,
+            observed_at,
+        })
     }
 
     fn plan_inventory_execution_for_grid(
@@ -930,6 +875,14 @@ mod tests {
             .and_then(|slot| slot.working_order.as_ref())
     }
 
+    fn empty_inventory_core_slot() -> ExecutionSlot {
+        ExecutionSlot {
+            slot: OrderSlot::new("inventory_core"),
+            state: SlotState::Empty,
+            working_order: None,
+        }
+    }
+
     fn active_runtime_with_executor_order() -> GridRuntime {
         let mut grid = GridRuntime::new(
             GridId::new("btc-core"),
@@ -1064,7 +1017,7 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         let executor_state = &grid.executor_state;
-        assert!(executor_state.slots.is_empty());
+        assert_eq!(executor_state.slots, vec![empty_inventory_core_slot()]);
         assert_eq!(executor_state.inventory_gap, Exposure(0.0));
         assert_eq!(executor_state.gap_started_at, None);
         assert_eq!(executor_state.stats.started_at, started_at);
@@ -1790,7 +1743,7 @@ mod tests {
         manager.resume_grid("btc1").unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert!(grid.executor_state.slots.is_empty());
+        assert_eq!(grid.executor_state.slots, vec![empty_inventory_core_slot()]);
         assert_eq!(grid.executor_state.last_reprice_at, None);
 
         let transition = manager
@@ -2001,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_reads_current_submit_hint_from_executor() {
+    fn recover_submit_effect_supersede_plan_is_executor_owned() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.current_exposure = grid_core::types::Exposure(0.0);
@@ -2035,10 +1988,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            recovery.resolution,
-            executor::SubmitRecoveryResolution::Superseded { .. }
-        ));
+        let executor::SubmitRecoveryResolution::Superseded { state } = &recovery.resolution else {
+            panic!("expected stale submit effect to be superseded");
+        };
         assert!(matches!(
             recovery.effects.as_slice(),
             [GridEffect::SubmitOrder {
@@ -2065,6 +2017,14 @@ mod tests {
             )),
             _ => None,
         };
+        assert_eq!(
+            state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::SubmitPending,
+                working_order: replacement_pending.clone(),
+            }]
+        );
         assert_eq!(
             inventory_core_order(manager.get_grid("btc-core").unwrap()),
             replacement_pending.as_ref()
@@ -2396,7 +2356,7 @@ mod tests {
         assert!(transition.effects.is_empty());
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert!(grid.executor_state.slots.is_empty());
+        assert_eq!(grid.executor_state.slots, vec![empty_inventory_core_slot()]);
         assert!(inventory_core_order(grid).is_none());
     }
 
@@ -2608,7 +2568,7 @@ mod tests {
             inventory_gap: grid_core::types::Exposure(6.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
-            slots: vec![],
+            slots: vec![empty_inventory_core_slot()],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
             recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
@@ -2639,7 +2599,7 @@ mod tests {
             grid.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
-        assert!(grid.executor_state.slots.is_empty());
+        assert_eq!(grid.executor_state.slots, vec![empty_inventory_core_slot()]);
     }
 
     #[test]
@@ -2652,7 +2612,7 @@ mod tests {
             inventory_gap: grid_core::types::Exposure(4.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
-            slots: vec![],
+            slots: vec![empty_inventory_core_slot()],
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
             recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
@@ -2882,13 +2842,19 @@ mod tests {
 
         let grid = manager.get_grid("btc1").unwrap();
         assert!(inventory_core_order(grid).is_none());
-        assert_eq!(grid.executor_state.slots.len(), 1);
+        assert_eq!(grid.executor_state.slots.len(), 2);
         assert_eq!(
             grid.executor_state.slots[0].slot,
+            OrderSlot::new("inventory_core")
+        );
+        assert_eq!(grid.executor_state.slots[0].state, SlotState::Empty);
+        assert!(grid.executor_state.slots[0].working_order.is_none());
+        assert_eq!(
+            grid.executor_state.slots[1].slot,
             OrderSlot::new("inventory_followup")
         );
         assert_eq!(
-            grid.executor_state.slots[0]
+            grid.executor_state.slots[1]
                 .working_order
                 .as_ref()
                 .and_then(|order| order.order_id.as_deref()),

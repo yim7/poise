@@ -1155,7 +1155,14 @@ mod tests {
         assert!(
             repository
                 .snapshot_for("btc-core")
-                .map(|snapshot| snapshot.executor_state.slots.is_empty())
+                .map(|snapshot| {
+                    snapshot.executor_state.slots
+                        == vec![ExecutionSlot {
+                            slot: OrderSlot::new("inventory_core"),
+                            state: SlotState::Empty,
+                            working_order: None,
+                        }]
+                })
                 .unwrap_or(false)
         );
         let effect = repository
@@ -1399,10 +1406,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            resolution,
-            SubmitRecoveryResolution::Superseded { .. }
-        ));
+        let SubmitRecoveryResolution::Superseded { state } = resolution else {
+            panic!("expected stale submit effect to be superseded");
+        };
         let effects = repository.all_effects();
         assert_eq!(effects.len(), 2);
         assert_eq!(
@@ -1437,6 +1443,14 @@ mod tests {
             )),
             _ => None,
         };
+        assert_eq!(
+            state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::SubmitPending,
+                working_order: replacement_pending.clone(),
+            }]
+        );
         assert_eq!(
             repository
                 .snapshot_for("btc-core")
