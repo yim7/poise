@@ -15,13 +15,13 @@
 ### 重点修改目录
 
 - `Cargo.toml`：workspace 成员与共享依赖入口
-- `core/`：`grid-core` -> `poise-core`，`GridConfig` 等基础领域类型收敛到 `Track*`
+- `core/`：`poise-core` -> `poise-core`，`GridConfig` 等基础领域类型收敛到 `Track*`
 - `engine/`：`grid.rs` 模块改为 `track.rs`，`GridId` / `GridManager` / `GridRuntime` 等统一改为 `Track*`
 - `storage/`：SQLite schema、表名、列名和持久化读写从 `grid_*` 切到 `track_*`
-- `protocol/`：DTO 和 JSON 字段从 `Grid*` / `grid_id` / `/grids` 切到 `Track*` / `track_id` / `/tracks`
+- `protocol/`：DTO 和 JSON 字段从 `Grid*` / `track_id` / `/tracks` 切到 `Track*` / `track_id` / `/tracks`
 - `server/`：配置结构、HTTP / WS 路由、projector、query/read/write service、运行入口和默认数据库文件名
 - `tui/`：客户端 DTO、HTTP / WS 请求路径、环境变量、binary 名和 fixture 文件名
-- `configs/`：`[[grids]]` / `grid_id` 改成 `[[tracks]]` / `track_id`
+- `configs/`：`[[tracks]]` / `track_id` 改成 `[[tracks]]` / `track_id`
 - `README.md` 与 `docs/`：当前入口文档、架构 spec、协议文档、当前主线计划和所有仍描述现行行为的文档
 
 ### 关键文件分组
@@ -108,13 +108,13 @@ Expected:
 - [x] **Step 2: 修改 workspace 和 7 个 crate 的 package 名**
 
 要求：
-- `grid-core` -> `poise-core`
-- `grid-engine` -> `poise-engine`
-- `grid-storage` -> `poise-storage`
-- `grid-protocol` -> `poise-protocol`
-- `grid-binance` -> `poise-binance`
-- `grid-server` -> `poise-server`
-- `grid-tui` -> `poise-tui`
+- `poise-core` -> `poise-core`
+- `poise-engine` -> `poise-engine`
+- `poise-storage` -> `poise-storage`
+- `poise-protocol` -> `poise-protocol`
+- `poise-binance` -> `poise-binance`
+- `poise-server` -> `poise-server`
+- `poise-tui` -> `poise-tui`
 
 同时修复各 `Cargo.toml` 中的 path 依赖 key，保证依赖声明也切到 `poise-*`。
 
@@ -128,8 +128,8 @@ Expected:
 - `use grid_binance::` -> `use poise_binance::`
 
 同时更新测试中显式写死的 package / binary 名：
-- `grid-server` -> `poise-server`
-- `grid-tui` -> `poise-tui`
+- `poise-server` -> `poise-server`
+- `poise-tui` -> `poise-tui`
 
 - [x] **Step 4: 更新 `Cargo.lock` 并运行 compile-only 验证**
 
@@ -207,7 +207,7 @@ Expected:
 
 要求：
 - `GridConfig` -> `TrackConfig`
-- `grid_id` 字段 / 变量统一改为 `track_id`
+- `track_id` 字段 / 变量统一改为 `track_id`
 - `grid` / `grids` 局部变量统一改为 `track` / `tracks`
 - `GridReadModel` -> `TrackReadModel`
 - `GridProjector` / `GridQueryService` / `GridWriteService` 等 server 层类型同步收敛
@@ -267,7 +267,7 @@ Task 2 code commits:
 - [x] **Step 1: 先用现有命令验证外部接口还停留在旧命名**
 
 Run:
-`rg -n "/grids|grid_id|\\[\\[grids\\]\\]|GRID_PLATFORM|GRID_TUI" protocol server tui configs README.md docs/protocol-contract.md`
+`rg -n "/tracks|track_id|\\[\\[grids\\]\\]|GRID_PLATFORM|GRID_TUI" protocol server tui configs README.md docs/protocol-contract.md`
 
 Expected:
 能搜到旧接口、旧配置键和旧环境变量。
@@ -277,12 +277,12 @@ Expected:
 要求：
 - `Config.grids` -> `Config.tracks`
 - `GridDefinition` -> `TrackDefinition`
-- `grid_id` -> `track_id`
-- `[[grids]]` -> `[[tracks]]`
-- `/grids` -> `/tracks`
-- `/grids/:id` -> `/tracks/:id`
-- `/grids/:id/commands` -> `/tracks/:id/commands`
-- `grid-server.sqlite` 默认文件名改为 `poise-server.sqlite`
+- `track_id` -> `track_id`
+- `[[tracks]]` -> `[[tracks]]`
+- `/tracks` -> `/tracks`
+- `/tracks/:id` -> `/tracks/:id`
+- `/tracks/:id/commands` -> `/tracks/:id/commands`
+- `poise-server.sqlite` 默认文件名改为 `poise-server.sqlite`
 
 - [x] **Step 3: 修改 protocol DTO 和 JSON 字段**
 
@@ -293,16 +293,16 @@ Expected:
 - `GridCommandRequest` -> `TrackCommandRequest`
 - `GridCommandAccepted` -> `TrackCommandAccepted`
 - `GridStreamEvent` -> `TrackStreamEvent`
-- JSON 字段 `grid_id` -> `track_id`
+- JSON 字段 `track_id` -> `track_id`
 
 - [x] **Step 4: 修改 TUI 客户端、fixture 和环境变量**
 
 要求：
 - API client 与 protocol 解析全部改为 `/tracks` 和 `track_id`
 - 环境变量：
-  - `GRID_PLATFORM_BASE_URL` -> `POISE_BASE_URL`
-  - `GRID_PLATFORM_WS_URL` -> `POISE_WS_URL`
-  - `GRID_TUI_WS_URL` -> `POISE_TUI_WS_URL`
+  - `POISE_BASE_URL` -> `POISE_BASE_URL`
+  - `POISE_WS_URL` -> `POISE_WS_URL`
+  - `POISE_TUI_WS_URL` -> `POISE_TUI_WS_URL`
 - 测试 fixture 文件名和内容同步改为 `track_*`
 - TUI 内所有用户可见命令示例改成 `poise-server` / `poise-tui`
 
@@ -368,7 +368,7 @@ Expected:
 - `grid_snapshots` -> `track_snapshots`
 - `domain_events` -> `track_events`
 - `grid_effects` -> `track_effects`
-- 所有 `grid_id` 列 -> `track_id`
+- 所有 `track_id` 列 -> `track_id`
 - 索引名同步改为 `idx_track_*`
 - `StoredGridSnapshot` / `CommittedGridWrite` / `PersistedGridEffect` 等存储接口类型统一切到 `Track*`
 
@@ -389,8 +389,9 @@ git add storage/src/schema.rs storage/src/sqlite.rs engine/src/ports.rs server/s
 git commit -m "refactor(storage): rename sqlite grid schema to track"
 ```
 
-Task 4 code commit:
-`c087adc7a5da174b8fed3e8d10bc09f51c07e773`
+Task 4 code commits:
+- `c087adc7a5da174b8fed3e8d10bc09f51c07e773`
+- `4a7f59ebf1cfaa934670cc70d55fd58c40b62794`
 
 ---
 
@@ -406,7 +407,7 @@ Task 4 code commit:
 - Modify: `docs/superpowers/specs/2026-03-25-grid-runtime-boundary-redesign.md`
 - Modify: `docs/superpowers/specs/2026-03-25-grid-write-boundary-convergence-design.md`
 - Modify: `docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md`
-- Modify: `docs/superpowers/specs/2026-03-27-grid-engine-runtime-internalization-design.md`
+- Modify: `docs/superpowers/specs/2026-03-27-poise-engine-runtime-internalization-design.md`
 - Modify: `docs/superpowers/specs/2026-03-28-grid-order-replacement-threshold-design.md`
 - Modify: `docs/superpowers/specs/2026-03-28-grid-replacement-gate-observability-design.md`
 - Modify: `docs/superpowers/specs/2026-03-28-grid-strategy-statistics-design.md`
@@ -422,7 +423,7 @@ Task 4 code commit:
 - [ ] **Step 1: 先用搜索命令盘点文档里的旧命名残留**
 
 Run:
-`rg -n "grid-platform|grid-server|grid-tui|grid-protocol|grid-core|grid-engine|grid-storage|grid-binance|Grid[A-Z]|grid_id|\\[\\[grids\\]\\]|/grids|GRID_PLATFORM|GRID_TUI" README.md docs configs`
+`rg -n "grid-platform|poise-server|poise-tui|poise-protocol|poise-core|poise-engine|poise-storage|poise-binance|Grid[A-Z]|track_id|\\[\\[grids\\]\\]|/tracks|GRID_PLATFORM|GRID_TUI" README.md docs configs`
 
 Expected:
 输出大量旧引用，确认文档和示例还未完成收敛。
@@ -444,7 +445,7 @@ Expected:
 - [ ] **Step 4: 用搜索命令做文档收尾验证**
 
 Run:
-`rg -n "grid-platform|grid-server|grid-tui|grid-protocol|grid-core|grid-engine|grid-storage|grid-binance|grid_id|\\[\\[grids\\]\\]|/grids|GRID_PLATFORM|GRID_TUI" README.md docs configs`
+`rg -n "grid-platform|poise-server|poise-tui|poise-protocol|poise-core|poise-engine|poise-storage|poise-binance|track_id|\\[\\[grids\\]\\]|/tracks|GRID_PLATFORM|GRID_TUI" README.md docs configs`
 
 Expected:
 当前文档入口、示例配置和现行说明不再命中旧命名。若历史说明中必须保留旧名，只能出现在明确的历史语境里，不能出现在现行入口段落。
