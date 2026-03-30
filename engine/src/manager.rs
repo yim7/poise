@@ -102,8 +102,30 @@ impl GridManager {
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<GridTransition> {
-        let (events, effects) =
-            self.apply_startup_exchange_state(id, position, open_orders, pending_submit_hints)?;
+        let (events, effects) = self.apply_startup_exchange_state(
+            id,
+            position,
+            open_orders,
+            pending_submit_hints,
+            true,
+        )?;
+        self.transition_for(id, events, effects)
+    }
+
+    pub fn sync_exchange_state_without_reconcile(
+        &mut self,
+        id: &GridId,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+        pending_submit_hints: Vec<executor::PendingSubmitHint>,
+    ) -> Result<GridTransition> {
+        let (events, effects) = self.apply_startup_exchange_state(
+            id,
+            position,
+            open_orders,
+            pending_submit_hints,
+            false,
+        )?;
         self.transition_for(id, events, effects)
     }
 
@@ -465,6 +487,7 @@ impl GridManager {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
+        allow_follow_up_reconcile: bool,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
         self.observe_position(id, position)?;
         let observed_at = self.clock.now();
@@ -519,6 +542,16 @@ impl GridManager {
                     grid.replacement_gate_reason = None;
                     return Ok((vec![], vec![]));
                 };
+
+                if !allow_follow_up_reconcile {
+                    let grid = self
+                        .grids
+                        .get_mut(id)
+                        .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+                    grid.executor_state = planned_grid.executor_state;
+                    grid.replacement_gate_reason = None;
+                    return Ok((vec![], vec![]));
+                }
 
                 let planned =
                     self.plan_inventory_execution_for_grid(&planned_grid, reference_price)?;

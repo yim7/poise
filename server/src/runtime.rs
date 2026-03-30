@@ -6,7 +6,7 @@ use grid_engine::observation::{OrderObservation, PositionObservation};
 use grid_engine::ports::{
     ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -21,6 +21,7 @@ pub struct ServerRuntime {
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
     recovery_retry_interval: Duration,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -56,11 +57,13 @@ impl ServerRuntime {
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
     ) -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             state,
             exchange,
             market_data,
             recovery_retry_interval,
+            shutdown_tx,
         }
     }
 
@@ -70,10 +73,11 @@ impl ServerRuntime {
         self.startup_sync().await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
-        let recovery_task = self.spawn_recovery_task();
-        let effect_task = self.spawn_effect_task();
-        let user_task = self.spawn_user_task(user_receiver, startup_cutoff);
-        let market_task = self.spawn_market_task();
+        let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
+        let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
+        let user_task =
+            self.spawn_user_task(user_receiver, startup_cutoff, self.shutdown_tx.subscribe());
+        let market_task = self.spawn_market_task(self.shutdown_tx.subscribe());
 
         Ok(RuntimeHandles {
             market_task,
@@ -81,6 +85,57 @@ impl ServerRuntime {
             effect_task,
             recovery_task,
         })
+    }
+
+    pub async fn shutdown(&self, mut handles: RuntimeHandles) {
+        let _ = self.shutdown_tx.send(true);
+        tracing::info!("shutdown signal sent");
+
+        let drain_timeout = Duration::from_secs(30);
+        if tokio::time::timeout(drain_timeout, &mut handles.effect_task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("effect worker drain timed out after {drain_timeout:?}");
+            handles.effect_task.abort();
+            let _ = handles.effect_task.await;
+        }
+
+        let grids = self.state.write_service.grid_instruments().await;
+        for grid in &grids {
+            if let Err(error) = self.exchange.cancel_all(&grid.instrument).await {
+                tracing::warn!(
+                    "failed to cancel all orders for {} during shutdown: {error}",
+                    grid.instrument.symbol
+                );
+                continue;
+            }
+
+            if let Err(error) = sync_exchange_state_from_exchange(
+                &self.state,
+                &self.exchange,
+                &grid.id,
+                &grid.instrument,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "failed to persist final exchange state for {} during shutdown: {}",
+                    grid.instrument.symbol,
+                    error.message()
+                );
+            }
+        }
+
+        handles.market_task.abort();
+        handles.user_task.abort();
+        handles.recovery_task.abort();
+        let _ = handles.market_task.await;
+        let _ = handles.user_task.await;
+        let _ = handles.recovery_task.await;
+
+        tracing::info!("shutdown complete");
     }
 
     async fn startup_sync(&self) -> Result<()> {
@@ -132,7 +187,7 @@ impl ServerRuntime {
         Ok(())
     }
 
-    fn spawn_market_task(&self) -> JoinHandle<()> {
+    fn spawn_market_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         let state = self.state.clone();
         let market_data = Arc::clone(&self.market_data);
 
@@ -141,24 +196,47 @@ impl ServerRuntime {
             let mut workers = JoinSet::new();
 
             for grid in grids {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 let instrument = grid.instrument.clone();
                 match market_data.subscribe_prices(&instrument).await {
                     Ok(mut receiver) => {
                         let state = state.clone();
+                        let mut worker_shutdown_rx = shutdown_rx.clone();
                         workers.spawn(async move {
-                            while let Some(tick) = receiver.recv().await {
-                                match state
-                                    .write_service
-                                    .observe_market(&grid.id, tick.reference_price)
-                                    .await
-                                {
-                                    Ok(_) => {}
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            "failed to apply market data update for {}: {}",
-                                            instrument.symbol,
-                                            error
-                                        );
+                            loop {
+                                if *worker_shutdown_rx.borrow() {
+                                    break;
+                                }
+
+                                tokio::select! {
+                                    biased;
+                                    changed = worker_shutdown_rx.changed() => {
+                                        if changed.is_err() || *worker_shutdown_rx.borrow() {
+                                            break;
+                                        }
+                                    }
+                                    tick = receiver.recv() => {
+                                        let Some(tick) = tick else {
+                                            break;
+                                        };
+
+                                        match state
+                                            .write_service
+                                            .observe_market(&grid.id, tick.reference_price)
+                                            .await
+                                        {
+                                            Ok(_) => {}
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    "failed to apply market data update for {}: {}",
+                                                    instrument.symbol,
+                                                    error
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -181,16 +259,17 @@ impl ServerRuntime {
         })
     }
 
-    fn spawn_effect_task(&self) -> JoinHandle<()> {
-        EffectWorker::new(
+    fn spawn_effect_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        EffectWorker::with_shutdown_rx(
             self.state.clone(),
             Arc::clone(&self.exchange),
             Duration::from_millis(10),
+            shutdown_rx,
         )
         .spawn()
     }
 
-    fn spawn_recovery_task(&self) -> JoinHandle<()> {
+    fn spawn_recovery_task(&self, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         let state = self.state.clone();
         let exchange = Arc::clone(&self.exchange);
         let retry_interval = self.recovery_retry_interval;
@@ -203,7 +282,17 @@ impl ServerRuntime {
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
             loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
                     _ = ticker.tick() => {
                         let now = Instant::now();
                         let due_grids: Vec<(String, grid_engine::grid::Instrument)> = tracked
@@ -221,6 +310,7 @@ impl ServerRuntime {
                                 &exchange,
                                 &grid_id,
                                 &instrument,
+                                true,
                             )
                             .await {
                                 tracing::warn!(
@@ -264,11 +354,31 @@ impl ServerRuntime {
         &self,
         mut receiver: mpsc::Receiver<UserDataEvent>,
         startup_cutoff: chrono::DateTime<chrono::Utc>,
+        mut shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
         let state = self.state.clone();
 
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
+                let event = tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    event = receiver.recv() => event,
+                };
+
+                let Some(event) = event else {
+                    break;
+                };
+
                 if event.event_time <= startup_cutoff {
                     continue;
                 }
@@ -325,6 +435,7 @@ async fn sync_exchange_state_from_exchange(
     exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
     instrument: &grid_engine::grid::Instrument,
+    allow_follow_up_reconcile: bool,
 ) -> std::result::Result<(), GridMutationError> {
     let position = exchange
         .get_position(instrument)
@@ -334,15 +445,27 @@ async fn sync_exchange_state_from_exchange(
         .get_open_orders(instrument)
         .await
         .map_err(GridMutationError::Persistence)?;
-    let _ = state
-        .write_service
-        .sync_exchange_state(
-            grid_id,
-            position_observation(&position),
-            open_orders.iter().map(order_observation).collect(),
-        )
-        .await
-        .map_err(preserve_grid_mutation_error)?;
+    if allow_follow_up_reconcile {
+        let _ = state
+            .write_service
+            .sync_exchange_state(
+                grid_id,
+                position_observation(&position),
+                open_orders.iter().map(order_observation).collect(),
+            )
+            .await
+            .map_err(preserve_grid_mutation_error)?;
+    } else {
+        let _ = state
+            .write_service
+            .sync_exchange_state_without_reconcile(
+                grid_id,
+                position_observation(&position),
+                open_orders.iter().map(order_observation).collect(),
+            )
+            .await
+            .map_err(preserve_grid_mutation_error)?;
+    }
     Ok(())
 }
 
@@ -1762,7 +1885,11 @@ mod tests {
             market_data as Arc<dyn MarketDataPort>,
         );
 
-        let user_task = runtime.spawn_user_task(user_receiver, test_server_time());
+        let user_task = runtime.spawn_user_task(
+            user_receiver,
+            test_server_time(),
+            runtime.shutdown_tx.subscribe(),
+        );
         let save_count_before_event = persistence.save_transition_count();
         user_sender
             .send(position_event_at(
@@ -1848,8 +1975,12 @@ mod tests {
             market_data as Arc<dyn MarketDataPort>,
         );
 
-        let user_task = runtime.spawn_user_task(user_receiver, test_server_time());
-        let effect_task = runtime.spawn_effect_task();
+        let user_task = runtime.spawn_user_task(
+            user_receiver,
+            test_server_time(),
+            runtime.shutdown_tx.subscribe(),
+        );
+        let effect_task = runtime.spawn_effect_task(runtime.shutdown_tx.subscribe());
         user_sender
             .send(position_event_at(
                 test_server_time() + chrono::Duration::milliseconds(1),
@@ -2618,6 +2749,64 @@ mod tests {
         );
 
         shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_orders_and_persists_final_exchange_state() {
+        let mut snapshot = test_snapshot();
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("live-1"),
+                "live-1",
+                Side::Buy,
+                94.5,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        let fixture = runtime_fixture(
+            Some(snapshot),
+            btc_position(7.5, 3.0),
+            vec![btc_exchange_order(
+                "live-1",
+                "live-1",
+                Side::Buy,
+                94.5,
+                0.25,
+                0.0,
+                OrderStatus::New,
+            )],
+            test_budget(),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        fixture.runtime.shutdown(handles).await;
+
+        assert_eq!(
+            fixture.exchange.cancel_all_symbols.lock().unwrap().as_slice(),
+            ["BTCUSDT"]
+        );
+        let snapshot = fixture
+            .persistence
+            .load_grid_state("BTCUSDT")
+            .await
+            .unwrap()
+            .expect("final snapshot should be persisted");
+        assert_eq!(snapshot.current_exposure, Exposure(2.0));
+        assert_eq!(snapshot.executor_state.recovery_anomaly, None);
+        assert_eq!(
+            snapshot.executor_state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }]
+        );
     }
 
     #[tokio::test]

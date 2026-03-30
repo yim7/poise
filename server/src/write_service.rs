@@ -242,6 +242,27 @@ impl GridWriteService {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
     ) -> Result<GridTransition> {
+        self.sync_exchange_state_inner(id, position, open_orders, true)
+            .await
+    }
+
+    pub async fn sync_exchange_state_without_reconcile(
+        &self,
+        id: &str,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+    ) -> Result<GridTransition> {
+        self.sync_exchange_state_inner(id, position, open_orders, false)
+            .await
+    }
+
+    async fn sync_exchange_state_inner(
+        &self,
+        id: &str,
+        position: PositionObservation,
+        open_orders: Vec<OrderObservation>,
+        allow_follow_up_reconcile: bool,
+    ) -> Result<GridTransition> {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let pending_submit_hints = self
             .repository
@@ -265,14 +286,25 @@ impl GridWriteService {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
-            let transition = manager
-                .sync_exchange_state(
-                    &GridId::new(id),
-                    position,
-                    open_orders,
-                    pending_submit_hints,
-                )
-                .map_err(GridMutationError::Mutation)?;
+            let transition = if allow_follow_up_reconcile {
+                manager
+                    .sync_exchange_state(
+                        &GridId::new(id),
+                        position,
+                        open_orders,
+                        pending_submit_hints,
+                    )
+                    .map_err(GridMutationError::Mutation)?
+            } else {
+                manager
+                    .sync_exchange_state_without_reconcile(
+                        &GridId::new(id),
+                        position,
+                        open_orders,
+                        pending_submit_hints,
+                    )
+                    .map_err(GridMutationError::Mutation)?
+            };
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;

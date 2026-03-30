@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use grid_engine::ports::{ExchangePort, OrderRequest, PersistedGridEffect};
 use grid_engine::transition::GridEffect;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
@@ -15,6 +16,7 @@ pub struct EffectWorker {
     state: ServerState,
     exchange: Arc<dyn ExchangePort>,
     poll_interval: Duration,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl EffectWorker {
@@ -23,29 +25,63 @@ impl EffectWorker {
         exchange: Arc<dyn ExchangePort>,
         poll_interval: Duration,
     ) -> Self {
+        let (_, shutdown_rx) = watch::channel(false);
+        Self::with_shutdown_rx(state, exchange, poll_interval, shutdown_rx)
+    }
+
+    pub fn with_shutdown_rx(
+        state: ServerState,
+        exchange: Arc<dyn ExchangePort>,
+        poll_interval: Duration,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             state,
             exchange,
             poll_interval,
+            shutdown_rx,
         }
     }
 
     pub fn spawn(&self) -> JoinHandle<()> {
         let worker = self.clone();
         tokio::spawn(async move {
-            loop {
-                if let Err(error) = worker.run_once().await {
-                    tracing::warn!("effect worker iteration failed: {error}");
-                }
-                sleep(worker.poll_interval).await;
+            if let Err(error) = worker.run_until_shutdown().await {
+                tracing::warn!("effect worker iteration failed: {error}");
             }
         })
+    }
+
+    pub async fn run_until_shutdown(&self) -> Result<()> {
+        let mut shutdown_rx = self.shutdown_rx.clone();
+
+        loop {
+            if *shutdown_rx.borrow() {
+                return Ok(());
+            }
+
+            tokio::select! {
+                biased;
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        return Ok(());
+                    }
+                }
+                _ = sleep(self.poll_interval) => {
+                    self.run_once().await?;
+                }
+            }
+        }
     }
 
     pub async fn run_once(&self) -> Result<()> {
         let mut seen_effects = HashSet::new();
 
         loop {
+            if *self.shutdown_rx.borrow() {
+                break;
+            }
+
             let Some(effect) = self
                 .state
                 .effect_service
@@ -300,7 +336,8 @@ mod tests {
     };
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
-    use tokio::sync::{Mutex as AsyncMutex, broadcast};
+    use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
+    use tokio::time::timeout;
 
     use crate::assembly::build_server_state;
     use crate::effect_service::EffectService;
@@ -606,6 +643,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn effect_worker_stops_polling_new_effects_after_shutdown_signal() {
+        let repository = Arc::new(MemoryRepository::default());
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        let submit_effect = match transition.effects.as_slice() {
+            [GridEffect::SubmitOrder { .. }] => repository
+                .list_all_effects()
+                .await
+                .into_iter()
+                .next()
+                .expect("submit effect should be persisted"),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+        repository
+            .seed_effect(PersistedGridEffect {
+                effect_id: "btc-core:shutdown:0".into(),
+                grid_id: GridId::new("btc-core"),
+                batch_id: "shutdown".into(),
+                sequence: 0,
+                effect: GridEffect::NoOp,
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = EffectWorker::with_shutdown_rx(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(1),
+            shutdown_rx,
+        );
+        let task = worker.spawn();
+
+        submit_started.notified().await;
+        shutdown_tx.send(true).unwrap();
+        release_submit.notify_waiters();
+
+        timeout(Duration::from_secs(1), async {
+            task.await.unwrap();
+        })
+        .await
+        .unwrap();
+
+        let effects = repository.list_all_effects().await;
+        let submit = effects
+            .iter()
+            .find(|effect| effect.effect_id == submit_effect.effect_id)
+            .expect("submit effect should still exist");
+        let no_op = effects
+            .iter()
+            .find(|effect| effect.effect_id == "btc-core:shutdown:0")
+            .expect("no-op effect should still exist");
+
+        assert_eq!(exchange.effects.lock().await.len(), 1);
+        assert_eq!(submit.status, EffectStatus::Succeeded);
+        assert_eq!(no_op.status, EffectStatus::Pending);
+    }
+
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
@@ -818,12 +929,30 @@ mod tests {
     #[derive(Default)]
     struct FakeExchange {
         effects: AsyncMutex<Vec<OrderRequest>>,
+        submit_started: Option<Arc<Notify>>,
+        release_submit: Option<Arc<Notify>>,
+    }
+
+    impl FakeExchange {
+        fn with_blocked_submit(submit_started: Arc<Notify>, release_submit: Arc<Notify>) -> Self {
+            Self {
+                effects: AsyncMutex::default(),
+                submit_started: Some(submit_started),
+                release_submit: Some(release_submit),
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl ExchangePort for FakeExchange {
         async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
             self.effects.lock().await.push(req.clone());
+            if let Some(notify) = &self.submit_started {
+                notify.notify_waiters();
+            }
+            if let Some(notify) = &self.release_submit {
+                notify.notified().await;
+            }
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: req.client_order_id,
