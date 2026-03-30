@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use poise_engine::command::GridCommand;
-use poise_engine::grid::GridId;
+use poise_engine::track::TrackId;
 use poise_protocol::{
     GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
 };
@@ -47,7 +47,7 @@ async fn get_grid_detail(
     Path(id): Path<String>,
     State(state): State<ServerState>,
 ) -> Result<Json<GridDetailView>, (StatusCode, Json<ErrorResponse>)> {
-    let grid_id = GridId::new(id.clone());
+    let grid_id = TrackId::new(id.clone());
     let source = state
         .query_service
         .load_detail_source(&grid_id)
@@ -128,8 +128,8 @@ fn map_query_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
 
 fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     match error.downcast::<GridMutationError>() {
-        Ok(GridMutationError::LoadedGridInvariant { grid_id }) => {
-            internal_error(GridMutationError::LoadedGridInvariant { grid_id }.to_string())
+        Ok(GridMutationError::LoadedGridInvariant { track_id }) => {
+            internal_error(GridMutationError::LoadedGridInvariant { track_id }.to_string())
         }
         Ok(GridMutationError::Mutation(error)) => bad_request(error.to_string()),
         Ok(GridMutationError::Persistence(error)) => internal_error(error.to_string()),
@@ -146,12 +146,12 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use chrono::Utc;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::ExchangeRules;
-    use poise_engine::grid::{GridId, Instrument, Venue};
-    use poise_engine::manager::GridManager;
+    use poise_engine::track::{TrackId, Instrument, Venue};
+    use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, GridReadRepositoryPort, OrderStatus, StateRepositoryPort, StoredGridSnapshot,
+        ClockPort, TrackReadRepositoryPort, OrderStatus, StateRepositoryPort, StoredTrackSnapshot,
     };
     use poise_protocol::{
         ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, GridCommandAccepted,
@@ -161,10 +161,10 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::assembly::{ServerState, build_server_state};
-    use crate::notifications::GridInternalNotification;
-    use crate::projector::GridProjector;
-    use crate::query_service::GridQueryService;
-    use crate::write_service::GridWriteService;
+    use crate::notifications::TrackInternalNotification;
+    use crate::projector::TrackProjector;
+    use crate::query_service::TrackQueryService;
+    use crate::write_service::TrackWriteService;
 
     use super::router;
 
@@ -194,7 +194,7 @@ mod tests {
 
     async fn build_test_state<R>(repository: Arc<R>) -> ServerState
     where
-        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
     {
         let manager = test_manager();
         let mut snapshot = manager
@@ -206,10 +206,10 @@ mod tests {
             .save_transition("btc-core", &snapshot, &[], &[])
             .await
             .unwrap();
-        let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let write_service = Arc::new(GridWriteService::new(
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             notifications,
@@ -218,18 +218,18 @@ mod tests {
         build_server_state(
             write_service,
             state_repository,
-            Arc::new(GridQueryService::new(read_repository)),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
         )
     }
 
-    fn test_manager() -> GridManager {
-        let mut manager = GridManager::new(Arc::new(FakeClock));
+    fn test_manager() -> TrackManager {
+        let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
             .add_grid(
-                GridId::new("btc-core"),
+                TrackId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
-                GridConfig {
+                TrackConfig {
                     lower_price: 90.0,
                     upper_price: 110.0,
                     long_exposure_units: 8.0,
@@ -248,8 +248,8 @@ mod tests {
             .unwrap();
         manager
             .observe(
-                &GridId::new("btc-core"),
-                poise_engine::observation::GridObservation::Market(
+                &TrackId::new("btc-core"),
+                poise_engine::observation::TrackObservation::Market(
                     poise_engine::observation::MarketObservation {
                         reference_price: 95.0,
                     },
@@ -431,19 +431,19 @@ mod tests {
                 .snapshot("btc-core")
                 .expect("seeded manager should expose runtime snapshot"),
         );
-        let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
         let app = router(build_server_state(
-            Arc::new(GridWriteService::new(
+            Arc::new(TrackWriteService::new(
                 manager,
                 state_repository.clone(),
                 notifications,
             )),
             state_repository,
-            Arc::new(GridQueryService::new(
-                repository as Arc<dyn GridReadRepositoryPort>,
+            Arc::new(TrackQueryService::new(
+                repository as Arc<dyn TrackReadRepositoryPort>,
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         ));
 
         let pause = app
@@ -593,14 +593,14 @@ mod tests {
 
     #[derive(Default)]
     struct FailingRepository {
-        snapshots: std::sync::Mutex<std::collections::HashMap<String, StoredGridSnapshot>>,
+        snapshots: std::sync::Mutex<std::collections::HashMap<String, StoredTrackSnapshot>>,
     }
 
     impl FailingRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::ports::GridSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::ports::TrackSnapshot) {
             self.snapshots.lock().unwrap().insert(
-                snapshot.grid_id.as_str().to_string(),
-                StoredGridSnapshot {
+                snapshot.track_id.as_str().to_string(),
+                StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 },
@@ -613,18 +613,18 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             _id: &str,
-            _state: &poise_engine::ports::GridSnapshot,
+            _state: &poise_engine::ports::TrackSnapshot,
             _events: &[poise_core::events::DomainEvent],
-            _effects: &[poise_engine::transition::GridEffect],
+            _effects: &[poise_engine::transition::TrackEffect],
             _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
-        ) -> anyhow::Result<poise_engine::ports::CommittedGridWrite> {
+        ) -> anyhow::Result<poise_engine::ports::CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
         }
 
         async fn load_grid_state(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Option<poise_engine::ports::GridSnapshot>> {
+        ) -> anyhow::Result<Option<poise_engine::ports::TrackSnapshot>> {
             Ok(None)
         }
 
@@ -637,28 +637,28 @@ mod tests {
 
         async fn list_dispatchable_effects(
             &self,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedGridEffect>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
-            _grid_id: &GridId,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedGridEffect>> {
+            _grid_id: &TrackId,
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }
 
     #[async_trait::async_trait]
-    impl GridReadRepositoryPort for FailingRepository {
-        async fn list_grid_snapshots(&self) -> anyhow::Result<Vec<StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for FailingRepository {
+        async fn list_grid_snapshots(&self) -> anyhow::Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())
         }
 
         async fn load_grid_snapshot(
             &self,
-            grid_id: &GridId,
-        ) -> anyhow::Result<Option<StoredGridSnapshot>> {
+            grid_id: &TrackId,
+        ) -> anyhow::Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -669,7 +669,7 @@ mod tests {
 
         async fn list_recent_grid_events(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
         ) -> anyhow::Result<Vec<poise_engine::ports::StoredDomainEvent>> {
             Ok(Vec::new())
@@ -677,9 +677,9 @@ mod tests {
 
         async fn list_recent_grid_effects(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedGridEffect>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }

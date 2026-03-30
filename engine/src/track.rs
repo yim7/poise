@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::GridConfig;
+use poise_core::strategy::TrackConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GridId(String);
+pub struct TrackId(String);
 
-impl GridId {
+impl TrackId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -16,13 +16,13 @@ impl GridId {
     }
 }
 
-impl From<String> for GridId {
+impl From<String> for TrackId {
     fn from(value: String) -> Self {
         Self::new(value)
     }
 }
 
-impl From<&str> for GridId {
+impl From<&str> for TrackId {
     fn from(value: &str) -> Self {
         Self::new(value)
     }
@@ -58,18 +58,18 @@ impl Instrument {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GridDefinition {
-    pub id: GridId,
+pub struct TrackDefinition {
+    pub id: TrackId,
     pub instrument: Instrument,
-    pub config: GridConfig,
+    pub config: TrackConfig,
     pub budget: CapacityBudget,
 }
 
-impl GridDefinition {
+impl TrackDefinition {
     pub fn new(
-        id: GridId,
+        id: TrackId,
         instrument: Instrument,
-        config: GridConfig,
+        config: TrackConfig,
         budget: CapacityBudget,
     ) -> Self {
         Self {

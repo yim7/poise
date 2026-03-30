@@ -43,13 +43,13 @@ mod tests {
 
     use super::*;
     use crate::execution_plan::ExecutionAction;
-    use crate::grid::{GridId, Instrument, Venue};
+    use crate::track::{TrackId, Instrument, Venue};
     use crate::observation::OrderObservation;
     use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
     use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
 
-    fn test_grid_id() -> GridId {
-        GridId::new("btc-core")
+    fn test_grid_id() -> TrackId {
+        TrackId::new("btc-core")
     }
 
     fn test_instrument() -> Instrument {
@@ -121,11 +121,11 @@ mod tests {
     fn plans_execution_mode_from_gap_and_age() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let passive = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -142,7 +142,7 @@ mod tests {
         );
 
         let rebalance = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -162,7 +162,7 @@ mod tests {
         );
 
         let catch_up = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -190,13 +190,13 @@ mod tests {
     fn cancel_plan_keeps_live_slot_until_cancel_effect_completes() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let mut existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
         existing_state.slots.push(sibling_slot());
 
         let plan = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -218,12 +218,12 @@ mod tests {
     fn replace_plan_keeps_live_slot_until_cancel_effect_completes() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
         let plan = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -248,11 +248,11 @@ mod tests {
     fn current_submit_hint_returns_single_submit_effect_from_plan() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let hint = current_submit_hint(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -280,12 +280,12 @@ mod tests {
     fn current_submit_hint_returns_none_when_plan_is_not_single_submit() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
         let hint = current_submit_hint(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -303,11 +303,11 @@ mod tests {
     fn plan_sets_reduce_only_for_decrease_inventory_order() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let plan = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -330,11 +330,11 @@ mod tests {
     fn plan_does_not_set_reduce_only_for_increase_inventory_order() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let plan = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -356,13 +356,13 @@ mod tests {
     #[test]
     fn replacement_gate_threshold_uses_exchange_maker_and_taker_fee_rate() {
         let instrument = test_instrument();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
         let low_fee_rules = test_exchange_rules();
         let low_fee_plan = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &low_fee_rules,
             base_qty_per_unit: 3.75,
@@ -377,7 +377,7 @@ mod tests {
         high_fee_rules.maker_fee_rate = 0.0005;
         high_fee_rules.taker_fee_rate = 0.001;
         let high_fee_plan = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &high_fee_rules,
             base_qty_per_unit: 3.75,
@@ -920,7 +920,7 @@ mod tests {
     fn submit_recovery_supersedes_stale_effect_when_current_plan_changed() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let grid_id = GridId::new("grid-1");
+        let track_id = TrackId::new("grid-1");
         let instrument = test_instrument();
         let request = OrderRequest {
             instrument: instrument.clone(),
@@ -941,7 +941,7 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(SubmitRecoveryPlanContext {
-                grid_id: &grid_id,
+                track_id: &track_id,
                 instrument: &instrument,
                 base_qty_per_unit: 3.75,
                 target_exposure: Exposure(4.0),
@@ -1040,12 +1040,12 @@ mod tests {
     fn plan_generates_unique_client_order_ids_across_calls() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let grid_id = test_grid_id();
+        let track_id = test_grid_id();
         let t1 = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let t2 = t1 + Duration::milliseconds(1);
 
         let plan1 = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -1056,7 +1056,7 @@ mod tests {
             observed_at: t1,
         });
         let plan2 = plan(ExecutorInput {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
@@ -1086,7 +1086,7 @@ mod tests {
     fn submit_recovery_proceed_updates_slot_target_to_current_plan_target() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let grid_id = GridId::new("grid-1");
+        let track_id = TrackId::new("grid-1");
         let instrument = test_instrument();
         let request = OrderRequest {
             instrument: instrument.clone(),
@@ -1107,7 +1107,7 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(SubmitRecoveryPlanContext {
-                grid_id: &grid_id,
+                track_id: &track_id,
                 instrument: &instrument,
                 base_qty_per_unit: 1.0,
                 target_exposure: Exposure(4.0),

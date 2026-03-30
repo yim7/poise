@@ -1,12 +1,12 @@
-use poise_engine::grid::GridId;
+use poise_engine::track::TrackId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GridInternalNotification {
+pub enum TrackInternalNotification {
     GridWriteCommitted {
-        grid_id: GridId,
+        track_id: TrackId,
         recovery_anomaly_active: bool,
     },
     GridEffectStateChanged {
-        grid_id: GridId,
+        track_id: TrackId,
     },
 }

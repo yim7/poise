@@ -25,7 +25,7 @@ pub struct OrderObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum GridObservation {
+pub enum TrackObservation {
     Market(MarketObservation),
     Position(PositionObservation),
     Order(OrderObservation),

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-use poise_engine::grid::{GridId, Instrument, Venue};
+use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+use poise_engine::track::{TrackId, Instrument, Venue};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -65,16 +65,16 @@ impl GridDefinition {
         self.tick_timeout_secs.unwrap_or(30)
     }
 
-    pub fn grid_id(&self) -> GridId {
-        GridId::new(self.grid_id.clone())
+    pub fn grid_id(&self) -> TrackId {
+        TrackId::new(self.grid_id.clone())
     }
 
     pub fn instrument(&self) -> Instrument {
         Instrument::new(self.venue, self.symbol.clone())
     }
 
-    pub fn grid_config(&self) -> GridConfig {
-        GridConfig {
+    pub fn grid_config(&self) -> TrackConfig {
+        TrackConfig {
             lower_price: self.lower_price,
             upper_price: self.upper_price,
             long_exposure_units: self.long_exposure_units,

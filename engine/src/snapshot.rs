@@ -2,11 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use poise_core::events::ReplacementGateReason;
-use poise_core::strategy::GridConfig;
+use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
 
-use crate::grid::{GridId, Instrument};
-use crate::runtime::{ExecutorState, GridStatus, RiskState};
+use crate::track::{TrackId, Instrument};
+use crate::runtime::{ExecutorState, TrackStatus, RiskState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ObservedState {
@@ -19,11 +19,12 @@ pub struct ObservedState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridRuntimeSnapshot {
-    pub grid_id: GridId,
+pub struct TrackRuntimeSnapshot {
+    #[serde(alias = "grid_id")]
+    pub track_id: TrackId,
     pub instrument: Instrument,
-    pub config: GridConfig,
-    pub status: GridStatus,
+    pub config: TrackConfig,
+    pub status: TrackStatus,
     pub current_exposure: Exposure,
     pub target_exposure: Option<Exposure>,
     #[serde(default)]
@@ -36,7 +37,7 @@ pub struct GridRuntimeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PersistedGridState {
-    pub snapshot: GridRuntimeSnapshot,
+pub struct PersistedTrackState {
+    pub snapshot: TrackRuntimeSnapshot,
     pub events: Vec<poise_core::events::DomainEvent>,
 }

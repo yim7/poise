@@ -3,16 +3,16 @@ use poise_core::events::ReplacementGateReason;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole};
-use poise_engine::ports::{PersistedGridEffect, StoredDomainEvent};
-use poise_engine::runtime::{GridStatus, SlotState};
-use poise_engine::snapshot::GridRuntimeSnapshot;
+use poise_engine::ports::{PersistedTrackEffect, StoredDomainEvent};
+use poise_engine::runtime::{TrackStatus, SlotState};
+use poise_engine::snapshot::TrackRuntimeSnapshot;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GridReadModel {
-    pub grid_id: String,
+pub struct TrackReadModel {
+    pub track_id: String,
     pub venue: String,
     pub symbol: String,
-    pub status: GridStatus,
+    pub status: TrackStatus,
     pub updated_at: DateTime<Utc>,
     pub lower_price: f64,
     pub upper_price: f64,
@@ -35,7 +35,7 @@ pub struct GridReadModel {
     pub slots: Vec<ReadModelSlot>,
     pub manual_target_override: Option<f64>,
     pub recent_domain_events: Vec<StoredDomainEvent>,
-    pub recent_effects: Vec<PersistedGridEffect>,
+    pub recent_effects: Vec<PersistedTrackEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,15 +48,15 @@ pub struct ReadModelSlot {
     pub role: OrderRole,
 }
 
-impl GridReadModel {
+impl TrackReadModel {
     pub fn from_snapshot(
-        snapshot: GridRuntimeSnapshot,
+        snapshot: TrackRuntimeSnapshot,
         updated_at: DateTime<Utc>,
         recent_domain_events: Vec<StoredDomainEvent>,
-        recent_effects: Vec<PersistedGridEffect>,
+        recent_effects: Vec<PersistedTrackEffect>,
     ) -> Self {
-        let GridRuntimeSnapshot {
-            grid_id,
+        let TrackRuntimeSnapshot {
+            track_id,
             instrument,
             config,
             status,
@@ -87,7 +87,7 @@ impl GridReadModel {
             .collect();
 
         Self {
-            grid_id: grid_id.as_str().to_string(),
+            track_id: track_id.as_str().to_string(),
             venue: instrument.venue.as_str().to_string(),
             symbol: instrument.symbol,
             status,

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridConfig {
+pub struct TrackConfig {
     pub lower_price: f64,
     pub upper_price: f64,
     pub long_exposure_units: f64,
@@ -48,7 +48,7 @@ pub enum BandBoundary {
     Above,
 }
 
-pub fn validate_config(config: &GridConfig) -> Result<(), String> {
+pub fn validate_config(config: &TrackConfig) -> Result<(), String> {
     if config.lower_price >= config.upper_price {
         return Err("lower_price must be less than upper_price".into());
     }
@@ -72,7 +72,7 @@ pub fn validate_config(config: &GridConfig) -> Result<(), String> {
 /// - Concave: p=0.5, g(x) = 1 - √x
 ///
 /// target = -short_exposure_units + (long_exposure_units + short_exposure_units) * g(x)
-pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
+pub fn target_exposure(price: f64, config: &TrackConfig) -> Exposure {
     let x =
         ((price - config.lower_price) / (config.upper_price - config.lower_price)).clamp(0.0, 1.0);
     let g = match config.shape_family {
@@ -86,7 +86,7 @@ pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
     )
 }
 
-pub fn band_status(price: f64, config: &GridConfig) -> BandStatus {
+pub fn band_status(price: f64, config: &TrackConfig) -> BandStatus {
     if price < config.lower_price - f64::EPSILON {
         BandStatus::OutOfBand {
             policy: config.out_of_band_policy,
@@ -104,7 +104,7 @@ pub fn band_status(price: f64, config: &GridConfig) -> BandStatus {
     }
 }
 
-impl GridConfig {
+impl TrackConfig {
     pub fn band_center(&self) -> f64 {
         (self.lower_price + self.upper_price) / 2.0
     }
@@ -123,8 +123,8 @@ impl GridConfig {
 mod tests {
     use super::*;
 
-    fn neutral_config() -> GridConfig {
-        GridConfig {
+    fn neutral_config() -> TrackConfig {
+        TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -135,8 +135,8 @@ mod tests {
         }
     }
 
-    fn long_only_config() -> GridConfig {
-        GridConfig {
+    fn long_only_config() -> TrackConfig {
+        TrackConfig {
             long_exposure_units: 8.0,
             short_exposure_units: 0.0,
             ..neutral_config()
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_inverted_prices() {
-        let config = GridConfig {
+        let config = TrackConfig {
             lower_price: 110.0,
             upper_price: 90.0,
             ..neutral_config()
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_negative_capacity() {
-        let config = GridConfig {
+        let config = TrackConfig {
             long_exposure_units: -1.0,
             ..neutral_config()
         };
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_both_zero_capacity() {
-        let config = GridConfig {
+        let config = TrackConfig {
             long_exposure_units: 0.0,
             short_exposure_units: 0.0,
             ..neutral_config()
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn convex_shape_slower_departure() {
-        let config = GridConfig {
+        let config = TrackConfig {
             shape_family: ShapeFamily::Convex,
             ..neutral_config()
         };

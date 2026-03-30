@@ -5,27 +5,27 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use poise_binance::BinanceAdapter;
-use poise_engine::grid::{GridId, Instrument};
-use poise_engine::manager::GridManager;
+use poise_engine::track::{TrackId, Instrument};
+use poise_engine::manager::TrackManager;
 use poise_engine::ports::{
-    ClockPort, ExchangePort, GridReadRepositoryPort, MarketDataPort, StateRepositoryPort,
+    ClockPort, ExchangePort, TrackReadRepositoryPort, MarketDataPort, StateRepositoryPort,
 };
 use poise_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
 use crate::config::{Config, ExchangeConfig};
-use crate::projector::GridProjector;
-use crate::query_service::GridQueryService;
+use crate::projector::TrackProjector;
+use crate::query_service::TrackQueryService;
 use crate::runtime::{RuntimeHandles, ServerRuntime};
-use crate::write_service::GridWriteService;
+use crate::write_service::TrackWriteService;
 #[derive(Clone)]
 pub struct ServerState {
-    pub write_service: Arc<GridWriteService>,
+    pub write_service: Arc<TrackWriteService>,
     pub state_repository: Arc<dyn StateRepositoryPort>,
     #[allow(dead_code)]
-    pub query_service: Arc<GridQueryService>,
+    pub query_service: Arc<TrackQueryService>,
     #[allow(dead_code)]
-    pub projector: Arc<GridProjector>,
+    pub projector: Arc<TrackProjector>,
 }
 
 pub struct ServerPlatform {
@@ -57,7 +57,7 @@ fn validate_unique_instruments(
 }
 
 fn validate_unique_grid_ids(
-    grid_ids: impl IntoIterator<Item = GridId>,
+    grid_ids: impl IntoIterator<Item = TrackId>,
 ) -> Result<(), anyhow::Error> {
     let mut known_grid_ids = HashSet::new();
     for grid_id in grid_ids {
@@ -124,7 +124,7 @@ pub(crate) async fn assemble_with_components<R>(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
-    R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+    R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
 {
     assemble_with_components_with_repository(config, exchange, market_data, repository, clock).await
 }
@@ -137,12 +137,12 @@ async fn assemble_with_components_with_repository<R>(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
-    R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+    R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
 {
     validate_unique_instruments(config.grids.iter().map(|grid| grid.instrument()))?;
     validate_unique_grid_ids(config.grids.iter().map(|grid| grid.grid_id()))?;
 
-    let mut manager = GridManager::new(clock);
+    let mut manager = TrackManager::new(clock);
     for grid in &config.grids {
         let grid_id = grid.grid_id();
         let info = exchange.get_exchange_info(&grid.instrument()).await?;
@@ -161,14 +161,14 @@ where
 
     let (notifications, _) = broadcast::channel(256);
     let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-    let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-    let write_service = Arc::new(GridWriteService::new(
+    let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+    let write_service = Arc::new(TrackWriteService::new(
         manager,
         state_repository.clone(),
         notifications.clone(),
     ));
-    let query_service = Arc::new(GridQueryService::new(read_repository));
-    let projector = Arc::new(GridProjector::new());
+    let query_service = Arc::new(TrackQueryService::new(read_repository));
+    let projector = Arc::new(TrackProjector::new());
     let server_state = build_server_state(write_service, state_repository, query_service, projector);
 
     Ok(ServerPlatform {
@@ -205,10 +205,10 @@ impl ClockPort for SystemClock {
 }
 
 pub(crate) fn build_server_state(
-    write_service: Arc<GridWriteService>,
+    write_service: Arc<TrackWriteService>,
     state_repository: Arc<dyn StateRepositoryPort>,
-    query_service: Arc<GridQueryService>,
-    projector: Arc<GridProjector>,
+    query_service: Arc<TrackQueryService>,
+    projector: Arc<TrackProjector>,
 ) -> ServerState {
     ServerState {
         write_service,
@@ -228,11 +228,11 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use poise_core::events::DomainEvent as EngineDomainEvent;
-    use poise_engine::grid::{GridId, Instrument, Venue};
-    use poise_engine::manager::GridManager;
-    use poise_engine::observation::{GridObservation, MarketObservation};
+    use poise_engine::track::{TrackId, Instrument, Venue};
+    use poise_engine::manager::TrackManager;
+    use poise_engine::observation::{TrackObservation, MarketObservation};
     use poise_engine::ports::{
-        ExchangeInfo, ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot,
+        ExchangeInfo, ExchangeOrder, ExchangePort, TrackReadRepositoryPort, TrackSnapshot,
         OrderReceipt, OrderRequest, Position, PriceTick, StateRepositoryPort,
     };
     use poise_protocol::{GridStreamEvent, GridStreamPayload};
@@ -243,9 +243,9 @@ mod tests {
 
     use crate::config::{Config, ExchangeConfig, GridDefinition};
     use crate::http::router;
-    use crate::projector::GridProjector;
-    use crate::query_service::GridQueryService;
-    use crate::write_service::GridWriteService;
+    use crate::projector::TrackProjector;
+    use crate::query_service::TrackQueryService;
+    use crate::write_service::TrackWriteService;
 
     use super::{
         ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_grid_ids,
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn assemble_rejects_duplicate_grid_ids() {
         let error =
-            validate_unique_grid_ids([GridId::new("alpha"), GridId::new("alpha")]).unwrap_err();
+            validate_unique_grid_ids([TrackId::new("alpha"), TrackId::new("alpha")]).unwrap_err();
         assert!(error.to_string().contains("duplicate grid id"));
     }
 
@@ -581,7 +581,7 @@ mod tests {
         let manager = manager_handle.read().await;
         let grid = manager.get_grid("btc-core").unwrap();
 
-        assert_eq!(grid.status(), &poise_engine::runtime::GridStatus::Paused);
+        assert_eq!(grid.status(), &poise_engine::runtime::TrackStatus::Paused);
 
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
@@ -602,8 +602,8 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             };
             let _ = manager.observe(
-                &GridId::new("btc-core"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: tick.reference_price,
                 }),
             );
@@ -664,7 +664,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.status, poise_engine::runtime::GridStatus::Frozen);
+        assert_eq!(snapshot.status, poise_engine::runtime::TrackStatus::Frozen);
         assert_eq!(snapshot.observed.reference_price, Some(85.0));
     }
 
@@ -691,7 +691,7 @@ mod tests {
         repository: Arc<R>,
     ) -> (ServerPlatform, mpsc::Sender<PriceTick>)
     where
-        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
     {
         let (btc_sender, btc_receiver) = mpsc::channel(8);
         let mut receivers = HashMap::new();
@@ -701,12 +701,12 @@ mod tests {
             receivers: Mutex::new(receivers),
         });
 
-        let mut manager = GridManager::new(Arc::new(SystemClock));
+        let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
             .add_grid(
-                GridId::new("btc-core"),
+                TrackId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::GridConfig {
+                poise_core::strategy::TrackConfig {
                     lower_price: 90.0,
                     upper_price: 110.0,
                     long_exposure_units: 8.0,
@@ -725,8 +725,8 @@ mod tests {
             .unwrap();
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let write_service = Arc::new(GridWriteService::new(
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             events.clone(),
@@ -734,8 +734,8 @@ mod tests {
         let state = build_server_state(
             write_service,
             state_repository,
-            Arc::new(GridQueryService::new(read_repository)),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
         );
 
         (
@@ -790,7 +790,7 @@ mod tests {
 
     #[derive(Default)]
     struct BlockingPersistence {
-        snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
+        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
         started_saves: AtomicUsize,
         completed_saves: AtomicUsize,
         first_save_started: Notify,
@@ -827,11 +827,11 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &GridSnapshot,
+            state: &TrackSnapshot,
             _events: &[EngineDomainEvent],
-            _effects: &[poise_engine::transition::GridEffect],
+            _effects: &[poise_engine::transition::TrackEffect],
             _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
-        ) -> Result<poise_engine::ports::CommittedGridWrite> {
+        ) -> Result<poise_engine::ports::CommittedTrackWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
             self.first_save_started.notify_waiters();
             if save_index == 0 {
@@ -844,13 +844,13 @@ mod tests {
                 .insert(id.to_string(), state.clone());
             self.completed_saves.fetch_add(1, Ordering::SeqCst);
             self.completed_save.notify_waiters();
-            Ok(poise_engine::ports::CommittedGridWrite {
-                grid_id: poise_engine::grid::GridId::new(id),
+            Ok(poise_engine::ports::CommittedTrackWrite {
+                track_id: poise_engine::track::TrackId::new(id),
                 effects: Vec::new(),
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -860,28 +860,28 @@ mod tests {
 
         async fn list_dispatchable_effects(
             &self,
-        ) -> Result<Vec<poise_engine::ports::PersistedGridEffect>> {
+        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
-            _grid_id: &GridId,
-        ) -> Result<Vec<poise_engine::ports::PersistedGridEffect>> {
+            _grid_id: &TrackId,
+        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }
 
     #[async_trait::async_trait]
-    impl GridReadRepositoryPort for BlockingPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<poise_engine::ports::StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for BlockingPersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<poise_engine::ports::StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| poise_engine::ports::StoredGridSnapshot {
+                .map(|snapshot| poise_engine::ports::StoredTrackSnapshot {
                     snapshot,
                     updated_at: chrono::Utc::now(),
                 })
@@ -890,15 +890,15 @@ mod tests {
 
         async fn load_grid_snapshot(
             &self,
-            grid_id: &GridId,
-        ) -> Result<Option<poise_engine::ports::StoredGridSnapshot>> {
+            track_id: &TrackId,
+        ) -> Result<Option<poise_engine::ports::StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
-                .map(|snapshot| poise_engine::ports::StoredGridSnapshot {
+                .map(|snapshot| poise_engine::ports::StoredTrackSnapshot {
                     snapshot,
                     updated_at: chrono::Utc::now(),
                 }))
@@ -906,7 +906,7 @@ mod tests {
 
         async fn list_recent_grid_events(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<poise_engine::ports::StoredDomainEvent>> {
             Ok(Vec::new())
@@ -914,9 +914,9 @@ mod tests {
 
         async fn list_recent_grid_effects(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<poise_engine::ports::PersistedGridEffect>> {
+        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }

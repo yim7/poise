@@ -1,41 +1,41 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_engine::grid::GridId;
-use poise_engine::ports::GridReadRepositoryPort;
+use poise_engine::track::TrackId;
+use poise_engine::ports::TrackReadRepositoryPort;
 
-use crate::read_model::GridReadModel;
+use crate::read_model::TrackReadModel;
 
 const LIST_EFFECTS_LIMIT: usize = 20;
 const DETAIL_EVENTS_LIMIT: usize = 20;
 const DETAIL_EFFECTS_LIMIT: usize = 20;
 
-pub struct GridQueryService {
-    repository: Arc<dyn GridReadRepositoryPort>,
+pub struct TrackQueryService {
+    repository: Arc<dyn TrackReadRepositoryPort>,
 }
 
-impl GridQueryService {
-    pub fn new(repository: Arc<dyn GridReadRepositoryPort>) -> Self {
+impl TrackQueryService {
+    pub fn new(repository: Arc<dyn TrackReadRepositoryPort>) -> Self {
         Self { repository }
     }
 
-    pub async fn list_grid_sources(&self) -> Result<Vec<GridReadModel>> {
+    pub async fn list_grid_sources(&self) -> Result<Vec<TrackReadModel>> {
         let mut snapshots = self.repository.list_grid_snapshots().await?;
         snapshots.sort_by(|left, right| {
             left.snapshot
-                .grid_id
+                .track_id
                 .as_str()
-                .cmp(right.snapshot.grid_id.as_str())
+                .cmp(right.snapshot.track_id.as_str())
         });
 
         let mut sources = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let recent_effects = self
                 .repository
-                .list_recent_grid_effects(&snapshot.snapshot.grid_id, LIST_EFFECTS_LIMIT)
+                .list_recent_grid_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
                 .await?;
 
-            sources.push(GridReadModel::from_snapshot(
+            sources.push(TrackReadModel::from_snapshot(
                 snapshot.snapshot,
                 snapshot.updated_at,
                 Vec::new(),
@@ -46,21 +46,21 @@ impl GridQueryService {
         Ok(sources)
     }
 
-    pub async fn load_detail_source(&self, grid_id: &GridId) -> Result<Option<GridReadModel>> {
-        let Some(snapshot) = self.repository.load_grid_snapshot(grid_id).await? else {
+    pub async fn load_detail_source(&self, track_id: &TrackId) -> Result<Option<TrackReadModel>> {
+        let Some(snapshot) = self.repository.load_grid_snapshot(track_id).await? else {
             return Ok(None);
         };
 
         let recent_domain_events = self
             .repository
-            .list_recent_grid_events(grid_id, DETAIL_EVENTS_LIMIT)
+            .list_recent_grid_events(track_id, DETAIL_EVENTS_LIMIT)
             .await?;
         let recent_effects = self
             .repository
-            .list_recent_grid_effects(grid_id, DETAIL_EFFECTS_LIMIT)
+            .list_recent_grid_effects(track_id, DETAIL_EFFECTS_LIMIT)
             .await?;
 
-        Ok(Some(GridReadModel::from_snapshot(
+        Ok(Some(TrackReadModel::from_snapshot(
             snapshot.snapshot,
             snapshot.updated_at,
             recent_domain_events,
@@ -78,24 +78,24 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
-        EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, PersistedGridEffect,
-        StoredDomainEvent, StoredGridSnapshot,
+        EffectStatus, TrackReadRepositoryPort, OrderRequest, OrderStatus, PersistedTrackEffect,
+        StoredDomainEvent, StoredTrackSnapshot,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
         WorkingOrder,
     };
-    use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-    use poise_engine::transition::GridEffect;
+    use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+    use poise_engine::transition::TrackEffect;
 
-    use crate::read_model::GridReadModel;
+    use crate::read_model::TrackReadModel;
 
-    use super::GridQueryService;
+    use super::TrackQueryService;
 
     #[tokio::test]
     async fn list_grid_sources_reads_all_registered_snapshots() {
@@ -103,7 +103,7 @@ mod tests {
         let sources = service.list_grid_sources().await.unwrap();
 
         assert!(!sources.is_empty());
-        assert_eq!(sources[0].grid_id, "btc-core");
+        assert_eq!(sources[0].track_id, "btc-core");
         assert_eq!(
             sources[0].updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
@@ -121,12 +121,12 @@ mod tests {
     async fn load_detail_source_reads_snapshot_events_and_effects() {
         let (service, _) = test_query_service();
         let source = service
-            .load_detail_source(&GridId::new("btc-core"))
+            .load_detail_source(&TrackId::new("btc-core"))
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(source.grid_id, "btc-core");
+        assert_eq!(source.track_id, "btc-core");
         assert_eq!(
             source.updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
@@ -145,14 +145,14 @@ mod tests {
         let event = repository.events.get("btc-core").unwrap()[0].clone();
         let effect = repository.effects.get("btc-core").unwrap()[0].clone();
 
-        let read_model = GridReadModel::from_snapshot(
+        let read_model = TrackReadModel::from_snapshot(
             stored.snapshot.clone(),
             stored.updated_at,
             vec![event],
             vec![effect],
         );
 
-        assert_eq!(read_model.grid_id, "btc-core");
+        assert_eq!(read_model.track_id, "btc-core");
         assert_eq!(read_model.venue, "binance");
         assert_eq!(read_model.symbol, "BTCUSDT");
         assert_eq!(read_model.reference_price, Some(101.25));
@@ -168,28 +168,28 @@ mod tests {
         assert_eq!(read_model.recent_effects.len(), 1);
     }
 
-    fn test_query_service() -> (GridQueryService, Arc<FakeReadRepository>) {
+    fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = GridQueryService::new(repository.clone());
+        let service = TrackQueryService::new(repository.clone());
         (service, repository)
     }
 
     struct FakeReadRepository {
-        snapshots: HashMap<String, StoredGridSnapshot>,
+        snapshots: HashMap<String, StoredTrackSnapshot>,
         events: HashMap<String, Vec<StoredDomainEvent>>,
-        effects: HashMap<String, Vec<PersistedGridEffect>>,
+        effects: HashMap<String, Vec<PersistedTrackEffect>>,
         effect_limits: std::sync::Mutex<Vec<usize>>,
     }
 
     impl FakeReadRepository {
         fn new() -> Self {
             let snapshot = test_snapshot();
-            let grid_id = snapshot.grid_id.as_str().to_string();
+            let grid_id = snapshot.track_id.as_str().to_string();
             let snapshot_updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
 
             let event = StoredDomainEvent {
                 id: 1,
-                grid_id: snapshot.grid_id.clone(),
+                track_id: snapshot.track_id.clone(),
                 event: DomainEvent::BandBreached {
                     boundary: poise_core::strategy::BandBoundary::Above,
                     price: 120.0,
@@ -197,12 +197,12 @@ mod tests {
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
             };
 
-            let effect = PersistedGridEffect {
+            let effect = PersistedTrackEffect {
                 effect_id: "btc-core:batch-1:0".into(),
-                grid_id: snapshot.grid_id.clone(),
+                track_id: snapshot.track_id.clone(),
                 batch_id: "batch-1".into(),
                 sequence: 0,
-                effect: GridEffect::SubmitOrder {
+                effect: TrackEffect::SubmitOrder {
                     request: OrderRequest {
                         instrument: snapshot.instrument.clone(),
                         side: Side::Buy,
@@ -223,7 +223,7 @@ mod tests {
             Self {
                 snapshots: HashMap::from([(
                     grid_id.clone(),
-                    StoredGridSnapshot {
+                    StoredTrackSnapshot {
                         snapshot,
                         updated_at: snapshot_updated_at,
                     },
@@ -240,36 +240,36 @@ mod tests {
     }
 
     #[async_trait]
-    impl GridReadRepositoryPort for FakeReadRepository {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for FakeReadRepository {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.values().cloned().collect())
         }
 
-        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
-            Ok(self.snapshots.get(grid_id.as_str()).cloned())
+        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+            Ok(self.snapshots.get(track_id.as_str()).cloned())
         }
 
         async fn list_recent_grid_events(
             &self,
-            grid_id: &GridId,
+            track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(self
                 .events
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
                 .unwrap_or_default())
         }
 
         async fn list_recent_grid_effects(
             &self,
-            grid_id: &GridId,
+            track_id: &TrackId,
             limit: usize,
-        ) -> Result<Vec<PersistedGridEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             self.effect_limits.lock().unwrap().push(limit);
             Ok(self
                 .effects
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
@@ -278,11 +278,11 @@ mod tests {
         }
     }
 
-    fn test_snapshot() -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: GridId::new("btc-core"),
+    fn test_snapshot() -> TrackRuntimeSnapshot {
+        TrackRuntimeSnapshot {
+            track_id: TrackId::new("btc-core"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: GridConfig {
+            config: TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
                 long_exposure_units: 8.0,
@@ -291,7 +291,7 @@ mod tests {
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
             manual_target_override: None,

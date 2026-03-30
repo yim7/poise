@@ -1,8 +1,8 @@
 use poise_core::events::DomainEvent;
 use poise_engine::executor::OrderRole;
 use poise_engine::ports::EffectStatus;
-use poise_engine::runtime::GridStatus as EngineGridStatus;
-use poise_engine::transition::GridEffect;
+use poise_engine::runtime::TrackStatus as EngineGridStatus;
+use poise_engine::transition::TrackEffect;
 use poise_protocol::{
     ActivityLevelView, ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView,
     ExecutionSlotPhaseView, ExecutionSlotView, ExecutionStateView, ExecutionStatusView,
@@ -13,18 +13,18 @@ use poise_protocol::{
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
 };
 
-use crate::read_model::GridReadModel;
+use crate::read_model::TrackReadModel;
 
-pub struct GridProjector;
+pub struct TrackProjector;
 
-impl GridProjector {
+impl TrackProjector {
     pub fn new() -> Self {
         Self
     }
 
-    pub fn project_list_item(&self, source: &GridReadModel) -> GridListItemView {
+    pub fn project_list_item(&self, source: &TrackReadModel) -> GridListItemView {
         GridListItemView {
-            id: source.grid_id.clone(),
+            id: source.track_id.clone(),
             instrument: project_instrument(&source.venue, &source.symbol),
             lifecycle: GridLifecycleView {
                 status: project_grid_status(&source.status),
@@ -43,10 +43,10 @@ impl GridProjector {
         }
     }
 
-    pub fn project_detail(&self, source: &GridReadModel) -> GridDetailView {
+    pub fn project_detail(&self, source: &TrackReadModel) -> GridDetailView {
         GridDetailView {
             identity: GridIdentityView {
-                id: source.grid_id.clone(),
+                id: source.track_id.clone(),
                 instrument: project_instrument(&source.venue, &source.symbol),
             },
             status: GridStatusPanelView {
@@ -97,7 +97,7 @@ impl GridProjector {
         }
     }
 
-    pub fn project_activity(&self, source: &GridReadModel) -> Vec<GridActivityItemView> {
+    pub fn project_activity(&self, source: &TrackReadModel) -> Vec<GridActivityItemView> {
         let mut activity = Vec::new();
 
         for event in &source.recent_domain_events {
@@ -188,7 +188,7 @@ fn project_replacement_gate_reason(
     }
 }
 
-fn project_execution_state(source: &GridReadModel) -> ExecutionStateView {
+fn project_execution_state(source: &TrackReadModel) -> ExecutionStateView {
     match source.status {
         EngineGridStatus::Paused => ExecutionStateView::Paused,
         EngineGridStatus::Terminated => ExecutionStateView::Closed,
@@ -196,7 +196,7 @@ fn project_execution_state(source: &GridReadModel) -> ExecutionStateView {
     }
 }
 
-fn project_execution_status(source: &GridReadModel) -> ExecutionStatusView {
+fn project_execution_status(source: &TrackReadModel) -> ExecutionStatusView {
     if source.has_recovery_anomaly || source.has_stale_market_data {
         ExecutionStatusView::AttentionRequired
     } else {
@@ -204,11 +204,11 @@ fn project_execution_status(source: &GridReadModel) -> ExecutionStatusView {
     }
 }
 
-fn active_slot_count(source: &GridReadModel) -> u32 {
+fn active_slot_count(source: &TrackReadModel) -> u32 {
     source.slots.len() as u32
 }
 
-fn project_execution_slots(source: &GridReadModel) -> Vec<ExecutionSlotView> {
+fn project_execution_slots(source: &TrackReadModel) -> Vec<ExecutionSlotView> {
     source
         .slots
         .iter()
@@ -232,7 +232,7 @@ fn project_execution_slots(source: &GridReadModel) -> Vec<ExecutionSlotView> {
         .collect()
 }
 
-fn project_available_commands(source: &GridReadModel) -> Vec<GridCommandView> {
+fn project_available_commands(source: &TrackReadModel) -> Vec<GridCommandView> {
     let status = &source.status;
     vec![
         GridCommandView {
@@ -314,9 +314,9 @@ fn project_domain_event_level(event: &DomainEvent) -> ActivityLevelView {
     }
 }
 
-fn project_effect_message(effect: &poise_engine::ports::PersistedGridEffect) -> String {
+fn project_effect_message(effect: &poise_engine::ports::PersistedTrackEffect) -> String {
     match &effect.effect {
-        GridEffect::SubmitOrder { .. } => match effect.status {
+        TrackEffect::SubmitOrder { .. } => match effect.status {
             EffectStatus::Failed => effect
                 .last_error
                 .clone()
@@ -326,7 +326,7 @@ fn project_effect_message(effect: &poise_engine::ports::PersistedGridEffect) -> 
             EffectStatus::Executing => "submit order executing".into(),
             EffectStatus::Pending => "submit order pending".into(),
         },
-        GridEffect::CancelOrder { order_id, .. } => match effect.status {
+        TrackEffect::CancelOrder { order_id, .. } => match effect.status {
             EffectStatus::Failed => effect
                 .last_error
                 .clone()
@@ -336,7 +336,7 @@ fn project_effect_message(effect: &poise_engine::ports::PersistedGridEffect) -> 
             EffectStatus::Executing => format!("cancel {order_id} executing"),
             EffectStatus::Pending => format!("cancel {order_id} pending"),
         },
-        GridEffect::CancelAll { instrument } => match effect.status {
+        TrackEffect::CancelAll { instrument } => match effect.status {
             EffectStatus::Failed => effect
                 .last_error
                 .clone()
@@ -346,7 +346,7 @@ fn project_effect_message(effect: &poise_engine::ports::PersistedGridEffect) -> 
             EffectStatus::Executing => format!("cancel all {} executing", instrument.symbol),
             EffectStatus::Pending => format!("cancel all {} pending", instrument.symbol),
         },
-        GridEffect::NoOp => "no-op".into(),
+        TrackEffect::NoOp => "no-op".into(),
     }
 }
 
@@ -364,24 +364,24 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
-        EffectStatus, OrderRequest, PersistedGridEffect, StoredDomainEvent,
+        EffectStatus, OrderRequest, PersistedTrackEffect, StoredDomainEvent,
     };
-    use poise_engine::runtime::GridStatus;
-    use poise_engine::transition::GridEffect;
+    use poise_engine::runtime::TrackStatus;
+    use poise_engine::transition::TrackEffect;
     use poise_protocol::{
         ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
         ExecutionStatusView, GridCommandType,
     };
 
-    use super::GridProjector;
-    use crate::read_model::{GridReadModel, ReadModelSlot};
+    use super::TrackProjector;
+    use crate::read_model::{TrackReadModel, ReadModelSlot};
 
     #[test]
     fn projects_execution_badge_from_working_orders() {
         let source = source_with_submitting_effect();
-        let item = GridProjector::new().project_list_item(&source);
+        let item = TrackProjector::new().project_list_item(&source);
 
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.state, ExecutionStateView::Open);
@@ -391,7 +391,7 @@ mod tests {
 
         let mut anomaly_source = source_with_submitting_effect();
         anomaly_source.has_recovery_anomaly = true;
-        let anomaly_item = GridProjector::new().project_list_item(&anomaly_source);
+        let anomaly_item = TrackProjector::new().project_list_item(&anomaly_source);
         assert_eq!(
             anomaly_item.execution.execution_status,
             ExecutionStatusView::AttentionRequired
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn project_detail_includes_available_commands_and_activity() {
         let source = source_with_failed_effect_and_recent_event();
-        let detail = GridProjector::new().project_detail(&source);
+        let detail = TrackProjector::new().project_detail(&source);
         let detail_json = serde_json::to_value(&detail).unwrap();
 
         assert!(!detail.available_commands.is_empty());
@@ -436,10 +436,10 @@ mod tests {
     #[test]
     fn project_detail_enables_resume_when_manual_flatten_is_active() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.status = GridStatus::ReducingOnly;
+        source.status = TrackStatus::ReducingOnly;
         source.manual_target_override = Some(0.0);
 
-        let detail = GridProjector::new().project_detail(&source);
+        let detail = TrackProjector::new().project_detail(&source);
         let resume = detail
             .available_commands
             .iter()
@@ -455,7 +455,7 @@ mod tests {
         let mut source = source_with_failed_effect_and_recent_event();
         source.has_stale_market_data = true;
 
-        let detail = GridProjector::new().project_detail(&source);
+        let detail = TrackProjector::new().project_detail(&source);
         assert_eq!(
             detail.execution.execution_status,
             ExecutionStatusView::AttentionRequired
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn projects_execution_slots_from_slot_workset() {
-        let detail = GridProjector::new().project_detail(&source_with_submitting_effect());
+        let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
         assert_eq!(
             detail.execution.execution_status,
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn projects_execution_observability_statistics() {
-        let detail = GridProjector::new().project_detail(&source_with_submitting_effect());
+        let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
         assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
@@ -517,7 +517,7 @@ mod tests {
             },
         );
 
-        let detail = GridProjector::new().project_detail(&source);
+        let detail = TrackProjector::new().project_detail(&source);
 
         assert_eq!(
             detail.execution.replacement_gate,
@@ -535,7 +535,7 @@ mod tests {
         let mut source = source_with_submitting_effect();
         source.recent_effects = vec![test_effect(EffectStatus::Superseded, None)];
 
-        let activity = GridProjector::new().project_activity(&source);
+        let activity = TrackProjector::new().project_activity(&source);
 
         assert_eq!(activity.len(), 1);
         assert_eq!(
@@ -550,14 +550,14 @@ mod tests {
         let mut source = source_with_submitting_effect();
         source.recent_domain_events = vec![StoredDomainEvent {
             id: 1,
-            grid_id: GridId::new("btc-core"),
+            track_id: TrackId::new("btc-core"),
             event: DomainEvent::ReplacementGateApplied {
                 reason: poise_core::events::ReplacementGateReason::RoundedMatch,
             },
             created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
         }];
 
-        let activity = GridProjector::new().project_activity(&source);
+        let activity = TrackProjector::new().project_activity(&source);
 
         assert_eq!(activity.len(), 2);
         assert_eq!(
@@ -567,12 +567,12 @@ mod tests {
         assert_eq!(activity[0].level, ActivityLevelView::Info);
     }
 
-    fn source_with_submitting_effect() -> GridReadModel {
-        GridReadModel {
-            grid_id: "btc-core".into(),
+    fn source_with_submitting_effect() -> TrackReadModel {
+        TrackReadModel {
+            track_id: "btc-core".into(),
             venue: "binance".into(),
             symbol: "BTCUSDT".into(),
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,
             upper_price: 110.0,
@@ -606,11 +606,11 @@ mod tests {
         }
     }
 
-    fn source_with_failed_effect_and_recent_event() -> GridReadModel {
-        GridReadModel {
+    fn source_with_failed_effect_and_recent_event() -> TrackReadModel {
+        TrackReadModel {
             recent_domain_events: vec![StoredDomainEvent {
                 id: 1,
-                grid_id: GridId::new("btc-core"),
+                track_id: TrackId::new("btc-core"),
                 event: DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
@@ -625,13 +625,13 @@ mod tests {
         }
     }
 
-    fn test_effect(status: EffectStatus, last_error: Option<String>) -> PersistedGridEffect {
-        PersistedGridEffect {
+    fn test_effect(status: EffectStatus, last_error: Option<String>) -> PersistedTrackEffect {
+        PersistedTrackEffect {
             effect_id: "btc-core:batch-1:0".into(),
-            grid_id: GridId::new("btc-core"),
+            track_id: TrackId::new("btc-core"),
             batch_id: "batch-1".into(),
             sequence: 0,
-            effect: GridEffect::SubmitOrder {
+            effect: TrackEffect::SubmitOrder {
                 request: OrderRequest {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     side: Side::Buy,

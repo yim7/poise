@@ -745,8 +745,8 @@ mod tests {
             Arc::new(|| 1_700_000_000_000),
         );
         let request = OrderRequest {
-            instrument: poise_engine::grid::Instrument::new(
-                poise_engine::grid::Venue::Binance,
+            instrument: poise_engine::track::Instrument::new(
+                poise_engine::track::Venue::Binance,
                 "BTCUSDT",
             ),
             side: poise_core::types::Side::Buy,

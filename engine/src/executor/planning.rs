@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
-use crate::grid::{GridId, Instrument};
+use crate::track::{TrackId, Instrument};
 use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
 
@@ -38,7 +38,7 @@ pub struct DesiredOrder {
 }
 
 pub struct ExecutorInput<'a> {
-    pub grid_id: &'a GridId,
+    pub track_id: &'a TrackId,
     pub instrument: &'a Instrument,
     pub exchange_rules: &'a ExchangeRules,
     pub base_qty_per_unit: f64,
@@ -385,7 +385,7 @@ fn desired_order_to_request(
         quantity: desired_order.quantity,
         client_order_id: format!(
             "{}-{}",
-            input.grid_id.as_str(),
+            input.track_id.as_str(),
             input.observed_at.timestamp_millis()
         ),
         reduce_only: desired_order.role == OrderRole::DecreaseInventory,

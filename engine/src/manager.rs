@@ -4,21 +4,21 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use poise_core::events::DomainEvent;
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::GridConfig;
+use poise_core::strategy::TrackConfig;
 use poise_core::types::ExchangeRules;
 use poise_core::types::Exposure;
 
 use crate::command::GridCommand;
 use crate::executor;
-use crate::grid::{GridId, Instrument};
+use crate::track::{TrackId, Instrument};
 use crate::observation::{
-    GridObservation, MarketObservation, OrderObservation, PositionObservation,
+    TrackObservation, MarketObservation, OrderObservation, PositionObservation,
 };
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
-use crate::runtime::{ExecutorState, GridRuntime, GridStatus};
-use crate::snapshot::GridRuntimeSnapshot;
-use crate::transition::{GridEffect, GridTransition};
+use crate::runtime::{ExecutorState, TrackRuntime, TrackStatus};
+use crate::snapshot::TrackRuntimeSnapshot;
+use crate::transition::{TrackEffect, TrackTransition};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
@@ -34,13 +34,13 @@ impl ExchangeSyncMode {
     }
 }
 
-pub struct GridManager {
-    grids: HashMap<GridId, GridRuntime>,
-    instruments: HashMap<Instrument, GridId>,
+pub struct TrackManager {
+    grids: HashMap<TrackId, TrackRuntime>,
+    instruments: HashMap<Instrument, TrackId>,
     clock: Arc<dyn ClockPort>,
 }
 
-impl GridManager {
+impl TrackManager {
     pub fn new(clock: Arc<dyn ClockPort>) -> Self {
         Self {
             grids: HashMap::new(),
@@ -51,9 +51,9 @@ impl GridManager {
 
     pub fn add_grid(
         &mut self,
-        id: GridId,
+        id: TrackId,
         instrument: Instrument,
-        config: GridConfig,
+        config: TrackConfig,
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
     ) -> Result<()> {
@@ -69,9 +69,9 @@ impl GridManager {
 
     pub fn add_grid_with_tick_timeout_secs(
         &mut self,
-        id: GridId,
+        id: TrackId,
         instrument: Instrument,
-        config: GridConfig,
+        config: TrackConfig,
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
         tick_timeout_secs: u64,
@@ -88,7 +88,7 @@ impl GridManager {
         }
 
         poise_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
-        let grid = GridRuntime::new(
+        let grid = TrackRuntime::new(
             id.clone(),
             instrument.clone(),
             config,
@@ -103,21 +103,21 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn resolve_grid_id(&self, instrument: &Instrument) -> Option<GridId> {
+    pub fn resolve_grid_id(&self, instrument: &Instrument) -> Option<TrackId> {
         self.instruments.get(instrument).cloned()
     }
 
-    pub fn observe(&mut self, id: &GridId, observation: GridObservation) -> Result<GridTransition> {
+    pub fn observe(&mut self, id: &TrackId, observation: TrackObservation) -> Result<TrackTransition> {
         let (events, effects) = match observation {
-            GridObservation::Market(observation) => self.observe_market(id, observation)?,
-            GridObservation::Position(observation) => {
+            TrackObservation::Market(observation) => self.observe_market(id, observation)?,
+            TrackObservation::Position(observation) => {
                 self.observe_position(id, observation)?;
                 match self.cached_reference_price(id)? {
                     Some(reference_price) => self.reconcile_grid(id, reference_price)?,
                     None => (vec![], vec![]),
                 }
             }
-            GridObservation::Order(observation) => {
+            TrackObservation::Order(observation) => {
                 let should_reconcile = observation.status.should_reconcile_after_order_update();
                 self.observe_order(id, observation)?;
                 match (should_reconcile, self.cached_reference_price(id)?) {
@@ -132,11 +132,11 @@ impl GridManager {
 
     pub fn sync_exchange_state(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
-    ) -> Result<GridTransition> {
+    ) -> Result<TrackTransition> {
         let (events, effects) = self.apply_exchange_state_sync(
             id,
             position,
@@ -149,11 +149,11 @@ impl GridManager {
 
     pub fn sync_exchange_state_without_reconcile(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
-    ) -> Result<GridTransition> {
+    ) -> Result<TrackTransition> {
         let (events, effects) = self.apply_exchange_state_sync(
             id,
             position,
@@ -164,7 +164,7 @@ impl GridManager {
         self.transition_for(id, events, effects)
     }
 
-    pub fn command(&mut self, id: &GridId, command: GridCommand) -> Result<GridTransition> {
+    pub fn command(&mut self, id: &TrackId, command: GridCommand) -> Result<TrackTransition> {
         let (events, effects) = match command {
             GridCommand::Pause => {
                 self.pause_grid(id.as_str())?;
@@ -188,7 +188,7 @@ impl GridManager {
         self.transition_for(id, events, effects)
     }
 
-    pub fn refresh_market_data_health(&mut self, id: &GridId) -> Result<GridTransition> {
+    pub fn refresh_market_data_health(&mut self, id: &TrackId) -> Result<TrackTransition> {
         let _ = self.guard_market_data_freshness(id)?;
         self.transition_for(id, vec![], vec![])
     }
@@ -196,19 +196,19 @@ impl GridManager {
     pub fn pause_grid(&mut self, id: &str) -> Result<()> {
         let grid = self
             .grids
-            .get_mut(&GridId::from(id))
+            .get_mut(&TrackId::from(id))
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
         // Pause disables strategy targeting, but does not rewrite observed exchange state.
-        grid.status = GridStatus::Paused;
+        grid.status = TrackStatus::Paused;
         grid.target_exposure = None;
         Ok(())
     }
 
-    pub fn resume_grid(&mut self, id: &str) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
-        let grid_id = GridId::from(id);
+    pub fn resume_grid(&mut self, id: &str) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
+        let track_id = TrackId::from(id);
         if self
             .grids
-            .get(&grid_id)
+            .get(&track_id)
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?
             .manual_target_override
             .is_some()
@@ -216,17 +216,17 @@ impl GridManager {
             let reference_price = {
                 let grid = self
                     .grids
-                    .get_mut(&grid_id)
+                    .get_mut(&track_id)
                     .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
                 grid.manual_target_override = None;
-                grid.status = GridStatus::WaitingMarketData;
+                grid.status = TrackStatus::WaitingMarketData;
                 grid.target_exposure = None;
                 grid.replacement_gate_reason = None;
                 grid.reference_price
             };
 
             return match reference_price {
-                Some(reference_price) => self.reconcile_grid(&grid_id, reference_price),
+                Some(reference_price) => self.reconcile_grid(&track_id, reference_price),
                 None => Ok((vec![], vec![])),
             };
         }
@@ -235,20 +235,20 @@ impl GridManager {
         let resumed_state = {
             let grid = self
                 .grids
-                .get(&grid_id)
+                .get(&track_id)
                 .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
 
-            if !matches!(grid.status, GridStatus::Paused) {
+            if !matches!(grid.status, TrackStatus::Paused) {
                 bail!("cannot resume grid `{id}` from status {:?}", grid.status);
             }
 
             if let Some(reference_price) = grid.reference_price {
                 let mut resumed = grid.clone();
-                resumed.status = GridStatus::WaitingMarketData;
+                resumed.status = TrackStatus::WaitingMarketData;
                 resumed.executor_state = grid.executor_state.reset_for_activation(resumed_at);
                 let result = self.plan_inventory_execution_for_grid(&resumed, reference_price)?;
                 (
-                    result.new_status.unwrap_or(GridStatus::Active),
+                    result.new_status.unwrap_or(TrackStatus::Active),
                     Some(result.target_exposure.clone()),
                     result.replacement_gate_reason,
                     executor::refresh_state(
@@ -260,7 +260,7 @@ impl GridManager {
                 )
             } else {
                 (
-                    GridStatus::WaitingMarketData,
+                    TrackStatus::WaitingMarketData,
                     None,
                     None,
                     grid.executor_state.reset_for_activation(resumed_at),
@@ -270,7 +270,7 @@ impl GridManager {
 
         let grid = self
             .grids
-            .get_mut(&grid_id)
+            .get_mut(&track_id)
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
         let (status, exposure, replacement_gate_reason, executor_state) = resumed_state;
         grid.status = status;
@@ -281,19 +281,19 @@ impl GridManager {
         Ok((vec![], vec![]))
     }
 
-    fn flatten_grid(&mut self, id: &GridId) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+    fn flatten_grid(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let reference_price = {
             let grid = self
                 .grids
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
 
-            if matches!(grid.status, GridStatus::Terminated) {
+            if matches!(grid.status, TrackStatus::Terminated) {
                 bail!("cannot flatten terminated grid `{}`", id.as_str());
             }
 
             grid.manual_target_override = Some(Exposure(0.0));
-            grid.status = GridStatus::ReducingOnly;
+            grid.status = TrackStatus::ReducingOnly;
             grid.reference_price
         };
 
@@ -303,19 +303,19 @@ impl GridManager {
         }
     }
 
-    pub fn snapshot(&self, id: &str) -> Option<GridRuntimeSnapshot> {
-        self.get_grid(id).map(GridRuntime::snapshot)
+    pub fn snapshot(&self, id: &str) -> Option<TrackRuntimeSnapshot> {
+        self.get_grid(id).map(TrackRuntime::snapshot)
     }
 
-    pub fn restore_grid_state(&mut self, snapshot: &GridRuntimeSnapshot) -> Result<()> {
+    pub fn restore_grid_state(&mut self, snapshot: &TrackRuntimeSnapshot) -> Result<()> {
         let grid = self
             .grids
-            .get_mut(&snapshot.grid_id)
-            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", snapshot.grid_id.as_str()))?;
+            .get_mut(&snapshot.track_id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", snapshot.track_id.as_str()))?;
         if grid.instrument != snapshot.instrument {
             bail!(
                 "snapshot instrument mismatch for `{}`: expected `{}:{}`, got `{}:{}`",
-                snapshot.grid_id.as_str(),
+                snapshot.track_id.as_str(),
                 grid.instrument.venue.as_str(),
                 grid.instrument.symbol,
                 snapshot.instrument.venue.as_str(),
@@ -328,7 +328,7 @@ impl GridManager {
 
     pub fn record_submit_request(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         request: &OrderRequest,
         target_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
@@ -347,7 +347,7 @@ impl GridManager {
 
     pub fn record_submit_receipt(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         request: &OrderRequest,
         target_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
@@ -379,7 +379,7 @@ impl GridManager {
         }
     }
 
-    pub fn record_submit_failure(&mut self, id: &GridId, client_order_id: &str) -> Result<()> {
+    pub fn record_submit_failure(&mut self, id: &TrackId, client_order_id: &str) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
@@ -392,7 +392,7 @@ impl GridManager {
         Ok(())
     }
 
-    fn clear_working_order_by_order_id(&mut self, id: &GridId, order_id: &str) -> Result<()> {
+    fn clear_working_order_by_order_id(&mut self, id: &TrackId, order_id: &str) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
@@ -405,11 +405,11 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn record_cancel_order_success(&mut self, id: &GridId, order_id: &str) -> Result<()> {
+    pub fn record_cancel_order_success(&mut self, id: &TrackId, order_id: &str) -> Result<()> {
         self.clear_working_order_by_order_id(id, order_id)
     }
 
-    fn clear_all_working_orders(&mut self, id: &GridId) -> Result<()> {
+    fn clear_all_working_orders(&mut self, id: &TrackId) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
@@ -422,13 +422,13 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn record_cancel_all_success(&mut self, id: &GridId) -> Result<()> {
+    pub fn record_cancel_all_success(&mut self, id: &TrackId) -> Result<()> {
         self.clear_all_working_orders(id)
     }
 
     pub fn recover_submit_effect(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         request: &OrderRequest,
         target_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
@@ -477,12 +477,12 @@ impl GridManager {
         Ok(plan)
     }
 
-    pub fn list_grids(&self) -> Vec<&GridRuntime> {
+    pub fn list_grids(&self) -> Vec<&TrackRuntime> {
         self.grids.values().collect()
     }
 
-    pub fn get_grid(&self, id: &str) -> Option<&GridRuntime> {
-        self.grids.get(&GridId::from(id))
+    pub fn get_grid(&self, id: &str) -> Option<&TrackRuntime> {
+        self.grids.get(&TrackId::from(id))
     }
 
     pub fn clock(&self) -> &dyn ClockPort {
@@ -491,23 +491,23 @@ impl GridManager {
 
     fn transition_for(
         &self,
-        id: &GridId,
+        id: &TrackId,
         events: Vec<DomainEvent>,
-        effects: Vec<GridEffect>,
-    ) -> Result<GridTransition> {
+        effects: Vec<TrackEffect>,
+    ) -> Result<TrackTransition> {
         let snapshot = self
             .grids
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?
             .snapshot();
-        Ok(GridTransition {
+        Ok(TrackTransition {
             snapshot,
             events,
             effects,
         })
     }
 
-    fn cached_reference_price(&self, id: &GridId) -> Result<Option<f64>> {
+    fn cached_reference_price(&self, id: &TrackId) -> Result<Option<f64>> {
         Ok(self
             .grids
             .get(id)
@@ -517,9 +517,9 @@ impl GridManager {
 
     fn observe_market(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         observation: MarketObservation,
-    ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let now = self.clock.now();
         let grid = self
             .grids
@@ -530,7 +530,7 @@ impl GridManager {
         self.reconcile_grid(id, observation.reference_price)
     }
 
-    fn observe_position(&mut self, id: &GridId, observation: PositionObservation) -> Result<()> {
+    fn observe_position(&mut self, id: &TrackId, observation: PositionObservation) -> Result<()> {
         let grid = self
             .grids
             .get_mut(id)
@@ -545,7 +545,7 @@ impl GridManager {
         Ok(())
     }
 
-    fn observe_order(&mut self, id: &GridId, observation: OrderObservation) -> Result<()> {
+    fn observe_order(&mut self, id: &TrackId, observation: OrderObservation) -> Result<()> {
         let today = self.clock.now().date_naive();
         let grid = self
             .grids
@@ -576,12 +576,12 @@ impl GridManager {
 
     fn apply_exchange_state_sync(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
         mode: ExchangeSyncMode,
-    ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         self.observe_position(id, position)?;
         let observed_at = self.clock.now();
         let grid = self
@@ -607,13 +607,13 @@ impl GridManager {
                     .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
                 grid.executor_state = state;
                 grid.replacement_gate_reason = None;
-                Ok((vec![], vec![GridEffect::NoOp]))
+                Ok((vec![], vec![TrackEffect::NoOp]))
             }
             executor::RecoveryResolution::Rebuilt { state } => {
                 let mut planned_grid = grid.clone();
                 planned_grid.executor_state = state;
 
-                if matches!(planned_grid.status, GridStatus::Paused) {
+                if matches!(planned_grid.status, TrackStatus::Paused) {
                     let grid = self
                         .grids
                         .get_mut(id)
@@ -659,7 +659,7 @@ impl GridManager {
                     .effects
                     .iter()
                     .filter(|effect| match effect {
-                        GridEffect::SubmitOrder { request, .. } => {
+                        TrackEffect::SubmitOrder { request, .. } => {
                             !pending_submit_hints.iter().any(|hint| {
                                 executor::submit_requests_match(
                                     &hint.request,
@@ -690,14 +690,14 @@ impl GridManager {
 
     fn reconcile_grid(
         &mut self,
-        id: &GridId,
+        id: &TrackId,
         reference_price: f64,
-    ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         if self.guard_market_data_freshness(id)? {
             return Ok((vec![], vec![]));
         }
 
-        if matches!(self.grids[&id].status, GridStatus::Paused) {
+        if matches!(self.grids[&id].status, TrackStatus::Paused) {
             let grid = self.grids.get_mut(id).unwrap();
             grid.reference_price = Some(reference_price);
             grid.target_exposure = None;
@@ -739,7 +739,7 @@ impl GridManager {
         Ok((events, effects))
     }
 
-    fn guard_market_data_freshness(&mut self, id: &GridId) -> Result<bool> {
+    fn guard_market_data_freshness(&mut self, id: &TrackId) -> Result<bool> {
         let now = self.clock.now();
         let grid = self
             .grids
@@ -768,17 +768,17 @@ impl GridManager {
 
     fn submit_recovery_plan_context<'a>(
         &self,
-        grid: &'a GridRuntime,
+        grid: &'a TrackRuntime,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<executor::SubmitRecoveryPlanContext<'a>> {
         let reference_price = grid.reference_price?;
-        if matches!(grid.status, GridStatus::Paused) {
+        if matches!(grid.status, TrackStatus::Paused) {
             return None;
         }
 
         let target = reconciler::reconcile_target(grid, reference_price);
         (!target.suppress_execution).then_some(executor::SubmitRecoveryPlanContext {
-            grid_id: &grid.id,
+            track_id: &grid.id,
             instrument: &grid.instrument,
             base_qty_per_unit: grid.config.base_qty_per_unit(),
             target_exposure: target.target_exposure,
@@ -789,14 +789,14 @@ impl GridManager {
 
     fn plan_inventory_execution_for_grid(
         &self,
-        grid: &GridRuntime,
+        grid: &TrackRuntime,
         reference_price: f64,
     ) -> Result<PlannedInventoryExecution> {
         let target = reconciler::reconcile_target(grid, reference_price);
         if grid.executor_state.recovery_anomaly.is_some() {
             return Ok(PlannedInventoryExecution {
                 events: target.events,
-                effects: vec![GridEffect::NoOp],
+                effects: vec![TrackEffect::NoOp],
                 target_exposure: target.target_exposure,
                 new_status: target.new_status,
                 replacement_gate_reason: None,
@@ -813,7 +813,7 @@ impl GridManager {
             );
             return Ok(PlannedInventoryExecution {
                 events: target.events,
-                effects: vec![GridEffect::NoOp],
+                effects: vec![TrackEffect::NoOp],
                 target_exposure: target.target_exposure.clone(),
                 new_status: target.new_status,
                 replacement_gate_reason: None,
@@ -822,7 +822,7 @@ impl GridManager {
         }
         let executor_state = Some(&grid.executor_state);
         let plan = executor::plan(executor::ExecutorInput {
-            grid_id: &grid.id,
+            track_id: &grid.id,
             instrument: &grid.instrument,
             exchange_rules: &grid.exchange_rules,
             base_qty_per_unit: grid.config.base_qty_per_unit(),
@@ -846,9 +846,9 @@ impl GridManager {
 
 struct PlannedInventoryExecution {
     events: Vec<DomainEvent>,
-    effects: Vec<GridEffect>,
+    effects: Vec<TrackEffect>,
     target_exposure: Exposure,
-    new_status: Option<GridStatus>,
+    new_status: Option<TrackStatus>,
     replacement_gate_reason: Option<poise_core::events::ReplacementGateReason>,
     executor_state: ExecutorState,
 }
@@ -871,7 +871,7 @@ mod tests {
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
     use crate::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
         WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
@@ -916,16 +916,16 @@ mod tests {
         assert!(ExchangeSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
     }
 
-    fn test_manager() -> GridManager {
-        GridManager::new(Arc::new(FakeClock))
+    fn test_manager() -> TrackManager {
+        TrackManager::new(Arc::new(FakeClock))
     }
 
-    fn test_manager_with_clock(clock: Arc<dyn ClockPort>) -> GridManager {
-        GridManager::new(clock)
+    fn test_manager_with_clock(clock: Arc<dyn ClockPort>) -> TrackManager {
+        TrackManager::new(clock)
     }
 
-    fn test_config() -> GridConfig {
-        GridConfig {
+    fn test_config() -> TrackConfig {
+        TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -963,13 +963,13 @@ mod tests {
     }
 
     fn test_instrument(symbol: &str) -> Instrument {
-        Instrument::new(crate::grid::Venue::Binance, symbol)
+        Instrument::new(crate::track::Venue::Binance, symbol)
     }
 
-    fn register_test_grid(manager: &mut GridManager, id: &str, symbol: &str) {
+    fn register_test_grid(manager: &mut TrackManager, id: &str, symbol: &str) {
         manager
             .add_grid(
-                GridId::new(id),
+                TrackId::new(id),
                 test_instrument(symbol),
                 test_config(),
                 test_budget(),
@@ -1002,7 +1002,7 @@ mod tests {
         }
     }
 
-    fn seed_executor_slot(grid: &mut GridRuntime, order: WorkingOrder, state: SlotState) {
+    fn seed_executor_slot(grid: &mut TrackRuntime, order: WorkingOrder, state: SlotState) {
         grid.executor_state
             .slots
             .retain(|slot| slot.slot != OrderSlot::new("inventory_core"));
@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     fn seed_named_executor_slot(
-        grid: &mut GridRuntime,
+        grid: &mut TrackRuntime,
         slot_name: &str,
         order: WorkingOrder,
         state: SlotState,
@@ -1047,7 +1047,7 @@ mod tests {
         )
     }
 
-    fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
+    fn inventory_core_order(grid: &TrackRuntime) -> Option<&WorkingOrder> {
         grid.executor_state
             .slots
             .iter()
@@ -1055,7 +1055,7 @@ mod tests {
             .and_then(|slot| slot.working_order.as_ref())
     }
 
-    fn inventory_core_order_from_snapshot(snapshot: &GridRuntimeSnapshot) -> Option<&WorkingOrder> {
+    fn inventory_core_order_from_snapshot(snapshot: &TrackRuntimeSnapshot) -> Option<&WorkingOrder> {
         snapshot
             .executor_state
             .slots
@@ -1072,16 +1072,16 @@ mod tests {
         }
     }
 
-    fn active_runtime_with_executor_order() -> GridRuntime {
-        let mut grid = GridRuntime::new(
-            GridId::new("btc-core"),
+    fn active_runtime_with_executor_order() -> TrackRuntime {
+        let mut grid = TrackRuntime::new(
+            TrackId::new("btc-core"),
             test_instrument("BTCUSDT"),
             test_config(),
             test_budget(),
             test_exchange_rules(),
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(4.0);
         grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         seed_executor_slot(
@@ -1142,15 +1142,15 @@ mod tests {
         }
     }
 
-    fn test_manager_with_active_grid() -> GridManager {
+    fn test_manager_with_active_grid() -> TrackManager {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc-core", "BTCUSDT");
         manager
     }
 
-    fn test_manager_with_cached_price(reference_price: f64) -> GridManager {
+    fn test_manager_with_cached_price(reference_price: f64) -> TrackManager {
         let mut manager = test_manager_with_active_grid();
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.reference_price = Some(reference_price);
         manager
     }
@@ -1158,7 +1158,7 @@ mod tests {
     #[test]
     fn add_grid_validates_config() {
         let mut manager = test_manager();
-        let bad_config = GridConfig {
+        let bad_config = TrackConfig {
             lower_price: 110.0,
             upper_price: 90.0,
             ..test_config()
@@ -1166,7 +1166,7 @@ mod tests {
         assert!(
             manager
                 .add_grid(
-                    GridId::new("test"),
+                    TrackId::new("test"),
                     test_instrument("BTCUSDT"),
                     bad_config,
                     test_budget(),
@@ -1215,10 +1215,10 @@ mod tests {
     #[test]
     fn add_grid_rejects_duplicate_grid_ids() {
         let mut manager = test_manager();
-        let grid_id = GridId::new("btc-core");
+        let track_id = TrackId::new("btc-core");
         manager
             .add_grid(
-                grid_id.clone(),
+                track_id.clone(),
                 test_instrument("BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -1228,7 +1228,7 @@ mod tests {
 
         let error = manager
             .add_grid(
-                grid_id,
+                track_id,
                 test_instrument("ETHUSDT"),
                 test_config(),
                 test_budget(),
@@ -1244,7 +1244,7 @@ mod tests {
         let mut manager = test_manager();
         manager
             .add_grid(
-                GridId::new("btc-core"),
+                TrackId::new("btc-core"),
                 test_instrument("BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -1254,7 +1254,7 @@ mod tests {
 
         let error = manager
             .add_grid(
-                GridId::new("btc-alt"),
+                TrackId::new("btc-alt"),
                 test_instrument("BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -1272,7 +1272,7 @@ mod tests {
 
         assert_eq!(
             manager.resolve_grid_id(&test_instrument("BTCUSDT")),
-            Some(GridId::new("btc-core"))
+            Some(TrackId::new("btc-core"))
         );
     }
 
@@ -1280,8 +1280,8 @@ mod tests {
     fn snapshot_roundtrip_preserves_runtime_state() {
         let runtime = active_runtime_with_executor_order();
         let snapshot = runtime.snapshot();
-        let mut restored = GridRuntime::new(
-            GridId::new("btc-core"),
+        let mut restored = TrackRuntime::new(
+            TrackId::new("btc-core"),
             test_instrument("BTCUSDT"),
             test_config(),
             test_budget(),
@@ -1297,10 +1297,10 @@ mod tests {
     fn restore_grid_state_rejects_config_mismatch() {
         let mut manager = test_manager_with_active_grid();
         let snapshot = {
-            let mut runtime = GridRuntime::new(
-                GridId::new("btc-core"),
+            let mut runtime = TrackRuntime::new(
+                TrackId::new("btc-core"),
                 test_instrument("BTCUSDT"),
-                GridConfig {
+                TrackConfig {
                     lower_price: 80.0,
                     ..test_config()
                 },
@@ -1308,7 +1308,7 @@ mod tests {
                 test_exchange_rules(),
                 Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
             );
-            runtime.status = GridStatus::Active;
+            runtime.status = TrackStatus::Active;
             runtime.current_exposure = poise_core::types::Exposure(0.0);
             runtime.reference_price = Some(90.0);
             runtime.snapshot()
@@ -1320,28 +1320,28 @@ mod tests {
 
     #[test]
     fn restore_from_snapshot_keeps_runtime_budget_during_reconcile() {
-        let mut runtime = GridRuntime::new(
-            GridId::new("btc-core"),
+        let mut runtime = TrackRuntime::new(
+            TrackId::new("btc-core"),
             test_instrument("BTCUSDT"),
             test_config(),
             budget_with_max_notional(1500.0),
             test_exchange_rules(),
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
-        runtime.status = GridStatus::Active;
+        runtime.status = TrackStatus::Active;
         runtime.current_exposure = poise_core::types::Exposure(0.0);
         runtime.reference_price = Some(90.0);
 
         let snapshot = {
-            let mut source = GridRuntime::new(
-                GridId::new("btc-core"),
+            let mut source = TrackRuntime::new(
+                TrackId::new("btc-core"),
                 test_instrument("BTCUSDT"),
                 test_config(),
                 test_budget(),
                 test_exchange_rules(),
                 Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
             );
-            source.status = GridStatus::Active;
+            source.status = TrackStatus::Active;
             source.current_exposure = poise_core::types::Exposure(0.0);
             source.reference_price = Some(90.0);
             source.snapshot()
@@ -1359,8 +1359,8 @@ mod tests {
         let mut manager = test_manager_with_active_grid();
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                crate::observation::GridObservation::Market(
+                &TrackId::new("btc-core"),
+                crate::observation::TrackObservation::Market(
                     crate::observation::MarketObservation {
                         reference_price: 95.0,
                     },
@@ -1378,8 +1378,8 @@ mod tests {
         let mut manager = test_manager_with_active_grid();
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                crate::observation::GridObservation::Market(
+                &TrackId::new("btc-core"),
+                crate::observation::TrackObservation::Market(
                     crate::observation::MarketObservation {
                         reference_price: 95.0,
                     },
@@ -1389,29 +1389,29 @@ mod tests {
 
         assert!(matches!(
             transition.effects.as_slice(),
-            [GridEffect::SubmitOrder { .. }]
+            [TrackEffect::SubmitOrder { .. }]
         ));
         assert!(!transition.snapshot.executor_state.slots.is_empty());
         assert!(
             !transition
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, GridEffect::CancelAll { .. }))
+                .any(|effect| matches!(effect, TrackEffect::CancelAll { .. }))
         );
     }
 
     #[test]
     fn executor_noop_when_working_orders_match_desired_orders() {
         let mut manager = test_manager_with_active_grid();
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.executor_state = passive_executor_state_with_matching_buy_order();
 
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                crate::observation::GridObservation::Market(
+                &TrackId::new("btc-core"),
+                crate::observation::TrackObservation::Market(
                     crate::observation::MarketObservation {
                         reference_price: 95.0,
                     },
@@ -1419,7 +1419,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
         let executor_state = transition.snapshot.executor_state;
         assert_eq!(executor_state.slots.len(), 1);
         assert_eq!(
@@ -1432,7 +1432,7 @@ mod tests {
     fn command_reconcile_uses_cached_reference_price() {
         let mut manager = test_manager_with_cached_price(95.0);
         {
-            let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+            let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
             grid.budget = CapacityBudget {
                 max_notional: 1500.0,
                 ..test_budget()
@@ -1440,7 +1440,7 @@ mod tests {
         }
         let transition = manager
             .command(
-                &GridId::new("btc-core"),
+                &TrackId::new("btc-core"),
                 crate::command::GridCommand::Reconcile,
             )
             .unwrap();
@@ -1464,8 +1464,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -1473,7 +1473,7 @@ mod tests {
         assert!(!transition.events.is_empty());
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.status, GridStatus::Active);
+        assert_eq!(grid.status, TrackStatus::Active);
         assert_eq!(grid.reference_price, Some(95.0));
         assert_eq!(grid.current_exposure.0, 0.0);
         assert!(grid.target_exposure.as_ref().unwrap().0 > 0.0); // should be long below center
@@ -1486,8 +1486,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -1502,13 +1502,13 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
         grid.current_exposure = poise_core::types::Exposure(2.0);
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -1534,15 +1534,15 @@ mod tests {
     fn paused_grid_ignores_reconcile_updates() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Paused;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Paused;
         grid.current_exposure = poise_core::types::Exposure(2.0);
         grid.target_exposure = Some(poise_core::types::Exposure(4.0));
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -1550,7 +1550,7 @@ mod tests {
 
         assert!(transition.events.is_empty());
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.status, GridStatus::Paused);
+        assert_eq!(grid.status, TrackStatus::Paused);
         assert_eq!(grid.current_exposure.0, 2.0);
         assert_eq!(grid.target_exposure, None);
         assert_eq!(grid.reference_price, Some(95.0));
@@ -1560,8 +1560,8 @@ mod tests {
     fn observe_market_keeps_submit_pending_slot_without_extra_effects() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         seed_executor_slot(
@@ -1580,8 +1580,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -1604,21 +1604,21 @@ mod tests {
                 OrderStatus::Submitting,
             ))
         );
-        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
     }
 
     #[test]
     fn observe_market_records_submit_pending_slot_for_new_submit_effect() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(0.0);
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -1626,7 +1626,7 @@ mod tests {
 
         let (request, target_exposure) = match transition.effects.as_slice() {
             [
-                GridEffect::SubmitOrder {
+                TrackEffect::SubmitOrder {
                     request,
                     target_exposure,
                 },
@@ -1646,8 +1646,8 @@ mod tests {
     fn observe_market_replacement_gate_emits_event_when_reason_first_appears() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(2.0);
         grid.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
@@ -1673,8 +1673,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 99.95,
                 }),
             )
@@ -1696,8 +1696,8 @@ mod tests {
     fn observe_market_replacement_gate_deduplicates_same_reason_across_ticks() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(2.0);
         grid.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
@@ -1723,16 +1723,16 @@ mod tests {
 
         let first = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 99.95,
                 }),
             )
             .unwrap();
         let second = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 99.95,
                 }),
             )
@@ -1760,8 +1760,8 @@ mod tests {
     fn observe_market_replacement_gate_emits_event_when_reason_changes() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.exchange_rules.maker_fee_rate = 0.0002;
         grid.exchange_rules.taker_fee_rate = 0.0004;
@@ -1782,8 +1782,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 99.95,
                 }),
             )
@@ -1822,13 +1822,13 @@ mod tests {
     #[test]
     fn flatten_persists_manual_target_override_and_targets_zero() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid_id = GridId::new("btc-core");
+        let track_id = TrackId::new("btc-core");
 
-        let transition = manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        let transition = manager.command(&track_id, GridCommand::Flatten).unwrap();
 
         let grid = manager.get_grid("btc-core").unwrap();
         assert_eq!(grid.manual_target_override, Some(Exposure(0.0)));
-        assert_eq!(grid.status, GridStatus::ReducingOnly);
+        assert_eq!(grid.status, TrackStatus::ReducingOnly);
         assert_eq!(
             transition.snapshot.manual_target_override,
             Some(Exposure(0.0))
@@ -1839,13 +1839,13 @@ mod tests {
     #[test]
     fn flatten_keeps_zero_target_even_when_price_is_in_band() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid_id = GridId::new("btc-core");
+        let track_id = TrackId::new("btc-core");
 
-        manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        manager.command(&track_id, GridCommand::Flatten).unwrap();
         let transition = manager
             .observe(
-                &grid_id,
-                GridObservation::Market(MarketObservation {
+                &track_id,
+                TrackObservation::Market(MarketObservation {
                     reference_price: 100.0,
                 }),
             )
@@ -1856,20 +1856,20 @@ mod tests {
             Some(Exposure(0.0))
         );
         assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
-        assert_eq!(transition.snapshot.status, GridStatus::ReducingOnly);
+        assert_eq!(transition.snapshot.status, TrackStatus::ReducingOnly);
     }
 
     #[test]
     fn resume_clears_manual_target_override_after_flatten() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid_id = GridId::new("btc-core");
+        let track_id = TrackId::new("btc-core");
 
-        manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        manager.command(&track_id, GridCommand::Flatten).unwrap();
         manager.resume_grid("btc-core").unwrap();
 
         let grid = manager.get_grid("btc-core").unwrap();
         assert!(grid.manual_target_override.is_none());
-        assert_ne!(grid.status, GridStatus::ReducingOnly);
+        assert_ne!(grid.status, TrackStatus::ReducingOnly);
     }
 
     #[test]
@@ -1877,8 +1877,8 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Paused;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Paused;
         grid.current_exposure = poise_core::types::Exposure(8.0);
         grid.reference_price = Some(85.0);
         grid.budget = CapacityBudget {
@@ -1889,7 +1889,7 @@ mod tests {
         manager.resume_grid("btc1").unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.status, GridStatus::Frozen);
+        assert_eq!(grid.status, TrackStatus::Frozen);
         assert_eq!(grid.current_exposure.0, 8.0);
         assert_eq!(
             grid.target_exposure.as_ref().map(|target| target.0),
@@ -1902,8 +1902,8 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Paused;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Paused;
         grid.current_exposure = poise_core::types::Exposure(2.0);
         grid.reference_price = Some(99.95);
         grid.exchange_rules = poise_core::types::ExchangeRules {
@@ -1931,7 +1931,7 @@ mod tests {
         manager.resume_grid("btc1").unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.status, GridStatus::Active);
+        assert_eq!(grid.status, TrackStatus::Active);
         assert_eq!(
             grid.replacement_gate_reason,
             Some(ReplacementGateReason::RoundedMatch)
@@ -1944,8 +1944,8 @@ mod tests {
         let mut manager = test_manager_with_clock(Arc::new(FixedClock(resumed_at)));
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Paused;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Paused;
         grid.current_exposure = Exposure(2.0);
         grid.reference_price = Some(95.0);
         seed_executor_slot(
@@ -1985,8 +1985,8 @@ mod tests {
         let mut manager = test_manager_with_clock(Arc::new(FixedClock(resumed_at)));
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Paused;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Paused;
         grid.current_exposure = Exposure(0.0);
         grid.reference_price = Some(95.0);
 
@@ -1998,8 +1998,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -2007,7 +2007,7 @@ mod tests {
 
         assert!(matches!(
             transition.effects.as_slice(),
-            [GridEffect::SubmitOrder { .. }]
+            [TrackEffect::SubmitOrder { .. }]
         ));
         assert_eq!(
             transition
@@ -2041,14 +2041,14 @@ mod tests {
 
         manager
             .record_submit_request(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 &request,
                 poise_core::types::Exposure(4.0),
             )
             .unwrap();
         manager
             .record_submit_receipt(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 &request,
                 poise_core::types::Exposure(4.0),
                 &receipt,
@@ -2077,7 +2077,7 @@ mod tests {
 
         let error = manager
             .record_submit_receipt(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "client-1".into(),
@@ -2103,7 +2103,7 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         seed_executor_slot(
-            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            manager.grids.get_mut(&TrackId::new("btc1")).unwrap(),
             working_order(
                 Some("order-1"),
                 "client-1",
@@ -2118,7 +2118,7 @@ mod tests {
 
         manager
             .record_submit_receipt(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "client-1".into(),
@@ -2164,13 +2164,13 @@ mod tests {
             reduce_only: false,
         };
         seed_executor_slot(
-            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            manager.grids.get_mut(&TrackId::new("btc1")).unwrap(),
             working_order_from_submit_request(&request, poise_core::types::Exposure(4.0)),
             SlotState::SubmitPending,
         );
 
         manager
-            .record_submit_failure(&GridId::new("btc1"), &request.client_order_id)
+            .record_submit_failure(&TrackId::new("btc1"), &request.client_order_id)
             .unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
@@ -2180,13 +2180,13 @@ mod tests {
     #[test]
     fn recover_submit_effect_supersedes_without_receipt_evidence_when_target_is_reached() {
         let mut manager = test_manager_with_cached_price(92.5);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.current_exposure = poise_core::types::Exposure(6.0);
         grid.target_exposure = Some(poise_core::types::Exposure(6.0));
 
         let recovery = manager
             .recover_submit_effect(
-                &GridId::new("btc-core"),
+                &TrackId::new("btc-core"),
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
@@ -2211,7 +2211,7 @@ mod tests {
     #[test]
     fn recover_submit_effect_supersede_plan_is_executor_owned() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
@@ -2230,7 +2230,7 @@ mod tests {
 
         let recovery = manager
             .recover_submit_effect(
-                &GridId::new("btc-core"),
+                &TrackId::new("btc-core"),
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
@@ -2249,7 +2249,7 @@ mod tests {
         };
         assert!(matches!(
             recovery.effects.as_slice(),
-            [GridEffect::SubmitOrder {
+            [TrackEffect::SubmitOrder {
                 request,
                 target_exposure,
             }] if request.side == poise_core::types::Side::Buy
@@ -2263,7 +2263,7 @@ mod tests {
         ));
         let replacement_pending = match recovery.effects.as_slice() {
             [
-                GridEffect::SubmitOrder {
+                TrackEffect::SubmitOrder {
                     request,
                     target_exposure,
                 },
@@ -2290,7 +2290,7 @@ mod tests {
     #[test]
     fn recover_submit_effect_supersedes_when_reduce_only_semantics_change() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         grid.executor_state.slots = vec![ExecutionSlot {
@@ -2310,7 +2310,7 @@ mod tests {
 
         let recovery = manager
             .recover_submit_effect(
-                &GridId::new("btc-core"),
+                &TrackId::new("btc-core"),
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
@@ -2329,7 +2329,7 @@ mod tests {
         };
         assert!(matches!(
             recovery.effects.as_slice(),
-            [GridEffect::SubmitOrder {
+            [TrackEffect::SubmitOrder {
                 request,
                 target_exposure,
             }] if request.side == poise_core::types::Side::Buy
@@ -2344,7 +2344,7 @@ mod tests {
         ));
         let replacement_pending = match recovery.effects.as_slice() {
             [
-                GridEffect::SubmitOrder {
+                TrackEffect::SubmitOrder {
                     request,
                     target_exposure,
                 },
@@ -2377,7 +2377,7 @@ mod tests {
     #[test]
     fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request() {
         let mut manager = test_manager_with_cached_price(94.99);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.config.notional_per_unit = 100.0;
         grid.exchange_rules = poise_core::types::ExchangeRules {
@@ -2406,7 +2406,7 @@ mod tests {
 
         let recovery = manager
             .recover_submit_effect(
-                &GridId::new("btc-core"),
+                &TrackId::new("btc-core"),
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
@@ -2450,8 +2450,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Position(PositionObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Position(PositionObservation {
                     qty: 15.0,
                     unrealized_pnl: 12.5,
                 }),
@@ -2469,8 +2469,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                GridObservation::Position(PositionObservation {
+                &TrackId::new("btc-core"),
+                TrackObservation::Position(PositionObservation {
                     qty: 7.5,
                     unrealized_pnl: 11.0,
                 }),
@@ -2494,7 +2494,7 @@ mod tests {
             transition
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, GridEffect::SubmitOrder { .. }))
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
         );
     }
 
@@ -2504,12 +2504,12 @@ mod tests {
         let clock = MutableClock(Arc::new(Mutex::new(started_at)));
         let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid_id = GridId::new("btc1");
+        let track_id = TrackId::new("btc1");
 
         manager
             .observe(
-                &grid_id,
-                GridObservation::Market(MarketObservation {
+                &track_id,
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -2518,8 +2518,8 @@ mod tests {
         clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
         let transition = manager
             .observe(
-                &grid_id,
-                GridObservation::Position(PositionObservation {
+                &track_id,
+                TrackObservation::Position(PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 0.0,
                 }),
@@ -2534,7 +2534,7 @@ mod tests {
                 .market_data_stale_since
                 .is_some()
         );
-        assert_eq!(transition.snapshot.status, GridStatus::Active);
+        assert_eq!(transition.snapshot.status, TrackStatus::Active);
     }
 
     #[test]
@@ -2543,12 +2543,12 @@ mod tests {
         let clock = MutableClock(Arc::new(Mutex::new(started_at)));
         let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid_id = GridId::new("btc1");
+        let track_id = TrackId::new("btc1");
 
         manager
             .observe(
-                &grid_id,
-                GridObservation::Market(MarketObservation {
+                &track_id,
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -2557,8 +2557,8 @@ mod tests {
         clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
         let _ = manager
             .observe(
-                &grid_id,
-                GridObservation::Position(PositionObservation {
+                &track_id,
+                TrackObservation::Position(PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 0.0,
                 }),
@@ -2567,8 +2567,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &grid_id,
-                GridObservation::Market(MarketObservation {
+                &track_id,
+                TrackObservation::Market(MarketObservation {
                     reference_price: 96.0,
                 }),
             )
@@ -2589,7 +2589,7 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         seed_executor_slot(
-            manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
+            manager.grids.get_mut(&TrackId::new("btc1")).unwrap(),
             working_order(
                 Some("stale-1"),
                 "stale-1",
@@ -2604,7 +2604,7 @@ mod tests {
 
         let transition = manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 15.0,
                     unrealized_pnl: 12.5,
@@ -2626,7 +2626,7 @@ mod tests {
     fn sync_exchange_state_preserves_submit_pending_slot_before_replaying_open_orders() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
         seed_executor_slot(
             grid,
             working_order(
@@ -2643,7 +2643,7 @@ mod tests {
 
         let transition = manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 7.5,
                     unrealized_pnl: 3.0,
@@ -2686,12 +2686,12 @@ mod tests {
         let clock = MutableClock(Arc::new(Mutex::new(started_at)));
         let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid_id = GridId::new("btc1");
+        let track_id = TrackId::new("btc1");
 
         manager
             .observe(
-                &grid_id,
-                GridObservation::Market(MarketObservation {
+                &track_id,
+                TrackObservation::Market(MarketObservation {
                     reference_price: 95.0,
                 }),
             )
@@ -2700,7 +2700,7 @@ mod tests {
         clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
         let transition = manager
             .sync_exchange_state(
-                &grid_id,
+                &track_id,
                 PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 0.0,
@@ -2724,14 +2724,14 @@ mod tests {
     fn sync_exchange_state_keeps_paused_grid_target_none() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Paused;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Paused;
         grid.target_exposure = None;
         grid.reference_price = Some(95.0);
 
         let transition = manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 3.0,
@@ -2745,7 +2745,7 @@ mod tests {
         assert!(transition.effects.is_empty());
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.status, GridStatus::Paused);
+        assert_eq!(grid.status, TrackStatus::Paused);
         assert_eq!(grid.target_exposure, None);
         assert_eq!(grid.reference_price, Some(95.0));
     }
@@ -2754,8 +2754,8 @@ mod tests {
     fn sync_exchange_state_marks_attention_required_when_receipt_backed_order_is_missing() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = poise_core::types::Exposure(2.0);
         grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         grid.reference_price = Some(95.0);
@@ -2775,7 +2775,7 @@ mod tests {
 
         let transition = manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 7.5,
                     unrealized_pnl: 3.0,
@@ -2796,7 +2796,7 @@ mod tests {
             .unwrap();
 
         assert!(transition.events.is_empty());
-        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
 
         let grid = manager.get_grid("btc1").unwrap();
         assert_eq!(grid.target_exposure, Some(poise_core::types::Exposure(6.0)));
@@ -2814,7 +2814,7 @@ mod tests {
 
         let transition = manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 7.5,
                     unrealized_pnl: 3.0,
@@ -2841,7 +2841,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         manager
             .grids
-            .get_mut(&GridId::new("btc1"))
+            .get_mut(&TrackId::new("btc1"))
             .unwrap()
             .risk_state = RiskState {
             realized_pnl_day: Some(
@@ -2856,7 +2856,7 @@ mod tests {
 
         manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 7.5,
                     unrealized_pnl: 3.0,
@@ -2890,7 +2890,7 @@ mod tests {
     fn sync_exchange_state_rebuilds_multiple_live_open_orders_when_they_match_distinct_slots() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
         seed_executor_slot(
             grid,
             working_order(
@@ -2921,7 +2921,7 @@ mod tests {
 
         let transition = manager
             .sync_exchange_state(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 PositionObservation {
                     qty: 7.5,
                     unrealized_pnl: 3.0,
@@ -2994,7 +2994,7 @@ mod tests {
         };
         manager
             .record_submit_request(
-                &GridId::new("btc1"),
+                &TrackId::new("btc1"),
                 &request,
                 poise_core::types::Exposure(6.0),
             )
@@ -3002,8 +3002,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3034,7 +3034,7 @@ mod tests {
     fn observe_order_does_not_mutate_slots_while_recovery_anomaly_is_active() {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
         grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         grid.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
@@ -3053,8 +3053,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3078,7 +3078,7 @@ mod tests {
     #[test]
     fn canceled_order_keeps_attention_required_while_recovery_anomaly_is_active() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         grid.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
@@ -3097,8 +3097,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc-core"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3110,7 +3110,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
         assert_eq!(
             transition.snapshot.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
@@ -3124,8 +3124,8 @@ mod tests {
         let mut manager = test_manager_with_clock(Arc::new(FixedClock(observed_at)));
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.status = GridStatus::Active;
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(2.0);
         grid.target_exposure = Some(Exposure(4.0));
         grid.executor_state.inventory_gap = Exposure(2.0);
@@ -3135,15 +3135,15 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Market(MarketObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
                     reference_price: 85.0,
                 }),
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![GridEffect::NoOp]);
-        assert_eq!(transition.snapshot.status, GridStatus::Frozen);
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
+        assert_eq!(transition.snapshot.status, TrackStatus::Frozen);
         assert_eq!(
             transition.snapshot.executor_state.inventory_gap,
             Exposure(2.0)
@@ -3169,7 +3169,7 @@ mod tests {
     #[test]
     fn observe_canceled_order_with_cached_reference_price_reconciles_immediately() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
             grid,
@@ -3187,8 +3187,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc-core"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3202,7 +3202,7 @@ mod tests {
 
         let (request, target_exposure) = match transition.effects.as_slice() {
             [
-                GridEffect::SubmitOrder {
+                TrackEffect::SubmitOrder {
                     request,
                     target_exposure,
                 },
@@ -3221,7 +3221,7 @@ mod tests {
     #[test]
     fn observe_filled_order_does_not_reconcile_before_position_update() {
         let mut manager = test_manager_with_cached_price(95.0);
-        let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc-core")).unwrap();
         grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
             grid,
@@ -3239,8 +3239,8 @@ mod tests {
 
         let transition = manager
             .observe(
-                &GridId::new("btc-core"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc-core"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3270,7 +3270,7 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
-        let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
+        let grid = manager.grids.get_mut(&TrackId::new("btc1")).unwrap();
         seed_executor_slot(
             grid,
             working_order(
@@ -3300,8 +3300,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3345,8 +3345,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3379,7 +3379,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         manager
             .grids
-            .get_mut(&GridId::new("btc1"))
+            .get_mut(&TrackId::new("btc1"))
             .unwrap()
             .risk_state = RiskState {
             realized_pnl_day: Some(
@@ -3394,8 +3394,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,
@@ -3428,7 +3428,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         manager
             .grids
-            .get_mut(&GridId::new("btc1"))
+            .get_mut(&TrackId::new("btc1"))
             .unwrap()
             .risk_state = RiskState {
             realized_pnl_day: Some(
@@ -3443,8 +3443,8 @@ mod tests {
 
         manager
             .observe(
-                &GridId::new("btc1"),
-                GridObservation::Order(OrderObservation {
+                &TrackId::new("btc1"),
+                TrackObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
                     side: poise_core::types::Side::Buy,

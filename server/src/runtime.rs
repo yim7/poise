@@ -13,7 +13,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
-use crate::notifications::GridInternalNotification;
+use crate::notifications::TrackInternalNotification;
 use crate::write_service::GridMutationError;
 
 #[derive(Clone)]
@@ -39,7 +39,7 @@ pub struct RuntimeHandles {
 
 #[derive(Debug, Clone)]
 struct RecoveryTrackedGrid {
-    instrument: poise_engine::grid::Instrument,
+    instrument: poise_engine::track::Instrument,
     next_retry_at: Instant,
 }
 
@@ -310,7 +310,7 @@ impl ServerRuntime {
                         }
 
                         let now = Instant::now();
-                        let due_grids: Vec<(String, poise_engine::grid::Instrument)> = tracked
+                        let due_grids: Vec<(String, poise_engine::track::Instrument)> = tracked
                             .iter()
                             .filter(|(_, tracked_grid)| tracked_grid.next_retry_at <= now)
                             .map(|(grid_id, tracked_grid)| (grid_id.clone(), tracked_grid.instrument.clone()))
@@ -338,19 +338,19 @@ impl ServerRuntime {
                     }
                     notification = notifications.recv() => {
                         match notification {
-                            Ok(GridInternalNotification::GridWriteCommitted {
-                                grid_id,
+                            Ok(TrackInternalNotification::GridWriteCommitted {
+                                track_id,
                                 recovery_anomaly_active,
                             }) => {
                                 update_recovery_tracking(
                                     &mut tracked,
                                     &instruments,
-                                    grid_id.as_str(),
+                                    track_id.as_str(),
                                     recovery_anomaly_active,
                                     retry_interval,
                                 );
                             }
-                            Ok(GridInternalNotification::GridEffectStateChanged { .. }) => {}
+                            Ok(TrackInternalNotification::GridEffectStateChanged { .. }) => {}
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                                 tracing::warn!(
                                     "recovery notification stream lagged by {skipped} messages; reseeding recovery tracking"
@@ -422,21 +422,21 @@ impl ServerRuntime {
 
 async fn apply_user_data_event(
     state: &ServerState,
-    grid_id: &str,
+    track_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), GridMutationError> {
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
                 .write_service
-                .observe_position(grid_id, position_observation(&position))
+                .observe_position(track_id, position_observation(&position))
                 .await
                 .map_err(preserve_grid_mutation_error)?;
         }
         UserDataPayload::OrderUpdate(order) => {
             let _ = state
                 .write_service
-                .observe_order(grid_id, order_observation(&order))
+                .observe_order(track_id, order_observation(&order))
                 .await
                 .map_err(preserve_grid_mutation_error)?;
         }
@@ -448,8 +448,8 @@ async fn apply_user_data_event(
 async fn sync_exchange_state_from_exchange(
     state: &ServerState,
     exchange: &Arc<dyn ExchangePort>,
-    grid_id: &str,
-    instrument: &poise_engine::grid::Instrument,
+    track_id: &str,
+    instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), GridMutationError> {
     let position = exchange
@@ -464,7 +464,7 @@ async fn sync_exchange_state_from_exchange(
         let _ = state
             .write_service
             .sync_exchange_state(
-                grid_id,
+                track_id,
                 position_observation(&position),
                 open_orders.iter().map(order_observation).collect(),
             )
@@ -474,7 +474,7 @@ async fn sync_exchange_state_from_exchange(
         let _ = state
             .write_service
             .sync_exchange_state_without_reconcile(
-                grid_id,
+                track_id,
                 position_observation(&position),
                 open_orders.iter().map(order_observation).collect(),
             )
@@ -487,25 +487,25 @@ async fn sync_exchange_state_from_exchange(
 fn update_recovery_tracking(
     tracked: &mut std::collections::HashMap<String, RecoveryTrackedGrid>,
     instruments: &[crate::write_service::GridInstrument],
-    grid_id: &str,
+    track_id: &str,
     recovery_anomaly_active: bool,
     retry_interval: Duration,
 ) {
     if !recovery_anomaly_active {
-        tracked.remove(grid_id);
+        tracked.remove(track_id);
         return;
     }
 
     let Some(instrument) = instruments
         .iter()
-        .find(|grid| grid.id == grid_id)
+        .find(|grid| grid.id == track_id)
         .map(|grid| grid.instrument.clone())
     else {
         return;
     };
 
     tracked
-        .entry(grid_id.to_string())
+        .entry(track_id.to_string())
         .or_insert_with(|| RecoveryTrackedGrid {
             instrument,
             next_retry_at: Instant::now() + retry_interval,
@@ -576,33 +576,33 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::command::GridCommand;
     use poise_engine::execution_plan::ExecutionAction;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::grid::{GridId, Instrument, Venue};
-    use poise_engine::manager::GridManager;
+    use poise_engine::track::{TrackId, Instrument, Venue};
+    use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot, MarketDataPort,
-        OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect, Position, PriceTick,
-        StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
+        ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
+        ExchangeOrder, ExchangePort, TrackReadRepositoryPort, TrackSnapshot, MarketDataPort,
+        OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
+        StateRepositoryPort, StoredDomainEvent, StoredTrackSnapshot, UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
         WorkingOrder,
     };
-    use poise_engine::transition::GridEffect;
+    use poise_engine::transition::TrackEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
     use tracing_subscriber::fmt::MakeWriter;
 
     use crate::assembly::{ServerState, build_server_state};
     use crate::effect_worker::EffectWorker;
-    use crate::projector::GridProjector;
-    use crate::query_service::GridQueryService;
-    use crate::write_service::GridWriteService;
+    use crate::projector::TrackProjector;
+    use crate::query_service::TrackQueryService;
+    use crate::write_service::TrackWriteService;
 
     use super::{RuntimeHandles, ServerRuntime};
 
@@ -951,9 +951,9 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:stale:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "stale".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1048,9 +1048,9 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:rounded:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "rounded".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1120,9 +1120,9 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:recovery:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "recovery".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1213,9 +1213,9 @@ mod tests {
         );
 
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:recovery:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "recovery".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1312,9 +1312,9 @@ mod tests {
         .await;
         fixture
             .persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:recovery:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "recovery".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1382,9 +1382,9 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:recovery:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "recovery".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1582,9 +1582,9 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:recovery:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "recovery".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -1622,7 +1622,7 @@ mod tests {
                 .unwrap();
             if matches!(
                 event,
-                crate::notifications::GridInternalNotification::GridEffectStateChanged { .. }
+                crate::notifications::TrackInternalNotification::GridEffectStateChanged { .. }
             ) {
                 saw_effect_state_changed = true;
                 break;
@@ -1661,7 +1661,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+            crate::notifications::TrackInternalNotification::GridWriteCommitted { .. }
         ));
         worker.run_once().await.unwrap();
 
@@ -1671,7 +1671,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::GridInternalNotification::GridEffectStateChanged { .. }
+            crate::notifications::TrackInternalNotification::GridEffectStateChanged { .. }
         ));
     }
 
@@ -1748,9 +1748,9 @@ mod tests {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:batch:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "batch".into(),
                 sequence: 0,
                 effect: ExecutionAction::CancelOrder {
@@ -1768,19 +1768,19 @@ mod tests {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
-        let manager = GridManager::new(clock);
+        let manager = TrackManager::new(clock);
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
         let state = build_server_state(
-            Arc::new(GridWriteService::new(
+            Arc::new(TrackWriteService::new(
                 manager,
                 state_repository.clone(),
                 events,
             )),
             state_repository,
-            Arc::new(GridQueryService::new(read_repository)),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
         );
         let worker = EffectWorker::new(
             state,
@@ -1857,10 +1857,10 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
 
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -1879,7 +1879,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
@@ -1887,10 +1887,10 @@ mod tests {
         let state = build_server_state(
             write_service,
             persistence.clone(),
-            Arc::new(GridQueryService::new(
-                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            Arc::new(TrackQueryService::new(
+                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         );
         let runtime = ServerRuntime::new(
             state.clone(),
@@ -1951,10 +1951,10 @@ mod tests {
         let market_data = Arc::new(FakeMarketData::without_user_receiver(price_receiver));
         let clock = Arc::new(FixedClock(test_server_time()));
 
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -1968,7 +1968,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
@@ -1976,10 +1976,10 @@ mod tests {
         let state = build_server_state(
             write_service,
             persistence.clone(),
-            Arc::new(GridQueryService::new(
-                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            Arc::new(TrackQueryService::new(
+                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         );
         let runtime = ServerRuntime::new(
             state.clone(),
@@ -2054,7 +2054,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+            crate::notifications::TrackInternalNotification::GridWriteCommitted { .. }
         ));
 
         shutdown(handles).await;
@@ -2145,11 +2145,11 @@ mod tests {
     #[tokio::test]
     async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event()
      {
-        let mut snapshot = GridSnapshot {
-            grid_id: GridId::new("BTCUSDT"),
+        let mut snapshot = TrackSnapshot {
+            track_id: TrackId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config: test_config(),
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(0.0)),
             manual_target_override: None,
@@ -2219,7 +2219,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::GridInternalNotification::GridWriteCommitted { .. }
+            crate::notifications::TrackInternalNotification::GridWriteCommitted { .. }
         ));
 
         shutdown(handles).await;
@@ -2322,9 +2322,9 @@ mod tests {
         .await;
         fixture
             .persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:startup:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "startup".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -2396,9 +2396,9 @@ mod tests {
         .await;
         fixture
             .persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:startup:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "startup".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -2430,7 +2430,7 @@ mod tests {
         assert_eq!(pending_effects.len(), 1);
         assert!(matches!(
             pending_effects.as_slice(),
-            [PersistedGridEffect {
+            [PersistedTrackEffect {
                 effect:
                     ExecutionAction::SubmitOrder {
                         request,
@@ -2530,9 +2530,9 @@ mod tests {
         .await;
         fixture
             .persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:startup:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "startup".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -2599,9 +2599,9 @@ mod tests {
         .await;
         fixture
             .persistence
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "BTCUSDT:startup:0".into(),
-                grid_id: GridId::new("BTCUSDT"),
+                track_id: TrackId::new("BTCUSDT"),
                 batch_id: "startup".into(),
                 sequence: 0,
                 effect: ExecutionAction::SubmitOrder {
@@ -2923,7 +2923,7 @@ mod tests {
         let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
         let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
         let mut snapshot = test_snapshot();
-        snapshot.status = GridStatus::Paused;
+        snapshot.status = TrackStatus::Paused;
         snapshot.target_exposure = None;
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
@@ -3015,10 +3015,10 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
 
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -3027,7 +3027,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
@@ -3035,10 +3035,10 @@ mod tests {
         let state = build_server_state(
             write_service,
             persistence.clone(),
-            Arc::new(GridQueryService::new(
-                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            Arc::new(TrackQueryService::new(
+                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         );
         let runtime = ServerRuntime::new(
             state,
@@ -3060,22 +3060,22 @@ mod tests {
 
     #[tokio::test]
     async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
-        let manager = GridManager::new(Arc::new(FixedClock(
+        let manager = TrackManager::new(Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         )));
         let persistence = Arc::new(MemoryPersistence::default());
         let (events, _) = broadcast::channel(16);
         let state = build_server_state(
-            Arc::new(GridWriteService::new(
+            Arc::new(TrackWriteService::new(
                 manager,
                 persistence.clone() as Arc<dyn StateRepositoryPort>,
                 events.clone(),
             )),
             persistence.clone() as Arc<dyn StateRepositoryPort>,
-            Arc::new(GridQueryService::new(
-                persistence as Arc<dyn GridReadRepositoryPort>,
+            Arc::new(TrackQueryService::new(
+                persistence as Arc<dyn TrackReadRepositoryPort>,
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         );
 
         let error = super::apply_user_data_event(
@@ -3181,10 +3181,10 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
 
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 test_budget(),
@@ -3193,7 +3193,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
@@ -3201,10 +3201,10 @@ mod tests {
         let state = build_server_state(
             write_service,
             persistence.clone(),
-            Arc::new(GridQueryService::new(
-                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            Arc::new(TrackQueryService::new(
+                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         );
 
         let runtime = ServerRuntime::new(
@@ -3227,7 +3227,7 @@ mod tests {
     }
 
     async fn runtime_fixture(
-        restored_snapshot: Option<GridSnapshot>,
+        restored_snapshot: Option<TrackSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -3243,7 +3243,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_recovery_retry_interval(
-        restored_snapshot: Option<GridSnapshot>,
+        restored_snapshot: Option<TrackSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -3263,7 +3263,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_clock_and_recovery_retry_interval(
-        restored_snapshot: Option<GridSnapshot>,
+        restored_snapshot: Option<TrackSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -3276,10 +3276,10 @@ mod tests {
         let (user_sender, user_receiver) = mpsc::channel(8);
         let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
 
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 test_config(),
                 budget,
@@ -3296,7 +3296,7 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let write_service = Arc::new(GridWriteService::new(
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
@@ -3304,10 +3304,10 @@ mod tests {
         let state = build_server_state(
             write_service,
             persistence.clone(),
-            Arc::new(GridQueryService::new(
-                persistence.clone() as Arc<dyn GridReadRepositoryPort>
+            Arc::new(TrackQueryService::new(
+                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackProjector::new()),
         );
 
         RuntimeFixture {
@@ -3328,20 +3328,20 @@ mod tests {
     async fn test_state<R>(
         exchange: Arc<dyn ExchangePort>,
         persistence: Arc<R>,
-        restored_snapshot: Option<GridSnapshot>,
+        restored_snapshot: Option<TrackSnapshot>,
         budget: CapacityBudget,
     ) -> ServerState
     where
-        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
     {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         let instrument = btc_instrument();
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 instrument.clone(),
                 test_config(),
                 budget,
@@ -3354,8 +3354,8 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let write_service = Arc::new(GridWriteService::new(
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             events.clone(),
@@ -3363,29 +3363,29 @@ mod tests {
         build_server_state(
             write_service,
             state_repository,
-            Arc::new(GridQueryService::new(read_repository)),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
         )
     }
 
     async fn test_state_with_config<R>(
         exchange: Arc<dyn ExchangePort>,
         persistence: Arc<R>,
-        restored_snapshot: Option<GridSnapshot>,
+        restored_snapshot: Option<TrackSnapshot>,
         budget: CapacityBudget,
-        config: GridConfig,
+        config: TrackConfig,
     ) -> ServerState
     where
-        R: StateRepositoryPort + GridReadRepositoryPort + 'static,
+        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
     {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         let instrument = btc_instrument();
         manager
             .add_grid(
-                GridId::new("BTCUSDT"),
+                TrackId::new("BTCUSDT"),
                 instrument.clone(),
                 config,
                 budget,
@@ -3398,8 +3398,8 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let write_service = Arc::new(GridWriteService::new(
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             events.clone(),
@@ -3407,12 +3407,12 @@ mod tests {
         build_server_state(
             write_service,
             state_repository,
-            Arc::new(GridQueryService::new(read_repository)),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
         )
     }
 
-    async fn current_instance(state: &ServerState) -> poise_engine::snapshot::GridRuntimeSnapshot {
+    async fn current_instance(state: &ServerState) -> poise_engine::snapshot::TrackRuntimeSnapshot {
         let manager_handle = state.write_service.manager();
         let manager = manager_handle.read().await;
         manager.get_grid("BTCUSDT").unwrap().snapshot()
@@ -3447,7 +3447,7 @@ mod tests {
 
     async fn wait_until_instance<F>(state: &ServerState, predicate: F)
     where
-        F: Fn(&poise_engine::snapshot::GridRuntimeSnapshot) -> bool,
+        F: Fn(&poise_engine::snapshot::TrackRuntimeSnapshot) -> bool,
     {
         timeout(Duration::from_secs(1), async {
             loop {
@@ -3478,13 +3478,13 @@ mod tests {
         .unwrap();
     }
 
-    fn ready_pending_effects(effects: &[PersistedGridEffect]) -> Vec<PersistedGridEffect> {
+    fn ready_pending_effects(effects: &[PersistedTrackEffect]) -> Vec<PersistedTrackEffect> {
         effects
             .iter()
             .filter(|effect| {
                 effect.status == EffectStatus::Pending
                     && !effects.iter().any(|prior| {
-                        prior.grid_id == effect.grid_id
+                        prior.track_id == effect.track_id
                             && prior.batch_id == effect.batch_id
                             && prior.sequence < effect.sequence
                             && !prior.status.unblocks_follow_up()
@@ -3495,7 +3495,7 @@ mod tests {
     }
 
     fn apply_effect_status_update(
-        effects: &mut [PersistedGridEffect],
+        effects: &mut [PersistedTrackEffect],
         effect_status_update: Option<&EffectStatusUpdate>,
         now: chrono::DateTime<Utc>,
     ) -> Result<()> {
@@ -3513,8 +3513,8 @@ mod tests {
         Ok(())
     }
 
-    fn test_config() -> GridConfig {
-        GridConfig {
+    fn test_config() -> TrackConfig {
+        TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -3525,8 +3525,8 @@ mod tests {
         }
     }
 
-    fn rounded_submit_test_config() -> GridConfig {
-        GridConfig {
+    fn rounded_submit_test_config() -> TrackConfig {
+        TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 6.0,
@@ -3610,7 +3610,7 @@ mod tests {
         }
     }
 
-    fn test_snapshot() -> GridSnapshot {
+    fn test_snapshot() -> TrackSnapshot {
         test_snapshot_with_config(test_config())
     }
 
@@ -3638,7 +3638,7 @@ mod tests {
         }
     }
 
-    fn set_executor_state(snapshot: &mut GridSnapshot, order: WorkingOrder, state: SlotState) {
+    fn set_executor_state(snapshot: &mut TrackSnapshot, order: WorkingOrder, state: SlotState) {
         snapshot.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
             inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
@@ -3660,7 +3660,7 @@ mod tests {
     }
 
     fn inventory_core_order(
-        grid: &poise_engine::snapshot::GridRuntimeSnapshot,
+        grid: &poise_engine::snapshot::TrackRuntimeSnapshot,
     ) -> Option<&WorkingOrder> {
         grid.executor_state
             .slots
@@ -3668,12 +3668,12 @@ mod tests {
             .and_then(|slot| slot.working_order.as_ref())
     }
 
-    fn test_snapshot_with_config(config: GridConfig) -> GridSnapshot {
-        let mut snapshot = GridSnapshot {
-            grid_id: GridId::new("BTCUSDT"),
+    fn test_snapshot_with_config(config: TrackConfig) -> TrackSnapshot {
+        let mut snapshot = TrackSnapshot {
+            track_id: TrackId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config,
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
@@ -3873,8 +3873,8 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryPersistence {
-        snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
-        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         next_effect_batch: AtomicUsize,
         save_transition_count: AtomicUsize,
     }
@@ -3884,11 +3884,11 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &GridSnapshot,
+            state: &TrackSnapshot,
             _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
-        ) -> Result<CommittedGridWrite> {
+        ) -> Result<CommittedTrackWrite> {
             self.save_transition_count.fetch_add(1, Ordering::SeqCst);
             self.snapshots
                 .lock()
@@ -3904,9 +3904,9 @@ mod tests {
                     continue;
                 }
 
-                let persisted = PersistedGridEffect {
+                let persisted = PersistedTrackEffect {
                     effect_id: format!("{id}:{batch_id}:{sequence}"),
-                    grid_id: GridId::new(id),
+                    track_id: TrackId::new(id),
                     batch_id: batch_id.clone(),
                     sequence: u32::try_from(sequence).unwrap(),
                     effect: effect.clone(),
@@ -3921,13 +3921,13 @@ mod tests {
             }
             apply_effect_status_update(&mut effect_store, effect_status_update, now)?;
 
-            Ok(CommittedGridWrite {
-                grid_id: GridId::new(id),
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
                 effects: persisted_effects,
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -3935,20 +3935,20 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
-            grid_id: &GridId,
-        ) -> Result<Vec<PersistedGridEffect>> {
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects)
                 .into_iter()
-                .filter(|effect| effect.grid_id == *grid_id)
-                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .collect())
         }
     }
@@ -3958,39 +3958,39 @@ mod tests {
             self.save_transition_count.load(Ordering::SeqCst)
         }
 
-        async fn all_effects(&self) -> Vec<PersistedGridEffect> {
+        async fn all_effects(&self) -> Vec<PersistedTrackEffect> {
             self.effects.lock().await.clone()
         }
 
-        async fn seed_effect(&self, effect: PersistedGridEffect) {
+        async fn seed_effect(&self, effect: PersistedTrackEffect) {
             self.effects.lock().await.push(effect);
         }
     }
 
     #[async_trait::async_trait]
-    impl GridReadRepositoryPort for MemoryPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for MemoryPersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 })
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 }))
@@ -3998,7 +3998,7 @@ mod tests {
 
         async fn list_recent_grid_events(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
@@ -4006,15 +4006,15 @@ mod tests {
 
         async fn list_recent_grid_effects(
             &self,
-            grid_id: &GridId,
+            track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<PersistedGridEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .await
                 .iter()
-                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.track_id == *track_id)
                 .cloned()
                 .collect())
         }
@@ -4022,8 +4022,8 @@ mod tests {
 
     #[derive(Default)]
     struct FailOnReceiptPersistence {
-        snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
-        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         next_effect_batch: AtomicUsize,
     }
 
@@ -4032,11 +4032,11 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &GridSnapshot,
+            state: &TrackSnapshot,
             _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
-        ) -> Result<CommittedGridWrite> {
+        ) -> Result<CommittedTrackWrite> {
             if state
                 .executor_state
                 .slots
@@ -4062,9 +4062,9 @@ mod tests {
                     continue;
                 }
 
-                let persisted = PersistedGridEffect {
+                let persisted = PersistedTrackEffect {
                     effect_id: format!("{id}:{batch_id}:{sequence}"),
-                    grid_id: GridId::new(id),
+                    track_id: TrackId::new(id),
                     batch_id: batch_id.clone(),
                     sequence: u32::try_from(sequence).unwrap(),
                     effect: effect.clone(),
@@ -4079,13 +4079,13 @@ mod tests {
             }
             apply_effect_status_update(&mut effect_store, effect_status_update, now)?;
 
-            Ok(CommittedGridWrite {
-                grid_id: GridId::new(id),
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
                 effects: persisted_effects,
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -4093,54 +4093,54 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
-            grid_id: &GridId,
-        ) -> Result<Vec<PersistedGridEffect>> {
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects)
                 .into_iter()
-                .filter(|effect| effect.grid_id == *grid_id)
-                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .collect())
         }
     }
 
     impl FailOnReceiptPersistence {
-        async fn all_effects(&self) -> Vec<PersistedGridEffect> {
+        async fn all_effects(&self) -> Vec<PersistedTrackEffect> {
             self.effects.lock().await.clone()
         }
     }
 
     #[async_trait::async_trait]
-    impl GridReadRepositoryPort for FailOnReceiptPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for FailOnReceiptPersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 })
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 }))
@@ -4148,7 +4148,7 @@ mod tests {
 
         async fn list_recent_grid_events(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
@@ -4156,23 +4156,23 @@ mod tests {
 
         async fn list_recent_grid_effects(
             &self,
-            grid_id: &GridId,
+            track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<PersistedGridEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .await
                 .iter()
-                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.track_id == *track_id)
                 .cloned()
                 .collect())
         }
     }
 
     struct FailOnSavePersistence {
-        snapshots: AsyncMutex<HashMap<String, GridSnapshot>>,
-        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         next_effect_batch: AtomicUsize,
         save_count: AtomicUsize,
         fail_on: usize,
@@ -4189,7 +4189,7 @@ mod tests {
             }
         }
 
-        async fn all_effects(&self) -> Vec<PersistedGridEffect> {
+        async fn all_effects(&self) -> Vec<PersistedTrackEffect> {
             self.effects.lock().await.clone()
         }
     }
@@ -4199,11 +4199,11 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &GridSnapshot,
+            state: &TrackSnapshot,
             _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
-        ) -> Result<CommittedGridWrite> {
+        ) -> Result<CommittedTrackWrite> {
             let save_number = self.save_count.fetch_add(1, Ordering::SeqCst) + 1;
             if save_number == self.fail_on {
                 return Err(anyhow!("injected save failure"));
@@ -4223,9 +4223,9 @@ mod tests {
                     continue;
                 }
 
-                let persisted = PersistedGridEffect {
+                let persisted = PersistedTrackEffect {
                     effect_id: format!("{id}:{batch_id}:{sequence}"),
-                    grid_id: GridId::new(id),
+                    track_id: TrackId::new(id),
                     batch_id: batch_id.clone(),
                     sequence: u32::try_from(sequence).unwrap(),
                     effect: effect.clone(),
@@ -4240,13 +4240,13 @@ mod tests {
             }
             apply_effect_status_update(&mut effect_store, effect_status_update, now)?;
 
-            Ok(CommittedGridWrite {
-                grid_id: GridId::new(id),
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
                 effects: persisted_effects,
             })
         }
 
-        async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
+        async fn load_grid_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -4254,48 +4254,48 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
-            grid_id: &GridId,
-        ) -> Result<Vec<PersistedGridEffect>> {
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects)
                 .into_iter()
-                .filter(|effect| effect.grid_id == *grid_id)
-                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .collect())
         }
     }
 
     #[async_trait::async_trait]
-    impl GridReadRepositoryPort for FailOnSavePersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for FailOnSavePersistence {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 })
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 }))
@@ -4303,7 +4303,7 @@ mod tests {
 
         async fn list_recent_grid_events(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
@@ -4311,15 +4311,15 @@ mod tests {
 
         async fn list_recent_grid_effects(
             &self,
-            grid_id: &GridId,
+            track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<PersistedGridEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .await
                 .iter()
-                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.track_id == *track_id)
                 .cloned()
                 .collect())
         }

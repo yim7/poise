@@ -3,16 +3,16 @@ use poise_core::risk::{self, ExposureIntent, RiskDecision};
 use poise_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use poise_core::types::Exposure;
 
-use crate::runtime::{GridRuntime, GridStatus};
+use crate::runtime::{TrackRuntime, TrackStatus};
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
     pub target_exposure: Exposure,
-    pub new_status: Option<GridStatus>,
+    pub new_status: Option<TrackStatus>,
     pub suppress_execution: bool,
 }
 
-pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetReconcileResult {
+pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReconcileResult {
     if let Some(target_override) = grid.manual_target_override.clone() {
         let delta = grid.current_exposure.delta(&target_override);
         return TargetReconcileResult {
@@ -24,7 +24,7 @@ pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetRecon
                 .into_iter()
                 .collect(),
             target_exposure: target_override,
-            new_status: Some(GridStatus::ReducingOnly),
+            new_status: Some(TrackStatus::ReducingOnly),
             suppress_execution: delta.is_zero(),
         };
     }
@@ -106,28 +106,28 @@ pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetRecon
     }
 }
 
-fn resolve_in_band_status(grid: &GridRuntime) -> Option<GridStatus> {
+fn resolve_in_band_status(grid: &TrackRuntime) -> Option<TrackStatus> {
     match grid.status {
-        GridStatus::WaitingMarketData => Some(GridStatus::Active),
-        GridStatus::Frozen | GridStatus::Holding => Some(GridStatus::Active),
+        TrackStatus::WaitingMarketData => Some(TrackStatus::Active),
+        TrackStatus::Frozen | TrackStatus::Holding => Some(TrackStatus::Active),
         _ => None,
     }
 }
 
 fn apply_out_of_band(
-    grid: &GridRuntime,
+    grid: &TrackRuntime,
     policy: OutOfBandPolicy,
-) -> (Exposure, Option<GridStatus>) {
+) -> (Exposure, Option<TrackStatus>) {
     let frozen_target = grid
         .target_exposure
         .clone()
         .unwrap_or_else(|| grid.current_exposure.clone());
 
     match policy {
-        OutOfBandPolicy::Freeze => (frozen_target, Some(GridStatus::Frozen)),
-        OutOfBandPolicy::Hold => (frozen_target, Some(GridStatus::Holding)),
-        OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(GridStatus::ReducingOnly)),
-        OutOfBandPolicy::Terminate => (Exposure(0.0), Some(GridStatus::Terminated)),
+        OutOfBandPolicy::Freeze => (frozen_target, Some(TrackStatus::Frozen)),
+        OutOfBandPolicy::Hold => (frozen_target, Some(TrackStatus::Holding)),
+        OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(TrackStatus::ReducingOnly)),
+        OutOfBandPolicy::Terminate => (Exposure(0.0), Some(TrackStatus::Terminated)),
     }
 }
 
@@ -138,11 +138,11 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::*;
 
-    fn test_runtime() -> GridRuntime {
-        GridRuntime::new(
+    fn test_runtime() -> TrackRuntime {
+        TrackRuntime::new(
             "test".into(),
-            crate::grid::Instrument::new(crate::grid::Venue::Binance, "BTCUSDT"),
-            GridConfig {
+            crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+            TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
                 long_exposure_units: 8.0,
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn reconcile_target_suppresses_execution_when_exposure_unchanged() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(0.0);
 
         let result = reconcile_target(&grid, 100.0);
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn reconcile_target_emits_event_when_exposure_changes() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(0.0);
 
         let result = reconcile_target(&grid, 90.0);
@@ -205,12 +205,12 @@ mod tests {
     #[test]
     fn reconcile_target_freezes_when_out_of_band() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&grid, 85.0);
 
-        assert_eq!(result.new_status, Some(GridStatus::Frozen));
+        assert_eq!(result.new_status, Some(TrackStatus::Frozen));
         assert!(result.suppress_execution);
     }
 
@@ -220,19 +220,19 @@ mod tests {
 
         let result = reconcile_target(&grid, 100.0);
 
-        assert_eq!(result.new_status, Some(GridStatus::Active));
+        assert_eq!(result.new_status, Some(TrackStatus::Active));
         assert!(result.suppress_execution);
     }
 
     #[test]
     fn reconcile_target_reactivates_after_reenter() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Frozen;
+        grid.status = TrackStatus::Frozen;
         grid.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&grid, 100.0);
 
-        assert_eq!(result.new_status, Some(GridStatus::Active));
+        assert_eq!(result.new_status, Some(TrackStatus::Active));
         assert!(!result.suppress_execution);
     }
 
@@ -240,12 +240,12 @@ mod tests {
     fn reconcile_target_reduce_only_targets_zero() {
         let mut grid = test_runtime();
         grid.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&grid, 85.0);
 
-        assert_eq!(result.new_status, Some(GridStatus::ReducingOnly));
+        assert_eq!(result.new_status, Some(TrackStatus::ReducingOnly));
         assert!(result.target_exposure.0.abs() < 0.001);
     }
 
@@ -253,19 +253,19 @@ mod tests {
     fn reconcile_target_terminate_targets_zero() {
         let mut grid = test_runtime();
         grid.config.out_of_band_policy = OutOfBandPolicy::Terminate;
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&grid, 85.0);
 
-        assert_eq!(result.new_status, Some(GridStatus::Terminated));
+        assert_eq!(result.new_status, Some(TrackStatus::Terminated));
         assert!(result.target_exposure.0.abs() < 0.001);
     }
 
     #[test]
     fn reconcile_target_emits_risk_cap_event_when_budget_caps_target() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(0.0);
         grid.budget = CapacityBudget {
             max_notional: 1500.0,
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn reconcile_target_keeps_risk_cap_event_when_cap_matches_current_exposure() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(4.0);
         grid.budget = CapacityBudget {
             max_notional: 1500.0,
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn reconcile_target_uses_risk_state_pnl_to_cap_target() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(2.0);
         grid.risk_state.realized_pnl_today = -100.0;
         grid.risk_state.unrealized_pnl = -25.0;
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(4.0);
         grid.target_exposure = Some(Exposure(6.0));
         grid.config.out_of_band_policy = OutOfBandPolicy::Freeze;
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn reconcile_target_uses_budget_from_runtime() {
         let mut grid = test_runtime();
-        grid.status = GridStatus::Active;
+        grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(0.0);
         grid.budget = CapacityBudget {
             max_notional: 1500.0,

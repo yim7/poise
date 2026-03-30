@@ -7,11 +7,11 @@ use tokio::sync::mpsc;
 use poise_core::events::DomainEvent;
 use poise_core::types::Side;
 
-use crate::grid::{GridId, Instrument};
-use crate::snapshot::GridRuntimeSnapshot;
-use crate::transition::GridEffect;
+use crate::track::{TrackId, Instrument};
+use crate::snapshot::TrackRuntimeSnapshot;
+use crate::transition::TrackEffect;
 
-pub use crate::snapshot::GridRuntimeSnapshot as GridSnapshot;
+pub use crate::snapshot::TrackRuntimeSnapshot as TrackSnapshot;
 
 // ── Exchange types ──
 
@@ -145,61 +145,62 @@ pub trait StateRepositoryPort: Send + Sync {
     async fn save_transition_with_effect_status(
         &self,
         id: &str,
-        state: &GridRuntimeSnapshot,
+        state: &TrackRuntimeSnapshot,
         events: &[DomainEvent],
-        effects: &[GridEffect],
+        effects: &[TrackEffect],
         effect_status_update: Option<&EffectStatusUpdate>,
-    ) -> Result<CommittedGridWrite>;
+    ) -> Result<CommittedTrackWrite>;
 
     async fn save_transition(
         &self,
         id: &str,
-        state: &GridRuntimeSnapshot,
+        state: &TrackRuntimeSnapshot,
         events: &[DomainEvent],
-        effects: &[GridEffect],
-    ) -> Result<CommittedGridWrite> {
+        effects: &[TrackEffect],
+    ) -> Result<CommittedTrackWrite> {
         self.save_transition_with_effect_status(id, state, events, effects, None)
             .await
     }
-    async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>>;
+    async fn load_grid_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
     async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
-    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>>;
+    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
     async fn list_pending_submit_effects_for_grid(
         &self,
-        grid_id: &GridId,
-    ) -> Result<Vec<PersistedGridEffect>>;
+        grid_id: &TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredDomainEvent {
     pub id: i64,
-    pub grid_id: GridId,
+    #[serde(alias = "grid_id")]
+    pub track_id: TrackId,
     pub event: DomainEvent,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoredGridSnapshot {
-    pub snapshot: GridRuntimeSnapshot,
+pub struct StoredTrackSnapshot {
+    pub snapshot: TrackRuntimeSnapshot,
     pub updated_at: DateTime<Utc>,
 }
 
 #[async_trait]
-pub trait GridReadRepositoryPort: Send + Sync {
-    async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>>;
-    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>>;
+pub trait TrackReadRepositoryPort: Send + Sync {
+    async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>>;
+    async fn load_grid_snapshot(&self, grid_id: &TrackId) -> Result<Option<StoredTrackSnapshot>>;
     async fn list_recent_grid_events(
         &self,
-        grid_id: &GridId,
+        grid_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<StoredDomainEvent>>;
     /// Returns effects selected from the most recent `updated_at` window,
     /// ordered by `updated_at` ascending.
     async fn list_recent_grid_effects(
         &self,
-        grid_id: &GridId,
+        grid_id: &TrackId,
         limit: usize,
-    ) -> Result<Vec<PersistedGridEffect>>;
+    ) -> Result<Vec<PersistedTrackEffect>>;
 }
 
 pub trait ClockPort: Send + Sync {
@@ -207,9 +208,10 @@ pub trait ClockPort: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CommittedGridWrite {
-    pub grid_id: GridId,
-    pub effects: Vec<PersistedGridEffect>,
+pub struct CommittedTrackWrite {
+    #[serde(alias = "grid_id")]
+    pub track_id: TrackId,
+    pub effects: Vec<PersistedTrackEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,12 +243,13 @@ impl EffectStatusUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PersistedGridEffect {
+pub struct PersistedTrackEffect {
     pub effect_id: String,
-    pub grid_id: GridId,
+    #[serde(alias = "grid_id")]
+    pub track_id: TrackId,
     pub batch_id: String,
     pub sequence: u32,
-    pub effect: GridEffect,
+    pub effect: TrackEffect,
     pub status: EffectStatus,
     pub attempt_count: u32,
     pub last_error: Option<String>,

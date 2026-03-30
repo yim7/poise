@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 
 use poise_core::events::ReplacementGateReason;
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::GridConfig;
+use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
-use crate::grid::{GridId, Instrument};
+use crate::track::{TrackId, Instrument};
 use crate::ports::OrderStatus;
-use crate::snapshot::{GridRuntimeSnapshot, ObservedState};
+use crate::snapshot::{TrackRuntimeSnapshot, ObservedState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GridStatus {
+pub enum TrackStatus {
     WaitingMarketData,
     Active,
     Frozen,
@@ -121,13 +121,13 @@ impl ExecutorState {
 }
 
 #[derive(Debug, Clone)]
-pub struct GridRuntime {
-    pub(crate) id: GridId,
+pub struct TrackRuntime {
+    pub(crate) id: TrackId,
     pub(crate) instrument: Instrument,
-    pub(crate) config: GridConfig,
+    pub(crate) config: TrackConfig,
     pub(crate) budget: CapacityBudget,
     pub(crate) exchange_rules: ExchangeRules,
-    pub(crate) status: GridStatus,
+    pub(crate) status: TrackStatus,
     pub(crate) current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub(crate) target_exposure: Option<Exposure>,
@@ -142,11 +142,11 @@ pub struct GridRuntime {
     pub(crate) tick_timeout_secs: u64,
 }
 
-impl GridRuntime {
+impl TrackRuntime {
     pub fn new(
-        id: GridId,
+        id: TrackId,
         instrument: Instrument,
-        config: GridConfig,
+        config: TrackConfig,
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
@@ -163,9 +163,9 @@ impl GridRuntime {
     }
 
     pub fn with_tick_timeout_secs(
-        id: GridId,
+        id: TrackId,
         instrument: Instrument,
-        config: GridConfig,
+        config: TrackConfig,
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
@@ -177,7 +177,7 @@ impl GridRuntime {
             config,
             budget,
             exchange_rules,
-            status: GridStatus::WaitingMarketData,
+            status: TrackStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
             manual_target_override: None,
@@ -196,7 +196,7 @@ impl GridRuntime {
         &self.instrument.symbol
     }
 
-    pub fn id(&self) -> &GridId {
+    pub fn id(&self) -> &TrackId {
         &self.id
     }
 
@@ -204,7 +204,7 @@ impl GridRuntime {
         &self.instrument
     }
 
-    pub fn status(&self) -> &GridStatus {
+    pub fn status(&self) -> &TrackStatus {
         &self.status
     }
 
@@ -212,9 +212,9 @@ impl GridRuntime {
         &self.budget
     }
 
-    pub fn snapshot(&self) -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: self.id.clone(),
+    pub fn snapshot(&self) -> TrackRuntimeSnapshot {
+        TrackRuntimeSnapshot {
+            track_id: self.id.clone(),
             instrument: self.instrument.clone(),
             config: self.config.clone(),
             status: self.status.clone(),
@@ -233,12 +233,12 @@ impl GridRuntime {
         }
     }
 
-    pub fn restore_from_snapshot(&mut self, snapshot: &GridRuntimeSnapshot) -> Result<()> {
-        if self.id != snapshot.grid_id {
+    pub fn restore_from_snapshot(&mut self, snapshot: &TrackRuntimeSnapshot) -> Result<()> {
+        if self.id != snapshot.track_id {
             anyhow::bail!(
-                "snapshot grid id mismatch: runtime has `{}`, snapshot has `{}`",
+                "snapshot track id mismatch: runtime has `{}`, snapshot has `{}`",
                 self.id.as_str(),
-                snapshot.grid_id.as_str()
+                snapshot.track_id.as_str()
             );
         }
         if self.instrument != snapshot.instrument {
@@ -282,23 +282,23 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
-    use crate::grid::{GridId, Instrument, Venue};
+    use crate::track::{TrackId, Instrument, Venue};
     use crate::ports::OrderStatus;
 
     use super::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, RiskState,
+        ExecutionSlot, ExecutionStats, ExecutorState, TrackRuntime, TrackStatus, RiskState,
         SlotState, WorkingOrder,
     };
 
-    fn test_runtime() -> GridRuntime {
-        GridRuntime::new(
-            GridId::new("grid-1"),
+    fn test_runtime() -> TrackRuntime {
+        TrackRuntime::new(
+            TrackId::new("grid-1"),
             Instrument::new(Venue::Binance, "BTCUSDT"),
-            GridConfig {
+            TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
                 long_exposure_units: 8.0,
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn snapshot_round_trips_executor_state() {
         let mut runtime = test_runtime();
-        runtime.status = GridStatus::Active;
+        runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
         runtime.target_exposure = Some(Exposure(6.0));
         runtime.manual_target_override = Some(Exposure(0.0));
@@ -417,7 +417,7 @@ mod tests {
         restored.tick_timeout_secs = 45;
         restored.restore_from_snapshot(&snapshot).unwrap();
 
-        assert_eq!(restored.status, GridStatus::Active);
+        assert_eq!(restored.status, TrackStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
         assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn restore_from_snapshot_detects_missing_field_via_round_trip() {
         let mut runtime = test_runtime();
-        runtime.status = GridStatus::Active;
+        runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
         runtime.target_exposure = Some(Exposure(6.0));
         runtime.reference_price = Some(96.0);

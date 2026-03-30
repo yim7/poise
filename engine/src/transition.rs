@@ -1,13 +1,13 @@
 use poise_core::events::DomainEvent;
 
 use crate::execution_plan::ExecutionAction;
-use crate::snapshot::GridRuntimeSnapshot;
+use crate::snapshot::TrackRuntimeSnapshot;
 
-pub type GridEffect = ExecutionAction;
+pub type TrackEffect = ExecutionAction;
 
 #[derive(Debug, Clone)]
-pub struct GridTransition {
-    pub snapshot: GridRuntimeSnapshot,
+pub struct TrackTransition {
+    pub snapshot: TrackRuntimeSnapshot,
     pub events: Vec<DomainEvent>,
-    pub effects: Vec<GridEffect>,
+    pub effects: Vec<TrackEffect>,
 }

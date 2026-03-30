@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use poise_engine::ports::{ExchangePort, OrderRequest, PersistedGridEffect};
-use poise_engine::transition::GridEffect;
+use poise_engine::ports::{ExchangePort, OrderRequest, PersistedTrackEffect};
+use poise_engine::transition::TrackEffect;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -103,16 +103,16 @@ impl EffectWorker {
         Ok(())
     }
 
-    async fn process_effect(&self, persisted: PersistedGridEffect) -> Result<()> {
+    async fn process_effect(&self, persisted: PersistedTrackEffect) -> Result<()> {
         match persisted.effect {
-            GridEffect::SubmitOrder {
+            TrackEffect::SubmitOrder {
                 ref request,
                 ref target_exposure,
             } => {
                 self.execute_submit(&persisted, request.clone(), target_exposure.clone())
                     .await
             }
-            GridEffect::CancelOrder {
+            TrackEffect::CancelOrder {
                 ref instrument,
                 ref order_id,
             } => {
@@ -125,7 +125,7 @@ impl EffectWorker {
                 )
                 .await
             }
-            GridEffect::CancelAll { ref instrument } => {
+            TrackEffect::CancelAll { ref instrument } => {
                 self.execute_cancellation(
                     &persisted,
                     Cancellation::All {
@@ -134,10 +134,10 @@ impl EffectWorker {
                 )
                 .await
             }
-            GridEffect::NoOp => {
+            TrackEffect::NoOp => {
                 self.state
                     .write_service
-                    .complete_effect_succeeded(persisted.grid_id.as_str(), &persisted.effect_id)
+                    .complete_effect_succeeded(persisted.track_id.as_str(), &persisted.effect_id)
                     .await?;
                 Ok(())
             }
@@ -146,7 +146,7 @@ impl EffectWorker {
 
     async fn execute_submit(
         &self,
-        persisted: &PersistedGridEffect,
+        persisted: &PersistedTrackEffect,
         request: OrderRequest,
         target_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
@@ -163,7 +163,7 @@ impl EffectWorker {
                     .state
                     .write_service
                     .complete_submit_execution(
-                        persisted.grid_id.as_str(),
+                        persisted.track_id.as_str(),
                         &persisted.effect_id,
                         &request,
                         prepared_submit.target_exposure,
@@ -174,7 +174,7 @@ impl EffectWorker {
                     self.state
                         .write_service
                         .complete_effect_failed(
-                            persisted.grid_id.as_str(),
+                            persisted.track_id.as_str(),
                             &persisted.effect_id,
                             &error.to_string(),
                         )
@@ -190,7 +190,7 @@ impl EffectWorker {
                     .state
                     .write_service
                     .record_submit_failure(
-                        persisted.grid_id.as_str(),
+                        persisted.track_id.as_str(),
                         &persisted.effect_id,
                         &request.client_order_id,
                         &failure_message,
@@ -215,7 +215,7 @@ impl EffectWorker {
 
     async fn prepare_submit_execution(
         &self,
-        persisted: &PersistedGridEffect,
+        persisted: &PersistedTrackEffect,
         request: &OrderRequest,
         target_exposure: poise_core::types::Exposure,
     ) -> Result<Option<crate::write_service::PreparedSubmitExecution>> {
@@ -229,7 +229,7 @@ impl EffectWorker {
         self.state
             .write_service
             .prepare_submit_execution(
-                persisted.grid_id.as_str(),
+                persisted.track_id.as_str(),
                 &persisted.effect_id,
                 request,
                 target_exposure.clone(),
@@ -240,7 +240,7 @@ impl EffectWorker {
 
     async fn execute_cancellation(
         &self,
-        persisted: &PersistedGridEffect,
+        persisted: &PersistedTrackEffect,
         cancellation: Cancellation,
     ) -> Result<()> {
         let result = match cancellation {
@@ -258,7 +258,7 @@ impl EffectWorker {
                         self.state
                             .write_service
                             .record_cancel_order_success(
-                                persisted.grid_id.as_str(),
+                                persisted.track_id.as_str(),
                                 &persisted.effect_id,
                                 order_id,
                             )
@@ -268,7 +268,7 @@ impl EffectWorker {
                         self.state
                             .write_service
                             .record_cancel_all_success(
-                                persisted.grid_id.as_str(),
+                                persisted.track_id.as_str(),
                                 &persisted.effect_id,
                             )
                             .await
@@ -278,7 +278,7 @@ impl EffectWorker {
                     self.state
                         .write_service
                         .complete_effect_failed(
-                            persisted.grid_id.as_str(),
+                            persisted.track_id.as_str(),
                             &persisted.effect_id,
                             &error.to_string(),
                         )
@@ -291,7 +291,7 @@ impl EffectWorker {
                 self.state
                     .write_service
                     .complete_effect_failed(
-                        persisted.grid_id.as_str(),
+                        persisted.track_id.as_str(),
                         &persisted.effect_id,
                         &error.to_string(),
                     )
@@ -304,11 +304,11 @@ impl EffectWorker {
 
 enum Cancellation {
     One {
-        instrument: poise_engine::grid::Instrument,
+        instrument: poise_engine::track::Instrument,
         order_id: String,
     },
     All {
-        instrument: poise_engine::grid::Instrument,
+        instrument: poise_engine::track::Instrument,
     },
 }
 
@@ -321,29 +321,29 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
-    use poise_engine::grid::{GridId, Instrument, Venue};
-    use poise_engine::manager::GridManager;
+    use poise_engine::track::{TrackId, Instrument, Venue};
+    use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, GridReadRepositoryPort, OrderReceipt, OrderRequest,
-        OrderStatus, PersistedGridEffect, Position, StateRepositoryPort, StoredDomainEvent,
-        StoredGridSnapshot,
+        ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
+        ExchangeOrder, ExchangePort, TrackReadRepositoryPort, OrderReceipt, OrderRequest,
+        OrderStatus, PersistedTrackEffect, Position, StateRepositoryPort, StoredDomainEvent,
+        StoredTrackSnapshot,
     };
     use poise_engine::runtime::{
-        ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState, WorkingOrder,
+        ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState, WorkingOrder,
     };
-    use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-    use poise_engine::transition::GridEffect;
+    use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+    use poise_engine::transition::TrackEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
     use tokio::time::timeout;
 
     use crate::assembly::build_server_state;
-    use crate::projector::GridProjector;
-    use crate::query_service::GridQueryService;
-    use crate::write_service::GridWriteService;
+    use crate::projector::TrackProjector;
+    use crate::query_service::TrackQueryService;
+    use crate::write_service::TrackWriteService;
 
     use super::EffectWorker;
 
@@ -360,7 +360,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             transition.effects.as_slice(),
-            [GridEffect::SubmitOrder { .. }]
+            [TrackEffect::SubmitOrder { .. }]
         ));
 
         {
@@ -442,12 +442,12 @@ mod tests {
             .seed_snapshot("btc-core", snapshot_with_recovery_anomaly())
             .await;
         repository
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "btc-core:batch:0".into(),
-                grid_id: GridId::new("btc-core"),
+                track_id: TrackId::new("btc-core"),
                 batch_id: "batch".into(),
                 sequence: 0,
-                effect: GridEffect::SubmitOrder {
+                effect: TrackEffect::SubmitOrder {
                     request: OrderRequest {
                         instrument: btc_instrument(),
                         side: Side::Buy,
@@ -504,12 +504,12 @@ mod tests {
             manager.restore_grid_state(&snapshot).unwrap();
         }
         repository
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "btc-core:batch:0".into(),
-                grid_id: GridId::new("btc-core"),
+                track_id: TrackId::new("btc-core"),
                 batch_id: "batch".into(),
                 sequence: 0,
-                effect: GridEffect::CancelOrder {
+                effect: TrackEffect::CancelOrder {
                     instrument: btc_instrument(),
                     order_id: "order-1".into(),
                 },
@@ -553,7 +553,7 @@ mod tests {
     async fn submit_recovery_proceed_receipt_keeps_current_plan_target() {
         let repository = Arc::new(MemoryRepository::default());
         let exchange = Arc::new(FakeExchange::default());
-        let config = GridConfig {
+        let config = TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -600,12 +600,12 @@ mod tests {
             manager.restore_grid_state(&snapshot).unwrap();
         }
         repository
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "btc-core:batch:0".into(),
-                grid_id: GridId::new("btc-core"),
+                track_id: TrackId::new("btc-core"),
                 batch_id: "batch".into(),
                 sequence: 0,
-                effect: GridEffect::SubmitOrder {
+                effect: TrackEffect::SubmitOrder {
                     request: OrderRequest {
                         instrument: btc_instrument(),
                         side: Side::Buy,
@@ -662,7 +662,7 @@ mod tests {
             .await
             .unwrap();
         let submit_effect = match transition.effects.as_slice() {
-            [GridEffect::SubmitOrder { .. }] => repository
+            [TrackEffect::SubmitOrder { .. }] => repository
                 .list_all_effects()
                 .await
                 .into_iter()
@@ -671,12 +671,12 @@ mod tests {
             other => panic!("expected one submit effect, got {other:?}"),
         };
         repository
-            .seed_effect(PersistedGridEffect {
+            .seed_effect(PersistedTrackEffect {
                 effect_id: "btc-core:shutdown:0".into(),
-                grid_id: GridId::new("btc-core"),
+                track_id: TrackId::new("btc-core"),
                 batch_id: "shutdown".into(),
                 sequence: 0,
-                effect: GridEffect::NoOp,
+                effect: TrackEffect::NoOp,
                 status: EffectStatus::Pending,
                 attempt_count: 0,
                 last_error: None,
@@ -742,17 +742,17 @@ mod tests {
     async fn test_state_with_grid(
         repository: Arc<MemoryRepository>,
         _exchange: Arc<FakeExchange>,
-        config: GridConfig,
+        config: TrackConfig,
         exchange_rules: ExchangeRules,
     ) -> crate::assembly::ServerState {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
-        let mut manager = GridManager::new(clock);
+        let mut manager = TrackManager::new(clock);
         let instrument = btc_instrument();
         manager
             .add_grid(
-                GridId::new("btc-core"),
+                TrackId::new("btc-core"),
                 instrument.clone(),
                 config,
                 test_budget(),
@@ -762,8 +762,8 @@ mod tests {
 
         let (notifications, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let write_service = Arc::new(GridWriteService::new(
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             notifications.clone(),
@@ -771,8 +771,8 @@ mod tests {
         build_server_state(
             write_service,
             state_repository,
-            Arc::new(GridQueryService::new(read_repository)),
-            Arc::new(GridProjector::new()),
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
         )
     }
 
@@ -780,12 +780,12 @@ mod tests {
         Instrument::new(Venue::Binance, "BTCUSDT")
     }
 
-    fn snapshot_with_recovery_anomaly() -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: GridId::new("btc-core"),
+    fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
+        TrackRuntimeSnapshot {
+            track_id: TrackId::new("btc-core"),
             instrument: btc_instrument(),
             config: test_config(),
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
@@ -818,12 +818,12 @@ mod tests {
         }
     }
 
-    fn snapshot_with_working_order() -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: GridId::new("btc-core"),
+    fn snapshot_with_working_order() -> TrackRuntimeSnapshot {
+        TrackRuntimeSnapshot {
+            track_id: TrackId::new("btc-core"),
             instrument: btc_instrument(),
             config: test_config(),
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(2.0),
             target_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
@@ -867,14 +867,14 @@ mod tests {
 
     fn snapshot_with_submit_pending_order(
         reference_price: f64,
-        config: GridConfig,
+        config: TrackConfig,
         order: WorkingOrder,
-    ) -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: GridId::new("btc-core"),
+    ) -> TrackRuntimeSnapshot {
+        TrackRuntimeSnapshot {
+            track_id: TrackId::new("btc-core"),
             instrument: btc_instrument(),
             config: config.clone(),
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(poise_core::strategy::target_exposure(
                 reference_price,
@@ -910,8 +910,8 @@ mod tests {
         }
     }
 
-    fn test_config() -> GridConfig {
-        GridConfig {
+    fn test_config() -> TrackConfig {
+        TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -1014,8 +1014,8 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryRepository {
-        snapshots: AsyncMutex<HashMap<String, poise_engine::snapshot::GridRuntimeSnapshot>>,
-        effects: AsyncMutex<Vec<PersistedGridEffect>>,
+        snapshots: AsyncMutex<HashMap<String, poise_engine::snapshot::TrackRuntimeSnapshot>>,
+        effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         next_effect_batch: AsyncMutex<u64>,
     }
 
@@ -1023,16 +1023,16 @@ mod tests {
         async fn seed_snapshot(
             &self,
             id: &str,
-            snapshot: poise_engine::snapshot::GridRuntimeSnapshot,
+            snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
         ) {
             self.snapshots.lock().await.insert(id.to_string(), snapshot);
         }
 
-        async fn seed_effect(&self, effect: PersistedGridEffect) {
+        async fn seed_effect(&self, effect: PersistedTrackEffect) {
             self.effects.lock().await.push(effect);
         }
 
-        async fn list_all_effects(&self) -> Vec<PersistedGridEffect> {
+        async fn list_all_effects(&self) -> Vec<PersistedTrackEffect> {
             self.effects.lock().await.clone()
         }
     }
@@ -1042,11 +1042,11 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &poise_engine::snapshot::GridRuntimeSnapshot,
+            state: &poise_engine::snapshot::TrackRuntimeSnapshot,
             _events: &[poise_core::events::DomainEvent],
-            effects: &[GridEffect],
+            effects: &[TrackEffect],
             effect_status_update: Option<&EffectStatusUpdate>,
-        ) -> Result<CommittedGridWrite> {
+        ) -> Result<CommittedTrackWrite> {
             self.snapshots
                 .lock()
                 .await
@@ -1059,13 +1059,13 @@ mod tests {
             let batch_id = next_effect_batch.to_string();
             let mut persisted_effects = Vec::new();
             for (sequence, effect) in effects.iter().enumerate() {
-                if matches!(effect, GridEffect::NoOp) {
+                if matches!(effect, TrackEffect::NoOp) {
                     continue;
                 }
 
-                let persisted = PersistedGridEffect {
+                let persisted = PersistedTrackEffect {
                     effect_id: format!("{id}:{batch_id}:{sequence}"),
-                    grid_id: GridId::new(id),
+                    track_id: TrackId::new(id),
                     batch_id: batch_id.clone(),
                     sequence: u32::try_from(sequence).unwrap(),
                     effect: effect.clone(),
@@ -1092,8 +1092,8 @@ mod tests {
                 effect.updated_at = now;
             }
 
-            Ok(CommittedGridWrite {
-                grid_id: GridId::new(id),
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
                 effects: persisted_effects,
             })
         }
@@ -1101,7 +1101,7 @@ mod tests {
         async fn load_grid_state(
             &self,
             id: &str,
-        ) -> Result<Option<poise_engine::snapshot::GridRuntimeSnapshot>> {
+        ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -1109,7 +1109,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
                 .lock()
@@ -1122,45 +1122,45 @@ mod tests {
 
         async fn list_pending_submit_effects_for_grid(
             &self,
-            grid_id: &GridId,
-        ) -> Result<Vec<PersistedGridEffect>> {
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .await
                 .iter()
-                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.track_id == *track_id)
                 .filter(|effect| effect.status == EffectStatus::Pending)
-                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
         }
     }
 
     #[async_trait::async_trait]
-    impl GridReadRepositoryPort for MemoryRepository {
-        async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+    impl TrackReadRepositoryPort for MemoryRepository {
+        async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 })
                 .collect())
         }
 
-        async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+        async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
-                .get(grid_id.as_str())
+                .get(track_id.as_str())
                 .cloned()
-                .map(|snapshot| StoredGridSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: Utc::now(),
                 }))
@@ -1168,7 +1168,7 @@ mod tests {
 
         async fn list_recent_grid_events(
             &self,
-            _grid_id: &GridId,
+            _grid_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())
@@ -1176,15 +1176,15 @@ mod tests {
 
         async fn list_recent_grid_effects(
             &self,
-            grid_id: &GridId,
+            track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<PersistedGridEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .await
                 .iter()
-                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.track_id == *track_id)
                 .cloned()
                 .collect())
         }

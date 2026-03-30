@@ -8,16 +8,16 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::{DomainEvent, ReplacementGateReason};
-use poise_core::strategy::GridConfig;
+use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
-use poise_engine::grid::{GridId, Instrument, Venue};
+use poise_engine::track::{TrackId, Instrument, Venue};
 use poise_engine::ports::{
-    CommittedGridWrite, EffectStatus, EffectStatusUpdate, GridReadRepositoryPort,
-    PersistedGridEffect, StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot,
+    CommittedTrackWrite, EffectStatus, EffectStatusUpdate, TrackReadRepositoryPort,
+    PersistedTrackEffect, StateRepositoryPort, StoredDomainEvent, StoredTrackSnapshot,
 };
-use poise_engine::runtime::{ExecutorState, GridStatus, RiskState};
-use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-use poise_engine::transition::GridEffect;
+use poise_engine::runtime::{ExecutorState, TrackStatus, RiskState};
+use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+use poise_engine::transition::TrackEffect;
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -47,13 +47,13 @@ impl SqliteStorage {
             .map_err(|err| anyhow!("failed to lock sqlite connection: {err}"))
     }
 
-    fn deserialize_grid_config(config_json: &str) -> rusqlite::Result<GridConfig> {
+    fn deserialize_grid_config(config_json: &str) -> rusqlite::Result<TrackConfig> {
         serde_json::from_str(config_json).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
         })
     }
 
-    fn deserialize_grid_status(status_json: &str) -> rusqlite::Result<GridStatus> {
+    fn deserialize_grid_status(status_json: &str) -> rusqlite::Result<TrackStatus> {
         serde_json::from_str(status_json).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
         })
@@ -79,7 +79,7 @@ impl SqliteStorage {
         })
     }
 
-    fn deserialize_grid_effect(effect_json: &str) -> rusqlite::Result<GridEffect> {
+    fn deserialize_grid_effect(effect_json: &str) -> rusqlite::Result<TrackEffect> {
         serde_json::from_str(effect_json).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
         })
@@ -115,9 +115,9 @@ impl SqliteStorage {
             })
     }
 
-    fn persisted_effect_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedGridEffect> {
+    fn persisted_effect_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedTrackEffect> {
         let effect_id = row.get::<_, String>(0)?;
-        let grid_id = GridId::new(row.get::<_, String>(1)?);
+        let track_id = TrackId::new(row.get::<_, String>(1)?);
         let batch_id = row.get::<_, String>(2)?;
         let sequence = row.get::<_, i64>(3)?;
         let effect_json = row.get::<_, String>(4)?;
@@ -126,9 +126,9 @@ impl SqliteStorage {
         let created_at = row.get::<_, String>(8)?;
         let updated_at = row.get::<_, String>(9)?;
 
-        Ok(PersistedGridEffect {
+        Ok(PersistedTrackEffect {
             effect_id,
-            grid_id,
+            track_id,
             batch_id,
             sequence: u32::try_from(sequence).map_err(|err| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -155,11 +155,11 @@ impl SqliteStorage {
     fn save_transition_blocking(
         conn: Arc<Mutex<Connection>>,
         id: String,
-        state: GridRuntimeSnapshot,
+        state: TrackRuntimeSnapshot,
         events: Vec<DomainEvent>,
-        effects: Vec<GridEffect>,
+        effects: Vec<TrackEffect>,
         effect_status_update: Option<EffectStatusUpdate>,
-    ) -> Result<CommittedGridWrite> {
+    ) -> Result<CommittedTrackWrite> {
         let config_json =
             serde_json::to_string(&state.config).context("failed to serialize grid config")?;
         let status_json =
@@ -253,10 +253,10 @@ impl SqliteStorage {
             .context("failed to save domain event")?;
         }
 
-        let grid_id = GridId::new(id.clone());
+        let grid_id = TrackId::new(id.clone());
         let mut persisted_effects = Vec::new();
         for (index, effect) in effects.into_iter().enumerate() {
-            if matches!(effect, GridEffect::NoOp) {
+            if matches!(effect, TrackEffect::NoOp) {
                 continue;
             }
 
@@ -292,9 +292,9 @@ impl SqliteStorage {
             )
             .context("failed to save grid effect")?;
 
-            persisted_effects.push(PersistedGridEffect {
+            persisted_effects.push(PersistedTrackEffect {
                 effect_id,
-                grid_id: grid_id.clone(),
+                track_id: grid_id.clone(),
                 batch_id: batch_id.clone(),
                 sequence,
                 effect,
@@ -333,8 +333,8 @@ impl SqliteStorage {
         tx.commit()
             .context("failed to commit sqlite transition transaction")?;
 
-        Ok(CommittedGridWrite {
-            grid_id,
+        Ok(CommittedTrackWrite {
+            track_id: grid_id,
             effects: persisted_effects,
         })
     }
@@ -342,7 +342,7 @@ impl SqliteStorage {
     fn load_grid_state_blocking(
         conn: Arc<Mutex<Connection>>,
         id: String,
-    ) -> Result<Option<GridRuntimeSnapshot>> {
+    ) -> Result<Option<TrackRuntimeSnapshot>> {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
@@ -365,7 +365,7 @@ impl SqliteStorage {
     fn load_grid_snapshot_blocking(
         conn: Arc<Mutex<Connection>>,
         id: String,
-    ) -> Result<Option<StoredGridSnapshot>> {
+    ) -> Result<Option<StoredTrackSnapshot>> {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
@@ -385,7 +385,7 @@ impl SqliteStorage {
         Ok(snapshot)
     }
 
-    fn grid_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridRuntimeSnapshot> {
+    fn grid_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRuntimeSnapshot> {
         let venue: String = row.get(1)?;
         let config_json: String = row.get(3)?;
         let status_json: String = row.get(4)?;
@@ -470,8 +470,8 @@ impl SqliteStorage {
             })
             .transpose()?;
 
-        Ok(GridRuntimeSnapshot {
-            grid_id: GridId::new(row.get::<_, String>(0)?),
+        Ok(TrackRuntimeSnapshot {
+            track_id: TrackId::new(row.get::<_, String>(0)?),
             instrument: Instrument::new(venue, row.get::<_, String>(2)?),
             config,
             status,
@@ -497,10 +497,10 @@ impl SqliteStorage {
 
     fn stored_grid_snapshot_from_row(
         row: &rusqlite::Row<'_>,
-    ) -> rusqlite::Result<StoredGridSnapshot> {
+    ) -> rusqlite::Result<StoredTrackSnapshot> {
         let updated_at: String = row.get(18)?;
 
-        Ok(StoredGridSnapshot {
+        Ok(StoredTrackSnapshot {
             snapshot: Self::grid_snapshot_from_row(row)?,
             updated_at: Self::deserialize_timestamp(&updated_at, 18)?,
         })
@@ -508,7 +508,7 @@ impl SqliteStorage {
 
     fn list_grid_snapshots_blocking(
         conn: Arc<Mutex<Connection>>,
-    ) -> Result<Vec<StoredGridSnapshot>> {
+    ) -> Result<Vec<StoredTrackSnapshot>> {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
@@ -556,7 +556,7 @@ impl SqliteStorage {
 
     fn list_recent_grid_events_blocking(
         conn: Arc<Mutex<Connection>>,
-        grid_id: GridId,
+        track_id: TrackId,
         limit: usize,
     ) -> Result<Vec<StoredDomainEvent>> {
         if limit == 0 {
@@ -575,12 +575,12 @@ impl SqliteStorage {
             .context("failed to prepare recent domain event query")?;
 
         let mut events = stmt
-            .query_map(params![grid_id.as_str(), limit], |row| {
+            .query_map(params![track_id.as_str(), limit], |row| {
                 let event_json: String = row.get(2)?;
                 let created_at: String = row.get(3)?;
                 Ok(StoredDomainEvent {
                     id: row.get(0)?,
-                    grid_id: GridId::new(row.get::<_, String>(1)?),
+                    track_id: TrackId::new(row.get::<_, String>(1)?),
                     event: Self::deserialize_domain_event(&event_json)?,
                     created_at: Self::deserialize_timestamp(&created_at, 3)?,
                 })
@@ -594,9 +594,9 @@ impl SqliteStorage {
 
     fn list_recent_grid_effects_blocking(
         conn: Arc<Mutex<Connection>>,
-        grid_id: GridId,
+        track_id: TrackId,
         limit: usize,
-    ) -> Result<Vec<PersistedGridEffect>> {
+    ) -> Result<Vec<PersistedTrackEffect>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -614,7 +614,7 @@ impl SqliteStorage {
 
         let mut effects = stmt
             .query_map(
-                params![grid_id.as_str(), limit],
+                params![track_id.as_str(), limit],
                 Self::persisted_effect_from_row,
             )
             .context("failed to query recent grid effects")?
@@ -626,7 +626,7 @@ impl SqliteStorage {
 
     fn list_dispatchable_effects_blocking(
         conn: Arc<Mutex<Connection>>,
-    ) -> Result<Vec<PersistedGridEffect>> {
+    ) -> Result<Vec<PersistedTrackEffect>> {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
@@ -636,7 +636,7 @@ impl SqliteStorage {
                    AND NOT EXISTS (
                        SELECT 1
                        FROM grid_effects prior
-                       WHERE prior.grid_id = ge.grid_id
+                       WHERE prior.track_id = ge.track_id
                          AND prior.batch_id = ge.batch_id
                          AND prior.sequence < ge.sequence
                          AND prior.status NOT IN (?2, ?3)
@@ -663,19 +663,19 @@ impl SqliteStorage {
 
     fn list_pending_submit_effects_for_grid_blocking(
         conn: Arc<Mutex<Connection>>,
-        grid_id: GridId,
-    ) -> Result<Vec<PersistedGridEffect>> {
+        track_id: TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>> {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
                 "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
                  FROM grid_effects ge
-                 WHERE ge.grid_id = ?1
+                 WHERE ge.track_id = ?1
                    AND ge.status = ?2
                    AND NOT EXISTS (
                        SELECT 1
                        FROM grid_effects prior
-                       WHERE prior.grid_id = ge.grid_id
+                       WHERE prior.track_id = ge.track_id
                          AND prior.batch_id = ge.batch_id
                          AND prior.sequence < ge.sequence
                          AND prior.status NOT IN (?3, ?4)
@@ -687,7 +687,7 @@ impl SqliteStorage {
         let effects = stmt
             .query_map(
                 params![
-                    grid_id.as_str(),
+                    track_id.as_str(),
                     EffectStatus::Pending.as_str(),
                     EffectStatus::Succeeded.as_str(),
                     EffectStatus::Superseded.as_str()
@@ -700,7 +700,7 @@ impl SqliteStorage {
 
         Ok(effects
             .into_iter()
-            .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+            .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
             .collect())
     }
 }
@@ -710,15 +710,15 @@ impl StateRepositoryPort for SqliteStorage {
     async fn save_transition_with_effect_status(
         &self,
         id: &str,
-        state: &GridRuntimeSnapshot,
+        state: &TrackRuntimeSnapshot,
         events: &[DomainEvent],
-        effects: &[GridEffect],
+        effects: &[TrackEffect],
         effect_status_update: Option<&EffectStatusUpdate>,
-    ) -> Result<CommittedGridWrite> {
+    ) -> Result<CommittedTrackWrite> {
         ensure!(
-            id == state.grid_id.as_str(),
-            "snapshot id mismatch: key `{id}` does not match snapshot.grid_id `{}`",
-            state.grid_id.as_str()
+            id == state.track_id.as_str(),
+            "snapshot id mismatch: key `{id}` does not match snapshot.track_id `{}`",
+            state.track_id.as_str()
         );
 
         let conn = Arc::clone(&self.conn);
@@ -735,7 +735,7 @@ impl StateRepositoryPort for SqliteStorage {
         .context("failed to join save_transition_with_effect_status blocking task")?
     }
 
-    async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>> {
+    async fn load_grid_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
 
@@ -753,7 +753,7 @@ impl StateRepositoryPort for SqliteStorage {
             .context("failed to join list_events blocking task")?
     }
 
-    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
         let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || Self::list_dispatchable_effects_blocking(conn))
@@ -763,13 +763,13 @@ impl StateRepositoryPort for SqliteStorage {
 
     async fn list_pending_submit_effects_for_grid(
         &self,
-        grid_id: &GridId,
-    ) -> Result<Vec<PersistedGridEffect>> {
+        track_id: &TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>> {
         let conn = Arc::clone(&self.conn);
-        let grid_id = grid_id.clone();
+        let track_id = track_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            Self::list_pending_submit_effects_for_grid_blocking(conn, grid_id)
+            Self::list_pending_submit_effects_for_grid_blocking(conn, track_id)
         })
         .await
         .context("failed to join list_pending_submit_effects_for_grid blocking task")?
@@ -777,8 +777,8 @@ impl StateRepositoryPort for SqliteStorage {
 }
 
 #[async_trait]
-impl GridReadRepositoryPort for SqliteStorage {
-    async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>> {
+impl TrackReadRepositoryPort for SqliteStorage {
+    async fn list_grid_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
         let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || Self::list_grid_snapshots_blocking(conn))
@@ -786,25 +786,25 @@ impl GridReadRepositoryPort for SqliteStorage {
             .context("failed to join list_grid_snapshots blocking task")?
     }
 
-    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>> {
+    async fn load_grid_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
         let conn = Arc::clone(&self.conn);
-        let grid_id = grid_id.as_str().to_owned();
+        let track_id = track_id.as_str().to_owned();
 
-        tokio::task::spawn_blocking(move || Self::load_grid_snapshot_blocking(conn, grid_id))
+        tokio::task::spawn_blocking(move || Self::load_grid_snapshot_blocking(conn, track_id))
             .await
             .context("failed to join load_grid_snapshot blocking task")?
     }
 
     async fn list_recent_grid_events(
         &self,
-        grid_id: &GridId,
+        track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<StoredDomainEvent>> {
         let conn = Arc::clone(&self.conn);
-        let grid_id = grid_id.clone();
+        let track_id = track_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            Self::list_recent_grid_events_blocking(conn, grid_id, limit)
+            Self::list_recent_grid_events_blocking(conn, track_id, limit)
         })
         .await
         .context("failed to join list_recent_grid_events blocking task")?
@@ -812,14 +812,14 @@ impl GridReadRepositoryPort for SqliteStorage {
 
     async fn list_recent_grid_effects(
         &self,
-        grid_id: &GridId,
+        track_id: &TrackId,
         limit: usize,
-    ) -> Result<Vec<PersistedGridEffect>> {
+    ) -> Result<Vec<PersistedTrackEffect>> {
         let conn = Arc::clone(&self.conn);
-        let grid_id = grid_id.clone();
+        let track_id = track_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            Self::list_recent_grid_effects_blocking(conn, grid_id, limit)
+            Self::list_recent_grid_effects_blocking(conn, track_id, limit)
         })
         .await
         .context("failed to join list_recent_grid_effects blocking task")?
@@ -839,26 +839,26 @@ mod tests {
 
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
-    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
-    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
-        EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
+        EffectStatus, TrackReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
         WorkingOrder,
     };
-    use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-    use poise_engine::transition::GridEffect;
+    use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+    use poise_engine::transition::TrackEffect;
     use rusqlite::Connection;
 
-    fn test_snapshot() -> GridRuntimeSnapshot {
-        GridRuntimeSnapshot {
-            grid_id: GridId::new("test-1"),
+    fn test_snapshot() -> TrackRuntimeSnapshot {
+        TrackRuntimeSnapshot {
+            track_id: TrackId::new("test-1"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: GridConfig {
+            config: TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
                 long_exposure_units: 8.0,
@@ -867,7 +867,7 @@ mod tests {
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
-            status: GridStatus::Active,
+            status: TrackStatus::Active,
             current_exposure: Exposure(4.0),
             target_exposure: Some(Exposure(6.0)),
             manual_target_override: Some(Exposure(0.0)),
@@ -950,14 +950,14 @@ mod tests {
         }
     }
 
-    fn test_snapshot_for(grid_id: &str, symbol: &str) -> GridRuntimeSnapshot {
+    fn test_snapshot_for(track_id: &str, symbol: &str) -> TrackRuntimeSnapshot {
         let mut snapshot = test_snapshot();
-        snapshot.grid_id = GridId::new(grid_id);
+        snapshot.track_id = TrackId::new(grid_id);
         snapshot.instrument = Instrument::new(Venue::Binance, symbol);
         snapshot
     }
 
-    async fn persist_two_events_for(grid_id: &str, storage: &SqliteStorage) -> [DomainEvent; 2] {
+    async fn persist_two_events_for(track_id: &str, storage: &SqliteStorage) -> [DomainEvent; 2] {
         let snapshot = test_snapshot_for(grid_id, "BTCUSDT");
         let first_event = DomainEvent::BandBreached {
             boundary: BandBoundary::Above,
@@ -985,7 +985,7 @@ mod tests {
 
     async fn save_effect_status_update(
         storage: &SqliteStorage,
-        grid_id: &str,
+        track_id: &str,
         effect_status_update: EffectStatusUpdate,
     ) {
         let snapshot = storage
@@ -1007,10 +1007,10 @@ mod tests {
 
     async fn persist_effect_batches_for_two_grids(
         storage: &SqliteStorage,
-    ) -> [PersistedGridEffect; 2] {
+    ) -> [PersistedTrackEffect; 2] {
         let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
-        let submit_effect = GridEffect::SubmitOrder {
+        let submit_effect = TrackEffect::SubmitOrder {
             request: test_order_request(),
             target_exposure: Exposure(6.0),
         };
@@ -1028,7 +1028,7 @@ mod tests {
                 "btc-core",
                 &btc_snapshot,
                 &[],
-                &[GridEffect::CancelAll {
+                &[TrackEffect::CancelAll {
                     instrument: btc_snapshot.instrument.clone(),
                 }],
             )
@@ -1048,9 +1048,9 @@ mod tests {
 
     async fn persist_three_effect_batches_for_grid(
         storage: &SqliteStorage,
-        grid_id: &str,
+        track_id: &str,
         symbol: &str,
-    ) -> [PersistedGridEffect; 3] {
+    ) -> [PersistedTrackEffect; 3] {
         let snapshot = test_snapshot_for(grid_id, symbol);
 
         let first = storage
@@ -1058,7 +1058,7 @@ mod tests {
                 grid_id,
                 &snapshot,
                 &[],
-                &[GridEffect::CancelAll {
+                &[TrackEffect::CancelAll {
                     instrument: snapshot.instrument.clone(),
                 }],
             )
@@ -1073,7 +1073,7 @@ mod tests {
                 grid_id,
                 &snapshot,
                 &[],
-                &[GridEffect::SubmitOrder {
+                &[TrackEffect::SubmitOrder {
                     request: test_order_request(),
                     target_exposure: Exposure(6.0),
                 }],
@@ -1089,7 +1089,7 @@ mod tests {
                 grid_id,
                 &snapshot,
                 &[],
-                &[GridEffect::CancelAll {
+                &[TrackEffect::CancelAll {
                     instrument: snapshot.instrument.clone(),
                 }],
             )
@@ -1114,7 +1114,7 @@ mod tests {
         .unwrap();
     }
 
-    fn overwrite_snapshot_updated_at(storage: &SqliteStorage, grid_id: &str, updated_at: &str) {
+    fn overwrite_snapshot_updated_at(storage: &SqliteStorage, track_id: &str, updated_at: &str) {
         let conn = storage.conn.lock().unwrap();
         conn.execute(
             "UPDATE grid_snapshots
@@ -1150,9 +1150,9 @@ mod tests {
 
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.grid_id.as_str(), "test-1");
+        assert_eq!(loaded.track_id.as_str(), "test-1");
         assert_eq!(loaded.instrument.symbol, "BTCUSDT");
-        assert_eq!(loaded.status, GridStatus::Active);
+        assert_eq!(loaded.status, TrackStatus::Active);
         assert_eq!(loaded.config, snapshot.config);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.target_exposure, Some(Exposure(6.0)));
@@ -1175,12 +1175,12 @@ mod tests {
         let snapshot = test_snapshot();
 
         storage
-            .save_transition(snapshot.grid_id.as_str(), &snapshot, &[], &[])
+            .save_transition(snapshot.track_id.as_str(), &snapshot, &[], &[])
             .await
             .unwrap();
 
         let loaded = storage
-            .load_grid_state(snapshot.grid_id.as_str())
+            .load_grid_state(snapshot.track_id.as_str())
             .await
             .unwrap()
             .unwrap();
@@ -1194,12 +1194,12 @@ mod tests {
         let snapshot = test_snapshot();
 
         storage
-            .save_transition(snapshot.grid_id.as_str(), &snapshot, &[], &[])
+            .save_transition(snapshot.track_id.as_str(), &snapshot, &[], &[])
             .await
             .unwrap();
 
         let loaded = storage
-            .load_grid_state(snapshot.grid_id.as_str())
+            .load_grid_state(snapshot.track_id.as_str())
             .await
             .unwrap()
             .unwrap();
@@ -1224,7 +1224,7 @@ mod tests {
         let loaded = storage.load_grid_state("test-1").await.unwrap().unwrap();
         let events = storage.list_events("test-1").await.unwrap();
 
-        assert_eq!(loaded.grid_id.as_str(), "test-1");
+        assert_eq!(loaded.track_id.as_str(), "test-1");
         assert_eq!(events, vec![test_event()]);
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
     async fn save_transition_persists_snapshot_events_and_effects_atomically() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
-        let effects = vec![GridEffect::SubmitOrder {
+        let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
             target_exposure: Exposure(6.0),
         }];
@@ -1246,11 +1246,11 @@ mod tests {
         let events = storage.list_events("test-1").await.unwrap();
         let pending = storage.list_dispatchable_effects().await.unwrap();
 
-        assert_eq!(loaded.grid_id.as_str(), "test-1");
+        assert_eq!(loaded.track_id.as_str(), "test-1");
         assert_eq!(events, vec![test_event()]);
         assert_eq!(persisted.effects, pending);
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].grid_id.as_str(), "test-1");
+        assert_eq!(pending[0].track_id.as_str(), "test-1");
         assert_eq!(pending[0].effect, effects[0]);
         assert_eq!(pending[0].status, EffectStatus::Pending);
         assert_eq!(pending[0].attempt_count, 0);
@@ -1261,7 +1261,7 @@ mod tests {
     async fn save_transition_with_effect_status_records_failed_attempt_count_and_last_error() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
-        let effects = vec![GridEffect::SubmitOrder {
+        let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
             target_exposure: Exposure(6.0),
         }];
@@ -1311,10 +1311,10 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
         let effects = vec![
-            GridEffect::CancelAll {
+            TrackEffect::CancelAll {
                 instrument: snapshot.instrument.clone(),
             },
-            GridEffect::SubmitOrder {
+            TrackEffect::SubmitOrder {
                 request: test_order_request(),
                 target_exposure: Exposure(6.0),
             },
@@ -1346,10 +1346,10 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
         let effects = vec![
-            GridEffect::CancelAll {
+            TrackEffect::CancelAll {
                 instrument: snapshot.instrument.clone(),
             },
-            GridEffect::SubmitOrder {
+            TrackEffect::SubmitOrder {
                 request: test_order_request(),
                 target_exposure: Exposure(6.0),
             },
@@ -1377,10 +1377,10 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
         let effects = vec![
-            GridEffect::CancelAll {
+            TrackEffect::CancelAll {
                 instrument: snapshot.instrument.clone(),
             },
-            GridEffect::SubmitOrder {
+            TrackEffect::SubmitOrder {
                 request: test_order_request(),
                 target_exposure: Exposure(6.0),
             },
@@ -1414,15 +1414,15 @@ mod tests {
         let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
 
         let btc_effects = vec![
-            GridEffect::CancelAll {
+            TrackEffect::CancelAll {
                 instrument: btc_snapshot.instrument.clone(),
             },
-            GridEffect::SubmitOrder {
+            TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 target_exposure: Exposure(6.0),
             },
         ];
-        let eth_effects = vec![GridEffect::SubmitOrder {
+        let eth_effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request_for_symbol("ETHUSDT"),
             target_exposure: Exposure(3.0),
         }];
@@ -1438,7 +1438,7 @@ mod tests {
 
         assert!(
             storage
-                .list_pending_submit_effects_for_grid(&GridId::new("btc-core"))
+                .list_pending_submit_effects_for_grid(&TrackId::new("btc-core"))
                 .await
                 .unwrap()
                 .is_empty()
@@ -1452,14 +1452,14 @@ mod tests {
         .await;
 
         let btc_submit_hints = storage
-            .list_pending_submit_effects_for_grid(&GridId::new("btc-core"))
+            .list_pending_submit_effects_for_grid(&TrackId::new("btc-core"))
             .await
             .unwrap();
         assert_eq!(btc_submit_hints.len(), 1);
-        assert_eq!(btc_submit_hints[0].grid_id.as_str(), "btc-core");
+        assert_eq!(btc_submit_hints[0].track_id.as_str(), "btc-core");
         assert!(matches!(
             btc_submit_hints[0].effect,
-            GridEffect::SubmitOrder { .. }
+            TrackEffect::SubmitOrder { .. }
         ));
     }
 
@@ -1469,13 +1469,13 @@ mod tests {
         let expected_events = persist_two_events_for("btc-core", &storage).await;
 
         let events = storage
-            .list_recent_grid_events(&GridId::new("btc-core"), 10)
+            .list_recent_grid_events(&TrackId::new("btc-core"), 10)
             .await
             .unwrap();
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].grid_id.as_str(), "btc-core");
-        assert_eq!(events[1].grid_id.as_str(), "btc-core");
+        assert_eq!(events[0].track_id.as_str(), "btc-core");
+        assert_eq!(events[1].track_id.as_str(), "btc-core");
         assert_eq!(events[0].event, expected_events[0]);
         assert_eq!(events[1].event, expected_events[1]);
         assert!(events[0].id < events[1].id);
@@ -1489,12 +1489,12 @@ mod tests {
             persist_effect_batches_for_two_grids(&storage).await;
 
         let effects = storage
-            .list_recent_grid_effects(&GridId::new("btc-core"), 1)
+            .list_recent_grid_effects(&TrackId::new("btc-core"), 1)
             .await
             .unwrap();
 
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].grid_id.as_str(), "btc-core");
+        assert_eq!(effects[0].track_id.as_str(), "btc-core");
         assert_eq!(effects[0].effect_id, newest_btc_effect.effect_id);
         assert_eq!(effects[0].batch_id, newest_btc_effect.batch_id);
         assert_eq!(effects[0].sequence, newest_btc_effect.sequence);
@@ -1513,7 +1513,7 @@ mod tests {
         overwrite_effect_updated_at(&storage, &third.effect_id, "2026-03-24T10:00:02+00:00");
 
         let effects = storage
-            .list_recent_grid_effects(&GridId::new("btc-core"), 3)
+            .list_recent_grid_effects(&TrackId::new("btc-core"), 3)
             .await
             .unwrap();
 
@@ -1556,7 +1556,7 @@ mod tests {
         .await;
 
         let effects = storage
-            .list_recent_grid_effects(&GridId::new("btc-core"), 2)
+            .list_recent_grid_effects(&TrackId::new("btc-core"), 2)
             .await
             .unwrap();
 
@@ -1585,7 +1585,7 @@ mod tests {
         let snapshots = storage.list_grid_snapshots().await.unwrap();
 
         assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].snapshot.grid_id.as_str(), "btc-core");
+        assert_eq!(snapshots[0].snapshot.track_id.as_str(), "btc-core");
         assert_eq!(
             snapshots[0].updated_at,
             DateTime::parse_from_rfc3339("2026-03-26T10:01:30+00:00")

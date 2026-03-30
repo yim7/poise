@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use poise_core::types::{ExchangeRules, Exposure};
 
-use crate::grid::{GridId, Instrument};
+use crate::track::{TrackId, Instrument};
 use crate::observation::OrderObservation;
 use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionStats, ExecutorState};
-use crate::transition::GridEffect;
+use crate::transition::TrackEffect;
 
 use super::{
     ExecutionMode, ExecutorInput, PendingSubmitHint, current_submit_hint, recording, slots,
@@ -51,7 +51,7 @@ pub struct SubmitRecoveryInput<'a> {
 
 #[derive(Debug, Clone)]
 pub struct SubmitRecoveryPlanContext<'a> {
-    pub grid_id: &'a GridId,
+    pub track_id: &'a TrackId,
     pub instrument: &'a Instrument,
     pub base_qty_per_unit: f64,
     pub target_exposure: Exposure,
@@ -88,7 +88,7 @@ impl SubmitRecoveryResolution {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubmitRecoveryPlan {
     pub resolution: SubmitRecoveryResolution,
-    pub effects: Vec<GridEffect>,
+    pub effects: Vec<TrackEffect>,
 }
 
 pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPlan {
@@ -138,7 +138,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
 
     let current_plan_submit = input.current_plan.as_ref().and_then(|current_plan| {
         current_submit_hint(ExecutorInput {
-            grid_id: current_plan.grid_id,
+            track_id: current_plan.track_id,
             instrument: current_plan.instrument,
             exchange_rules: input.exchange_rules,
             base_qty_per_unit: current_plan.base_qty_per_unit,
@@ -166,7 +166,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
                         next_submit.target_exposure.clone(),
                     ),
                 },
-                effects: vec![GridEffect::SubmitOrder {
+                effects: vec![TrackEffect::SubmitOrder {
                     request: next_submit.request,
                     target_exposure: next_submit.target_exposure,
                 }],
