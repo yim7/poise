@@ -155,8 +155,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
         let effect_service = Arc::new(EffectService::new(
-            repository.clone() as Arc<dyn StateRepositoryPort>,
-            notifications.clone(),
+            repository.clone() as Arc<dyn StateRepositoryPort>
         ));
         let service = Arc::new(GridWriteService::new(
             test_manager(),
@@ -597,13 +596,29 @@ mod tests {
                 .collect())
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|effect| effect.status == EffectStatus::Pending)
+                .cloned()
+                .collect())
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
         }

@@ -162,10 +162,7 @@ where
     let (notifications, _) = broadcast::channel(256);
     let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
     let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-    let effect_service = Arc::new(EffectService::new(
-        state_repository.clone(),
-        notifications.clone(),
-    ));
+    let effect_service = Arc::new(EffectService::new(state_repository.clone()));
     let write_service = Arc::new(GridWriteService::new(
         manager,
         state_repository,
@@ -701,7 +698,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -834,8 +831,15 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(
+        async fn list_dispatchable_effects(
             &self,
+        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            _grid_id: &GridId,
         ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }

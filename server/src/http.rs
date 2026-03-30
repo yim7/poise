@@ -204,10 +204,7 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let effect_service = Arc::new(EffectService::new(
-            state_repository.clone(),
-            notifications.clone(),
-        ));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -430,8 +427,7 @@ mod tests {
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
         let effect_service = Arc::new(EffectService::new(
-            repository.clone() as Arc<dyn StateRepositoryPort>,
-            notifications.clone(),
+            repository.clone() as Arc<dyn StateRepositoryPort>
         ));
         let app = router(build_server_state(
             Arc::new(GridWriteService::new(
@@ -635,8 +631,15 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(
+        async fn list_dispatchable_effects(
             &self,
+        ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            _grid_id: &GridId,
         ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }

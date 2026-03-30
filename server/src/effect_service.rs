@@ -1,60 +1,24 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use grid_engine::grid::GridId;
 use grid_engine::ports::{GridSnapshot, PersistedGridEffect, StateRepositoryPort};
-use tokio::sync::broadcast;
-
-use crate::notifications::GridInternalNotification;
 
 #[derive(Clone)]
 pub struct EffectService {
     repository: Arc<dyn StateRepositoryPort>,
-    notifications: broadcast::Sender<GridInternalNotification>,
 }
 
 impl EffectService {
-    pub fn new(
-        repository: Arc<dyn StateRepositoryPort>,
-        notifications: broadcast::Sender<GridInternalNotification>,
-    ) -> Self {
-        Self {
-            repository,
-            notifications,
-        }
+    pub fn new(repository: Arc<dyn StateRepositoryPort>) -> Self {
+        Self { repository }
     }
 
     pub async fn load_grid_state(&self, id: &str) -> Result<Option<GridSnapshot>> {
         self.repository.load_grid_state(id).await
     }
 
-    pub async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
-        self.repository.list_pending_effects().await
-    }
-
-    pub async fn complete_effect_succeeded(&self, id: &str, effect_id: &str) -> Result<()> {
-        self.repository.mark_effect_succeeded(effect_id).await?;
-        self.emit_effect_state_changed(id);
-        Ok(())
-    }
-
-    pub async fn complete_effect_failed(
-        &self,
-        id: &str,
-        effect_id: &str,
-        error: &str,
-    ) -> Result<()> {
-        self.repository.mark_effect_failed(effect_id, error).await?;
-        self.emit_effect_state_changed(id);
-        Ok(())
-    }
-
-    fn emit_effect_state_changed(&self, id: &str) {
-        let _ = self
-            .notifications
-            .send(GridInternalNotification::GridEffectStateChanged {
-                grid_id: GridId::new(id),
-            });
+    pub async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        self.repository.list_dispatchable_effects().await
     }
 }
 
@@ -80,15 +44,12 @@ mod tests {
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
 
-    use crate::notifications::GridInternalNotification;
-
     use super::EffectService;
 
     #[tokio::test]
-    async fn submit_recovery_anchor_only_exists_for_matching_pending_submit_effect() {
+    async fn list_dispatchable_effects_returns_pending_submit_effects_without_recovery_filtering() {
         let repository = Arc::new(MemoryRepository::default());
-        let (notifications, _) = tokio::sync::broadcast::channel(16);
-        let service = EffectService::new(repository.clone(), notifications);
+        let service = EffectService::new(repository.clone());
 
         repository.seed_snapshot(snapshot_with_executor_order(WorkingOrder {
             order_id: None,
@@ -103,7 +64,7 @@ mod tests {
         repository.seed_effect(submit_effect("btc-core:batch:0", "client-1"));
         assert_eq!(
             service
-                .list_pending_effects()
+                .list_dispatchable_effects()
                 .await
                 .unwrap()
                 .into_iter()
@@ -114,7 +75,7 @@ mod tests {
 
         repository.clear_effects();
         assert_eq!(
-            service.list_pending_effects().await.unwrap(),
+            service.list_dispatchable_effects().await.unwrap(),
             Vec::<PersistedGridEffect>::new()
         );
 
@@ -131,7 +92,7 @@ mod tests {
         repository.seed_effect(submit_effect("btc-core:batch:1", "client-1"));
         assert_eq!(
             service
-                .list_pending_effects()
+                .list_dispatchable_effects()
                 .await
                 .unwrap()
                 .into_iter()
@@ -142,60 +103,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_recovery_anchor_returns_none_without_matching_executor_slot() {
+    async fn list_dispatchable_effects_does_not_require_matching_executor_slot() {
         let repository = Arc::new(MemoryRepository::default());
-        let (notifications, _) = tokio::sync::broadcast::channel(16);
-        let service = EffectService::new(repository.clone(), notifications);
+        let service = EffectService::new(repository.clone());
 
         repository.seed_snapshot(snapshot_without_matching_executor_slot());
         repository.seed_effect(submit_effect("btc-core:batch:legacy", "client-legacy"));
 
         assert_eq!(
             service
-                .list_pending_effects()
+                .list_dispatchable_effects()
                 .await
                 .unwrap()
                 .into_iter()
                 .map(|effect| effect.effect_id)
                 .collect::<Vec<_>>(),
             vec!["btc-core:batch:legacy".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_effect_succeeded_marks_status_and_emits_notification() {
-        let repository = Arc::new(MemoryRepository::default());
-        let (notifications, _) = tokio::sync::broadcast::channel(16);
-        let service = EffectService::new(repository.clone(), notifications);
-        let mut receiver = service.notifications.subscribe();
-
-        repository.seed_effect(PersistedGridEffect {
-            effect_id: "btc-core:batch:0".into(),
-            grid_id: GridId::new("btc-core"),
-            batch_id: "batch".into(),
-            sequence: 0,
-            effect: GridEffect::NoOp,
-            status: EffectStatus::Pending,
-            attempt_count: 0,
-            last_error: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        });
-
-        service
-            .complete_effect_succeeded("btc-core", "btc-core:batch:0")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            receiver.recv().await.unwrap(),
-            GridInternalNotification::GridEffectStateChanged {
-                grid_id: GridId::new("btc-core"),
-            }
-        );
-        assert_eq!(
-            repository.effect("btc-core:batch:0").unwrap().status,
-            EffectStatus::Succeeded
         );
     }
 
@@ -317,15 +240,6 @@ mod tests {
         fn clear_effects(&self) {
             self.effects.lock().unwrap().clear();
         }
-
-        fn effect(&self, effect_id: &str) -> Option<PersistedGridEffect> {
-            self.effects
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|effect| effect.effect_id == effect_id)
-                .cloned()
-        }
     }
 
     #[async_trait::async_trait]
@@ -349,13 +263,29 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
             Ok(self
                 .effects
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|effect| effect.status == EffectStatus::Pending)
+                .cloned()
+                .collect())
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
         }

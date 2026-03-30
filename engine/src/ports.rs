@@ -161,7 +161,11 @@ pub trait StateRepositoryPort: Send + Sync {
     }
     async fn load_grid_state(&self, id: &str) -> Result<Option<GridRuntimeSnapshot>>;
     async fn list_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
-    async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>>;
+    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>>;
+    async fn list_pending_submit_effects_for_grid(
+        &self,
+        grid_id: &GridId,
+    ) -> Result<Vec<PersistedGridEffect>>;
     async fn mark_effect_executing(&self, effect_id: &str) -> Result<()>;
     async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()>;
     async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()>;

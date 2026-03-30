@@ -578,7 +578,7 @@ impl SqliteStorage {
         Ok(effects)
     }
 
-    fn list_pending_effects_blocking(
+    fn list_dispatchable_effects_blocking(
         conn: Arc<Mutex<Connection>>,
     ) -> Result<Vec<PersistedGridEffect>> {
         let conn = Self::lock_connection(&conn)?;
@@ -613,6 +613,49 @@ impl SqliteStorage {
             .context("failed to deserialize pending effects")?;
 
         Ok(effects)
+    }
+
+    fn list_pending_submit_effects_for_grid_blocking(
+        conn: Arc<Mutex<Connection>>,
+        grid_id: GridId,
+    ) -> Result<Vec<PersistedGridEffect>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, grid_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM grid_effects ge
+                 WHERE ge.grid_id = ?1
+                   AND ge.status = ?2
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM grid_effects prior
+                       WHERE prior.grid_id = ge.grid_id
+                         AND prior.batch_id = ge.batch_id
+                         AND prior.sequence < ge.sequence
+                         AND prior.status NOT IN (?3, ?4)
+                   )
+                 ORDER BY ge.created_at ASC, ge.batch_id ASC, ge.sequence ASC, ge.effect_id ASC",
+            )
+            .context("failed to prepare grid-scoped pending submit effect query")?;
+
+        let effects = stmt
+            .query_map(
+                params![
+                    grid_id.as_str(),
+                    EffectStatus::Pending.as_str(),
+                    EffectStatus::Succeeded.as_str(),
+                    EffectStatus::Superseded.as_str()
+                ],
+                Self::persisted_effect_from_row,
+            )
+            .context("failed to query grid-scoped pending submit effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize grid-scoped pending submit effects")?;
+
+        Ok(effects
+            .into_iter()
+            .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+            .collect())
     }
 
     fn mark_effect_status_blocking(
@@ -695,12 +738,26 @@ impl StateRepositoryPort for SqliteStorage {
             .context("failed to join list_events blocking task")?
     }
 
-    async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
         let conn = Arc::clone(&self.conn);
 
-        tokio::task::spawn_blocking(move || Self::list_pending_effects_blocking(conn))
+        tokio::task::spawn_blocking(move || Self::list_dispatchable_effects_blocking(conn))
             .await
-            .context("failed to join list_pending_effects blocking task")?
+            .context("failed to join list_dispatchable_effects blocking task")?
+    }
+
+    async fn list_pending_submit_effects_for_grid(
+        &self,
+        grid_id: &GridId,
+    ) -> Result<Vec<PersistedGridEffect>> {
+        let conn = Arc::clone(&self.conn);
+        let grid_id = grid_id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_pending_submit_effects_for_grid_blocking(conn, grid_id)
+        })
+        .await
+        .context("failed to join list_pending_submit_effects_for_grid blocking task")?
     }
 
     async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
@@ -906,8 +963,12 @@ mod tests {
     }
 
     fn test_order_request() -> OrderRequest {
+        test_order_request_for_symbol("BTCUSDT")
+    }
+
+    fn test_order_request_for_symbol(symbol: &str) -> OrderRequest {
         OrderRequest {
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            instrument: Instrument::new(Venue::Binance, symbol),
             side: Side::Buy,
             price: 95.0,
             quantity: 0.25,
@@ -1187,7 +1248,7 @@ mod tests {
 
         let loaded = storage.load_grid_state("test-1").await.unwrap().unwrap();
         let events = storage.list_events("test-1").await.unwrap();
-        let pending = storage.list_pending_effects().await.unwrap();
+        let pending = storage.list_dispatchable_effects().await.unwrap();
 
         assert_eq!(loaded.grid_id.as_str(), "test-1");
         assert_eq!(events, vec![test_event()]);
@@ -1261,7 +1322,7 @@ mod tests {
             .await
             .unwrap();
 
-        let pending = storage.list_pending_effects().await.unwrap();
+        let pending = storage.list_dispatchable_effects().await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].effect_id, persisted.effects[0].effect_id);
 
@@ -1270,7 +1331,7 @@ mod tests {
             .await
             .unwrap();
 
-        let pending = storage.list_pending_effects().await.unwrap();
+        let pending = storage.list_dispatchable_effects().await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
     }
@@ -1299,7 +1360,7 @@ mod tests {
             .await
             .unwrap();
 
-        let pending = storage.list_pending_effects().await.unwrap();
+        let pending = storage.list_dispatchable_effects().await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
     }
@@ -1328,8 +1389,62 @@ mod tests {
             .await
             .unwrap();
 
-        let pending = storage.list_pending_effects().await.unwrap();
+        let pending = storage.list_dispatchable_effects().await.unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_pending_submit_effects_for_grid_returns_only_dispatchable_submit_effects() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+        let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
+
+        let btc_effects = vec![
+            GridEffect::CancelAll {
+                instrument: btc_snapshot.instrument.clone(),
+            },
+            GridEffect::SubmitOrder {
+                request: test_order_request_for_symbol("BTCUSDT"),
+                target_exposure: Exposure(6.0),
+            },
+        ];
+        let eth_effects = vec![GridEffect::SubmitOrder {
+            request: test_order_request_for_symbol("ETHUSDT"),
+            target_exposure: Exposure(3.0),
+        }];
+
+        let btc_persisted = storage
+            .save_transition("btc-core", &btc_snapshot, &[], &btc_effects)
+            .await
+            .unwrap();
+        storage
+            .save_transition("eth-core", &eth_snapshot, &[], &eth_effects)
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .list_pending_submit_effects_for_grid(&GridId::new("btc-core"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        storage
+            .mark_effect_succeeded(&btc_persisted.effects[0].effect_id)
+            .await
+            .unwrap();
+
+        let btc_submit_hints = storage
+            .list_pending_submit_effects_for_grid(&GridId::new("btc-core"))
+            .await
+            .unwrap();
+        assert_eq!(btc_submit_hints.len(), 1);
+        assert_eq!(btc_submit_hints[0].grid_id.as_str(), "btc-core");
+        assert!(matches!(
+            btc_submit_hints[0].effect,
+            GridEffect::SubmitOrder { .. }
+        ));
     }
 
     #[tokio::test]

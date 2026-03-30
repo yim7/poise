@@ -453,6 +453,7 @@ mod tests {
         ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, RiskState,
         SlotState, WorkingOrder,
     };
+    use grid_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
@@ -505,7 +506,7 @@ mod tests {
         assert_eq!(
             fixture
                 .persistence
-                .list_pending_effects()
+                .list_dispatchable_effects()
                 .await
                 .unwrap()
                 .len(),
@@ -518,7 +519,13 @@ mod tests {
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
         wait_until_async(|| {
             let persistence = Arc::clone(&fixture.persistence);
-            async move { persistence.list_pending_effects().await.unwrap().is_empty() }
+            async move {
+                persistence
+                    .list_dispatchable_effects()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            }
         })
         .await;
 
@@ -584,7 +591,11 @@ mod tests {
                 && (*quantity - test_config().base_qty_per_unit() * 6.0).abs() < f64::EPSILON
         ));
         assert!(
-            persistence.list_pending_effects().await.unwrap().is_empty(),
+            persistence
+                .list_dispatchable_effects()
+                .await
+                .unwrap()
+                .is_empty(),
             "replacement submit should not leave duplicate pending submit effects behind"
         );
     }
@@ -602,7 +613,7 @@ mod tests {
         assert_eq!(
             fixture
                 .persistence
-                .list_pending_effects()
+                .list_dispatchable_effects()
                 .await
                 .unwrap()
                 .len(),
@@ -622,7 +633,13 @@ mod tests {
         wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
         wait_until_async(|| {
             let persistence = Arc::clone(&fixture.persistence);
-            async move { persistence.list_pending_effects().await.unwrap().is_empty() }
+            async move {
+                persistence
+                    .list_dispatchable_effects()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            }
         })
         .await;
 
@@ -664,7 +681,10 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
         );
-        assert_eq!(persistence.list_pending_effects().await.unwrap().len(), 1);
+        assert_eq!(
+            persistence.list_dispatchable_effects().await.unwrap().len(),
+            1
+        );
 
         let handles = runtime.start().await.unwrap();
 
@@ -1629,7 +1649,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1715,7 +1735,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2039,7 +2059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_replans_even_when_submit_recovery_anchor_is_present() {
+    async fn startup_sync_replans_even_when_pending_submit_effect_is_present() {
         let mut snapshot = test_snapshot();
         set_executor_state(
             &mut snapshot,
@@ -2160,7 +2180,11 @@ mod tests {
 
         fixture.runtime.startup_sync().await.unwrap();
 
-        let pending_effects = fixture.persistence.list_pending_effects().await.unwrap();
+        let pending_effects = fixture
+            .persistence
+            .list_dispatchable_effects()
+            .await
+            .unwrap();
         assert_eq!(pending_effects.len(), 1);
         assert!(matches!(
             pending_effects.as_slice(),
@@ -2371,7 +2395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_clears_orphaned_submitting_anchor_without_effect() {
+    async fn startup_sync_clears_orphaned_submit_pending_slot_without_effect() {
         let mut snapshot = test_snapshot();
         set_executor_state(
             &mut snapshot,
@@ -2412,28 +2436,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_sync_marks_attention_required_when_multiple_live_open_orders_exist() {
+    async fn startup_sync_rebuilds_multiple_live_open_orders_when_they_match_distinct_slots() {
+        let mut snapshot = test_snapshot();
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("order-a"),
+                "client-a",
+                Side::Buy,
+                94.5,
+                0.25,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        snapshot.executor_state.slots.push(ExecutionSlot {
+            slot: OrderSlot::new("inventory_followup"),
+            state: SlotState::Working,
+            working_order: Some(working_order(
+                Some("order-b"),
+                "client-b",
+                Side::Sell,
+                95.5,
+                0.15,
+                Exposure(2.0),
+                OrderStatus::PartiallyFilled,
+            )),
+        });
         let fixture = runtime_fixture(
-            Some(test_snapshot()),
+            Some(snapshot),
             btc_position(7.5, 3.0),
             vec![
                 btc_exchange_order(
-                    "order-z",
-                    "zeta",
-                    Side::Buy,
-                    94.5,
-                    0.25,
+                    "order-b",
+                    "client-b",
+                    Side::Sell,
+                    95.5,
+                    0.15,
                     0.0,
                     OrderStatus::New,
                 ),
                 btc_exchange_order(
                     "order-a",
-                    "alpha",
+                    "client-a",
                     Side::Buy,
-                    94.0,
+                    94.5,
                     0.25,
                     0.0,
-                    OrderStatus::New,
+                    OrderStatus::PartiallyFilled,
                 ),
             ],
             test_budget(),
@@ -2453,11 +2504,22 @@ mod tests {
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
+        assert!(instance.executor_state.recovery_anomaly.is_none());
+        assert_eq!(instance.executor_state.slots.len(), 2);
         assert_eq!(
-            instance.executor_state.recovery_anomaly.as_ref(),
-            Some(&grid_engine::executor::RecoveryAnomaly::DuplicateLiveOrders)
+            instance.executor_state.slots[0]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-a")
         );
-        assert!(inventory_core_order(&instance).is_none());
+        assert_eq!(
+            instance.executor_state.slots[1]
+                .working_order
+                .as_ref()
+                .and_then(|order| order.order_id.as_deref()),
+            Some("order-b")
+        );
 
         shutdown(handles).await;
     }
@@ -2620,7 +2682,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2660,8 +2722,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let (events, _) = broadcast::channel(16);
         let effect_service = Arc::new(EffectService::new(
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
-            events.clone(),
+            persistence.clone() as Arc<dyn StateRepositoryPort>
         ));
         let state = build_server_state(
             Arc::new(GridWriteService::new(
@@ -2791,7 +2852,7 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2877,7 +2938,7 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -2937,7 +2998,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -2982,7 +3043,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone(), events.clone()));
+        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             state_repository,
@@ -3497,9 +3558,21 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(ready_pending_effects(&effects)
+                .into_iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .collect())
         }
 
         async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
@@ -3691,9 +3764,21 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(ready_pending_effects(&effects)
+                .into_iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .collect())
         }
 
         async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
@@ -3888,9 +3973,21 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(ready_pending_effects(&effects)
+                .into_iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .collect())
         }
 
         async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {

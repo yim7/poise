@@ -54,6 +54,11 @@ pub struct GridInstrument {
     pub instrument: Instrument,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedSubmitExecution {
+    pub target_exposure: grid_core::types::Exposure,
+}
+
 #[derive(Debug)]
 pub enum GridMutationError {
     Mutation(anyhow::Error),
@@ -220,11 +225,10 @@ impl GridWriteService {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let pending_submit_hints = self
             .repository
-            .list_pending_effects()
+            .list_pending_submit_effects_for_grid(&GridId::new(id))
             .await
             .map_err(GridMutationError::Persistence)?
             .into_iter()
-            .filter(|effect| effect.grid_id.as_str() == id)
             .filter_map(|effect| match effect.effect {
                 GridEffect::SubmitOrder {
                     request,
@@ -269,51 +273,129 @@ impl GridWriteService {
         Ok(transition)
     }
 
-    pub async fn record_submit_receipt(
+    pub async fn complete_submit_execution(
         &self,
         id: &str,
+        effect_id: &str,
         request: &OrderRequest,
         target_exposure: grid_core::types::Exposure,
         receipt: &OrderReceipt,
     ) -> Result<()> {
-        self.mutate_grid(id, |manager| {
-            manager.record_submit_receipt(
-                &GridId::new(id),
-                request,
-                target_exposure.clone(),
-                receipt,
-            )?;
-            Ok(())
-        })
+        self.mutate_grid_with_effect_status(
+            id,
+            EffectStatusUpdate::succeeded(effect_id.to_string()),
+            |manager| {
+                manager.record_submit_receipt(
+                    &GridId::new(id),
+                    request,
+                    target_exposure.clone(),
+                    receipt,
+                )?;
+                Ok(())
+            },
+        )
         .await
+        .map(|_| ())
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn clear_pending_submit(&self, id: &str, client_order_id: &str) -> Result<()> {
-        self.mutate_grid(id, |manager| {
-            manager.clear_pending_submit(&GridId::new(id), client_order_id)?;
+    pub async fn record_submit_failure(
+        &self,
+        id: &str,
+        effect_id: &str,
+        client_order_id: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.mutate_grid_with_effect_status(id, effect_status_failed(effect_id, error), |manager| {
+            manager.record_submit_failure(&GridId::new(id), client_order_id)?;
             Ok(())
         })
         .await
+        .map(|_| ())
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn clear_working_order_by_order_id(&self, id: &str, order_id: &str) -> Result<()> {
-        self.mutate_grid(id, |manager| {
-            manager.clear_working_order_by_order_id(&GridId::new(id), order_id)?;
-            Ok(())
-        })
+    pub async fn record_cancel_order_success(
+        &self,
+        id: &str,
+        effect_id: &str,
+        order_id: &str,
+    ) -> Result<()> {
+        self.mutate_grid_with_effect_status(
+            id,
+            EffectStatusUpdate::succeeded(effect_id.to_string()),
+            |manager| {
+                manager.record_cancel_order_success(&GridId::new(id), order_id)?;
+                Ok(())
+            },
+        )
         .await
+        .map(|_| ())
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn clear_all_working_orders(&self, id: &str) -> Result<()> {
-        self.mutate_grid(id, |manager| {
-            manager.clear_all_working_orders(&GridId::new(id))?;
-            Ok(())
-        })
+    pub async fn record_cancel_all_success(&self, id: &str, effect_id: &str) -> Result<()> {
+        self.mutate_grid_with_effect_status(
+            id,
+            EffectStatusUpdate::succeeded(effect_id.to_string()),
+            |manager| {
+                manager.record_cancel_all_success(&GridId::new(id))?;
+                Ok(())
+            },
+        )
         .await
+        .map(|_| ())
         .map_err(anyhow::Error::new)
+    }
+
+    pub async fn complete_effect_succeeded(&self, id: &str, effect_id: &str) -> Result<()> {
+        self.mutate_grid_with_effect_status(
+            id,
+            EffectStatusUpdate::succeeded(effect_id.to_string()),
+            |_manager| Ok(()),
+        )
+        .await
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn complete_effect_failed(
+        &self,
+        id: &str,
+        effect_id: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.mutate_grid_with_effect_status(
+            id,
+            effect_status_failed(effect_id, error),
+            |_manager| Ok(()),
+        )
+        .await
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+    }
+
+    pub async fn prepare_submit_execution(
+        &self,
+        id: &str,
+        effect_id: &str,
+        request: &OrderRequest,
+        target_exposure: grid_core::types::Exposure,
+        live_order: Option<&ExchangeOrder>,
+    ) -> Result<Option<PreparedSubmitExecution>> {
+        Ok(
+            match self
+                .recover_submit_effect(id, effect_id, request, target_exposure, live_order)
+                .await?
+            {
+                SubmitRecoveryResolution::Proceed {
+                    target_exposure, ..
+                } => Some(PreparedSubmitExecution { target_exposure }),
+                SubmitRecoveryResolution::Recovered { .. }
+                | SubmitRecoveryResolution::Superseded { .. }
+                | SubmitRecoveryResolution::AwaitExchangeState => None,
+            },
+        )
     }
 
     pub async fn recover_submit_effect(
@@ -369,6 +451,41 @@ impl GridWriteService {
         Ok(plan.resolution)
     }
 
+    async fn mutate_grid_with_effect_status<R, F>(
+        &self,
+        id: &str,
+        effect_status_update: EffectStatusUpdate,
+        mutate: F,
+    ) -> std::result::Result<R, GridMutationError>
+    where
+        F: FnOnce(&mut GridManager) -> Result<R>,
+        R: TransitionResult,
+    {
+        let _mutation_guard = self.lock_grid_mutation(id).await;
+        let (previous_snapshot, result, next_snapshot) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+            let result = mutate(&mut manager).map_err(GridMutationError::Mutation)?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+            (previous_snapshot, result, next_snapshot)
+        };
+
+        self.commit_grid_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &result,
+            Some(&effect_status_update),
+            false,
+        )
+        .await?;
+        Ok(result)
+    }
+
     async fn mutate_grid<R, F>(
         &self,
         id: &str,
@@ -412,10 +529,11 @@ impl GridWriteService {
     where
         R: TransitionResult,
     {
-        let has_persistence_work = previous_snapshot != next_snapshot
+        let has_grid_write = previous_snapshot != next_snapshot
             || !result.domain_events().is_empty()
-            || !result.effects().is_empty()
-            || effect_status_update.is_some();
+            || !result.effects().is_empty();
+        let has_effect_status_update = effect_status_update.is_some();
+        let has_persistence_work = has_grid_write || has_effect_status_update;
         if skip_when_noop && !has_persistence_work {
             return Ok(());
         }
@@ -443,17 +561,28 @@ impl GridWriteService {
             return Err(GridMutationError::Persistence(error));
         }
 
-        self.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
-            grid_id: GridId::new(id),
-            recovery_anomaly_active: next_snapshot.executor_state.recovery_anomaly.is_some(),
-        });
-        if effect_status_update.is_some() {
+        if has_grid_write {
+            self.emit_internal_notification(GridInternalNotification::GridWriteCommitted {
+                grid_id: GridId::new(id),
+                recovery_anomaly_active: next_snapshot.executor_state.recovery_anomaly.is_some(),
+            });
+        }
+        if has_effect_status_update {
             self.emit_internal_notification(GridInternalNotification::GridEffectStateChanged {
                 grid_id: GridId::new(id),
             });
         }
 
         Ok(())
+    }
+}
+
+fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
+    EffectStatusUpdate {
+        effect_id: effect_id.to_string(),
+        status: grid_engine::ports::EffectStatus::Failed,
+        attempt_delta: 1,
+        last_error: Some(error.to_string()),
     }
 }
 
@@ -478,8 +607,8 @@ mod tests {
         GridObservation, MarketObservation, OrderObservation, PositionObservation,
     };
     use grid_engine::ports::{
-        ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, OrderRequest, OrderStatus,
-        PersistedGridEffect, StateRepositoryPort,
+        ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, OrderReceipt,
+        OrderRequest, OrderStatus, PersistedGridEffect, StateRepositoryPort,
     };
     use grid_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder,
@@ -656,6 +785,34 @@ mod tests {
                 grid_id: GridId::new("btc-core"),
                 recovery_anomaly_active: true,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_exchange_state_does_not_read_global_pending_effect_list_for_submit_hints() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        service
+            .sync_exchange_state(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository.global_pending_effect_queries(),
+            0,
+            "startup sync should read grid-scoped pending submit hints instead of the global pending effect list",
+        );
+        assert_eq!(
+            repository.pending_submit_hint_queries(),
+            vec!["btc-core".to_string()]
         );
     }
 
@@ -924,6 +1081,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn complete_submit_execution_returns_error_when_executor_slot_is_missing() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository as Arc<dyn StateRepositoryPort>);
+
+        let error = service
+            .complete_submit_execution(
+                "btc-core",
+                "btc-core:batch:0",
+                &OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                },
+                Exposure(4.0),
+                &OrderReceipt {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    status: OrderStatus::New,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("submit receipt"));
+    }
+
+    #[tokio::test]
+    async fn record_submit_failure_clears_submit_pending_slot_and_marks_effect_failed() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        let transition = service.observe_market("btc-core", 95.0).await.unwrap();
+        let request = match transition.effects.as_slice() {
+            [GridEffect::SubmitOrder { request, .. }] => request.clone(),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+        let effect_id = repository.pending_effects()[0].effect_id.clone();
+
+        service
+            .record_submit_failure(
+                "btc-core",
+                &effect_id,
+                &request.client_order_id,
+                "submit order rejected",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            repository
+                .snapshot_for("btc-core")
+                .map(|snapshot| snapshot.executor_state.slots.is_empty())
+                .unwrap_or(false)
+        );
+        let effect = repository
+            .all_effects()
+            .into_iter()
+            .find(|effect| effect.effect_id == effect_id)
+            .expect("effect should remain persisted");
+        assert_eq!(effect.status, EffectStatus::Failed);
+        assert_eq!(effect.last_error.as_deref(), Some("submit order rejected"));
+    }
+
     fn working_order(
         order_id: Option<&str>,
         client_order_id: &str,
@@ -989,7 +1212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_submit_effect_proceed_persists_submitting_anchor_before_returning() {
+    async fn recover_submit_effect_proceed_persists_submit_pending_slot_before_returning() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
 
@@ -1226,6 +1449,8 @@ mod tests {
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedGridEffect>>,
         next_effect_seq: Mutex<u64>,
+        global_pending_effect_queries: AtomicUsize,
+        pending_submit_hint_queries: Mutex<Vec<String>>,
         save_controls: Mutex<HashMap<String, Arc<SaveControl>>>,
         completed_saves: Mutex<Vec<String>>,
         completed_notify: Notify,
@@ -1257,6 +1482,14 @@ mod tests {
 
         fn all_effects(&self) -> Vec<PersistedGridEffect> {
             self.effects.lock().unwrap().clone()
+        }
+
+        fn global_pending_effect_queries(&self) -> usize {
+            self.global_pending_effect_queries.load(Ordering::SeqCst)
+        }
+
+        fn pending_submit_hint_queries(&self) -> Vec<String> {
+            self.pending_submit_hint_queries.lock().unwrap().clone()
         }
 
         fn seed_snapshot(&self, id: &str, snapshot: GridRuntimeSnapshot) {
@@ -1396,8 +1629,26 @@ mod tests {
             Ok(self.events_for(id))
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            self.global_pending_effect_queries
+                .fetch_add(1, Ordering::SeqCst);
             Ok(self.pending_effects())
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
+            self.pending_submit_hint_queries
+                .lock()
+                .unwrap()
+                .push(grid_id.as_str().to_string());
+            Ok(self
+                .pending_effects()
+                .into_iter()
+                .filter(|effect| effect.grid_id == *grid_id)
+                .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
+                .collect())
         }
 
         async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
@@ -1473,7 +1724,14 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedGridEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pending_submit_effects_for_grid(
+            &self,
+            _grid_id: &GridId,
+        ) -> Result<Vec<PersistedGridEffect>> {
             Ok(Vec::new())
         }
 
