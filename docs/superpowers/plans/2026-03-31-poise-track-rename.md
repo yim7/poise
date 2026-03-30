@@ -264,7 +264,7 @@ Task 2 code commits:
 - Test: `cargo test -p poise-tui protocol::tests:: -- --nocapture`
 - Test: `cargo test -p poise-tui views::tests::renders_poise_header -- --exact`
 
-- [ ] **Step 1: 先用现有命令验证外部接口还停留在旧命名**
+- [x] **Step 1: 先用现有命令验证外部接口还停留在旧命名**
 
 Run:
 `rg -n "/grids|grid_id|\\[\\[grids\\]\\]|GRID_PLATFORM|GRID_TUI" protocol server tui configs README.md docs/protocol-contract.md`
@@ -272,7 +272,7 @@ Run:
 Expected:
 能搜到旧接口、旧配置键和旧环境变量。
 
-- [ ] **Step 2: 修改 server 配置和 HTTP / WS 入口**
+- [x] **Step 2: 修改 server 配置和 HTTP / WS 入口**
 
 要求：
 - `Config.grids` -> `Config.tracks`
@@ -284,7 +284,7 @@ Expected:
 - `/grids/:id/commands` -> `/tracks/:id/commands`
 - `grid-server.sqlite` 默认文件名改为 `poise-server.sqlite`
 
-- [ ] **Step 3: 修改 protocol DTO 和 JSON 字段**
+- [x] **Step 3: 修改 protocol DTO 和 JSON 字段**
 
 要求：
 - `GridListResponse` -> `TrackListResponse`
@@ -295,7 +295,7 @@ Expected:
 - `GridStreamEvent` -> `TrackStreamEvent`
 - JSON 字段 `grid_id` -> `track_id`
 
-- [ ] **Step 4: 修改 TUI 客户端、fixture 和环境变量**
+- [x] **Step 4: 修改 TUI 客户端、fixture 和环境变量**
 
 要求：
 - API client 与 protocol 解析全部改为 `/tracks` 和 `track_id`
@@ -306,7 +306,7 @@ Expected:
 - 测试 fixture 文件名和内容同步改为 `track_*`
 - TUI 内所有用户可见命令示例改成 `poise-server` / `poise-tui`
 
-- [ ] **Step 5: 运行外部接口定向测试**
+- [x] **Step 5: 运行外部接口定向测试**
 
 Run:
 `cargo test -p poise-protocol`
@@ -317,7 +317,7 @@ Run:
 Expected:
 协议类型、HTTP 入口和 TUI 协议解析通过；如果网络相关测试仍受本地端口限制，只记录为环境限制，不回退到旧命名。
 
-- [ ] **Step 6: 提交并回写 SHA**
+- [x] **Step 6: 提交并回写 SHA**
 
 ```bash
 git add server/src/config.rs server/src/http.rs server/src/websocket.rs server/src/main.rs protocol/src/lib.rs tui/src/api_client.rs tui/src/protocol.rs tui/src/app.rs tui/src/input.rs tui/src/main.rs tui/src/views configs/binance-testnet.toml configs/test.toml tui/tests/fixtures
@@ -325,7 +325,7 @@ git commit -m "refactor(api): rename grid surface to track"
 ```
 
 Task 3 code commit:
-`TODO`
+`80f30d534bcefda26e5e9dfa3474294c56a10ec8`
 
 ---
 
