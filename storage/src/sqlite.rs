@@ -7,17 +7,17 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
-use grid_core::events::{DomainEvent, ReplacementGateReason};
-use grid_core::strategy::GridConfig;
-use grid_core::types::Exposure;
-use grid_engine::grid::{GridId, Instrument, Venue};
-use grid_engine::ports::{
+use poise_core::events::{DomainEvent, ReplacementGateReason};
+use poise_core::strategy::GridConfig;
+use poise_core::types::Exposure;
+use poise_engine::grid::{GridId, Instrument, Venue};
+use poise_engine::ports::{
     CommittedGridWrite, EffectStatus, EffectStatusUpdate, GridReadRepositoryPort,
     PersistedGridEffect, StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot,
 };
-use grid_engine::runtime::{ExecutorState, GridStatus, RiskState};
-use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-use grid_engine::transition::GridEffect;
+use poise_engine::runtime::{ExecutorState, GridStatus, RiskState};
+use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+use poise_engine::transition::GridEffect;
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -837,21 +837,21 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use grid_core::events::DomainEvent;
-    use grid_core::strategy::BandBoundary;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{Exposure, Side};
-    use grid_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::ports::{
+    use poise_core::events::DomainEvent;
+    use poise_core::strategy::BandBoundary;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{Exposure, Side};
+    use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::ports::{
         EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
     };
-    use grid_engine::runtime::{
+    use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
         WorkingOrder,
     };
-    use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-    use grid_engine::transition::GridEffect;
+    use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+    use poise_engine::transition::GridEffect;
     use rusqlite::Connection;
 
     fn test_snapshot() -> GridRuntimeSnapshot {

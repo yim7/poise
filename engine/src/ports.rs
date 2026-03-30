@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use grid_core::events::DomainEvent;
-use grid_core::types::Side;
+use poise_core::events::DomainEvent;
+use poise_core::types::Side;
 
 use crate::grid::{GridId, Instrument};
 use crate::snapshot::GridRuntimeSnapshot;
@@ -97,7 +97,7 @@ pub struct PriceTick {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeInfo {
     pub instrument: Instrument,
-    pub rules: grid_core::types::ExchangeRules,
+    pub rules: poise_core::types::ExchangeRules,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

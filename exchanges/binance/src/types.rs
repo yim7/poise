@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use grid_engine::grid::{Instrument, Venue};
-use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position};
+use poise_engine::grid::{Instrument, Venue};
+use poise_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceOrderResponse {
@@ -127,7 +127,7 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
 
         Ok(Self {
             instrument,
-            rules: grid_core::types::ExchangeRules {
+            rules: poise_core::types::ExchangeRules {
                 price_tick: parse_optional_decimal("tickSize", price_filter.tick_size.as_deref())?,
                 quantity_step: parse_optional_decimal(
                     "stepSize",
@@ -147,10 +147,10 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
     }
 }
 
-fn parse_side(value: &str) -> Result<grid_core::types::Side> {
+fn parse_side(value: &str) -> Result<poise_core::types::Side> {
     match value {
-        "BUY" => Ok(grid_core::types::Side::Buy),
-        "SELL" => Ok(grid_core::types::Side::Sell),
+        "BUY" => Ok(poise_core::types::Side::Buy),
+        "SELL" => Ok(poise_core::types::Side::Sell),
         other => Err(anyhow!("unsupported side: {other}")),
     }
 }
@@ -180,7 +180,7 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
 
 #[cfg(test)]
 mod tests {
-    use grid_core::types::{ExchangeRules, Side};
+    use poise_core::types::{ExchangeRules, Side};
 
     use super::*;
 

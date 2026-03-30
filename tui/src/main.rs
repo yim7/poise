@@ -1365,9 +1365,9 @@ mod tests {
     fn grid_tui_binary_path() -> PathBuf {
         let mut path = workspace_root().join("target").join("debug");
         path.push(if cfg!(windows) {
-            "grid-tui.exe"
+            "poise-tui.exe"
         } else {
-            "grid-tui"
+            "poise-tui"
         });
         path
     }
@@ -1375,9 +1375,9 @@ mod tests {
     fn grid_server_binary_path() -> PathBuf {
         let mut path = workspace_root().join("target").join("debug");
         path.push(if cfg!(windows) {
-            "grid-server.exe"
+            "poise-server.exe"
         } else {
-            "grid-server"
+            "poise-server"
         });
         path
     }
@@ -1387,7 +1387,7 @@ mod tests {
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
-            .arg("grid-server")
+            .arg("poise-server")
             .current_dir(workspace_root())
             .status()
             .unwrap();
@@ -1400,7 +1400,7 @@ mod tests {
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
-            .arg("grid-tui")
+            .arg("poise-tui")
             .current_dir(workspace_root())
             .status()
             .unwrap();

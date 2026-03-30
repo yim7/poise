@@ -2,9 +2,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use grid_engine::command::GridCommand;
-use grid_engine::grid::GridId;
-use grid_protocol::{
+use poise_engine::command::GridCommand;
+use poise_engine::grid::GridId;
+use poise_protocol::{
     GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
 };
 use serde::Serialize;
@@ -145,19 +145,19 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use chrono::Utc;
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::ExchangeRules;
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
-    use grid_engine::ports::{
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::ExchangeRules;
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::manager::GridManager;
+    use poise_engine::ports::{
         ClockPort, GridReadRepositoryPort, OrderStatus, StateRepositoryPort, StoredGridSnapshot,
     };
-    use grid_protocol::{
+    use poise_protocol::{
         ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, GridCommandAccepted,
         GridCommandRequest, GridCommandType, GridDetailView, GridListResponse, GridStatus,
     };
-    use grid_storage::sqlite::SqliteStorage;
+    use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
     use crate::assembly::{ServerState, build_server_state};
@@ -249,8 +249,8 @@ mod tests {
         manager
             .observe(
                 &GridId::new("btc-core"),
-                grid_engine::observation::GridObservation::Market(
-                    grid_engine::observation::MarketObservation {
+                poise_engine::observation::GridObservation::Market(
+                    poise_engine::observation::MarketObservation {
                         reference_price: 95.0,
                     },
                 ),
@@ -597,7 +597,7 @@ mod tests {
     }
 
     impl FailingRepository {
-        fn seed_snapshot(&self, snapshot: grid_engine::ports::GridSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::ports::GridSnapshot) {
             self.snapshots.lock().unwrap().insert(
                 snapshot.grid_id.as_str().to_string(),
                 StoredGridSnapshot {
@@ -613,38 +613,38 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             _id: &str,
-            _state: &grid_engine::ports::GridSnapshot,
-            _events: &[grid_core::events::DomainEvent],
-            _effects: &[grid_engine::transition::GridEffect],
-            _effect_status_update: Option<&grid_engine::ports::EffectStatusUpdate>,
-        ) -> anyhow::Result<grid_engine::ports::CommittedGridWrite> {
+            _state: &poise_engine::ports::GridSnapshot,
+            _events: &[poise_core::events::DomainEvent],
+            _effects: &[poise_engine::transition::GridEffect],
+            _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
+        ) -> anyhow::Result<poise_engine::ports::CommittedGridWrite> {
             Err(anyhow!("persistence unavailable"))
         }
 
         async fn load_grid_state(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Option<grid_engine::ports::GridSnapshot>> {
+        ) -> anyhow::Result<Option<poise_engine::ports::GridSnapshot>> {
             Ok(None)
         }
 
         async fn list_events(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Vec<grid_core::events::DomainEvent>> {
+        ) -> anyhow::Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
         async fn list_dispatchable_effects(
             &self,
-        ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
             _grid_id: &GridId,
-        ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
     }
@@ -671,7 +671,7 @@ mod tests {
             &self,
             _grid_id: &GridId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<grid_engine::ports::StoredDomainEvent>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::StoredDomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -679,7 +679,7 @@ mod tests {
             &self,
             _grid_id: &GridId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
     }

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use grid_core::types::{ExchangeRules, Exposure};
+use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::grid::{GridId, Instrument};
 use crate::observation::OrderObservation;

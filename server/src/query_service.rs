@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use grid_engine::grid::GridId;
-use grid_engine::ports::GridReadRepositoryPort;
+use poise_engine::grid::GridId;
+use poise_engine::ports::GridReadRepositoryPort;
 
 use crate::read_model::GridReadModel;
 
@@ -77,21 +77,21 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use grid_core::events::DomainEvent;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{Exposure, Side};
-    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::ports::{
+    use poise_core::events::DomainEvent;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{Exposure, Side};
+    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::ports::{
         EffectStatus, GridReadRepositoryPort, OrderRequest, OrderStatus, PersistedGridEffect,
         StoredDomainEvent, StoredGridSnapshot,
     };
-    use grid_engine::runtime::{
+    use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
         WorkingOrder,
     };
-    use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-    use grid_engine::transition::GridEffect;
+    use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+    use poise_engine::transition::GridEffect;
 
     use crate::read_model::GridReadModel;
 
@@ -191,7 +191,7 @@ mod tests {
                 id: 1,
                 grid_id: snapshot.grid_id.clone(),
                 event: DomainEvent::BandBreached {
-                    boundary: grid_core::strategy::BandBoundary::Above,
+                    boundary: poise_core::strategy::BandBoundary::Above,
                     price: 120.0,
                 },
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),

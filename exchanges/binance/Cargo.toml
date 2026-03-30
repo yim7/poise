@@ -1,11 +1,11 @@
 [package]
-name = "grid-binance"
+name = "poise-binance"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-grid-engine = { path = "../../engine" }
-grid-core = { path = "../../core" }
+poise-engine = { path = "../../engine" }
+poise-core = { path = "../../core" }
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
 tokio.workspace = true

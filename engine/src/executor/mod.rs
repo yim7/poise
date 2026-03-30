@@ -38,8 +38,8 @@ pub const INVENTORY_CORE_SLOT: &str = "inventory_core";
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
-    use grid_core::events::ReplacementGateReason;
-    use grid_core::types::{ExchangeRules, Exposure, Side};
+    use poise_core::events::ReplacementGateReason;
+    use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use super::*;
     use crate::execution_plan::ExecutionAction;

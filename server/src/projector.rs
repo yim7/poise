@@ -1,9 +1,9 @@
-use grid_core::events::DomainEvent;
-use grid_engine::executor::OrderRole;
-use grid_engine::ports::EffectStatus;
-use grid_engine::runtime::GridStatus as EngineGridStatus;
-use grid_engine::transition::GridEffect;
-use grid_protocol::{
+use poise_core::events::DomainEvent;
+use poise_engine::executor::OrderRole;
+use poise_engine::ports::EffectStatus;
+use poise_engine::runtime::GridStatus as EngineGridStatus;
+use poise_engine::transition::GridEffect;
+use poise_protocol::{
     ActivityLevelView, ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView,
     ExecutionSlotPhaseView, ExecutionSlotView, ExecutionStateView, ExecutionStatusView,
     ExposureSummaryView, GridActivityItemView, GridCommandType, GridCommandView, GridDetailView,
@@ -149,36 +149,36 @@ fn project_grid_status(value: &EngineGridStatus) -> ProtocolGridStatus {
     }
 }
 
-fn project_shape_family(value: grid_core::strategy::ShapeFamily) -> ProtocolShapeFamily {
+fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolShapeFamily {
     match value {
-        grid_core::strategy::ShapeFamily::Linear => ProtocolShapeFamily::Linear,
-        grid_core::strategy::ShapeFamily::Convex => ProtocolShapeFamily::Convex,
-        grid_core::strategy::ShapeFamily::Concave => ProtocolShapeFamily::Concave,
+        poise_core::strategy::ShapeFamily::Linear => ProtocolShapeFamily::Linear,
+        poise_core::strategy::ShapeFamily::Convex => ProtocolShapeFamily::Convex,
+        poise_core::strategy::ShapeFamily::Concave => ProtocolShapeFamily::Concave,
     }
 }
 
-fn project_out_of_band_policy(value: grid_core::strategy::OutOfBandPolicy) -> ProtocolPolicy {
+fn project_out_of_band_policy(value: poise_core::strategy::OutOfBandPolicy) -> ProtocolPolicy {
     match value {
-        grid_core::strategy::OutOfBandPolicy::Freeze => ProtocolPolicy::Freeze,
-        grid_core::strategy::OutOfBandPolicy::ReduceOnly => ProtocolPolicy::ReduceOnly,
-        grid_core::strategy::OutOfBandPolicy::Terminate => ProtocolPolicy::Terminate,
-        grid_core::strategy::OutOfBandPolicy::Hold => ProtocolPolicy::Hold,
+        poise_core::strategy::OutOfBandPolicy::Freeze => ProtocolPolicy::Freeze,
+        poise_core::strategy::OutOfBandPolicy::ReduceOnly => ProtocolPolicy::ReduceOnly,
+        poise_core::strategy::OutOfBandPolicy::Terminate => ProtocolPolicy::Terminate,
+        poise_core::strategy::OutOfBandPolicy::Hold => ProtocolPolicy::Hold,
     }
 }
 
-fn project_side(value: grid_core::types::Side) -> ProtocolSide {
+fn project_side(value: poise_core::types::Side) -> ProtocolSide {
     match value {
-        grid_core::types::Side::Buy => ProtocolSide::Buy,
-        grid_core::types::Side::Sell => ProtocolSide::Sell,
+        poise_core::types::Side::Buy => ProtocolSide::Buy,
+        poise_core::types::Side::Sell => ProtocolSide::Sell,
     }
 }
 
 fn project_replacement_gate_reason(
-    reason: &grid_core::events::ReplacementGateReason,
+    reason: &poise_core::events::ReplacementGateReason,
 ) -> ReplacementGateView {
     match reason {
-        grid_core::events::ReplacementGateReason::RoundedMatch => ReplacementGateView::RoundedMatch,
-        grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
+        poise_core::events::ReplacementGateReason::RoundedMatch => ReplacementGateView::RoundedMatch,
+        poise_core::events::ReplacementGateReason::ImprovementBelowThreshold {
             improvement_bps,
             threshold_bps,
         } => ReplacementGateView::ImprovementBelowThreshold {
@@ -293,10 +293,10 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
         }
         DomainEvent::RiskDenied { reason } => format!("risk denied: {reason}"),
         DomainEvent::ReplacementGateApplied { reason } => match reason {
-            grid_core::events::ReplacementGateReason::RoundedMatch => {
+            poise_core::events::ReplacementGateReason::RoundedMatch => {
                 "replacement gate: candidate matches working order after rounding".into()
             }
-            grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
+            poise_core::events::ReplacementGateReason::ImprovementBelowThreshold {
                 improvement_bps,
                 threshold_bps,
             } => format!(
@@ -314,7 +314,7 @@ fn project_domain_event_level(event: &DomainEvent) -> ActivityLevelView {
     }
 }
 
-fn project_effect_message(effect: &grid_engine::ports::PersistedGridEffect) -> String {
+fn project_effect_message(effect: &poise_engine::ports::PersistedGridEffect) -> String {
     match &effect.effect {
         GridEffect::SubmitOrder { .. } => match effect.status {
             EffectStatus::Failed => effect
@@ -360,17 +360,17 @@ fn project_effect_level(status: EffectStatus) -> ActivityLevelView {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use grid_core::events::DomainEvent;
-    use grid_core::strategy::{OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{Exposure, Side};
-    use grid_engine::executor::{ExecutionMode, OrderRole};
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::ports::{
+    use poise_core::events::DomainEvent;
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{Exposure, Side};
+    use poise_engine::executor::{ExecutionMode, OrderRole};
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::ports::{
         EffectStatus, OrderRequest, PersistedGridEffect, StoredDomainEvent,
     };
-    use grid_engine::runtime::GridStatus;
-    use grid_engine::transition::GridEffect;
-    use grid_protocol::{
+    use poise_engine::runtime::GridStatus;
+    use poise_engine::transition::GridEffect;
+    use poise_protocol::{
         ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
         ExecutionStatusView, GridCommandType,
     };
@@ -488,7 +488,7 @@ mod tests {
             ExecutionIntentView::IncreaseInventory
         );
         let order = detail.execution.slots[0].order.as_ref().unwrap();
-        assert_eq!(order.side, grid_protocol::Side::Buy);
+        assert_eq!(order.side, poise_protocol::Side::Buy);
         assert!((order.price - 100.5).abs() < f64::EPSILON);
         assert!((order.quantity - 0.1).abs() < f64::EPSILON);
     }
@@ -511,7 +511,7 @@ mod tests {
     fn project_detail_includes_replacement_gate_reason() {
         let mut source = source_with_submitting_effect();
         source.replacement_gate_reason = Some(
-            grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
+            poise_core::events::ReplacementGateReason::ImprovementBelowThreshold {
                 improvement_bps: 9.0,
                 threshold_bps: 13.0,
             },
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(
             detail.execution.replacement_gate,
             Some(
-                grid_protocol::ReplacementGateView::ImprovementBelowThreshold {
+                poise_protocol::ReplacementGateView::ImprovementBelowThreshold {
                     improvement_bps: 9.0,
                     threshold_bps: 13.0,
                 }
@@ -552,7 +552,7 @@ mod tests {
             id: 1,
             grid_id: GridId::new("btc-core"),
             event: DomainEvent::ReplacementGateApplied {
-                reason: grid_core::events::ReplacementGateReason::RoundedMatch,
+                reason: poise_core::events::ReplacementGateReason::RoundedMatch,
             },
             created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
         }];

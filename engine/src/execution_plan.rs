@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use grid_core::events::DomainEvent;
-use grid_core::types::{ExchangeRules, Exposure};
+use poise_core::events::DomainEvent;
+use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::grid::Instrument;
 use crate::ports::OrderRequest;

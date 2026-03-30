@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use grid_engine::manager::ExchangeSyncMode;
-use grid_engine::observation::{OrderObservation, PositionObservation};
-use grid_engine::ports::{
+use poise_engine::manager::ExchangeSyncMode;
+use poise_engine::observation::{OrderObservation, PositionObservation};
+use poise_engine::ports::{
     ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
 };
 use tokio::sync::{mpsc, watch};
@@ -39,7 +39,7 @@ pub struct RuntimeHandles {
 
 #[derive(Debug, Clone)]
 struct RecoveryTrackedGrid {
-    instrument: grid_engine::grid::Instrument,
+    instrument: poise_engine::grid::Instrument,
     next_retry_at: Instant,
 }
 
@@ -310,7 +310,7 @@ impl ServerRuntime {
                         }
 
                         let now = Instant::now();
-                        let due_grids: Vec<(String, grid_engine::grid::Instrument)> = tracked
+                        let due_grids: Vec<(String, poise_engine::grid::Instrument)> = tracked
                             .iter()
                             .filter(|(_, tracked_grid)| tracked_grid.next_retry_at <= now)
                             .map(|(grid_id, tracked_grid)| (grid_id.clone(), tracked_grid.instrument.clone()))
@@ -449,7 +449,7 @@ async fn sync_exchange_state_from_exchange(
     state: &ServerState,
     exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
-    instrument: &grid_engine::grid::Instrument,
+    instrument: &poise_engine::grid::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), GridMutationError> {
     let position = exchange
@@ -575,25 +575,25 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{ExchangeRules, Exposure, Side};
-    use grid_engine::command::GridCommand;
-    use grid_engine::execution_plan::ExecutionAction;
-    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
-    use grid_engine::ports::{
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_engine::command::GridCommand;
+    use poise_engine::execution_plan::ExecutionAction;
+    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::manager::GridManager;
+    use poise_engine::ports::{
         ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot, MarketDataPort,
         OrderReceipt, OrderRequest, OrderStatus, PersistedGridEffect, Position, PriceTick,
         StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
-    use grid_engine::runtime::{
+    use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
         WorkingOrder,
     };
-    use grid_engine::transition::GridEffect;
+    use poise_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
     use tracing_subscriber::fmt::MakeWriter;
@@ -1355,7 +1355,7 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(6.0));
         assert_eq!(
             instance.executor_state.recovery_anomaly.as_ref(),
-            Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+            Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
 
         shutdown(handles).await;
@@ -2156,7 +2156,7 @@ mod tests {
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
-            observed: grid_engine::snapshot::ObservedState {
+            observed: poise_engine::snapshot::ObservedState {
                 reference_price: Some(100.0),
                 out_of_band_since: None,
                 last_tick_at: None,
@@ -2263,10 +2263,10 @@ mod tests {
         let executor_state = &instance.executor_state;
         assert_eq!(
             executor_state.slots.as_slice(),
-            [grid_engine::runtime::ExecutionSlot {
+            [poise_engine::runtime::ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::Working,
-                working_order: Some(grid_engine::runtime::WorkingOrder {
+                working_order: Some(poise_engine::runtime::WorkingOrder {
                     order_id: Some("snapshot-1".into()),
                     client_order_id: "snapshot-1".into(),
                     side: Side::Buy,
@@ -2472,7 +2472,7 @@ mod tests {
         assert_eq!(instance.target_exposure, Some(Exposure(0.0)));
         assert_eq!(
             instance.executor_state.recovery_anomaly.as_ref(),
-            Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+            Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
 
@@ -2627,7 +2627,7 @@ mod tests {
 
         wait_until_instance(&fixture.state, |instance| {
             instance.executor_state.recovery_anomaly.as_ref()
-                == Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+                == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -2864,7 +2864,7 @@ mod tests {
 
         wait_until_instance(&fixture.state, |instance| {
             instance.executor_state.recovery_anomaly.as_ref()
-                == Some(&grid_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+                == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
         assert_eq!(
@@ -3412,7 +3412,7 @@ mod tests {
         )
     }
 
-    async fn current_instance(state: &ServerState) -> grid_engine::snapshot::GridRuntimeSnapshot {
+    async fn current_instance(state: &ServerState) -> poise_engine::snapshot::GridRuntimeSnapshot {
         let manager_handle = state.write_service.manager();
         let manager = manager_handle.read().await;
         manager.get_grid("BTCUSDT").unwrap().snapshot()
@@ -3447,7 +3447,7 @@ mod tests {
 
     async fn wait_until_instance<F>(state: &ServerState, predicate: F)
     where
-        F: Fn(&grid_engine::snapshot::GridRuntimeSnapshot) -> bool,
+        F: Fn(&poise_engine::snapshot::GridRuntimeSnapshot) -> bool,
     {
         timeout(Duration::from_secs(1), async {
             loop {
@@ -3660,7 +3660,7 @@ mod tests {
     }
 
     fn inventory_core_order(
-        grid: &grid_engine::snapshot::GridRuntimeSnapshot,
+        grid: &poise_engine::snapshot::GridRuntimeSnapshot,
     ) -> Option<&WorkingOrder> {
         grid.executor_state
             .slots
@@ -3680,7 +3680,7 @@ mod tests {
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
-            observed: grid_engine::snapshot::ObservedState {
+            observed: poise_engine::snapshot::ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
                 last_tick_at: None,
@@ -3885,7 +3885,7 @@ mod tests {
             &self,
             id: &str,
             state: &GridSnapshot,
-            _events: &[grid_core::events::DomainEvent],
+            _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
@@ -3931,7 +3931,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -4033,7 +4033,7 @@ mod tests {
             &self,
             id: &str,
             state: &GridSnapshot,
-            _events: &[grid_core::events::DomainEvent],
+            _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
@@ -4089,7 +4089,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -4200,7 +4200,7 @@ mod tests {
             &self,
             id: &str,
             state: &GridSnapshot,
-            _events: &[grid_core::events::DomainEvent],
+            _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
@@ -4250,7 +4250,7 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 

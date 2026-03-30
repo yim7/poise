@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use grid_core::events::ReplacementGateReason;
-use grid_core::strategy::GridConfig;
-use grid_core::types::Exposure;
+use poise_core::events::ReplacementGateReason;
+use poise_core::strategy::GridConfig;
+use poise_core::types::Exposure;
 
 use crate::grid::{GridId, Instrument};
 use crate::runtime::{ExecutorState, GridStatus, RiskState};
@@ -38,5 +38,5 @@ pub struct GridRuntimeSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedGridState {
     pub snapshot: GridRuntimeSnapshot,
-    pub events: Vec<grid_core::events::DomainEvent>,
+    pub events: Vec<poise_core::events::DomainEvent>,
 }

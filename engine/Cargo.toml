@@ -1,10 +1,10 @@
 [package]
-name = "grid-engine"
+name = "poise-engine"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-grid-core = { path = "../core" }
+poise-core = { path = "../core" }
 serde.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

@@ -14,8 +14,8 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
 };
 
-use grid_engine::grid::{Instrument, Venue};
-use grid_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
+use poise_engine::grid::{Instrument, Venue};
+use poise_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
 
 use crate::rest::BinanceRestClient;
 use crate::types::parse_order_status;
@@ -497,7 +497,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
 
             Ok(UserStreamMessage::Events(vec![UserDataEvent {
                 event_time,
-                payload: UserDataPayload::OrderUpdate(grid_engine::ports::ExchangeOrder {
+                payload: UserDataPayload::OrderUpdate(poise_engine::ports::ExchangeOrder {
                     instrument: Instrument::new(Venue::Binance, order.symbol),
                     order_id: order.order_id.to_string(),
                     client_order_id: order.client_order_id,
@@ -520,7 +520,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 .map(|position| {
                     Ok(UserDataEvent {
                         event_time,
-                        payload: UserDataPayload::PositionUpdate(grid_engine::ports::Position {
+                        payload: UserDataPayload::PositionUpdate(poise_engine::ports::Position {
                             instrument: Instrument::new(Venue::Binance, position.symbol),
                             qty: parse_decimal("a.P.pa", &position.position_amt)?,
                             avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
@@ -548,10 +548,10 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
         .with_context(|| format!("invalid decimal for {field}: {value}"))
 }
 
-fn parse_side(value: &str) -> Result<grid_core::types::Side> {
+fn parse_side(value: &str) -> Result<poise_core::types::Side> {
     match value {
-        "BUY" => Ok(grid_core::types::Side::Buy),
-        "SELL" => Ok(grid_core::types::Side::Sell),
+        "BUY" => Ok(poise_core::types::Side::Buy),
+        "SELL" => Ok(poise_core::types::Side::Sell),
         other => Err(anyhow!("unsupported side: {other}")),
     }
 }
@@ -639,9 +639,9 @@ mod tests {
         tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
     };
 
-    use grid_core::types::Side;
-    use grid_engine::grid::{Instrument, Venue};
-    use grid_engine::ports::{ExchangeOrder, OrderStatus, Position, UserDataPayload};
+    use poise_core::types::Side;
+    use poise_engine::grid::{Instrument, Venue};
+    use poise_engine::ports::{ExchangeOrder, OrderStatus, Position, UserDataPayload};
 
     use super::*;
 

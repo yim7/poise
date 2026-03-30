@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use grid_core::events::DomainEvent;
-use grid_core::risk::CapacityBudget;
-use grid_core::strategy::GridConfig;
-use grid_core::types::ExchangeRules;
-use grid_core::types::Exposure;
+use poise_core::events::DomainEvent;
+use poise_core::risk::CapacityBudget;
+use poise_core::strategy::GridConfig;
+use poise_core::types::ExchangeRules;
+use poise_core::types::Exposure;
 
 use crate::command::GridCommand;
 use crate::executor;
@@ -87,7 +87,7 @@ impl GridManager {
             );
         }
 
-        grid_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
+        poise_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
         let grid = GridRuntime::new(
             id.clone(),
             instrument.clone(),
@@ -330,7 +330,7 @@ impl GridManager {
         &mut self,
         id: &GridId,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
         let grid = self
             .grids
@@ -349,7 +349,7 @@ impl GridManager {
         &mut self,
         id: &GridId,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
     ) -> Result<()> {
         let grid = self
@@ -430,7 +430,7 @@ impl GridManager {
         &mut self,
         id: &GridId,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<executor::SubmitRecoveryPlan> {
         let live_order_observation = live_order.map(|order| OrderObservation {
@@ -537,9 +537,9 @@ impl GridManager {
             .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
         let unit_qty = grid.config.base_qty_per_unit();
         grid.current_exposure = if unit_qty <= f64::EPSILON {
-            grid_core::types::Exposure(0.0)
+            poise_core::types::Exposure(0.0)
         } else {
-            grid_core::types::Exposure(observation.qty / unit_qty)
+            poise_core::types::Exposure(observation.qty / unit_qty)
         };
         grid.risk_state.unrealized_pnl = observation.unrealized_pnl;
         Ok(())
@@ -849,7 +849,7 @@ struct PlannedInventoryExecution {
     effects: Vec<GridEffect>,
     target_exposure: Exposure,
     new_status: Option<GridStatus>,
-    replacement_gate_reason: Option<grid_core::events::ReplacementGateReason>,
+    replacement_gate_reason: Option<poise_core::events::ReplacementGateReason>,
     executor_state: ExecutorState,
 }
 
@@ -875,9 +875,9 @@ mod tests {
         WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
-    use grid_core::events::ReplacementGateReason;
-    use grid_core::strategy::*;
-    use grid_core::types::Side;
+    use poise_core::events::ReplacementGateReason;
+    use poise_core::strategy::*;
+    use poise_core::types::Side;
 
     struct FakeClock;
 
@@ -951,8 +951,8 @@ mod tests {
         }
     }
 
-    fn test_exchange_rules() -> grid_core::types::ExchangeRules {
-        grid_core::types::ExchangeRules {
+    fn test_exchange_rules() -> poise_core::types::ExchangeRules {
+        poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.1,
             min_qty: 0.0,
@@ -981,10 +981,10 @@ mod tests {
     fn working_order(
         order_id: Option<&str>,
         client_order_id: &str,
-        side: grid_core::types::Side,
+        side: poise_core::types::Side,
         price: f64,
         quantity: f64,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -996,8 +996,8 @@ mod tests {
             target_exposure,
             status,
             role: match side {
-                grid_core::types::Side::Buy => OrderRole::IncreaseInventory,
-                grid_core::types::Side::Sell => OrderRole::DecreaseInventory,
+                poise_core::types::Side::Buy => OrderRole::IncreaseInventory,
+                poise_core::types::Side::Sell => OrderRole::DecreaseInventory,
             },
         }
     }
@@ -1034,7 +1034,7 @@ mod tests {
 
     fn working_order_from_submit_request(
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
     ) -> WorkingOrder {
         working_order(
             None,
@@ -1082,17 +1082,17 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(4.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(6.0));
+        grid.current_exposure = poise_core::types::Exposure(4.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         seed_executor_slot(
             &mut grid,
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -1115,7 +1115,7 @@ mod tests {
     fn passive_executor_state_with_matching_buy_order() -> ExecutorState {
         ExecutorState {
             mode: ExecutionMode::Passive,
-            inventory_gap: grid_core::types::Exposure(4.0),
+            inventory_gap: poise_core::types::Exposure(4.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
             slots: vec![ExecutionSlot {
@@ -1124,10 +1124,10 @@ mod tests {
                 working_order: Some(WorkingOrder {
                     order_id: Some("order-1".into()),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    target_exposure: grid_core::types::Exposure(4.0),
+                    target_exposure: poise_core::types::Exposure(4.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
@@ -1136,7 +1136,7 @@ mod tests {
             recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
-                max_inventory_gap_abs: grid_core::types::Exposure(4.0),
+                max_inventory_gap_abs: poise_core::types::Exposure(4.0),
                 max_gap_age_ms: 0,
             },
         }
@@ -1309,7 +1309,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
             );
             runtime.status = GridStatus::Active;
-            runtime.current_exposure = grid_core::types::Exposure(0.0);
+            runtime.current_exposure = poise_core::types::Exposure(0.0);
             runtime.reference_price = Some(90.0);
             runtime.snapshot()
         };
@@ -1329,7 +1329,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         );
         runtime.status = GridStatus::Active;
-        runtime.current_exposure = grid_core::types::Exposure(0.0);
+        runtime.current_exposure = poise_core::types::Exposure(0.0);
         runtime.reference_price = Some(90.0);
 
         let snapshot = {
@@ -1342,7 +1342,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
             );
             source.status = GridStatus::Active;
-            source.current_exposure = grid_core::types::Exposure(0.0);
+            source.current_exposure = poise_core::types::Exposure(0.0);
             source.reference_price = Some(90.0);
             source.snapshot()
         };
@@ -1351,7 +1351,7 @@ mod tests {
 
         let result = crate::reconciler::reconcile_target(&runtime, 90.0);
         assert_eq!(runtime.budget.max_notional, 1500.0);
-        assert_eq!(result.target_exposure, grid_core::types::Exposure(4.0));
+        assert_eq!(result.target_exposure, poise_core::types::Exposure(4.0));
     }
 
     #[test]
@@ -1405,7 +1405,7 @@ mod tests {
         let mut manager = test_manager_with_active_grid();
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.executor_state = passive_executor_state_with_matching_buy_order();
 
         let transition = manager
@@ -1503,7 +1503,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
 
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.current_exposure = grid_core::types::Exposure(2.0);
+        grid.current_exposure = poise_core::types::Exposure(2.0);
 
         let transition = manager
             .observe(
@@ -1536,8 +1536,8 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Paused;
-        grid.current_exposure = grid_core::types::Exposure(2.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.current_exposure = poise_core::types::Exposure(2.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(4.0));
 
         let transition = manager
             .observe(
@@ -1562,17 +1562,17 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(0.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(6.0));
+        grid.current_exposure = poise_core::types::Exposure(0.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         seed_executor_slot(
             grid,
             working_order(
                 None,
                 "recover-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.0,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::Submitting,
             ),
             SlotState::SubmitPending,
@@ -1589,7 +1589,7 @@ mod tests {
 
         assert_eq!(
             transition.snapshot.target_exposure,
-            Some(grid_core::types::Exposure(4.0))
+            Some(poise_core::types::Exposure(4.0))
         );
         assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
         assert_eq!(
@@ -1597,10 +1597,10 @@ mod tests {
             Some(&working_order(
                 None,
                 "recover-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.0,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::Submitting,
             ))
         );
@@ -1613,7 +1613,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.current_exposure = poise_core::types::Exposure(0.0);
 
         let transition = manager
             .observe(
@@ -1648,8 +1648,8 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(2.0);
-        grid.exchange_rules = grid_core::types::ExchangeRules {
+        grid.current_exposure = poise_core::types::Exposure(2.0);
+        grid.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.5,
             min_qty: 0.0,
@@ -1662,10 +1662,10 @@ mod tests {
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Sell,
+                poise_core::types::Side::Sell,
                 99.9,
                 7.0,
-                grid_core::types::Exposure(0.5),
+                poise_core::types::Exposure(0.5),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -1698,8 +1698,8 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(2.0);
-        grid.exchange_rules = grid_core::types::ExchangeRules {
+        grid.current_exposure = poise_core::types::Exposure(2.0);
+        grid.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.5,
             min_qty: 0.0,
@@ -1712,10 +1712,10 @@ mod tests {
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Sell,
+                poise_core::types::Side::Sell,
                 99.9,
                 7.0,
-                grid_core::types::Exposure(0.5),
+                poise_core::types::Exposure(0.5),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -1762,7 +1762,7 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.exchange_rules.maker_fee_rate = 0.0002;
         grid.exchange_rules.taker_fee_rate = 0.0004;
         seed_executor_slot(
@@ -1770,10 +1770,10 @@ mod tests {
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 100.0,
                 0.1,
-                grid_core::types::Exposure(0.4),
+                poise_core::types::Exposure(0.4),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -1879,7 +1879,7 @@ mod tests {
 
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Paused;
-        grid.current_exposure = grid_core::types::Exposure(8.0);
+        grid.current_exposure = poise_core::types::Exposure(8.0);
         grid.reference_price = Some(85.0);
         grid.budget = CapacityBudget {
             max_notional: 1500.0,
@@ -1904,9 +1904,9 @@ mod tests {
 
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Paused;
-        grid.current_exposure = grid_core::types::Exposure(2.0);
+        grid.current_exposure = poise_core::types::Exposure(2.0);
         grid.reference_price = Some(99.95);
-        grid.exchange_rules = grid_core::types::ExchangeRules {
+        grid.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.5,
             min_qty: 0.0,
@@ -1919,10 +1919,10 @@ mod tests {
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Sell,
+                poise_core::types::Side::Sell,
                 99.9,
                 7.0,
-                grid_core::types::Exposure(0.5),
+                poise_core::types::Exposure(0.5),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -2028,7 +2028,7 @@ mod tests {
         let request = OrderRequest {
             instrument: test_instrument("BTCUSDT"),
             client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
+            side: poise_core::types::Side::Buy,
             price: 95.0,
             quantity: 0.4,
             reduce_only: false,
@@ -2043,14 +2043,14 @@ mod tests {
             .record_submit_request(
                 &GridId::new("btc1"),
                 &request,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
             )
             .unwrap();
         manager
             .record_submit_receipt(
                 &GridId::new("btc1"),
                 &request,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 &receipt,
             )
             .unwrap();
@@ -2061,10 +2061,10 @@ mod tests {
             Some(&working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 95.0,
                 0.4,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ))
         );
@@ -2081,12 +2081,12 @@ mod tests {
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 &OrderReceipt {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
@@ -2107,10 +2107,10 @@ mod tests {
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 95.0,
                 0.4,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -2122,12 +2122,12 @@ mod tests {
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 &OrderReceipt {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
@@ -2142,10 +2142,10 @@ mod tests {
             Some(&working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 95.0,
                 0.4,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ))
         );
@@ -2158,14 +2158,14 @@ mod tests {
         let request = OrderRequest {
             instrument: test_instrument("BTCUSDT"),
             client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
+            side: poise_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
             reduce_only: false,
         };
         seed_executor_slot(
             manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
-            working_order_from_submit_request(&request, grid_core::types::Exposure(4.0)),
+            working_order_from_submit_request(&request, poise_core::types::Exposure(4.0)),
             SlotState::SubmitPending,
         );
 
@@ -2181,8 +2181,8 @@ mod tests {
     fn recover_submit_effect_supersedes_without_receipt_evidence_when_target_is_reached() {
         let mut manager = test_manager_with_cached_price(92.5);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.current_exposure = grid_core::types::Exposure(6.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(6.0));
+        grid.current_exposure = poise_core::types::Exposure(6.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(6.0));
 
         let recovery = manager
             .recover_submit_effect(
@@ -2190,12 +2190,12 @@ mod tests {
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 92.5,
                     quantity: test_config().base_qty_per_unit() * 6.0,
                     reduce_only: false,
                 },
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 None,
             )
             .unwrap();
@@ -2212,17 +2212,17 @@ mod tests {
     fn recover_submit_effect_supersede_plan_is_executor_owned() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.current_exposure = grid_core::types::Exposure(0.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.current_exposure = poise_core::types::Exposure(0.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
             grid,
             working_order(
                 None,
                 "btc-core-reconcile",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.0,
                 test_config().base_qty_per_unit() * 6.0,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::Submitting,
             ),
             SlotState::SubmitPending,
@@ -2234,12 +2234,12 @@ mod tests {
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.0,
                     quantity: test_config().base_qty_per_unit() * 6.0,
                     reduce_only: false,
                 },
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 None,
             )
             .unwrap();
@@ -2252,14 +2252,14 @@ mod tests {
             [GridEffect::SubmitOrder {
                 request,
                 target_exposure,
-            }] if request.side == grid_core::types::Side::Buy
+            }] if request.side == poise_core::types::Side::Buy
                 && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
                 && rounded_values_match(
                     request.quantity,
                     test_config().base_qty_per_unit() * 4.0,
                     test_exchange_rules().quantity_step,
                 )
-                && *target_exposure == grid_core::types::Exposure(4.0)
+                && *target_exposure == poise_core::types::Exposure(4.0)
         ));
         let replacement_pending = match recovery.effects.as_slice() {
             [
@@ -2291,18 +2291,18 @@ mod tests {
     fn recover_submit_effect_supersedes_when_reduce_only_semantics_change() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.current_exposure = grid_core::types::Exposure(0.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.current_exposure = poise_core::types::Exposure(0.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         grid.executor_state.slots = vec![ExecutionSlot {
             slot: OrderSlot::new("inventory_core"),
             state: SlotState::SubmitPending,
             working_order: Some(WorkingOrder {
                 order_id: None,
                 client_order_id: "btc-core-reconcile".into(),
-                side: grid_core::types::Side::Buy,
+                side: poise_core::types::Side::Buy,
                 price: 95.0,
                 quantity: test_config().base_qty_per_unit() * 4.0,
-                target_exposure: grid_core::types::Exposure(-2.0),
+                target_exposure: poise_core::types::Exposure(-2.0),
                 status: OrderStatus::Submitting,
                 role: OrderRole::DecreaseInventory,
             }),
@@ -2314,12 +2314,12 @@ mod tests {
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 95.0,
                     quantity: test_config().base_qty_per_unit() * 4.0,
                     reduce_only: true,
                 },
-                grid_core::types::Exposure(-2.0),
+                poise_core::types::Exposure(-2.0),
                 None,
             )
             .unwrap();
@@ -2332,7 +2332,7 @@ mod tests {
             [GridEffect::SubmitOrder {
                 request,
                 target_exposure,
-            }] if request.side == grid_core::types::Side::Buy
+            }] if request.side == poise_core::types::Side::Buy
                 && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
                 && rounded_values_match(
                     request.quantity,
@@ -2340,7 +2340,7 @@ mod tests {
                     test_exchange_rules().quantity_step,
                 )
                 && !request.reduce_only
-                && *target_exposure == grid_core::types::Exposure(4.0)
+                && *target_exposure == poise_core::types::Exposure(4.0)
         ));
         let replacement_pending = match recovery.effects.as_slice() {
             [
@@ -2378,9 +2378,9 @@ mod tests {
     fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request() {
         let mut manager = test_manager_with_cached_price(94.99);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.current_exposure = poise_core::types::Exposure(0.0);
         grid.config.notional_per_unit = 100.0;
-        grid.exchange_rules = grid_core::types::ExchangeRules {
+        grid.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 10.0,
             quantity_step: 1.0,
             min_qty: 0.0,
@@ -2388,17 +2388,17 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         };
-        let expected_target = grid_core::strategy::target_exposure(94.99, &grid.config);
+        let expected_target = poise_core::strategy::target_exposure(94.99, &grid.config);
         grid.target_exposure = Some(expected_target.clone());
         seed_executor_slot(
             grid,
             working_order(
                 None,
                 "btc-core-reconcile",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 90.0,
                 4.0,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::Submitting,
             ),
             SlotState::SubmitPending,
@@ -2410,12 +2410,12 @@ mod tests {
                 &OrderRequest {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 90.0,
                     quantity: 4.0,
                     reduce_only: false,
                 },
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 None,
             )
             .unwrap();
@@ -2430,7 +2430,7 @@ mod tests {
             Some(WorkingOrder {
                 order_id: None,
                 client_order_id,
-                side: grid_core::types::Side::Buy,
+                side: poise_core::types::Side::Buy,
                 price,
                 quantity,
                 target_exposure,
@@ -2459,7 +2459,7 @@ mod tests {
             .unwrap();
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.current_exposure, grid_core::types::Exposure(4.0));
+        assert_eq!(grid.current_exposure, poise_core::types::Exposure(4.0));
         assert!((grid.risk_state.unrealized_pnl - 12.5).abs() < f64::EPSILON);
     }
 
@@ -2479,7 +2479,7 @@ mod tests {
 
         assert_eq!(
             transition.snapshot.current_exposure,
-            grid_core::types::Exposure(2.0)
+            poise_core::types::Exposure(2.0)
         );
         assert_eq!(
             transition
@@ -2593,10 +2593,10 @@ mod tests {
             working_order(
                 Some("stale-1"),
                 "stale-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -2618,7 +2618,7 @@ mod tests {
         assert!(transition.effects.is_empty());
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.current_exposure, grid_core::types::Exposure(4.0));
+        assert_eq!(grid.current_exposure, poise_core::types::Exposure(4.0));
         assert!(inventory_core_order(grid).is_none());
     }
 
@@ -2632,10 +2632,10 @@ mod tests {
             working_order(
                 None,
                 "restore-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::Submitting,
             ),
             SlotState::SubmitPending,
@@ -2651,7 +2651,7 @@ mod tests {
                 vec![OrderObservation {
                     order_id: "live-1".into(),
                     client_order_id: "restore-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
@@ -2665,16 +2665,16 @@ mod tests {
         assert!(transition.effects.is_empty());
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.current_exposure, grid_core::types::Exposure(2.0));
+        assert_eq!(grid.current_exposure, poise_core::types::Exposure(2.0));
         assert_eq!(
             inventory_core_order(grid),
             Some(&working_order(
                 Some("live-1"),
                 "restore-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::New,
             ))
         );
@@ -2756,18 +2756,18 @@ mod tests {
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
-        grid.current_exposure = grid_core::types::Exposure(2.0);
-        grid.target_exposure = Some(grid_core::types::Exposure(6.0));
+        grid.current_exposure = poise_core::types::Exposure(2.0);
+        grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         grid.reference_price = Some(95.0);
         seed_executor_slot(
             grid,
             working_order(
                 Some("restore-1"),
                 "restore-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -2785,12 +2785,12 @@ mod tests {
                     request: OrderRequest {
                         instrument: test_instrument("BTCUSDT"),
                         client_order_id: "restore-1".into(),
-                        side: grid_core::types::Side::Buy,
+                        side: poise_core::types::Side::Buy,
                         price: 94.5,
                         quantity: 0.25,
                         reduce_only: false,
                     },
-                    target_exposure: grid_core::types::Exposure(6.0),
+                    target_exposure: poise_core::types::Exposure(6.0),
                 }],
             )
             .unwrap();
@@ -2799,7 +2799,7 @@ mod tests {
         assert_eq!(transition.effects, vec![GridEffect::NoOp]);
 
         let grid = manager.get_grid("btc1").unwrap();
-        assert_eq!(grid.target_exposure, Some(grid_core::types::Exposure(6.0)));
+        assert_eq!(grid.target_exposure, Some(poise_core::types::Exposure(6.0)));
         assert!(inventory_core_order(grid).is_none());
         assert_eq!(
             grid.executor_state.recovery_anomaly.as_ref(),
@@ -2864,7 +2864,7 @@ mod tests {
                 vec![OrderObservation {
                     order_id: "live-1".into(),
                     client_order_id: "live-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: -5.0,
@@ -2896,10 +2896,10 @@ mod tests {
             working_order(
                 Some("order-a"),
                 "client-a",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -2910,10 +2910,10 @@ mod tests {
             working_order(
                 Some("order-b"),
                 "client-b",
-                grid_core::types::Side::Sell,
+                poise_core::types::Side::Sell,
                 95.5,
                 0.15,
-                grid_core::types::Exposure(2.0),
+                poise_core::types::Exposure(2.0),
                 OrderStatus::PartiallyFilled,
             ),
             SlotState::Working,
@@ -2930,7 +2930,7 @@ mod tests {
                     OrderObservation {
                         order_id: "order-b".into(),
                         client_order_id: "client-b".into(),
-                        side: grid_core::types::Side::Sell,
+                        side: poise_core::types::Side::Sell,
                         price: 95.5,
                         quantity: 0.15,
                         realized_pnl: 0.0,
@@ -2939,7 +2939,7 @@ mod tests {
                     OrderObservation {
                         order_id: "order-a".into(),
                         client_order_id: "client-a".into(),
-                        side: grid_core::types::Side::Buy,
+                        side: poise_core::types::Side::Buy,
                         price: 94.5,
                         quantity: 0.25,
                         realized_pnl: 0.0,
@@ -2987,7 +2987,7 @@ mod tests {
         let request = OrderRequest {
             instrument: test_instrument("BTCUSDT"),
             client_order_id: "client-1".into(),
-            side: grid_core::types::Side::Buy,
+            side: poise_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
             reduce_only: false,
@@ -2996,7 +2996,7 @@ mod tests {
             .record_submit_request(
                 &GridId::new("btc1"),
                 &request,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
             )
             .unwrap();
 
@@ -3006,7 +3006,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
@@ -3021,10 +3021,10 @@ mod tests {
             Some(&working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(6.0),
+                poise_core::types::Exposure(6.0),
                 OrderStatus::New,
             ))
         );
@@ -3035,10 +3035,10 @@ mod tests {
         let mut manager = test_manager();
         register_test_grid(&mut manager, "btc1", "BTCUSDT");
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
-        grid.target_exposure = Some(grid_core::types::Exposure(6.0));
+        grid.target_exposure = Some(poise_core::types::Exposure(6.0));
         grid.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
-            inventory_gap: grid_core::types::Exposure(6.0),
+            inventory_gap: poise_core::types::Exposure(6.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
             slots: vec![empty_inventory_core_slot()],
@@ -3046,7 +3046,7 @@ mod tests {
             recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
-                max_inventory_gap_abs: grid_core::types::Exposure(6.0),
+                max_inventory_gap_abs: poise_core::types::Exposure(6.0),
                 max_gap_age_ms: 0,
             },
         };
@@ -3057,7 +3057,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
@@ -3079,10 +3079,10 @@ mod tests {
     fn canceled_order_keeps_attention_required_while_recovery_anomaly_is_active() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         grid.executor_state = ExecutorState {
             mode: ExecutionMode::Passive,
-            inventory_gap: grid_core::types::Exposure(4.0),
+            inventory_gap: poise_core::types::Exposure(4.0),
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
             slots: vec![empty_inventory_core_slot()],
@@ -3090,7 +3090,7 @@ mod tests {
             recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
-                max_inventory_gap_abs: grid_core::types::Exposure(4.0),
+                max_inventory_gap_abs: poise_core::types::Exposure(4.0),
                 max_gap_age_ms: 0,
             },
         };
@@ -3101,7 +3101,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
@@ -3170,16 +3170,16 @@ mod tests {
     fn observe_canceled_order_with_cached_reference_price_reconciles_immediately() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
             grid,
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -3191,7 +3191,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
@@ -3222,16 +3222,16 @@ mod tests {
     fn observe_filled_order_does_not_reconcile_before_position_update() {
         let mut manager = test_manager_with_cached_price(95.0);
         let grid = manager.grids.get_mut(&GridId::new("btc-core")).unwrap();
-        grid.target_exposure = Some(grid_core::types::Exposure(4.0));
+        grid.target_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
             grid,
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -3243,7 +3243,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: -12.5,
@@ -3276,10 +3276,10 @@ mod tests {
             working_order(
                 Some("order-1"),
                 "client-1",
-                grid_core::types::Side::Buy,
+                poise_core::types::Side::Buy,
                 94.5,
                 0.25,
-                grid_core::types::Exposure(4.0),
+                poise_core::types::Exposure(4.0),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -3290,10 +3290,10 @@ mod tests {
             working_order: Some(working_order(
                 Some("order-2"),
                 "client-2",
-                grid_core::types::Side::Sell,
+                poise_core::types::Side::Sell,
                 95.5,
                 0.15,
-                grid_core::types::Exposure(2.0),
+                poise_core::types::Exposure(2.0),
                 OrderStatus::PartiallyFilled,
             )),
         });
@@ -3304,7 +3304,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
@@ -3349,7 +3349,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: -12.5,
@@ -3398,7 +3398,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: -5.0,
@@ -3447,7 +3447,7 @@ mod tests {
                 GridObservation::Order(OrderObservation {
                     order_id: "order-1".into(),
                     client_order_id: "client-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: -5.0,

@@ -2,18 +2,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use grid_core::events::DomainEvent;
-use grid_engine::command::GridCommand;
-use grid_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
-use grid_engine::grid::{GridId, Instrument};
-use grid_engine::manager::{ExchangeSyncMode, GridManager};
-use grid_engine::observation::{
+use poise_core::events::DomainEvent;
+use poise_engine::command::GridCommand;
+use poise_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
+use poise_engine::grid::{GridId, Instrument};
+use poise_engine::manager::{ExchangeSyncMode, GridManager};
+use poise_engine::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
 };
-use grid_engine::ports::{
+use poise_engine::ports::{
     EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
 };
-use grid_engine::transition::{GridEffect, GridTransition};
+use poise_engine::transition::{GridEffect, GridTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 use crate::notifications::GridInternalNotification;
@@ -56,7 +56,7 @@ pub struct GridInstrument {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedSubmitExecution {
-    pub target_exposure: grid_core::types::Exposure,
+    pub target_exposure: poise_core::types::Exposure,
 }
 
 #[derive(Debug)]
@@ -287,7 +287,7 @@ impl GridWriteService {
                 GridEffect::SubmitOrder {
                     request,
                     target_exposure,
-                } => Some(grid_engine::executor::PendingSubmitHint {
+                } => Some(poise_engine::executor::PendingSubmitHint {
                     request,
                     target_exposure,
                 }),
@@ -343,7 +343,7 @@ impl GridWriteService {
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
     ) -> Result<()> {
         self.mutate_grid_with_effect_status(
@@ -445,7 +445,7 @@ impl GridWriteService {
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<Option<PreparedSubmitExecution>> {
         Ok(
@@ -468,7 +468,7 @@ impl GridWriteService {
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitRecoveryResolution> {
         let _mutation_guard = self.lock_grid_mutation(id).await;
@@ -617,8 +617,8 @@ impl GridWriteService {
     async fn commit_grid_mutation<R>(
         &self,
         id: &str,
-        previous_snapshot: &grid_engine::snapshot::GridRuntimeSnapshot,
-        next_snapshot: &grid_engine::snapshot::GridRuntimeSnapshot,
+        previous_snapshot: &poise_engine::snapshot::GridRuntimeSnapshot,
+        next_snapshot: &poise_engine::snapshot::GridRuntimeSnapshot,
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_noop: bool,
@@ -677,7 +677,7 @@ impl GridWriteService {
 fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
     EffectStatusUpdate {
         effect_id: effect_id.to_string(),
-        status: grid_engine::ports::EffectStatus::Failed,
+        status: poise_engine::ports::EffectStatus::Failed,
         attempt_delta: 1,
         last_error: Some(error.to_string()),
     }
@@ -692,26 +692,26 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use grid_core::events::DomainEvent;
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{ExchangeRules, Exposure, Side};
-    use grid_engine::command::GridCommand;
-    use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::{ExchangeSyncMode, GridManager};
-    use grid_engine::observation::{
+    use poise_core::events::DomainEvent;
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_engine::command::GridCommand;
+    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::manager::{ExchangeSyncMode, GridManager};
+    use poise_engine::observation::{
         GridObservation, MarketObservation, OrderObservation, PositionObservation,
     };
-    use grid_engine::ports::{
+    use poise_engine::ports::{
         ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, OrderReceipt,
         OrderRequest, OrderStatus, PersistedGridEffect, StateRepositoryPort,
     };
-    use grid_engine::runtime::{
+    use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder,
     };
-    use grid_engine::snapshot::GridRuntimeSnapshot;
-    use grid_engine::transition::GridEffect;
+    use poise_engine::snapshot::GridRuntimeSnapshot;
+    use poise_engine::transition::GridEffect;
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
@@ -872,11 +872,11 @@ mod tests {
                 vec![OrderObservation {
                     order_id: "live-1".into(),
                     client_order_id: "unexpected-live".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
-                    status: grid_engine::ports::OrderStatus::New,
+                    status: poise_engine::ports::OrderStatus::New,
                 }],
             )
             .await
@@ -1153,11 +1153,11 @@ mod tests {
                 vec![OrderObservation {
                     order_id: "live-1".into(),
                     client_order_id: "restore-1".into(),
-                    side: grid_core::types::Side::Buy,
+                    side: poise_core::types::Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
                     realized_pnl: 0.0,
-                    status: grid_engine::ports::OrderStatus::New,
+                    status: poise_engine::ports::OrderStatus::New,
                 }],
             )
             .await
@@ -1168,10 +1168,10 @@ mod tests {
         let executor_state = snapshot.executor_state;
         assert_eq!(
             executor_state.slots,
-            vec![grid_engine::runtime::ExecutionSlot {
+            vec![poise_engine::runtime::ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::Working,
-                working_order: Some(grid_engine::runtime::WorkingOrder {
+                working_order: Some(poise_engine::runtime::WorkingOrder {
                     order_id: Some("live-1".into()),
                     client_order_id: "restore-1".into(),
                     side: Side::Buy,

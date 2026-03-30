@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use grid_engine::ports::{ExchangePort, OrderRequest, PersistedGridEffect};
-use grid_engine::transition::GridEffect;
+use poise_engine::ports::{ExchangePort, OrderRequest, PersistedGridEffect};
+use poise_engine::transition::GridEffect;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -148,7 +148,7 @@ impl EffectWorker {
         &self,
         persisted: &PersistedGridEffect,
         request: OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
         let Some(prepared_submit) = self
             .prepare_submit_execution(persisted, &request, target_exposure.clone())
@@ -217,7 +217,7 @@ impl EffectWorker {
         &self,
         persisted: &PersistedGridEffect,
         request: &OrderRequest,
-        target_exposure: grid_core::types::Exposure,
+        target_exposure: poise_core::types::Exposure,
     ) -> Result<Option<crate::write_service::PreparedSubmitExecution>> {
         let live_order = self
             .exchange
@@ -304,11 +304,11 @@ impl EffectWorker {
 
 enum Cancellation {
     One {
-        instrument: grid_engine::grid::Instrument,
+        instrument: poise_engine::grid::Instrument,
         order_id: String,
     },
     All {
-        instrument: grid_engine::grid::Instrument,
+        instrument: poise_engine::grid::Instrument,
     },
 }
 
@@ -320,23 +320,23 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{ExchangeRules, Exposure, Side};
-    use grid_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
-    use grid_engine::ports::{
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::manager::GridManager;
+    use poise_engine::ports::{
         ClockPort, CommittedGridWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, GridReadRepositoryPort, OrderReceipt, OrderRequest,
         OrderStatus, PersistedGridEffect, Position, StateRepositoryPort, StoredDomainEvent,
         StoredGridSnapshot,
     };
-    use grid_engine::runtime::{
+    use poise_engine::runtime::{
         ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState, WorkingOrder,
     };
-    use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
-    use grid_engine::transition::GridEffect;
+    use poise_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
+    use poise_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
     use tokio::time::timeout;
 
@@ -370,10 +370,10 @@ mod tests {
             snapshot
                 .executor_state
                 .slots
-                .push(grid_engine::runtime::ExecutionSlot {
-                    slot: grid_engine::executor::OrderSlot::new("inventory_followup"),
+                .push(poise_engine::runtime::ExecutionSlot {
+                    slot: poise_engine::executor::OrderSlot::new("inventory_followup"),
                     state: SlotState::Working,
-                    working_order: Some(grid_engine::runtime::WorkingOrder {
+                    working_order: Some(poise_engine::runtime::WorkingOrder {
                         order_id: Some("order-2".into()),
                         client_order_id: "client-2".into(),
                         side: Side::Sell,
@@ -381,7 +381,7 @@ mod tests {
                         quantity: 0.1,
                         target_exposure: Exposure(2.0),
                         status: OrderStatus::PartiallyFilled,
-                        role: grid_engine::executor::OrderRole::DecreaseInventory,
+                        role: poise_engine::executor::OrderRole::DecreaseInventory,
                     }),
                 });
             manager.restore_grid_state(&snapshot).unwrap();
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(snapshot.executor_state.slots.len(), 2);
         assert_eq!(
             snapshot.executor_state.slots[1].slot,
-            grid_engine::executor::OrderSlot::new("inventory_followup")
+            poise_engine::executor::OrderSlot::new("inventory_followup")
         );
         assert_eq!(
             snapshot.executor_state.slots[1]
@@ -533,8 +533,8 @@ mod tests {
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(
             snapshot.executor_state.slots,
-            vec![grid_engine::runtime::ExecutionSlot {
-                slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+            vec![poise_engine::runtime::ExecutionSlot {
+                slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                 state: SlotState::Empty,
                 working_order: None,
             }]
@@ -577,7 +577,7 @@ mod tests {
             exchange_rules,
         )
         .await;
-        let expected_target = grid_core::strategy::target_exposure(94.99, &config);
+        let expected_target = poise_core::strategy::target_exposure(94.99, &config);
         let snapshot = snapshot_with_submit_pending_order(
             94.99,
             config.clone(),
@@ -589,7 +589,7 @@ mod tests {
                 quantity: 4.0,
                 target_exposure: Exposure(4.0),
                 status: OrderStatus::Submitting,
-                role: grid_engine::executor::OrderRole::IncreaseInventory,
+                role: poise_engine::executor::OrderRole::IncreaseInventory,
             },
         );
 
@@ -794,8 +794,8 @@ mod tests {
                 inventory_gap: Exposure(6.0),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                 last_reprice_at: None,
-                slots: vec![grid_engine::runtime::ExecutionSlot {
-                    slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                slots: vec![poise_engine::runtime::ExecutionSlot {
+                    slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                     state: SlotState::Empty,
                     working_order: None,
                 }],
@@ -832,10 +832,10 @@ mod tests {
                 inventory_gap: Exposure(4.0),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                 last_reprice_at: None,
-                slots: vec![grid_engine::runtime::ExecutionSlot {
-                    slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                slots: vec![poise_engine::runtime::ExecutionSlot {
+                    slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                     state: SlotState::Working,
-                    working_order: Some(grid_engine::runtime::WorkingOrder {
+                    working_order: Some(poise_engine::runtime::WorkingOrder {
                         order_id: Some("order-1".into()),
                         client_order_id: "client-1".into(),
                         side: Side::Buy,
@@ -843,7 +843,7 @@ mod tests {
                         quantity: 15.0,
                         target_exposure: Exposure(6.0),
                         status: OrderStatus::New,
-                        role: grid_engine::executor::OrderRole::IncreaseInventory,
+                        role: poise_engine::executor::OrderRole::IncreaseInventory,
                     }),
                 }],
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
@@ -876,7 +876,7 @@ mod tests {
             config: config.clone(),
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(grid_core::strategy::target_exposure(
+            target_exposure: Some(poise_core::strategy::target_exposure(
                 reference_price,
                 &config,
             )),
@@ -886,8 +886,8 @@ mod tests {
                 inventory_gap: Exposure(order.target_exposure.0),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                 last_reprice_at: None,
-                slots: vec![grid_engine::runtime::ExecutionSlot {
-                    slot: grid_engine::executor::OrderSlot::new("inventory_core"),
+                slots: vec![poise_engine::runtime::ExecutionSlot {
+                    slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                     state: SlotState::SubmitPending,
                     working_order: Some(order),
                 }],
@@ -1014,7 +1014,7 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryRepository {
-        snapshots: AsyncMutex<HashMap<String, grid_engine::snapshot::GridRuntimeSnapshot>>,
+        snapshots: AsyncMutex<HashMap<String, poise_engine::snapshot::GridRuntimeSnapshot>>,
         effects: AsyncMutex<Vec<PersistedGridEffect>>,
         next_effect_batch: AsyncMutex<u64>,
     }
@@ -1023,7 +1023,7 @@ mod tests {
         async fn seed_snapshot(
             &self,
             id: &str,
-            snapshot: grid_engine::snapshot::GridRuntimeSnapshot,
+            snapshot: poise_engine::snapshot::GridRuntimeSnapshot,
         ) {
             self.snapshots.lock().await.insert(id.to_string(), snapshot);
         }
@@ -1042,8 +1042,8 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &grid_engine::snapshot::GridRuntimeSnapshot,
-            _events: &[grid_core::events::DomainEvent],
+            state: &poise_engine::snapshot::GridRuntimeSnapshot,
+            _events: &[poise_core::events::DomainEvent],
             effects: &[GridEffect],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedGridWrite> {
@@ -1101,11 +1101,11 @@ mod tests {
         async fn load_grid_state(
             &self,
             id: &str,
-        ) -> Result<Option<grid_engine::snapshot::GridRuntimeSnapshot>> {
+        ) -> Result<Option<poise_engine::snapshot::GridRuntimeSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_events(&self, _id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 

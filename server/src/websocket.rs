@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use grid_protocol::{GridStreamEvent, GridStreamPayload};
+use poise_protocol::{GridStreamEvent, GridStreamPayload};
 
 use crate::assembly::ServerState;
 use crate::notifications::GridInternalNotification;
@@ -36,7 +36,7 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 async fn push_projected_updates(
     socket: &mut WebSocket,
     state: &ServerState,
-    grid_id: grid_engine::grid::GridId,
+    grid_id: poise_engine::grid::GridId,
 ) -> bool {
     let source = match state.query_service.load_detail_source(&grid_id).await {
         Ok(Some(source)) => source,
@@ -107,19 +107,19 @@ mod tests {
     use axum::Router;
     use chrono::Utc;
     use futures_util::StreamExt;
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::ExchangeRules;
-    use grid_engine::command::GridCommand;
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
-    use grid_engine::ports::{
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::ExchangeRules;
+    use poise_engine::command::GridCommand;
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::manager::GridManager;
+    use poise_engine::ports::{
         ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort, GridReadRepositoryPort,
         OrderReceipt, OrderRequest, PersistedGridEffect, Position, StateRepositoryPort,
         StoredDomainEvent, StoredGridSnapshot,
     };
-    use grid_engine::transition::GridEffect;
-    use grid_protocol::{
+    use poise_engine::transition::GridEffect;
+    use poise_protocol::{
         ExecutionStateView, ExecutionStatusView, GridStatus, GridStreamEvent, GridStreamPayload,
     };
     use tokio::net::TcpListener;
@@ -420,8 +420,8 @@ mod tests {
         manager
             .observe(
                 &GridId::new("btc-core"),
-                grid_engine::observation::GridObservation::Market(
-                    grid_engine::observation::MarketObservation {
+                poise_engine::observation::GridObservation::Market(
+                    poise_engine::observation::MarketObservation {
                         reference_price: 95.0,
                     },
                 ),
@@ -449,7 +449,7 @@ mod tests {
     }
 
     impl TestRepository {
-        fn seed_snapshot(&self, snapshot: grid_engine::ports::GridSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::ports::GridSnapshot) {
             self.snapshots.lock().unwrap().insert(
                 snapshot.grid_id.as_str().to_string(),
                 StoredGridSnapshot {
@@ -499,11 +499,11 @@ mod tests {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &grid_engine::ports::GridSnapshot,
-            events: &[grid_core::events::DomainEvent],
+            state: &poise_engine::ports::GridSnapshot,
+            events: &[poise_core::events::DomainEvent],
             effects: &[GridEffect],
-            effect_status_update: Option<&grid_engine::ports::EffectStatusUpdate>,
-        ) -> Result<grid_engine::ports::CommittedGridWrite> {
+            effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
+        ) -> Result<poise_engine::ports::CommittedGridWrite> {
             let now = Utc::now();
             self.snapshots.lock().unwrap().insert(
                 id.to_string(),
@@ -563,7 +563,7 @@ mod tests {
                 }
             }
 
-            Ok(grid_engine::ports::CommittedGridWrite {
+            Ok(poise_engine::ports::CommittedGridWrite {
                 grid_id: GridId::new(id),
                 effects: persisted_effects,
             })
@@ -572,7 +572,7 @@ mod tests {
         async fn load_grid_state(
             &self,
             id: &str,
-        ) -> Result<Option<grid_engine::ports::GridSnapshot>> {
+        ) -> Result<Option<poise_engine::ports::GridSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -582,7 +582,7 @@ mod tests {
                 .map(|stored| stored.snapshot))
         }
 
-        async fn list_events(&self, id: &str) -> Result<Vec<grid_core::events::DomainEvent>> {
+        async fn list_events(&self, id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(self
                 .events
                 .lock()

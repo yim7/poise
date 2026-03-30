@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-pub use grid_protocol::{
+pub use poise_protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
     ExecutionStatusView, GridCommandAccepted, GridCommandRequest, GridCommandType, GridCommandView,
     GridDetailView, GridExecutionView, GridListItemView, GridListResponse, GridStatisticsView,
@@ -7,7 +7,7 @@ pub use grid_protocol::{
 };
 
 #[cfg(test)]
-pub use grid_protocol::{ExecutionBadgeView, ExposureSummaryView};
+pub use poise_protocol::{ExecutionBadgeView, ExposureSummaryView};
 
 #[cfg(test)]
 mod tests {

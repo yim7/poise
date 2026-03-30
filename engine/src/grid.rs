@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use grid_core::risk::CapacityBudget;
-use grid_core::strategy::GridConfig;
+use poise_core::risk::CapacityBudget;
+use poise_core::strategy::GridConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GridId(String);

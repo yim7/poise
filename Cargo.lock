@@ -536,121 +536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grid-binance"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures-util",
- "grid-core",
- "grid-engine",
- "hex",
- "hmac",
- "native-tls",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "grid-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "grid-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "grid-core",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "grid-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "grid-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "futures-util",
- "grid-binance",
- "grid-core",
- "grid-engine",
- "grid-protocol",
- "grid-storage",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "toml_edit",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "grid-storage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "grid-core",
- "grid-engine",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "grid-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "crossterm",
- "futures-util",
- "grid-protocol",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1307,6 +1192,121 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
+
+[[package]]
+name = "poise-binance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "hex",
+ "hmac",
+ "native-tls",
+ "poise-core",
+ "poise-engine",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "poise-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "poise-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "poise-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "poise-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "poise-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures-util",
+ "poise-binance",
+ "poise-core",
+ "poise-engine",
+ "poise-protocol",
+ "poise-storage",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "toml_edit",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "poise-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "poise-core",
+ "poise-engine",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "poise-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "crossterm",
+ "futures-util",
+ "poise-protocol",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
 
 [[package]]
 name = "potential_utf"

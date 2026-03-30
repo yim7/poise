@@ -17,7 +17,7 @@ pub struct PositionObservation {
 pub struct OrderObservation {
     pub order_id: String,
     pub client_order_id: String,
-    pub side: grid_core::types::Side,
+    pub side: poise_core::types::Side,
     pub price: f64,
     pub quantity: f64,
     pub realized_pnl: f64,

@@ -1,4 +1,4 @@
-use grid_core::events::DomainEvent;
+use poise_core::events::DomainEvent;
 
 use crate::execution_plan::ExecutionAction;
 use crate::snapshot::GridRuntimeSnapshot;

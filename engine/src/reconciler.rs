@@ -1,7 +1,7 @@
-use grid_core::events::DomainEvent;
-use grid_core::risk::{self, ExposureIntent, RiskDecision};
-use grid_core::strategy::{self, BandStatus, OutOfBandPolicy};
-use grid_core::types::Exposure;
+use poise_core::events::DomainEvent;
+use poise_core::risk::{self, ExposureIntent, RiskDecision};
+use poise_core::strategy::{self, BandStatus, OutOfBandPolicy};
+use poise_core::types::Exposure;
 
 use crate::runtime::{GridRuntime, GridStatus};
 
@@ -135,8 +135,8 @@ fn apply_out_of_band(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::*;
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::*;
 
     fn test_runtime() -> GridRuntime {
         GridRuntime::new(
@@ -152,7 +152,7 @@ mod tests {
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
             test_budget(),
-            grid_core::types::ExchangeRules {
+            poise_core::types::ExchangeRules {
                 price_tick: 0.1,
                 quantity_step: 0.1,
                 min_qty: 0.0,

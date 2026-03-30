@@ -4,8 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use grid_engine::grid::Instrument;
-use grid_engine::ports::{
+use poise_engine::grid::Instrument;
+use poise_engine::ports::{
     ExchangeInfo, ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest,
     Position, PriceTick, UserDataEvent,
 };
@@ -90,8 +90,8 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use grid_core::types::Side;
-    use grid_engine::grid::{Instrument, Venue};
+    use poise_core::types::Side;
+    use poise_engine::grid::{Instrument, Venue};
 
     use super::*;
 

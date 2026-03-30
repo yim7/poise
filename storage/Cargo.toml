@@ -1,11 +1,11 @@
 [package]
-name = "grid-storage"
+name = "poise-storage"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-grid-engine = { path = "../engine" }
-grid-core = { path = "../core" }
+poise-engine = { path = "../engine" }
+poise-core = { path = "../core" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

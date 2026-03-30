@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use grid_core::events::ReplacementGateReason;
-use grid_core::types::{ExchangeRules, Exposure, Side};
+use poise_core::events::ReplacementGateReason;
+use poise_core::types::{ExchangeRules, Exposure, Side};
 use serde::{Deserialize, Serialize};
 
 use crate::execution_plan::ExecutionAction;

@@ -2,10 +2,10 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use grid_core::events::ReplacementGateReason;
-use grid_core::risk::CapacityBudget;
-use grid_core::strategy::GridConfig;
-use grid_core::types::{ExchangeRules, Exposure, Side};
+use poise_core::events::ReplacementGateReason;
+use poise_core::risk::CapacityBudget;
+use poise_core::strategy::GridConfig;
+use poise_core::types::{ExchangeRules, Exposure, Side};
 
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
@@ -280,10 +280,10 @@ impl GridRuntime {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
-    use grid_core::events::ReplacementGateReason;
-    use grid_core::risk::CapacityBudget;
-    use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-    use grid_core::types::{ExchangeRules, Exposure, Side};
+    use poise_core::events::ReplacementGateReason;
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::grid::{GridId, Instrument, Venue};

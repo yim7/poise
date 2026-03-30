@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use grid_core::risk::CapacityBudget;
-use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
-use grid_engine::grid::{GridId, Instrument, Venue};
+use poise_core::risk::CapacityBudget;
+use poise_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
+use poise_engine::grid::{GridId, Instrument, Venue};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -112,7 +112,7 @@ fn default_out_of_band_policy() -> OutOfBandPolicy {
 
 #[cfg(test)]
 mod tests {
-    use grid_core::strategy::{OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 
     use super::{Config, default_bind_address, parse_config};
 
@@ -161,11 +161,11 @@ out_of_band_policy = "hold"
         assert_eq!(config.grids[0].grid_id().as_str(), "btc-core");
         assert_eq!(
             config.grids[1].shape_family,
-            grid_core::strategy::ShapeFamily::Concave
+            poise_core::strategy::ShapeFamily::Concave
         );
         assert_eq!(
             config.grids[1].out_of_band_policy,
-            grid_core::strategy::OutOfBandPolicy::Hold
+            poise_core::strategy::OutOfBandPolicy::Hold
         );
         assert_eq!(config.exchange.api_key.as_deref(), Some("demo-key"));
         assert_eq!(
@@ -198,11 +198,11 @@ notional_per_unit = 375.0
         assert_eq!(config.exchange.api_secret, None);
         assert_eq!(
             config.grids[0].grid_config().shape_family,
-            grid_core::strategy::ShapeFamily::Linear
+            poise_core::strategy::ShapeFamily::Linear
         );
         assert_eq!(
             config.grids[0].grid_config().out_of_band_policy,
-            grid_core::strategy::OutOfBandPolicy::Freeze
+            poise_core::strategy::OutOfBandPolicy::Freeze
         );
     }
 

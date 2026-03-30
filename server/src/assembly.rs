@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use grid_binance::BinanceAdapter;
-use grid_engine::grid::{GridId, Instrument};
-use grid_engine::manager::GridManager;
-use grid_engine::ports::{
+use poise_binance::BinanceAdapter;
+use poise_engine::grid::{GridId, Instrument};
+use poise_engine::manager::GridManager;
+use poise_engine::ports::{
     ClockPort, ExchangePort, GridReadRepositoryPort, MarketDataPort, StateRepositoryPort,
 };
-use grid_storage::sqlite::SqliteStorage;
+use poise_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
 use crate::config::{Config, ExchangeConfig};
@@ -227,16 +227,16 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
-    use grid_core::events::DomainEvent as EngineDomainEvent;
-    use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
-    use grid_engine::observation::{GridObservation, MarketObservation};
-    use grid_engine::ports::{
+    use poise_core::events::DomainEvent as EngineDomainEvent;
+    use poise_engine::grid::{GridId, Instrument, Venue};
+    use poise_engine::manager::GridManager;
+    use poise_engine::observation::{GridObservation, MarketObservation};
+    use poise_engine::ports::{
         ExchangeInfo, ExchangeOrder, ExchangePort, GridReadRepositoryPort, GridSnapshot,
         OrderReceipt, OrderRequest, Position, PriceTick, StateRepositoryPort,
     };
-    use grid_protocol::{GridStreamEvent, GridStreamPayload};
-    use grid_storage::sqlite::SqliteStorage;
+    use poise_protocol::{GridStreamEvent, GridStreamPayload};
+    use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio_tungstenite::connect_async;
@@ -252,8 +252,8 @@ mod tests {
         validate_unique_instruments,
     };
 
-    fn test_exchange_rules() -> grid_core::types::ExchangeRules {
-        grid_core::types::ExchangeRules {
+    fn test_exchange_rules() -> poise_core::types::ExchangeRules {
+        poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.1,
             min_qty: 0.0,
@@ -289,8 +289,8 @@ mod tests {
                     long_exposure_units: 8.0,
                     short_exposure_units: 8.0,
                     notional_per_unit: 375.0,
-                    shape_family: grid_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
@@ -305,8 +305,8 @@ mod tests {
                     long_exposure_units: 5.0,
                     short_exposure_units: 3.0,
                     notional_per_unit: 500.0,
-                    shape_family: grid_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
@@ -371,8 +371,8 @@ mod tests {
                     long_exposure_units: 8.0,
                     short_exposure_units: 8.0,
                     notional_per_unit: 375.0,
-                    shape_family: grid_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
@@ -387,8 +387,8 @@ mod tests {
                     long_exposure_units: 6.0,
                     short_exposure_units: 6.0,
                     notional_per_unit: 250.0,
-                    shape_family: grid_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
@@ -421,8 +421,8 @@ mod tests {
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                shape_family: grid_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
                 daily_loss_limit: None,
                 stop_loss_pct: None,
@@ -458,8 +458,8 @@ mod tests {
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                shape_family: grid_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
                 daily_loss_limit: None,
                 stop_loss_pct: None,
@@ -545,8 +545,8 @@ mod tests {
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                shape_family: grid_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
                 daily_loss_limit: None,
                 stop_loss_pct: None,
@@ -581,7 +581,7 @@ mod tests {
         let manager = manager_handle.read().await;
         let grid = manager.get_grid("btc-core").unwrap();
 
-        assert_eq!(grid.status(), &grid_engine::runtime::GridStatus::Paused);
+        assert_eq!(grid.status(), &poise_engine::runtime::GridStatus::Paused);
 
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
@@ -664,7 +664,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.status, grid_engine::runtime::GridStatus::Frozen);
+        assert_eq!(snapshot.status, poise_engine::runtime::GridStatus::Frozen);
         assert_eq!(snapshot.observed.reference_price, Some(85.0));
     }
 
@@ -706,16 +706,16 @@ mod tests {
             .add_grid(
                 GridId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
-                grid_core::strategy::GridConfig {
+                poise_core::strategy::GridConfig {
                     lower_price: 90.0,
                     upper_price: 110.0,
                     long_exposure_units: 8.0,
                     short_exposure_units: 8.0,
                     notional_per_unit: 375.0,
-                    shape_family: grid_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: grid_core::strategy::OutOfBandPolicy::Freeze,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 },
-                grid_core::risk::CapacityBudget {
+                poise_core::risk::CapacityBudget {
                     max_notional: 3000.0,
                     daily_loss_limit: -100.0,
                     stop_loss_pct: 10.0,
@@ -829,9 +829,9 @@ mod tests {
             id: &str,
             state: &GridSnapshot,
             _events: &[EngineDomainEvent],
-            _effects: &[grid_engine::transition::GridEffect],
-            _effect_status_update: Option<&grid_engine::ports::EffectStatusUpdate>,
-        ) -> Result<grid_engine::ports::CommittedGridWrite> {
+            _effects: &[poise_engine::transition::GridEffect],
+            _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
+        ) -> Result<poise_engine::ports::CommittedGridWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
             self.first_save_started.notify_waiters();
             if save_index == 0 {
@@ -844,8 +844,8 @@ mod tests {
                 .insert(id.to_string(), state.clone());
             self.completed_saves.fetch_add(1, Ordering::SeqCst);
             self.completed_save.notify_waiters();
-            Ok(grid_engine::ports::CommittedGridWrite {
-                grid_id: grid_engine::grid::GridId::new(id),
+            Ok(poise_engine::ports::CommittedGridWrite {
+                grid_id: poise_engine::grid::GridId::new(id),
                 effects: Vec::new(),
             })
         }
@@ -860,28 +860,28 @@ mod tests {
 
         async fn list_dispatchable_effects(
             &self,
-        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        ) -> Result<Vec<poise_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_grid(
             &self,
             _grid_id: &GridId,
-        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        ) -> Result<Vec<poise_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
     }
 
     #[async_trait::async_trait]
     impl GridReadRepositoryPort for BlockingPersistence {
-        async fn list_grid_snapshots(&self) -> Result<Vec<grid_engine::ports::StoredGridSnapshot>> {
+        async fn list_grid_snapshots(&self) -> Result<Vec<poise_engine::ports::StoredGridSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| grid_engine::ports::StoredGridSnapshot {
+                .map(|snapshot| poise_engine::ports::StoredGridSnapshot {
                     snapshot,
                     updated_at: chrono::Utc::now(),
                 })
@@ -891,14 +891,14 @@ mod tests {
         async fn load_grid_snapshot(
             &self,
             grid_id: &GridId,
-        ) -> Result<Option<grid_engine::ports::StoredGridSnapshot>> {
+        ) -> Result<Option<poise_engine::ports::StoredGridSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .get(grid_id.as_str())
                 .cloned()
-                .map(|snapshot| grid_engine::ports::StoredGridSnapshot {
+                .map(|snapshot| poise_engine::ports::StoredGridSnapshot {
                     snapshot,
                     updated_at: chrono::Utc::now(),
                 }))
@@ -908,7 +908,7 @@ mod tests {
             &self,
             _grid_id: &GridId,
             _limit: usize,
-        ) -> Result<Vec<grid_engine::ports::StoredDomainEvent>> {
+        ) -> Result<Vec<poise_engine::ports::StoredDomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -916,7 +916,7 @@ mod tests {
             &self,
             _grid_id: &GridId,
             _limit: usize,
-        ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
+        ) -> Result<Vec<poise_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
     }
@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl grid_engine::ports::MarketDataPort for FakeMarketData {
+    impl poise_engine::ports::MarketDataPort for FakeMarketData {
         async fn subscribe_prices(
             &self,
             instrument: &Instrument,
@@ -948,7 +948,7 @@ mod tests {
 
         async fn subscribe_user_data(
             &self,
-        ) -> Result<mpsc::Receiver<grid_engine::ports::UserDataEvent>> {
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

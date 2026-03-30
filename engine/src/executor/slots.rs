@@ -1,4 +1,4 @@
-use grid_core::types::{Exposure, Side};
+use poise_core::types::{Exposure, Side};
 
 use crate::observation::OrderObservation;
 use crate::runtime::{ExecutionSlot, ExecutorState, SlotState, WorkingOrder};

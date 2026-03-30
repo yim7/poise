@@ -13,7 +13,7 @@ use sha2::Sha256;
 use tokio::time::{Duration, sleep};
 use url::{Host, Url, form_urlencoded::Serializer};
 
-use grid_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position};
+use poise_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position};
 
 use crate::types::{
     BinanceExchangeInfoResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
@@ -462,10 +462,10 @@ fn trim_decimal_string(mut value: String) -> String {
     }
 }
 
-fn side_to_binance(side: grid_core::types::Side) -> &'static str {
+fn side_to_binance(side: poise_core::types::Side) -> &'static str {
     match side {
-        grid_core::types::Side::Buy => "BUY",
-        grid_core::types::Side::Sell => "SELL",
+        poise_core::types::Side::Buy => "BUY",
+        poise_core::types::Side::Sell => "SELL",
     }
 }
 
@@ -745,11 +745,11 @@ mod tests {
             Arc::new(|| 1_700_000_000_000),
         );
         let request = OrderRequest {
-            instrument: grid_engine::grid::Instrument::new(
-                grid_engine::grid::Venue::Binance,
+            instrument: poise_engine::grid::Instrument::new(
+                poise_engine::grid::Venue::Binance,
                 "BTCUSDT",
             ),
-            side: grid_core::types::Side::Buy,
+            side: poise_core::types::Side::Buy,
             price: 0.1 + 0.2,
             quantity: 0.024000000000000004,
             client_order_id: "grid-open-006".to_string(),

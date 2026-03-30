@@ -13,7 +13,7 @@ pub enum SubmitReceiptResolution {
 pub fn record_submit_request(
     previous_state: &ExecutorState,
     request: &OrderRequest,
-    target_exposure: grid_core::types::Exposure,
+    target_exposure: poise_core::types::Exposure,
 ) -> ExecutorState {
     let ((_, sibling_slots), _) =
         slots::split_inventory_core_slot_from_slots(&previous_state.slots);
@@ -41,7 +41,7 @@ pub fn record_submit_request(
 pub fn record_submit_receipt(
     previous_state: &ExecutorState,
     request: &OrderRequest,
-    target_exposure: grid_core::types::Exposure,
+    target_exposure: poise_core::types::Exposure,
     receipt: &OrderReceipt,
 ) -> SubmitReceiptResolution {
     let matching_indexes = previous_state
@@ -226,8 +226,8 @@ pub(super) fn submit_pending_slot(
 }
 
 pub(super) fn target_exposure_reached(
-    current_exposure: &grid_core::types::Exposure,
-    target_exposure: &grid_core::types::Exposure,
+    current_exposure: &poise_core::types::Exposure,
+    target_exposure: &poise_core::types::Exposure,
 ) -> bool {
     let delta = target_exposure.0 - current_exposure.0;
     if delta.abs() <= f64::EPSILON {

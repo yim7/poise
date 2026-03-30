@@ -91,13 +91,13 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::Utc;
-    use grid_core::types::ExchangeRules;
-    use grid_engine::grid::{Instrument, Venue};
-    use grid_engine::ports::{
+    use poise_core::types::ExchangeRules;
+    use poise_engine::grid::{Instrument, Venue};
+    use poise_engine::ports::{
         ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
         OrderStatus, Position, PriceTick,
     };
-    use grid_storage::sqlite::SqliteStorage;
+    use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
     use super::parse_config_path;
@@ -189,7 +189,7 @@ notional_per_unit = 375.0
             .await
             .unwrap();
         assert!(grids.status().is_success());
-        let list: grid_protocol::GridListResponse = grids.json().await.unwrap();
+        let list: poise_protocol::GridListResponse = grids.json().await.unwrap();
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id, "btc-core");
 
@@ -199,7 +199,7 @@ notional_per_unit = 375.0
             .await
             .unwrap();
         assert!(detail.status().is_success());
-        let payload: grid_protocol::GridDetailView = detail.json().await.unwrap();
+        let payload: poise_protocol::GridDetailView = detail.json().await.unwrap();
         assert_eq!(payload.identity.id, "btc-core");
         assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
 
@@ -274,7 +274,7 @@ notional_per_unit = 375.0
     }
 
     #[async_trait::async_trait]
-    impl grid_engine::ports::MarketDataPort for FakeMarketData {
+    impl poise_engine::ports::MarketDataPort for FakeMarketData {
         async fn subscribe_prices(
             &self,
             instrument: &Instrument,
@@ -288,7 +288,7 @@ notional_per_unit = 375.0
 
         async fn subscribe_user_data(
             &self,
-        ) -> Result<mpsc::Receiver<grid_engine::ports::UserDataEvent>> {
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }
