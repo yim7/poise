@@ -304,7 +304,7 @@ Task 1 code commit:
 - Modify: `configs/binance-testnet.toml` — 示例配置
 - Test: `server/src/config.rs` 内 tests
 
-- [ ] **Step 1: 在 GridDefinition 加可选风控字段**
+- [x] **Step 1: 在 GridDefinition 加可选风控字段**
 
 `server/src/config.rs`：
 
@@ -329,7 +329,7 @@ pub struct GridDefinition {
 }
 ```
 
-- [ ] **Step 2: 修改 budget() 读取显式配置，保留合理缺省**
+- [x] **Step 2: 修改 budget() 读取显式配置，保留合理缺省**
 
 ```rust
 impl GridDefinition {
@@ -347,7 +347,7 @@ impl GridDefinition {
 
 缺省逻辑：`daily_loss_limit` 默认 -10% max_notional，`stop_loss_pct` 默认 10%。不再是 -∞/100%。
 
-- [ ] **Step 3: 更新示例配置**
+- [x] **Step 3: 更新示例配置**
 
 `configs/binance-testnet.toml` 追加：
 
@@ -357,7 +357,7 @@ daily_loss_limit = -500
 stop_loss_pct = 5.0
 ```
 
-- [ ] **Step 4: 写验收测试**
+- [x] **Step 4: 写验收测试**
 
 `server/src/config.rs` tests：
 
@@ -417,12 +417,12 @@ notional_per_unit = 375.0
 }
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run: `cargo test -p grid-server`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/src/config.rs configs/binance-testnet.toml
@@ -431,6 +431,9 @@ git commit -m "feat: make risk budget configurable with safe defaults
 daily_loss_limit defaults to -10% of max_notional, stop_loss_pct
 defaults to 10%. Previously both were effectively disabled."
 ```
+
+Task 2 code commit:
+`44fac5908838d601f4858d2a32b6c084383024a6`
 
 ---
 
