@@ -363,14 +363,14 @@ git commit -m "refactor(server): scope pending effect queries by intent"
 - Test: `storage/src/sqlite.rs`
 - Test: `server/src/write_service.rs`
 
-- [ ] **Step 1: 写失败测试，锁住 effect 状态只能通过统一提交路径更新**
+- [x] **Step 1: 写失败测试，锁住 effect 状态只能通过统一提交路径更新**
 
 测试至少覆盖：
 - storage 通过 `save_transition_with_effect_status()` 也能推进 effect 状态
 - follow-up effect 的放行语义仍然正确
 - server 写侧测试不再依赖仓储 port 的 `mark_effect_*`
 
-- [ ] **Step 2: 运行定向测试确认失败**
+- [x] **Step 2: 运行定向测试确认失败**
 
 Run:
 `cargo test -p grid-storage sqlite::tests::save_transition_with_effect_status_advances_batch_after_success_update -- --exact`
@@ -379,14 +379,14 @@ Run:
 Expected:
 测试失败，因为当前相关覆盖还依赖 `mark_effect_*` 旧接口。
 
-- [ ] **Step 3: 做最小实现，删除仓储 port 的旧直写入口**
+- [x] **Step 3: 做最小实现，删除仓储 port 的旧直写入口**
 
 要求：
 - `StateRepositoryPort` 删除 `mark_effect_executing / succeeded / superseded / failed`
 - 存储和测试统一通过 `save_transition_with_effect_status()` 覆盖 effect 状态推进语义
 - 不保留新的应用层旁路写入口
 
-- [ ] **Step 4: 运行 Task 6 的定向测试**
+- [x] **Step 4: 运行 Task 6 的定向测试**
 
 Run:
 `cargo test -p grid-storage sqlite::tests:: -- --nocapture`
@@ -395,10 +395,10 @@ Run:
 Expected:
 effect 状态推进只剩统一提交路径，相关测试通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 Task 6 code commit:
-`TODO`
+`8533930225b4b69fd76eabdd787da88f5fb53599`
 
 ```bash
 git add engine/src/ports.rs storage/src/sqlite.rs server/src/effect_service.rs server/src/write_service.rs server/src/runtime.rs server/src/http.rs server/src/websocket.rs server/src/assembly.rs docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
