@@ -92,11 +92,11 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::Utc;
     use poise_core::types::ExchangeRules;
-    use poise_engine::track::{Instrument, Venue};
     use poise_engine::ports::{
         ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
         OrderStatus, Position, PriceTick,
     };
+    use poise_engine::track::{Instrument, Venue};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -150,8 +150,8 @@ bind_address = "{bind_address}"
 rest_base_url = "http://127.0.0.1:1"
 ws_base_url = "ws://127.0.0.1:1"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -183,23 +183,23 @@ notional_per_unit = 375.0
         });
 
         let client = reqwest::Client::new();
-        let grids = client
-            .get(format!("http://{bind_address}/grids"))
+        let tracks = client
+            .get(format!("http://{bind_address}/tracks"))
             .send()
             .await
             .unwrap();
-        assert!(grids.status().is_success());
-        let list: poise_protocol::GridListResponse = grids.json().await.unwrap();
+        assert!(tracks.status().is_success());
+        let list: poise_protocol::TrackListResponse = tracks.json().await.unwrap();
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].id, "btc-core");
 
         let detail = client
-            .get(format!("http://{bind_address}/grids/btc-core"))
+            .get(format!("http://{bind_address}/tracks/btc-core"))
             .send()
             .await
             .unwrap();
         assert!(detail.status().is_success());
-        let payload: poise_protocol::GridDetailView = detail.json().await.unwrap();
+        let payload: poise_protocol::TrackDetailView = detail.json().await.unwrap();
         assert_eq!(payload.identity.id, "btc-core");
         assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
 

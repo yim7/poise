@@ -1,7 +1,7 @@
 {
-  "grid_id": "btc-core",
+  "track_id": "btc-core",
   "payload": {
-    "type": "grid_detail_changed",
+    "type": "track_detail_changed",
     "detail": {
       "identity": {
         "id": "btc-core",

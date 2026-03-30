@@ -62,14 +62,13 @@ mod tests {
     fn renders_poise_header() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let response: crate::protocol::GridListResponse =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_list_response.json"))
-                .unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
         let app = App::new(response.items);
 
-        terminal
-            .draw(|frame| render(&app, frame))
-            .unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Poise"));

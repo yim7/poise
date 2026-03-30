@@ -10,7 +10,7 @@ pub enum CommandKind {
 }
 
 impl CommandKind {
-    pub fn as_grid_command(self) -> GridCommandType {
+    pub fn as_track_command(self) -> GridCommandType {
         match self {
             Self::Pause => GridCommandType::Pause,
             Self::Resume => GridCommandType::Resume,
@@ -95,13 +95,13 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::app::{App, View};
-    use crate::protocol::{GridCommandType, GridCommandView, GridDetailView, GridListResponse};
+    use crate::protocol::{GridCommandType, GridCommandView, TrackDetailView, TrackListResponse};
 
     use super::{Action, CommandKind, handle_key_event};
 
     fn app() -> App {
-        let mut response: GridListResponse =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+        let mut response: TrackListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json"))
                 .unwrap();
         let mut eth = response.items[0].clone();
         eth.id = "eth-core".into();
@@ -110,9 +110,9 @@ mod tests {
         App::new(response.items)
     }
 
-    fn detail_view() -> GridDetailView {
-        let mut detail: GridDetailView =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
+    fn detail_view() -> TrackDetailView {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
         detail.available_commands.push(GridCommandView {
             command: GridCommandType::Resume,
             enabled: true,
@@ -194,7 +194,7 @@ mod tests {
     fn pause_and_resume_are_available_in_instance_view() {
         let mut app = app();
         app.current_view = View::Instance;
-        app.current_grid = Some(detail_view());
+        app.current_track = Some(detail_view());
 
         assert_eq!(
             handle_key_event(&mut app, key(KeyCode::Char('p'))),
@@ -210,7 +210,7 @@ mod tests {
     fn commands_are_disabled_without_loaded_instance() {
         let mut app = app();
         app.current_view = View::Instance;
-        app.current_grid = None;
+        app.current_track = None;
 
         assert_eq!(
             handle_key_event(&mut app, key(KeyCode::Char('p'))),

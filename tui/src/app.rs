@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::protocol::{GridCommandType, GridDetailView, GridListItemView};
+use crate::protocol::{GridCommandType, TrackDetailView, TrackListItemView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -11,8 +11,8 @@ pub enum View {
 
 #[derive(Debug, Clone)]
 pub struct App {
-    pub grids: Vec<GridListItemView>,
-    pub current_grid: Option<GridDetailView>,
+    pub grids: Vec<TrackListItemView>,
+    pub current_track: Option<TrackDetailView>,
     pub selected_index: usize,
     pub current_view: View,
     pub should_quit: bool,
@@ -23,12 +23,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mut grids: Vec<GridListItemView>) -> Self {
+    pub fn new(mut grids: Vec<TrackListItemView>) -> Self {
         grids.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
             grids,
-            current_grid: None,
+            current_track: None,
             selected_index: 0,
             current_view: View::Dashboard,
             should_quit: false,
@@ -39,16 +39,16 @@ impl App {
         }
     }
 
-    pub fn selected_grid_id(&self) -> Option<&str> {
+    pub fn selected_track_id(&self) -> Option<&str> {
         self.grids
             .get(self.selected_index)
             .map(|grid| grid.id.as_str())
     }
 
-    pub fn current_grid_detail(&self) -> Option<&GridDetailView> {
-        self.current_grid
+    pub fn current_track_detail(&self) -> Option<&TrackDetailView> {
+        self.current_track
             .as_ref()
-            .filter(|detail| self.selected_grid_id() == Some(detail.identity.id.as_str()))
+            .filter(|detail| self.selected_track_id() == Some(detail.identity.id.as_str()))
     }
 
     pub fn select_next(&mut self) {
@@ -86,21 +86,21 @@ impl App {
     pub fn show_instance_for_selected(&mut self) {
         self.current_view = View::Instance;
         if self
-            .current_grid
+            .current_track
             .as_ref()
-            .is_some_and(|detail| self.selected_grid_id() != Some(detail.identity.id.as_str()))
+            .is_some_and(|detail| self.selected_track_id() != Some(detail.identity.id.as_str()))
         {
-            self.current_grid = None;
+            self.current_track = None;
         }
     }
 
-    pub fn apply_grid_list_item(&mut self, item: GridListItemView) {
+    pub fn apply_track_list_item(&mut self, item: TrackListItemView) {
         if let Some(existing) = self.grids.iter_mut().find(|grid| grid.id == item.id) {
             *existing = item;
             return;
         }
 
-        let selected_id = self.selected_grid_id().map(ToOwned::to_owned);
+        let selected_id = self.selected_track_id().map(ToOwned::to_owned);
         self.grids.push(item);
         self.grids.sort_by(|left, right| left.id.cmp(&right.id));
         if let Some(selected_id) = selected_id {
@@ -112,20 +112,20 @@ impl App {
         }
     }
 
-    pub fn apply_grid_detail(&mut self, detail: GridDetailView) {
-        let selected_matches = self.selected_grid_id() == Some(detail.identity.id.as_str());
+    pub fn apply_track_detail(&mut self, detail: TrackDetailView) {
+        let selected_matches = self.selected_track_id() == Some(detail.identity.id.as_str());
         let should_refresh_current = selected_matches
             || self
-                .current_grid
+                .current_track
                 .as_ref()
                 .is_some_and(|current| current.identity.id == detail.identity.id);
         if should_refresh_current {
-            self.current_grid = Some(detail);
+            self.current_track = Some(detail);
         }
     }
 
     pub fn is_command_enabled(&self, command: GridCommandType) -> bool {
-        self.current_grid_detail()
+        self.current_track_detail()
             .and_then(|detail| {
                 detail
                     .available_commands
@@ -173,14 +173,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        ExecutionStateView, GridDetailView, GridListItemView, GridStreamEvent, GridStreamPayload,
+        ExecutionStateView, TrackDetailView, TrackListItemView, TrackStreamEvent,
+        TrackStreamPayload,
     };
 
     use super::{App, View};
 
-    fn grid_list_items() -> Vec<GridListItemView> {
-        let mut response: crate::protocol::GridListResponse =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+    fn track_list_items() -> Vec<TrackListItemView> {
+        let mut response: crate::protocol::TrackListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json"))
                 .unwrap();
         let mut eth = response.items[0].clone();
         eth.id = "eth-core".into();
@@ -190,9 +191,9 @@ mod tests {
         response.items
     }
 
-    fn detail_view(id: &str) -> GridDetailView {
-        let mut detail: GridDetailView =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
+    fn detail_view(id: &str) -> TrackDetailView {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
         detail.identity.id = id.into();
         detail.identity.instrument.symbol = if id == "eth-core" {
             "ETHUSDT".into()
@@ -203,28 +204,31 @@ mod tests {
     }
 
     #[test]
-    fn apply_grid_detail_updates_current_detail_without_snapshot_cache() {
-        let mut app = App::new(grid_list_items());
+    fn apply_track_detail_updates_current_detail_without_snapshot_cache() {
+        let mut app = App::new(track_list_items());
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        app.apply_grid_detail(detail_view("btc-core"));
+        app.apply_track_detail(detail_view("btc-core"));
 
-        assert_eq!(app.current_grid_detail().unwrap().identity.id, "btc-core");
+        assert_eq!(app.current_track_detail().unwrap().identity.id, "btc-core");
         assert_eq!(
-            app.current_grid_detail().unwrap().position.current_exposure,
+            app.current_track_detail()
+                .unwrap()
+                .position
+                .current_exposure,
             3.5
         );
     }
 
     #[test]
-    fn apply_grid_list_item_updates_dashboard_item() {
-        let mut app = App::new(grid_list_items());
+    fn apply_track_list_item_updates_dashboard_item() {
+        let mut app = App::new(track_list_items());
         let mut updated = app.grids[0].clone();
         updated.reference_price = Some(102.5);
         updated.execution.state = ExecutionStateView::Paused;
 
-        app.apply_grid_list_item(updated);
+        app.apply_track_list_item(updated);
 
         assert_eq!(app.grids[0].reference_price, Some(102.5));
         assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
@@ -232,7 +236,7 @@ mod tests {
 
     #[test]
     fn help_view_restores_previous_view() {
-        let mut app = App::new(grid_list_items());
+        let mut app = App::new(track_list_items());
         app.current_view = View::Instance;
 
         app.enter_help();
@@ -244,38 +248,38 @@ mod tests {
 
     #[test]
     fn show_instance_for_selected_uses_current_list_selection_and_detail() {
-        let mut app = App::new(grid_list_items());
+        let mut app = App::new(track_list_items());
         app.current_view = View::Instance;
-        app.apply_grid_detail(detail_view("btc-core"));
+        app.apply_track_detail(detail_view("btc-core"));
         app.show_instance_for_selected();
 
-        assert_eq!(app.current_grid_detail().unwrap().identity.id, "btc-core");
+        assert_eq!(app.current_track_detail().unwrap().identity.id, "btc-core");
 
         app.select_next();
         app.show_instance_for_selected();
 
-        assert!(app.current_grid_detail().is_none());
+        assert!(app.current_track_detail().is_none());
     }
 
     #[test]
-    fn apply_grid_detail_event_updates_current_grid() {
-        let mut app = App::new(grid_list_items());
+    fn apply_track_detail_event_updates_current_track() {
+        let mut app = App::new(track_list_items());
         app.current_view = View::Instance;
         app.show_instance_for_selected();
-        app.apply_grid_detail(detail_view("btc-core"));
+        app.apply_track_detail(detail_view("btc-core"));
 
-        let event: GridStreamEvent = serde_json::from_str(include_str!(
-            "../tests/fixtures/ws_grid_detail_changed.json"
+        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap();
-        let GridStreamPayload::GridDetailChanged { detail } = event.payload else {
+        let TrackStreamPayload::TrackDetailChanged { detail } = event.payload else {
             panic!("unexpected payload variant");
         };
 
-        app.apply_grid_detail(detail);
+        app.apply_track_detail(detail);
 
         assert_eq!(
-            app.current_grid_detail().unwrap().status.reference_price,
+            app.current_track_detail().unwrap().status.reference_price,
             Some(101.5)
         );
     }

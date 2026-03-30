@@ -104,12 +104,13 @@ mod tests {
     }
 
     #[test]
-    fn renders_dashboard_rows_from_grid_list_items() {
+    fn renders_dashboard_rows_from_track_list_items() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let response: crate::protocol::GridListResponse =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_list_response.json"))
-                .unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
         let app = App::new(response.items);
 
         terminal

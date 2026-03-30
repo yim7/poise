@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::api_client::{ApiClient, connect_ws};
 use crate::app::{App, View};
 use crate::input::{Action, CommandKind, handle_key_event};
-use crate::protocol::{GridCommandAccepted, GridStreamEvent, GridStreamPayload};
+use crate::protocol::{TrackCommandAccepted, TrackStreamEvent, TrackStreamPayload};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -133,7 +133,7 @@ fn init_file_tracing(path: &Path) -> Result<()> {
 }
 
 fn tracing_destination_from_env() -> TracingDestination {
-    parse_tracing_destination(env_value("GRID_TUI_LOG").as_deref())
+    parse_tracing_destination(env_value("POISE_TUI_LOG").as_deref())
 }
 
 fn parse_tracing_destination(value: Option<&str>) -> TracingDestination {
@@ -146,15 +146,12 @@ fn parse_tracing_destination(value: Option<&str>) -> TracingDestination {
 
 impl RuntimeConfig {
     fn from_env() -> Result<Self> {
-        let base_url = env_value("GRID_TUI_BASE_URL")
-            .or_else(|| env_value("GRID_PLATFORM_BASE_URL"))
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        let ws_url =
-            match env_value("GRID_TUI_WS_URL").or_else(|| env_value("GRID_PLATFORM_WS_URL")) {
-                Some(url) => url,
-                None => derive_ws_url(&base_url)
-                    .with_context(|| format!("failed to derive websocket url from `{base_url}`"))?,
-            };
+        let base_url = env_value("POISE_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let ws_url = match env_value("POISE_TUI_WS_URL").or_else(|| env_value("POISE_WS_URL")) {
+            Some(url) => url,
+            None => derive_ws_url(&base_url)
+                .with_context(|| format!("failed to derive websocket url from `{base_url}`"))?,
+        };
 
         Ok(Self { base_url, ws_url })
     }
@@ -184,11 +181,11 @@ fn derive_ws_url(base_url: &str) -> Result<String> {
 }
 
 async fn load_initial_state(client: &ApiClient) -> Result<App> {
-    let response = client.list_grids().await?;
+    let response = client.list_tracks().await?;
     let mut app = App::new(response.items);
-    if let Some(grid_id) = app.selected_grid_id().map(ToOwned::to_owned) {
-        let detail = client.get_grid_detail(&grid_id).await?;
-        app.apply_grid_detail(detail);
+    if let Some(track_id) = app.selected_track_id().map(ToOwned::to_owned) {
+        let detail = client.get_track_detail(&track_id).await?;
+        app.apply_track_detail(detail);
     }
 
     Ok(app)
@@ -197,7 +194,7 @@ async fn load_initial_state(client: &ApiClient) -> Result<App> {
 async fn bootstrap_runtime_state(
     client: &ApiClient,
     ws_url: &str,
-) -> (App, Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>) {
+) -> (App, Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>) {
     let mut app = match load_initial_state(client).await {
         Ok(app) => app,
         Err(error) => {
@@ -228,7 +225,7 @@ async fn run_loop(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
 ) -> Result<()> {
     loop {
         maybe_load_initial_state(client, app).await;
@@ -282,7 +279,7 @@ async fn process_ws_event(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
 ) {
     if ws_receiver.is_none() {
         maybe_reconnect_websocket(client, ws_url, app, ws_receiver).await;
@@ -316,7 +313,7 @@ async fn maybe_reconnect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
 ) {
     if !app.should_retry_websocket() {
         return;
@@ -342,19 +339,19 @@ async fn submit_selected_command(
     app: &mut App,
     command: CommandKind,
 ) -> Result<()> {
-    let grid_id = app
-        .selected_grid_id()
+    let track_id = app
+        .selected_track_id()
         .context("no instance selected for command")?
         .to_string();
     let response = client
-        .submit_command(&grid_id, command.as_grid_command())
+        .submit_command(&track_id, command.as_track_command())
         .await
-        .with_context(|| format!("failed to submit command for `{grid_id}`"))?;
+        .with_context(|| format!("failed to submit command for `{track_id}`"))?;
     if !response.accepted {
         anyhow::bail!(
             "command `{:?}` rejected for `{}`",
             response.command,
-            response.grid_id
+            response.track_id
         );
     }
     sync_projected_state(client, app).await?;
@@ -365,28 +362,28 @@ async fn submit_selected_command(
     Ok(())
 }
 
-fn format_command_response(response: &GridCommandAccepted) -> String {
+fn format_command_response(response: &TrackCommandAccepted) -> String {
     format!(
         "command `{:?}` accepted for `{}`",
-        response.command, response.grid_id
+        response.command, response.track_id
     )
     .to_ascii_lowercase()
 }
 
 async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Result<()> {
-    let grid_id = app
-        .selected_grid_id()
+    let track_id = app
+        .selected_track_id()
         .context("no instance selected")?
         .to_string();
-    let detail = client.get_grid_detail(&grid_id).await?;
-    app.apply_grid_detail(detail);
+    let detail = client.get_track_detail(&track_id).await?;
+    app.apply_track_detail(detail);
     Ok(())
 }
 
-async fn handle_ws_event(app: &mut App, event: GridStreamEvent) {
+async fn handle_ws_event(app: &mut App, event: TrackStreamEvent) {
     match event.payload {
-        GridStreamPayload::GridListItemChanged { item } => app.apply_grid_list_item(item),
-        GridStreamPayload::GridDetailChanged { detail } => app.apply_grid_detail(detail),
+        TrackStreamPayload::TrackListItemChanged { item } => app.apply_track_list_item(item),
+        TrackStreamPayload::TrackDetailChanged { detail } => app.apply_track_detail(detail),
     }
 }
 
@@ -394,7 +391,7 @@ async fn reconnect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
 ) {
     app.set_status_message("websocket disconnected, reconnecting");
     connect_websocket(client, ws_url, app, ws_receiver, "websocket reconnected").await;
@@ -404,7 +401,7 @@ async fn connect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<GridStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
     success_message: &str,
 ) {
     *ws_receiver = match connect_ws(ws_url).await {
@@ -432,25 +429,25 @@ async fn finalize_websocket_connection(client: &ApiClient, app: &mut App, succes
 }
 
 async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
-    let selected_grid_id = app.selected_grid_id().map(ToOwned::to_owned);
+    let selected_track_id = app.selected_track_id().map(ToOwned::to_owned);
     let current_view = app.current_view;
     let should_quit = app.should_quit;
 
-    let response = client.list_grids().await?;
+    let response = client.list_tracks().await?;
     let mut refreshed = App::new(response.items);
-    if let Some(selected_grid_id) = selected_grid_id {
+    if let Some(selected_track_id) = selected_track_id {
         if let Some(index) = refreshed
             .grids
             .iter()
-            .position(|grid| grid.id == selected_grid_id)
+            .position(|grid| grid.id == selected_track_id)
         {
             refreshed.selected_index = index;
         }
     }
 
-    if let Some(grid_id) = refreshed.selected_grid_id().map(ToOwned::to_owned) {
-        let detail = client.get_grid_detail(&grid_id).await?;
-        refreshed.apply_grid_detail(detail);
+    if let Some(track_id) = refreshed.selected_track_id().map(ToOwned::to_owned) {
+        let detail = client.get_track_detail(&track_id).await?;
+        refreshed.apply_track_detail(detail);
     }
 
     refreshed.current_view = current_view;
@@ -488,9 +485,9 @@ mod tests {
     use crate::api_client::connect_ws;
     use crate::app::App;
     use crate::protocol::{
-        ExecutionStateView, GridCommandAccepted, GridCommandRequest, GridCommandType,
-        GridDetailView, GridListItemView, GridListResponse, GridStatus, GridStreamEvent,
-        GridStreamPayload,
+        ExecutionStateView, GridCommandType, GridStatus, TrackCommandAccepted, TrackCommandRequest,
+        TrackDetailView, TrackListItemView, TrackListResponse, TrackStreamEvent,
+        TrackStreamPayload,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -498,9 +495,9 @@ mod tests {
     const ETH_GRID_ID: &str = "eth-core";
     const ETH_SYMBOL: &str = "ETHUSDT";
 
-    fn grid_list_response() -> GridListResponse {
-        let mut response: GridListResponse =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+    fn track_list_response() -> TrackListResponse {
+        let mut response: TrackListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json"))
                 .unwrap();
         let mut eth = response.items[0].clone();
         eth.id = ETH_GRID_ID.into();
@@ -510,10 +507,10 @@ mod tests {
         response
     }
 
-    fn detail_view(grid_id: &str, symbol: &str) -> GridDetailView {
-        let mut detail: GridDetailView =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
-        detail.identity.id = grid_id.into();
+    fn detail_view(track_id: &str, symbol: &str) -> TrackDetailView {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
+        detail.identity.id = track_id.into();
         detail.identity.instrument.symbol = symbol.into();
         detail.status.reference_price = Some(if symbol == ETH_SYMBOL { 2200.0 } else { 100.0 });
         detail.position.current_exposure = if symbol == ETH_SYMBOL { -1.0 } else { 2.0 };
@@ -538,16 +535,16 @@ mod tests {
         detail
     }
 
-    fn grid_list_item_changed_event() -> GridStreamEvent {
+    fn track_list_item_changed_event() -> TrackStreamEvent {
         serde_json::from_str(include_str!(
-            "../tests/fixtures/ws_grid_list_item_changed.json"
+            "../tests/fixtures/ws_track_list_item_changed.json"
         ))
         .unwrap()
     }
 
-    fn grid_detail_changed_event() -> GridStreamEvent {
+    fn track_detail_changed_event() -> TrackStreamEvent {
         serde_json::from_str(include_str!(
-            "../tests/fixtures/ws_grid_detail_changed.json"
+            "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap()
     }
@@ -559,16 +556,16 @@ mod tests {
 
     async fn list_projected_grids(
         State(state): State<ProjectionStubState>,
-    ) -> Json<GridListResponse> {
-        state.requests.lock().await.push("/grids".into());
-        Json(grid_list_response())
+    ) -> Json<TrackListResponse> {
+        state.requests.lock().await.push("/tracks".into());
+        Json(track_list_response())
     }
 
     async fn get_projected_detail(
         Path(id): Path<String>,
         State(state): State<ProjectionStubState>,
-    ) -> Json<GridDetailView> {
-        state.requests.lock().await.push(format!("/grids/{id}"));
+    ) -> Json<TrackDetailView> {
+        state.requests.lock().await.push(format!("/tracks/{id}"));
         Json(match id.as_str() {
             BTC_GRID_ID => detail_view(BTC_GRID_ID, BTC_SYMBOL),
             ETH_GRID_ID => detail_view(ETH_GRID_ID, ETH_SYMBOL),
@@ -583,8 +580,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/grids", get(list_projected_grids))
-            .route("/grids/:id", get(get_projected_detail))
+            .route("/tracks", get(list_projected_grids))
+            .route("/tracks/:id", get(get_projected_detail))
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -596,12 +593,12 @@ mod tests {
 
     #[derive(Clone)]
     struct StubState {
-        list: Arc<Mutex<GridListResponse>>,
-        details: Arc<Mutex<HashMap<String, GridDetailView>>>,
+        list: Arc<Mutex<TrackListResponse>>,
+        details: Arc<Mutex<HashMap<String, TrackDetailView>>>,
     }
 
-    fn list_item_from_detail(detail: &GridDetailView) -> GridListItemView {
-        GridListItemView {
+    fn list_item_from_detail(detail: &TrackDetailView) -> TrackListItemView {
+        TrackListItemView {
             id: detail.identity.id.clone(),
             instrument: detail.identity.instrument.clone(),
             lifecycle: detail.status.lifecycle.clone(),
@@ -622,7 +619,7 @@ mod tests {
         let btc = detail_view(BTC_GRID_ID, BTC_SYMBOL);
         let eth = detail_view(ETH_GRID_ID, ETH_SYMBOL);
         StubState {
-            list: Arc::new(Mutex::new(GridListResponse {
+            list: Arc::new(Mutex::new(TrackListResponse {
                 items: vec![list_item_from_detail(&btc), list_item_from_detail(&eth)],
             })),
             details: Arc::new(Mutex::new(HashMap::from([
@@ -632,22 +629,22 @@ mod tests {
         }
     }
 
-    async fn list_grids(State(state): State<StubState>) -> Json<GridListResponse> {
+    async fn list_tracks(State(state): State<StubState>) -> Json<TrackListResponse> {
         Json(state.list.lock().await.clone())
     }
 
-    async fn get_grid_detail(
+    async fn get_track_detail(
         Path(id): Path<String>,
         State(state): State<StubState>,
-    ) -> Json<GridDetailView> {
+    ) -> Json<TrackDetailView> {
         Json(state.details.lock().await.get(&id).unwrap().clone())
     }
 
     async fn submit_command(
         Path(id): Path<String>,
         State(state): State<StubState>,
-        Json(command): Json<GridCommandRequest>,
-    ) -> Json<GridCommandAccepted> {
+        Json(command): Json<TrackCommandRequest>,
+    ) -> Json<TrackCommandAccepted> {
         let mut details = state.details.lock().await;
         let detail = details.get_mut(&id).unwrap();
         match command.command {
@@ -667,8 +664,8 @@ mod tests {
             *item = list_item;
         }
 
-        Json(GridCommandAccepted {
-            grid_id: id,
+        Json(TrackCommandAccepted {
+            track_id: id,
             command: command.command,
             accepted: true,
         })
@@ -679,7 +676,7 @@ mod tests {
     }
 
     async fn handle_ws_socket(mut socket: WebSocket) {
-        let payload = serde_json::to_string(&grid_detail_changed_event()).unwrap();
+        let payload = serde_json::to_string(&track_detail_changed_event()).unwrap();
         socket.send(AxumMessage::Text(payload)).await.unwrap();
     }
 
@@ -833,9 +830,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/grids", get(list_grids))
-            .route("/grids/:id", get(get_grid_detail))
-            .route("/grids/:id/commands", post(submit_command))
+            .route("/tracks", get(list_tracks))
+            .route("/tracks/:id", get(get_track_detail))
+            .route("/tracks/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
 
@@ -856,9 +853,9 @@ mod tests {
         let state = stub_state();
         let listener = TcpListener::bind(address).await.unwrap();
         let app = Router::new()
-            .route("/grids", get(list_grids))
-            .route("/grids/:id", get(get_grid_detail))
-            .route("/grids/:id/commands", post(submit_command))
+            .route("/tracks", get(list_tracks))
+            .route("/tracks/:id", get(get_track_detail))
+            .route("/tracks/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
 
@@ -908,8 +905,8 @@ mod tests {
     #[test]
     fn tracing_destination_treats_other_values_as_log_path() {
         assert_eq!(
-            parse_tracing_destination(Some("/tmp/grid-tui.log")),
-            TracingDestination::File(PathBuf::from("/tmp/grid-tui.log"))
+            parse_tracing_destination(Some("/tmp/poise-tui.log")),
+            TracingDestination::File(PathBuf::from("/tmp/poise-tui.log"))
         );
     }
 
@@ -929,8 +926,8 @@ mod tests {
 
     #[test]
     fn formats_command_response_message() {
-        let text = format_command_response(&GridCommandAccepted {
-            grid_id: BTC_GRID_ID.into(),
+        let text = format_command_response(&TrackCommandAccepted {
+            track_id: BTC_GRID_ID.into(),
             command: crate::protocol::GridCommandType::Pause,
             accepted: true,
         });
@@ -945,31 +942,31 @@ mod tests {
         let app = load_initial_state(&client).await.unwrap();
 
         assert_eq!(app.grids.len(), 2);
-        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/grids".to_string(), format!("/grids/{BTC_GRID_ID}")]
+            vec!["/tracks".to_string(), format!("/tracks/{BTC_GRID_ID}")]
         );
     }
 
     #[tokio::test]
     async fn handle_ws_event_applies_projected_updates_without_refetch() {
-        let mut app = App::new(grid_list_response().items);
+        let mut app = App::new(track_list_response().items);
         app.current_view = View::Instance;
         app.show_instance_for_selected();
-        app.apply_grid_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
+        app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
 
-        handle_ws_event(&mut app, grid_list_item_changed_event()).await;
-        handle_ws_event(&mut app, grid_detail_changed_event()).await;
+        handle_ws_event(&mut app, track_list_item_changed_event()).await;
+        handle_ws_event(&mut app, track_detail_changed_event()).await;
 
         assert_eq!(app.grids[0].reference_price, Some(101.4));
         assert_eq!(
-            app.current_grid.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
         );
         assert!(matches!(
-            grid_detail_changed_event().payload,
-            GridStreamPayload::GridDetailChanged { .. }
+            track_detail_changed_event().payload,
+            TrackStreamPayload::TrackDetailChanged { .. }
         ));
     }
 
@@ -980,9 +977,13 @@ mod tests {
         let app = load_initial_state(&client).await.unwrap();
 
         assert_eq!(app.grids.len(), 2);
-        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert_eq!(
-            app.current_grid.as_ref().unwrap().position.current_exposure,
+            app.current_track
+                .as_ref()
+                .unwrap()
+                .position
+                .current_exposure,
             2.0
         );
     }
@@ -1002,16 +1003,16 @@ mod tests {
         second.position.current_exposure = 3.0;
 
         sender
-            .send(GridStreamEvent {
-                grid_id: BTC_GRID_ID.into(),
-                payload: GridStreamPayload::GridDetailChanged { detail: first },
+            .send(TrackStreamEvent {
+                track_id: BTC_GRID_ID.into(),
+                payload: TrackStreamPayload::TrackDetailChanged { detail: first },
             })
             .await
             .unwrap();
         sender
-            .send(GridStreamEvent {
-                grid_id: BTC_GRID_ID.into(),
-                payload: GridStreamPayload::GridDetailChanged { detail: second },
+            .send(TrackStreamEvent {
+                track_id: BTC_GRID_ID.into(),
+                payload: TrackStreamPayload::TrackDetailChanged { detail: second },
             })
             .await
             .unwrap();
@@ -1020,11 +1021,15 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         assert_eq!(
-            app.current_grid.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.reference_price,
             Some(102.0)
         );
         assert_eq!(
-            app.current_grid.as_ref().unwrap().position.current_exposure,
+            app.current_track
+                .as_ref()
+                .unwrap()
+                .position
+                .current_exposure,
             3.0
         );
         assert!(matches!(
@@ -1042,10 +1047,10 @@ mod tests {
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        handle_ws_event(&mut app, grid_detail_changed_event()).await;
+        handle_ws_event(&mut app, track_detail_changed_event()).await;
 
         assert_eq!(
-            app.current_grid.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
         );
     }
@@ -1062,7 +1067,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.current_grid_detail().unwrap().status.lifecycle.status,
+            app.current_track_detail().unwrap().status.lifecycle.status,
             GridStatus::Paused
         );
         assert!(
@@ -1086,7 +1091,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.current_grid_detail().unwrap().status.lifecycle.status,
+            app.current_track_detail().unwrap().status.lifecycle.status,
             GridStatus::Paused
         );
         assert_eq!(app.grids[0].lifecycle.status, GridStatus::Paused);
@@ -1121,14 +1126,14 @@ mod tests {
         for _ in 0..20 {
             maybe_load_initial_state(&client, &mut app).await;
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if app.grids.len() == 2 && app.current_grid.is_some() {
+            if app.grids.len() == 2 && app.current_track.is_some() {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
         assert_eq!(app.grids.len(), 2);
-        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
 
         server.abort();
         let _ = server.await;
@@ -1151,7 +1156,7 @@ mod tests {
         for _ in 0..20 {
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
             if app
-                .current_grid
+                .current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price)
                 == Some(101.5)
@@ -1162,7 +1167,7 @@ mod tests {
         }
 
         assert_eq!(
-            app.current_grid.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
         );
 
@@ -1181,7 +1186,7 @@ mod tests {
         let (mut app, mut ws_receiver) = bootstrap_runtime_state(&client, &ws_url).await;
         assert!(app.status_message().unwrap().contains("ws connect failed"));
         assert_eq!(
-            app.current_grid
+            app.current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price),
             Some(100.0)
@@ -1190,14 +1195,14 @@ mod tests {
         let mut updated = detail_view(BTC_GRID_ID, BTC_SYMBOL);
         updated.status.reference_price = Some(111.5);
         updated.position.current_exposure = 4.5;
-        replace_grid_detail(&state, updated).await;
+        replace_track_detail(&state, updated).await;
 
         let ws_server = spawn_silent_ws_server_on(bind_address).await;
 
         for _ in 0..20 {
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
             if app
-                .current_grid
+                .current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price)
                 == Some(111.5)
@@ -1209,7 +1214,7 @@ mod tests {
 
         assert!(ws_receiver.is_some());
         assert_eq!(
-            app.current_grid
+            app.current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price),
             Some(111.5)
@@ -1231,7 +1236,7 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         let event = ws_receiver.as_mut().unwrap().recv().await.unwrap();
-        assert_eq!(event.grid_id, BTC_GRID_ID);
+        assert_eq!(event.track_id, BTC_GRID_ID);
         assert_eq!(app.status_message(), Some("websocket reconnected"));
     }
 
@@ -1260,7 +1265,7 @@ mod tests {
         for _ in 0..20 {
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
             if app
-                .current_grid
+                .current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price)
                 == Some(101.5)
@@ -1271,7 +1276,7 @@ mod tests {
         }
 
         assert_eq!(
-            app.current_grid.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
         );
 
@@ -1341,16 +1346,16 @@ mod tests {
         })
     }
 
-    async fn replace_grid_detail(state: &StubState, detail: GridDetailView) {
-        let grid_id = detail.identity.id.clone();
+    async fn replace_track_detail(state: &StubState, detail: TrackDetailView) {
+        let track_id = detail.identity.id.clone();
         state
             .details
             .lock()
             .await
-            .insert(grid_id.clone(), detail.clone());
+            .insert(track_id.clone(), detail.clone());
         let list_item = list_item_from_detail(&detail);
         let mut list = state.list.lock().await;
-        if let Some(item) = list.items.iter_mut().find(|item| item.id == grid_id) {
+        if let Some(item) = list.items.iter_mut().find(|item| item.id == track_id) {
             *item = list_item;
         }
     }
@@ -1415,7 +1420,7 @@ mod tests {
     impl TmuxSession {
         fn start(command: &str) -> Self {
             let name = format!(
-                "grid-tui-{}",
+                "poise-tui-{}",
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -1497,7 +1502,7 @@ mod tests {
             .build()
             .unwrap();
         for _ in 0..50 {
-            let Ok(response) = client.get(format!("{base_url}/grids")).send().await else {
+            let Ok(response) = client.get(format!("{base_url}/tracks")).send().await else {
                 sleep(Duration::from_millis(100)).await;
                 continue;
             };
@@ -1512,7 +1517,7 @@ mod tests {
 
     async fn wait_for_detail_price(client: &ApiClient, id: &str) {
         for _ in 0..50 {
-            let detail = client.get_grid_detail(id).await.unwrap();
+            let detail = client.get_track_detail(id).await.unwrap();
             if detail.status.reference_price.is_some() {
                 return;
             }
@@ -1530,7 +1535,7 @@ mod tests {
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
-        let config_path = temp_dir.path().join("grid-server.toml");
+        let config_path = temp_dir.path().join("poise-server.toml");
         fs::write(
             &config_path,
             format!(
@@ -1544,8 +1549,8 @@ api_secret = "demo-secret"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -1554,8 +1559,8 @@ long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
 
-[[grids]]
-grid_id = "eth-core"
+[[tracks]]
+track_id = "eth-core"
 venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
@@ -1599,23 +1604,23 @@ out_of_band_policy = "hold"
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
 
         let action = crate::input::handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_grid.as_ref().unwrap().identity.id, ETH_GRID_ID);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, ETH_GRID_ID);
 
         for _ in 0..30 {
             let before = app
-                .current_grid
+                .current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price);
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
             if app
-                .current_grid
+                .current_track
                 .as_ref()
                 .and_then(|detail| detail.status.reference_price)
                 != before
@@ -1626,7 +1631,7 @@ out_of_band_policy = "hold"
         }
 
         assert!(
-            app.current_grid
+            app.current_track
                 .as_ref()
                 .unwrap()
                 .status
@@ -1646,7 +1651,7 @@ out_of_band_policy = "hold"
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
-        let config_path = temp_dir.path().join("grid-server.toml");
+        let config_path = temp_dir.path().join("poise-server.toml");
         fs::write(
             &config_path,
             format!(
@@ -1660,8 +1665,8 @@ api_secret = "demo-secret"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -1706,7 +1711,7 @@ notional_per_unit = 375.0
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
-        let config_path = temp_dir.path().join("grid-server.toml");
+        let config_path = temp_dir.path().join("poise-server.toml");
         fs::write(
             &config_path,
             format!(
@@ -1720,8 +1725,8 @@ api_secret = "demo-secret"
 rest_base_url = "{rest_base_url}"
 ws_base_url = "{ws_base_url}"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -1730,8 +1735,8 @@ long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
 
-[[grids]]
-grid_id = "eth-core"
+[[tracks]]
+track_id = "eth-core"
 venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
@@ -1761,7 +1766,7 @@ out_of_band_policy = "hold"
         let ws_url = format!("ws://{bind_address}/ws");
         wait_for_http_ready(&base_url).await;
         let session = TmuxSession::start(&format!(
-            "env GRID_TUI_BASE_URL={base_url} GRID_TUI_WS_URL={ws_url} {}",
+            "env POISE_BASE_URL={base_url} POISE_TUI_WS_URL={ws_url} {}",
             tui_binary.display()
         ));
 

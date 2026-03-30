@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use poise_protocol::{GridStreamEvent, GridStreamPayload};
+use poise_protocol::{TrackStreamEvent, TrackStreamPayload};
 
 use crate::assembly::ServerState;
 use crate::notifications::TrackInternalNotification;
@@ -36,39 +36,43 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 async fn push_projected_updates(
     socket: &mut WebSocket,
     state: &ServerState,
-    grid_id: poise_engine::track::TrackId,
+    track_id: poise_engine::track::TrackId,
 ) -> bool {
-    let source = match state.query_service.load_track_detail_source(&grid_id).await {
+    let source = match state
+        .query_service
+        .load_track_detail_source(&track_id)
+        .await
+    {
         Ok(Some(source)) => source,
         Ok(None) => {
             tracing::warn!(
-                "grid `{}` missing from read model during websocket push; closing socket for resync",
-                grid_id.as_str()
+                "track `{}` missing from read model during websocket push; closing socket for resync",
+                track_id.as_str()
             );
             close_socket(socket).await;
             return false;
         }
         Err(error) => {
             tracing::warn!(
-                "failed to load read model for websocket grid `{}`: {error}; closing socket for resync",
-                grid_id.as_str()
+                "failed to load read model for websocket track `{}`: {error}; closing socket for resync",
+                track_id.as_str()
             );
             close_socket(socket).await;
             return false;
         }
     };
 
-    let grid_id_text = grid_id.as_str().to_string();
+    let track_id_text = track_id.as_str().to_string();
     let list_item = state.projector.project_list_item(&source);
     let detail = state.projector.project_detail(&source);
     let events = [
-        GridStreamEvent {
-            grid_id: grid_id_text.clone(),
-            payload: GridStreamPayload::GridListItemChanged { item: list_item },
+        TrackStreamEvent {
+            track_id: track_id_text.clone(),
+            payload: TrackStreamPayload::TrackListItemChanged { item: list_item },
         },
-        GridStreamEvent {
-            grid_id: grid_id_text,
-            payload: GridStreamPayload::GridDetailChanged { detail },
+        TrackStreamEvent {
+            track_id: track_id_text,
+            payload: TrackStreamPayload::TrackDetailChanged { detail },
         },
     ];
 
@@ -85,7 +89,7 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
-async fn send_event(socket: &mut WebSocket, event: GridStreamEvent) -> bool {
+async fn send_event(socket: &mut WebSocket, event: TrackStreamEvent) -> bool {
     let message = match serde_json::to_string(&event) {
         Ok(message) => message,
         Err(error) => {
@@ -108,19 +112,19 @@ mod tests {
     use chrono::Utc;
     use futures_util::StreamExt;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort, TrackReadRepositoryPort,
-        OrderReceipt, OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort,
-        StoredDomainEvent, StoredTrackSnapshot,
+        ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
+        OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort, StoredDomainEvent,
+        StoredTrackSnapshot, TrackReadRepositoryPort,
     };
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
-        ExecutionStateView, ExecutionStatusView, GridStatus, GridStreamEvent, GridStreamPayload,
+        ExecutionStateView, ExecutionStatusView, GridStatus, TrackStreamEvent, TrackStreamPayload,
     };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
@@ -178,7 +182,7 @@ mod tests {
         (format!("ws://{address}/ws"), service, state)
     }
 
-    async fn recv_event(stream: &mut ClientStream) -> GridStreamEvent {
+    async fn recv_event(stream: &mut ClientStream) -> TrackStreamEvent {
         let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -202,7 +206,8 @@ mod tests {
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
+        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+            track_id: TrackId::new("btc-core"),
             recovery_anomaly_active: false,
         });
 
@@ -210,10 +215,10 @@ mod tests {
         let payload_b = recv_event(&mut stream_b).await;
 
         assert_eq!(payload_a, payload_b);
-        assert_eq!(payload_a.grid_id, "btc-core");
+        assert_eq!(payload_a.track_id, "btc-core");
         assert!(matches!(
             payload_a.payload,
-            GridStreamPayload::GridListItemChanged { .. }
+            TrackStreamPayload::TrackListItemChanged { .. }
         ));
     }
 
@@ -233,16 +238,14 @@ mod tests {
         let second = recv_event(&mut stream).await;
         let events = [first, second];
 
-        assert!(
-            events.iter().any(|event| matches!(
-                event.payload,
-                GridStreamPayload::GridListItemChanged { .. }
-            ))
-        );
+        assert!(events.iter().any(|event| matches!(
+            event.payload,
+            TrackStreamPayload::TrackListItemChanged { .. }
+        )));
         let detail = events
             .iter()
             .find_map(|event| match &event.payload {
-                GridStreamPayload::GridDetailChanged { detail } => Some(detail),
+                TrackStreamPayload::TrackDetailChanged { detail } => Some(detail),
                 _ => None,
             })
             .expect("should emit projected detail change");
@@ -269,7 +272,7 @@ mod tests {
         let item = events
             .iter()
             .find_map(|event| match &event.payload {
-                GridStreamPayload::GridListItemChanged { item } => Some(item),
+                TrackStreamPayload::TrackListItemChanged { item } => Some(item),
                 _ => None,
             })
             .expect("should emit projected list item change");
@@ -277,9 +280,10 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event.payload, GridStreamPayload::GridDetailChanged { .. }))
+            events.iter().any(|event| matches!(
+                event.payload,
+                TrackStreamPayload::TrackDetailChanged { .. }
+            ))
         );
 
         drop(service);
@@ -294,7 +298,8 @@ mod tests {
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
+            service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+                track_id: TrackId::new("btc-core"),
                 recovery_anomaly_active: false,
             });
         }
@@ -327,7 +332,8 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
+        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+            track_id: TrackId::new("btc-core"),
             recovery_anomaly_active: false,
         });
 
@@ -359,7 +365,8 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted { track_id: TrackId::new("btc-core"),
+        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+            track_id: TrackId::new("btc-core"),
             recovery_anomaly_active: false,
         });
 
@@ -459,8 +466,8 @@ mod tests {
             *self.read_delay.lock().unwrap() = Some(delay);
         }
 
-        fn remove_snapshot(&self, grid_id: &str) {
-            self.snapshots.lock().unwrap().remove(grid_id);
+        fn remove_snapshot(&self, track_id: &str) {
+            self.snapshots.lock().unwrap().remove(track_id);
         }
 
         fn set_load_snapshot_error(&self, error: &str) {
@@ -626,7 +633,10 @@ mod tests {
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             self.maybe_delay_read().await;
             if let Some(error) = self.load_snapshot_error.lock().unwrap().clone() {
                 return Err(anyhow!(error));

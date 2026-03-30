@@ -24,10 +24,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .split(area);
 
     let Some(detail) = app
-        .current_grid_detail()
-        .or_else(|| app.current_grid.as_ref())
+        .current_track_detail()
+        .or_else(|| app.current_track.as_ref())
     else {
-        let empty = Paragraph::new("No grid detail loaded")
+        let empty = Paragraph::new("No track detail loaded")
             .block(Block::default().title("Instance").borders(Borders::ALL));
         frame.render_widget(empty, area);
         return;
@@ -275,7 +275,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::{GridCommandType, GridCommandView, GridDetailView};
+    use crate::protocol::{GridCommandType, GridCommandView, TrackDetailView};
 
     use super::render;
 
@@ -289,15 +289,16 @@ mod tests {
             .collect::<String>()
     }
 
-    fn render_text_with_size(detail: GridDetailView, width: u16, height: u16) -> String {
+    fn render_text_with_size(detail: TrackDetailView, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        let response: crate::protocol::GridListResponse =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_list_response.json"))
-                .unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
         let mut app = App::new(response.items);
         app.current_view = View::Instance;
-        app.apply_grid_detail(detail);
+        app.apply_track_detail(detail);
         app.show_instance_for_selected();
 
         terminal
@@ -307,14 +308,14 @@ mod tests {
         buffer_text(&terminal)
     }
 
-    fn render_text(detail: GridDetailView) -> String {
+    fn render_text(detail: TrackDetailView) -> String {
         render_text_with_size(detail, 100, 36)
     }
 
     #[test]
     fn renders_grid_detail_execution_activity_and_commands() {
-        let mut detail: GridDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
         detail.available_commands.push(GridCommandView {
             command: GridCommandType::Resume,
@@ -360,8 +361,8 @@ mod tests {
 
     #[test]
     fn renders_statistics_with_explicit_separator_for_large_pnl_values() {
-        let mut detail: GridDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
         detail.statistics.total_pnl = -123456789.12;
         detail.statistics.realized_pnl = 987654321.99;
@@ -375,8 +376,8 @@ mod tests {
 
     #[test]
     fn renders_activity_timestamp_in_local_time() {
-        let detail: GridDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
 
         let text = render_text(detail.clone());
@@ -393,8 +394,8 @@ mod tests {
 
     #[test]
     fn keeps_original_activity_timestamp_when_parsing_fails() {
-        let mut detail: GridDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/grid_detail_view.json"))
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
         detail.activity[0].ts = "not-a-timestamp".to_string();
 

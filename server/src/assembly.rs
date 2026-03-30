@@ -5,11 +5,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use poise_binance::BinanceAdapter;
-use poise_engine::track::{TrackId, Instrument};
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{
-    ClockPort, ExchangePort, TrackReadRepositoryPort, MarketDataPort, StateRepositoryPort,
+    ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort, TrackReadRepositoryPort,
 };
+use poise_engine::track::{Instrument, TrackId};
 use poise_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
@@ -94,8 +94,8 @@ fn validate_exchange_runtime_config(
 }
 
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
-    validate_unique_instruments(config.grids.iter().map(|track| track.instrument()))?;
-    validate_unique_track_ids(config.grids.iter().map(|track| track.track_id()))?;
+    validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
+    validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
     let exchange_config = validate_exchange_runtime_config(&config.exchange)?;
 
     let adapter = Arc::new(BinanceAdapter::new(
@@ -139,11 +139,11 @@ async fn assemble_with_components_with_repository<R>(
 where
     R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
 {
-    validate_unique_instruments(config.grids.iter().map(|track| track.instrument()))?;
-    validate_unique_track_ids(config.grids.iter().map(|track| track.track_id()))?;
+    validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
+    validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
 
     let mut manager = TrackManager::new(clock);
-    for track in &config.grids {
+    for track in &config.tracks {
         let track_id = track.track_id();
         let info = exchange.get_exchange_info(&track.instrument()).await?;
         manager.add_track_with_tick_timeout_secs(
@@ -169,7 +169,8 @@ where
     ));
     let query_service = Arc::new(TrackQueryService::new(read_repository));
     let projector = Arc::new(TrackProjector::new());
-    let server_state = build_server_state(write_service, state_repository, query_service, projector);
+    let server_state =
+        build_server_state(write_service, state_repository, query_service, projector);
 
     Ok(ServerPlatform {
         state: server_state.clone(),
@@ -228,14 +229,14 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use poise_core::events::DomainEvent as EngineDomainEvent;
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::TrackManager;
-    use poise_engine::observation::{TrackObservation, MarketObservation};
+    use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
-        ExchangeInfo, ExchangeOrder, ExchangePort, TrackReadRepositoryPort, TrackSnapshot,
-        OrderReceipt, OrderRequest, Position, PriceTick, StateRepositoryPort,
+        ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest, Position, PriceTick,
+        StateRepositoryPort, TrackReadRepositoryPort, TrackSnapshot,
     };
-    use poise_protocol::{GridStreamEvent, GridStreamPayload};
+    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_protocol::{TrackStreamEvent, TrackStreamPayload};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -248,8 +249,8 @@ mod tests {
     use crate::write_service::TrackWriteService;
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_track_ids,
-        validate_unique_instruments,
+        ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_instruments,
+        validate_unique_track_ids,
     };
 
     fn test_exchange_rules() -> poise_core::types::ExchangeRules {
@@ -279,9 +280,9 @@ mod tests {
         let config = Config {
             environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![
+            tracks: vec![
                 TrackDefinition {
-                    grid_id: "btc-core".into(),
+                    track_id: "btc-core".into(),
                     venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
@@ -297,7 +298,7 @@ mod tests {
                     tick_timeout_secs: None,
                 },
                 TrackDefinition {
-                    grid_id: "eth-core".into(),
+                    track_id: "eth-core".into(),
                     venue: Venue::Binance,
                     symbol: "ETHUSDT".into(),
                     lower_price: 2000.0,
@@ -330,7 +331,7 @@ mod tests {
         assert!(
             std::path::Path::new(".data")
                 .join(&suffix)
-                .join("grid-server.sqlite")
+                .join("poise-server.sqlite")
                 .exists()
         );
 
@@ -338,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_rejects_duplicate_grid_ids() {
+    fn assemble_rejects_duplicate_track_ids() {
         let error =
             validate_unique_track_ids([TrackId::new("alpha"), TrackId::new("alpha")]).unwrap_err();
         assert!(error.to_string().contains("duplicate grid id"));
@@ -361,9 +362,9 @@ mod tests {
         let config = Config {
             environment: suffix,
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![
+            tracks: vec![
                 TrackDefinition {
-                    grid_id: "btc-core".into(),
+                    track_id: "btc-core".into(),
                     venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
@@ -379,7 +380,7 @@ mod tests {
                     tick_timeout_secs: None,
                 },
                 TrackDefinition {
-                    grid_id: "btc-alt".into(),
+                    track_id: "btc-alt".into(),
                     venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 80.0,
@@ -412,8 +413,8 @@ mod tests {
         let config = Config {
             environment: suffix,
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![TrackDefinition {
-                grid_id: "btc-core".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
                 venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
@@ -449,8 +450,8 @@ mod tests {
         let config = Config {
             environment: suffix,
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![TrackDefinition {
-                grid_id: "btc-core".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
                 venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
@@ -510,12 +511,12 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        let payload: GridStreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        let payload: TrackStreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
 
-        assert_eq!(payload.grid_id, "btc-core");
+        assert_eq!(payload.track_id, "btc-core");
         assert!(matches!(
             payload.payload,
-            GridStreamPayload::GridListItemChanged { .. }
+            TrackStreamPayload::TrackListItemChanged { .. }
         ));
 
         server.abort();
@@ -536,8 +537,8 @@ mod tests {
         let config = Config {
             environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
-            grids: vec![TrackDefinition {
-                grid_id: "btc-core".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
                 venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
@@ -565,7 +566,7 @@ mod tests {
             app,
             axum::http::Request::builder()
                 .method("POST")
-                .uri("/grids/btc-core/commands")
+                .uri("/tracks/btc-core/commands")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(
                     serde_json::to_vec(&serde_json::json!({ "command": "pause" })).unwrap(),
@@ -615,7 +616,7 @@ mod tests {
                 app,
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/grids/btc-core/commands")
+                    .uri("/tracks/btc-core/commands")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         serde_json::to_vec(&serde_json::json!({ "command": "resume" })).unwrap(),
@@ -866,7 +867,7 @@ mod tests {
 
         async fn list_pending_submit_effects_for_track(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
         ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
@@ -874,7 +875,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackReadRepositoryPort for BlockingPersistence {
-        async fn list_track_snapshots(&self) -> Result<Vec<poise_engine::ports::StoredTrackSnapshot>> {
+        async fn list_track_snapshots(
+            &self,
+        ) -> Result<Vec<poise_engine::ports::StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -906,7 +909,7 @@ mod tests {
 
         async fn list_recent_track_events(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<poise_engine::ports::StoredDomainEvent>> {
             Ok(Vec::new())
@@ -914,7 +917,7 @@ mod tests {
 
         async fn list_recent_track_effects(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())

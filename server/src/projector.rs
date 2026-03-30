@@ -6,11 +6,11 @@ use poise_engine::transition::TrackEffect;
 use poise_protocol::{
     ActivityLevelView, ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView,
     ExecutionSlotPhaseView, ExecutionSlotView, ExecutionStateView, ExecutionStatusView,
-    ExposureSummaryView, GridActivityItemView, GridCommandType, GridCommandView, GridDetailView,
-    GridExecutionView, GridIdentityView, GridLifecycleView, GridListItemView, GridMarketView,
-    GridPositionView, GridStatisticsView, GridStatus as ProtocolGridStatus, GridStatusPanelView,
-    GridStrategyView, InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
+    ExposureSummaryView, GridActivityItemView, GridCommandType, GridCommandView, GridExecutionView,
+    GridIdentityView, GridLifecycleView, GridMarketView, GridPositionView, GridStatisticsView,
+    GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView, InstrumentView,
+    OutOfBandPolicy as ProtocolPolicy, ReplacementGateView, ShapeFamily as ProtocolShapeFamily,
+    Side as ProtocolSide, TrackDetailView, TrackListItemView,
 };
 
 use crate::read_model::TrackReadModel;
@@ -22,8 +22,8 @@ impl TrackProjector {
         Self
     }
 
-    pub fn project_list_item(&self, source: &TrackReadModel) -> GridListItemView {
-        GridListItemView {
+    pub fn project_list_item(&self, source: &TrackReadModel) -> TrackListItemView {
+        TrackListItemView {
             id: source.track_id.clone(),
             instrument: project_instrument(&source.venue, &source.symbol),
             lifecycle: GridLifecycleView {
@@ -43,8 +43,8 @@ impl TrackProjector {
         }
     }
 
-    pub fn project_detail(&self, source: &TrackReadModel) -> GridDetailView {
-        GridDetailView {
+    pub fn project_detail(&self, source: &TrackReadModel) -> TrackDetailView {
+        TrackDetailView {
             identity: GridIdentityView {
                 id: source.track_id.clone(),
                 instrument: project_instrument(&source.venue, &source.symbol),
@@ -177,7 +177,9 @@ fn project_replacement_gate_reason(
     reason: &poise_core::events::ReplacementGateReason,
 ) -> ReplacementGateView {
     match reason {
-        poise_core::events::ReplacementGateReason::RoundedMatch => ReplacementGateView::RoundedMatch,
+        poise_core::events::ReplacementGateReason::RoundedMatch => {
+            ReplacementGateView::RoundedMatch
+        }
         poise_core::events::ReplacementGateReason::ImprovementBelowThreshold {
             improvement_bps,
             threshold_bps,
@@ -364,11 +366,11 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
         EffectStatus, OrderRequest, PersistedTrackEffect, StoredDomainEvent,
     };
     use poise_engine::runtime::TrackStatus;
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
         ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
@@ -376,7 +378,7 @@ mod tests {
     };
 
     use super::TrackProjector;
-    use crate::read_model::{TrackReadModel, ReadModelSlot};
+    use crate::read_model::{ReadModelSlot, TrackReadModel};
 
     #[test]
     fn projects_execution_badge_from_working_orders() {
@@ -649,5 +651,4 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
         }
     }
-
 }

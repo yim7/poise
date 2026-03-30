@@ -1,9 +1,9 @@
 #[allow(unused_imports)]
 pub use poise_protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-    ExecutionStatusView, GridCommandAccepted, GridCommandRequest, GridCommandType, GridCommandView,
-    GridDetailView, GridExecutionView, GridListItemView, GridListResponse, GridStatisticsView,
-    GridStatus, GridStreamEvent, GridStreamPayload, ReplacementGateView,
+    ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, GridStatisticsView,
+    GridStatus, ReplacementGateView, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+    TrackListItemView, TrackListResponse, TrackStreamEvent, TrackStreamPayload,
 };
 
 #[cfg(test)]
@@ -12,15 +12,15 @@ pub use poise_protocol::{ExecutionBadgeView, ExposureSummaryView};
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandAccepted,
-        GridCommandRequest, GridCommandType, GridDetailView, GridListResponse, GridStreamEvent,
-        GridStreamPayload,
+        ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandType,
+        TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
+        TrackStreamEvent, TrackStreamPayload,
     };
 
     #[test]
     fn deserializes_grid_list_response() {
-        let response: GridListResponse =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json"))
+        let response: TrackListResponse =
+            serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json"))
                 .unwrap();
 
         assert_eq!(response.items.len(), 1);
@@ -31,8 +31,8 @@ mod tests {
 
     #[test]
     fn deserializes_grid_detail_view() {
-        let detail: GridDetailView =
-            serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap();
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
 
         assert_eq!(detail.identity.id, "btc-core");
         assert_eq!(detail.identity.instrument.venue, "binance_futures");
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn deserializes_grid_detail_view_without_statistics() {
-        let detail: GridDetailView = serde_json::from_str(
+        let detail: TrackDetailView = serde_json::from_str(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
@@ -60,7 +60,7 @@ mod tests {
                 "market":{"mark_price":64123.4,"index_price":64120.1},
                 "position":{"current_exposure":0.5,"target_exposure":0.75},
                 "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
-                "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Grid activated","level":"info"}],
+                "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
             }"#,
         )
@@ -73,14 +73,14 @@ mod tests {
 
     #[test]
     fn deserializes_grid_stream_list_item_changed() {
-        let event: GridStreamEvent = serde_json::from_str(include_str!(
-            "../tests/fixtures/ws_grid_list_item_changed.json"
+        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_track_list_item_changed.json"
         ))
         .unwrap();
 
-        assert_eq!(event.grid_id, "btc-core");
+        assert_eq!(event.track_id, "btc-core");
         match event.payload {
-            GridStreamPayload::GridListItemChanged { item } => {
+            TrackStreamPayload::TrackListItemChanged { item } => {
                 assert_eq!(item.instrument.venue, "binance_futures");
                 assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
                 assert_eq!(item.execution.active_slot_count, 0);
@@ -91,14 +91,14 @@ mod tests {
 
     #[test]
     fn deserializes_grid_stream_detail_changed() {
-        let event: GridStreamEvent = serde_json::from_str(include_str!(
-            "../tests/fixtures/ws_grid_detail_changed.json"
+        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap();
 
-        assert_eq!(event.grid_id, "btc-core");
+        assert_eq!(event.track_id, "btc-core");
         match event.payload {
-            GridStreamPayload::GridDetailChanged { detail } => {
+            TrackStreamPayload::TrackDetailChanged { detail } => {
                 assert_eq!(detail.identity.instrument.symbol, "BTCUSDT");
                 assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
                 assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
@@ -110,11 +110,11 @@ mod tests {
 
     #[test]
     fn deserializes_grid_stream_detail_changed_without_statistics() {
-        let event: GridStreamEvent = serde_json::from_str(
+        let event: TrackStreamEvent = serde_json::from_str(
             r#"{
-                "grid_id":"btc-core",
+                "track_id":"btc-core",
                 "payload":{
-                    "type":"grid_detail_changed",
+                    "type":"track_detail_changed",
                     "detail":{
                         "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                         "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
@@ -122,7 +122,7 @@ mod tests {
                         "market":{"mark_price":64123.4,"index_price":64120.1},
                         "position":{"current_exposure":0.5,"target_exposure":0.75},
                         "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
-                        "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Grid activated","level":"info"}],
+                        "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
                         "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
                     }
                 }
@@ -131,7 +131,7 @@ mod tests {
         .unwrap();
 
         match event.payload {
-            GridStreamPayload::GridDetailChanged { detail } => {
+            TrackStreamPayload::TrackDetailChanged { detail } => {
                 assert_eq!(detail.identity.id, "btc-core");
                 assert!((detail.statistics.realized_pnl - 0.0).abs() < f64::EPSILON);
                 assert!((detail.statistics.total_pnl - 0.0).abs() < f64::EPSILON);
@@ -142,18 +142,18 @@ mod tests {
 
     #[test]
     fn deserializes_grid_command_request() {
-        let request: GridCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
+        let request: TrackCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
 
         assert_eq!(request.command, GridCommandType::Pause);
     }
 
     #[test]
     fn deserializes_grid_command_accepted() {
-        let response: GridCommandAccepted =
-            serde_json::from_str(r#"{"grid_id":"btc-core","command":"pause","accepted":true}"#)
+        let response: TrackCommandAccepted =
+            serde_json::from_str(r#"{"track_id":"btc-core","command":"pause","accepted":true}"#)
                 .unwrap();
 
-        assert_eq!(response.grid_id, "btc-core");
+        assert_eq!(response.track_id, "btc-core");
         assert_eq!(response.command, GridCommandType::Pause);
         assert!(response.accepted);
     }

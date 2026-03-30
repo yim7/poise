@@ -10,8 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
-    GridStreamEvent,
+    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
+    TrackStreamEvent,
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct ApiClient {
 
 #[derive(Debug)]
 enum WsMessageOutcome {
-    Event(GridStreamEvent),
+    Event(TrackStreamEvent),
     Closed,
     Ignore,
 }
@@ -43,37 +43,37 @@ impl ApiClient {
         }
     }
 
-    pub async fn list_grids(&self) -> Result<GridListResponse> {
+    pub async fn list_tracks(&self) -> Result<TrackListResponse> {
         let response = self
             .http
-            .get(self.endpoint("/grids"))
+            .get(self.endpoint("/tracks"))
             .send()
             .await
-            .context("failed to request grid list")?;
+            .context("failed to request track list")?;
 
-        decode_json(response, "list grids").await
+        decode_json(response, "list tracks").await
     }
 
-    pub async fn get_grid_detail(&self, id: &str) -> Result<GridDetailView> {
+    pub async fn get_track_detail(&self, id: &str) -> Result<TrackDetailView> {
         let response = self
             .http
-            .get(self.endpoint(&format!("/grids/{id}")))
+            .get(self.endpoint(&format!("/tracks/{id}")))
             .send()
             .await
-            .with_context(|| format!("failed to request grid detail for `{id}`"))?;
+            .with_context(|| format!("failed to request track detail for `{id}`"))?;
 
-        decode_json(response, "get grid detail").await
+        decode_json(response, "get track detail").await
     }
 
     pub async fn submit_command(
         &self,
         id: &str,
         cmd: GridCommandType,
-    ) -> Result<GridCommandAccepted> {
+    ) -> Result<TrackCommandAccepted> {
         let response = self
             .http
-            .post(self.endpoint(&format!("/grids/{id}/commands")))
-            .json(&GridCommandRequest { command: cmd })
+            .post(self.endpoint(&format!("/tracks/{id}/commands")))
+            .json(&TrackCommandRequest { command: cmd })
             .send()
             .await
             .with_context(|| format!("failed to submit `{:?}` for `{id}`", cmd))?;
@@ -99,7 +99,7 @@ fn should_bypass_proxy(base_url: &str) -> bool {
     }
 }
 
-pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<GridStreamEvent>> {
+pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<TrackStreamEvent>> {
     let (stream, _) = connect_async(url)
         .await
         .with_context(|| format!("failed to connect websocket `{url}`"))?;
@@ -143,7 +143,7 @@ fn decode_ws_message(message: Message) -> Result<WsMessageOutcome> {
     }
 }
 
-fn decode_ws_event_text(text: &str) -> Result<GridStreamEvent> {
+fn decode_ws_event_text(text: &str) -> Result<TrackStreamEvent> {
     serde_json::from_str(text).context("invalid websocket event json")
 }
 
@@ -173,47 +173,47 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::protocol::{
-        GridCommandAccepted, GridCommandRequest, GridCommandType, GridDetailView, GridListResponse,
-        GridStreamEvent,
+        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackListResponse, TrackStreamEvent,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
 
     const BTC_GRID_ID: &str = "btc-core";
 
-    fn grid_list_response() -> GridListResponse {
-        serde_json::from_str(include_str!("../tests/fixtures/grid_list_response.json")).unwrap()
+    fn track_list_response() -> TrackListResponse {
+        serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json")).unwrap()
     }
 
-    fn grid_detail_view() -> GridDetailView {
-        serde_json::from_str(include_str!("../tests/fixtures/grid_detail_view.json")).unwrap()
+    fn track_detail_view() -> TrackDetailView {
+        serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap()
     }
 
-    fn grid_stream_event() -> GridStreamEvent {
+    fn track_stream_event() -> TrackStreamEvent {
         serde_json::from_str(include_str!(
-            "../tests/fixtures/ws_grid_detail_changed.json"
+            "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap()
     }
 
-    async fn list_grids() -> Json<GridListResponse> {
-        Json(grid_list_response())
+    async fn list_tracks() -> Json<TrackListResponse> {
+        Json(track_list_response())
     }
 
-    async fn get_grid_detail(
+    async fn get_track_detail(
         axum::extract::Path(id): axum::extract::Path<String>,
-    ) -> Json<GridDetailView> {
-        let detail = grid_detail_view();
+    ) -> Json<TrackDetailView> {
+        let detail = track_detail_view();
         assert_eq!(detail.identity.id, id);
         Json(detail)
     }
 
     async fn submit_command(
         axum::extract::Path(id): axum::extract::Path<String>,
-        Json(command): Json<GridCommandRequest>,
-    ) -> Json<GridCommandAccepted> {
-        Json(GridCommandAccepted {
-            grid_id: id,
+        Json(command): Json<TrackCommandRequest>,
+    ) -> Json<TrackCommandAccepted> {
+        Json(TrackCommandAccepted {
+            track_id: id,
             command: command.command,
             accepted: true,
         })
@@ -224,7 +224,7 @@ mod tests {
     }
 
     async fn handle_socket(mut socket: WebSocket) {
-        let payload = serde_json::to_string(&grid_stream_event()).unwrap();
+        let payload = serde_json::to_string(&track_stream_event()).unwrap();
         socket.send(AxumMessage::Text(payload)).await.unwrap();
     }
 
@@ -232,9 +232,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/grids", get(list_grids))
-            .route("/grids/:id", get(get_grid_detail))
-            .route("/grids/:id/commands", post(submit_command))
+            .route("/tracks", get(list_tracks))
+            .route("/tracks/:id", get(get_track_detail))
+            .route("/tracks/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler));
 
         tokio::spawn(async move {
@@ -245,11 +245,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_grids_decodes_grid_list_response() {
+    async fn list_tracks_decodes_track_list_response() {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let response = client.list_grids().await.unwrap();
+        let response = client.list_tracks().await.unwrap();
 
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].id, BTC_GRID_ID);
@@ -257,11 +257,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_grid_detail_decodes_projected_detail() {
+    async fn get_track_detail_decodes_projected_detail() {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let detail = client.get_grid_detail(BTC_GRID_ID).await.unwrap();
+        let detail = client.get_track_detail(BTC_GRID_ID).await.unwrap();
 
         assert_eq!(detail.identity.id, BTC_GRID_ID);
         assert_eq!(detail.position.current_exposure, 3.5);
@@ -281,7 +281,7 @@ mod tests {
             .unwrap();
 
         assert!(response.accepted);
-        assert_eq!(response.grid_id, BTC_GRID_ID);
+        assert_eq!(response.track_id, BTC_GRID_ID);
         assert_eq!(response.command, GridCommandType::Pause);
     }
 
@@ -294,14 +294,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receives_grid_stream_events_from_websocket() {
+    async fn receives_track_stream_events_from_websocket() {
         let (_, ws_url) = spawn_stub_server().await;
         let mut receiver = connect_ws(&ws_url).await.unwrap();
 
         let event = receiver.recv().await.unwrap();
 
-        assert_eq!(event.grid_id, BTC_GRID_ID);
-        assert_eq!(event.payload, grid_stream_event().payload);
+        assert_eq!(event.track_id, BTC_GRID_ID);
+        assert_eq!(event.payload, track_stream_event().payload);
     }
 
     #[test]

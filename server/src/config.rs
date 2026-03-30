@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
-use poise_engine::track::{TrackId, Instrument, Venue};
+use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+use poise_engine::track::{Instrument, TrackId, Venue};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -9,14 +9,14 @@ pub struct Config {
     pub environment: String,
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
-    pub grids: Vec<TrackDefinition>,
+    pub tracks: Vec<TrackDefinition>,
     #[serde(default)]
     pub exchange: ExchangeConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TrackDefinition {
-    pub grid_id: String,
+    pub track_id: String,
     pub venue: Venue,
     pub symbol: String,
     pub lower_price: f64,
@@ -56,7 +56,7 @@ impl Config {
     pub fn default_db_path(&self) -> std::path::PathBuf {
         std::path::Path::new(".data")
             .join(&self.environment)
-            .join("grid-server.sqlite")
+            .join("poise-server.sqlite")
     }
 }
 
@@ -66,7 +66,7 @@ impl TrackDefinition {
     }
 
     pub fn track_id(&self) -> TrackId {
-        TrackId::new(self.grid_id.clone())
+        TrackId::new(self.track_id.clone())
     }
 
     pub fn instrument(&self) -> Instrument {
@@ -90,9 +90,7 @@ impl TrackDefinition {
             self.long_exposure_units.max(self.short_exposure_units) * self.notional_per_unit;
         CapacityBudget {
             max_notional: self.max_notional.unwrap_or(implied_max_notional),
-            daily_loss_limit: self
-                .daily_loss_limit
-                .unwrap_or(-implied_max_notional * 0.1),
+            daily_loss_limit: self.daily_loss_limit.unwrap_or(-implied_max_notional * 0.1),
             stop_loss_pct: self.stop_loss_pct.unwrap_or(10.0),
         }
     }
@@ -129,8 +127,8 @@ api_secret = "demo-secret"
 rest_base_url = "http://127.0.0.1:18080"
 ws_base_url = "ws://127.0.0.1:18081"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -139,8 +137,8 @@ long_exposure_units = 8.0
 short_exposure_units = 6.0
 notional_per_unit = 3000.0
 
-[[grids]]
-grid_id = "eth-core"
+[[tracks]]
+track_id = "eth-core"
 venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
@@ -156,15 +154,15 @@ out_of_band_policy = "hold"
 
         assert_eq!(config.environment, "test");
         assert_eq!(config.bind_address, "127.0.0.1:9000");
-        assert_eq!(config.grids.len(), 2);
-        assert_eq!(config.grids[0].symbol, "BTCUSDT");
-        assert_eq!(config.grids[0].track_id().as_str(), "btc-core");
+        assert_eq!(config.tracks.len(), 2);
+        assert_eq!(config.tracks[0].symbol, "BTCUSDT");
+        assert_eq!(config.tracks[0].track_id().as_str(), "btc-core");
         assert_eq!(
-            config.grids[1].shape_family,
+            config.tracks[1].shape_family,
             poise_core::strategy::ShapeFamily::Concave
         );
         assert_eq!(
-            config.grids[1].out_of_band_policy,
+            config.tracks[1].out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Hold
         );
         assert_eq!(config.exchange.api_key.as_deref(), Some("demo-key"));
@@ -180,8 +178,8 @@ out_of_band_policy = "hold"
             r#"
 environment = "paper"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -197,11 +195,11 @@ notional_per_unit = 375.0
         assert_eq!(config.exchange.api_key, None);
         assert_eq!(config.exchange.api_secret, None);
         assert_eq!(
-            config.grids[0].track_config().shape_family,
+            config.tracks[0].track_config().shape_family,
             poise_core::strategy::ShapeFamily::Linear
         );
         assert_eq!(
-            config.grids[0].track_config().out_of_band_policy,
+            config.tracks[0].track_config().out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Freeze
         );
     }
@@ -212,8 +210,8 @@ notional_per_unit = 375.0
             r#"
 environment = "paper"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -226,7 +224,7 @@ tick_timeout_secs = 45
         )
         .unwrap();
 
-        assert_eq!(config.grids[0].tick_timeout_secs, Some(45));
+        assert_eq!(config.tracks[0].tick_timeout_secs, Some(45));
     }
 
     #[test]
@@ -235,8 +233,8 @@ tick_timeout_secs = 45
             r#"
 environment = "paper"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -250,7 +248,7 @@ out_of_band_policy = "reduce_only"
         )
         .unwrap();
 
-        let grid = &config.grids[0];
+        let grid = &config.tracks[0];
         assert_eq!(grid.shape_family, ShapeFamily::Concave);
         assert_eq!(grid.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
         assert_eq!(grid.budget().max_notional, 3000.0);
@@ -262,8 +260,8 @@ out_of_band_policy = "reduce_only"
             r#"
 environment = "test"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -278,7 +276,7 @@ stop_loss_pct = 5.0
         )
         .unwrap();
 
-        let budget = config.grids[0].budget();
+        let budget = config.tracks[0].budget();
         assert!((budget.max_notional - 5000.0).abs() < f64::EPSILON);
         assert!((budget.daily_loss_limit - (-200.0)).abs() < f64::EPSILON);
         assert!((budget.stop_loss_pct - 5.0).abs() < f64::EPSILON);
@@ -290,8 +288,8 @@ stop_loss_pct = 5.0
             r#"
 environment = "test"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -303,7 +301,7 @@ notional_per_unit = 375.0
         )
         .unwrap();
 
-        let budget = config.grids[0].budget();
+        let budget = config.tracks[0].budget();
         let implied_max = 8.0 * 375.0;
         assert!((budget.max_notional - implied_max).abs() < f64::EPSILON);
         assert!((budget.daily_loss_limit - (-implied_max * 0.1)).abs() < f64::EPSILON);
@@ -315,7 +313,7 @@ notional_per_unit = 375.0
         let config = Config {
             environment: "testnet".into(),
             bind_address: default_bind_address(),
-            grids: vec![],
+            tracks: vec![],
             exchange: Default::default(),
         };
 
@@ -323,18 +321,18 @@ notional_per_unit = 375.0
             config.default_db_path(),
             std::path::Path::new(".data")
                 .join("testnet")
-                .join("grid-server.sqlite")
+                .join("poise-server.sqlite")
         );
     }
 
     #[test]
-    fn parses_explicit_grid_id_from_config_instead_of_deriving_from_symbol() {
+    fn parses_explicit_track_id_from_config_instead_of_deriving_from_symbol() {
         let config = parse_config(
             r#"
 environment = "paper"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -346,14 +344,14 @@ notional_per_unit = 375.0
         )
         .unwrap();
 
-        assert_eq!(config.grids[0].symbol, "BTCUSDT");
-        assert_eq!(config.grids[0].track_id().as_str(), "btc-core");
+        assert_eq!(config.tracks[0].symbol, "BTCUSDT");
+        assert_eq!(config.tracks[0].track_id().as_str(), "btc-core");
     }
 
     #[test]
     fn parses_binance_testnet_example_config() {
         let config = parse_config(include_str!("../../configs/binance-testnet.toml")).unwrap();
-        let grid = &config.grids[0];
+        let grid = &config.tracks[0];
         let equivalent_grid_step = (grid.upper_price - grid.lower_price)
             / (grid.long_exposure_units + grid.short_exposure_units);
 
@@ -366,7 +364,7 @@ notional_per_unit = 375.0
             config.exchange.ws_base_url.as_deref(),
             Some("wss://fstream.binancefuture.com")
         );
-        assert_eq!(config.grids.len(), 1);
+        assert_eq!(config.tracks.len(), 1);
         assert_eq!(grid.track_id().as_str(), "btc-core");
         assert_eq!(grid.upper_price - grid.lower_price, 2000.0);
         assert!((equivalent_grid_step - 100.0).abs() < f64::EPSILON);

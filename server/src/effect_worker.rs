@@ -321,21 +321,21 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, TrackReadRepositoryPort, OrderReceipt, OrderRequest,
-        OrderStatus, PersistedTrackEffect, Position, StateRepositoryPort, StoredDomainEvent,
-        StoredTrackSnapshot,
+        ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect,
+        Position, StateRepositoryPort, StoredDomainEvent, StoredTrackSnapshot,
+        TrackReadRepositoryPort,
     };
     use poise_engine::runtime::{
-        ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState, WorkingOrder,
+        ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,
     };
-    use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+    use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
     use tokio::time::timeout;
@@ -1153,7 +1153,10 @@ mod tests {
                 .collect())
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -1168,7 +1171,7 @@ mod tests {
 
         async fn list_recent_track_events(
             &self,
-            _grid_id: &TrackId,
+            _track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredDomainEvent>> {
             Ok(Vec::new())

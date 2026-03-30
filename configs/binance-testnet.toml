@@ -7,8 +7,8 @@ api_secret = ""
 rest_base_url = "https://demo-fapi.binance.com"
 ws_base_url = "wss://fstream.binancefuture.com"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 65500.0

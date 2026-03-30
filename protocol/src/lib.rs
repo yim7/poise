@@ -15,12 +15,12 @@ pub enum GridStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridListResponse {
-    pub items: Vec<GridListItemView>,
+pub struct TrackListResponse {
+    pub items: Vec<TrackListItemView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridListItemView {
+pub struct TrackListItemView {
     pub id: String,
     pub instrument: InstrumentView,
     pub lifecycle: GridLifecycleView,
@@ -56,7 +56,7 @@ pub struct ExecutionBadgeView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridDetailView {
+pub struct TrackDetailView {
     pub identity: GridIdentityView,
     pub status: GridStatusPanelView,
     pub strategy: GridStrategyView,
@@ -208,13 +208,13 @@ pub struct GridCommandView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridCommandRequest {
+pub struct TrackCommandRequest {
     pub command: GridCommandType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridCommandAccepted {
-    pub grid_id: String,
+pub struct TrackCommandAccepted {
+    pub track_id: String,
     pub command: GridCommandType,
     pub accepted: bool,
 }
@@ -237,16 +237,16 @@ pub enum ExecutionStateView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridStreamEvent {
-    pub grid_id: String,
-    pub payload: GridStreamPayload,
+pub struct TrackStreamEvent {
+    pub track_id: String,
+    pub payload: TrackStreamPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum GridStreamPayload {
-    GridListItemChanged { item: GridListItemView },
-    GridDetailChanged { detail: GridDetailView },
+pub enum TrackStreamPayload {
+    TrackListItemChanged { item: TrackListItemView },
+    TrackDetailChanged { detail: TrackDetailView },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +271,87 @@ pub enum OutOfBandPolicy {
 pub enum Side {
     Buy,
     Sell,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+    };
+
+    #[test]
+    fn deserializes_track_list_response() {
+        let response: TrackListResponse = serde_json::from_str(
+            r#"{
+                "items":[
+                    {
+                        "id":"btc-core",
+                        "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
+                        "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                        "reference_price":64123.4,
+                        "exposure":{"current":0.5,"target":0.75},
+                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].id, "btc-core");
+    }
+
+    #[test]
+    fn deserializes_track_command_accepted_with_track_id() {
+        let response: TrackCommandAccepted =
+            serde_json::from_str(r#"{"track_id":"btc-core","command":"pause","accepted":true}"#)
+                .unwrap();
+
+        assert_eq!(response.track_id, "btc-core");
+        assert_eq!(response.command, GridCommandType::Pause);
+        assert!(response.accepted);
+    }
+
+    #[test]
+    fn deserializes_track_stream_detail_changed_with_track_id() {
+        let event: TrackStreamEvent = serde_json::from_str(
+            r#"{
+                "track_id":"btc-core",
+                "payload":{
+                    "type":"track_detail_changed",
+                    "detail":{
+                        "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                        "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                        "strategy":{"lower_price":60000.0,"upper_price":68000.0,"shape_family":"linear","out_of_band_policy":"freeze"},
+                        "market":{"mark_price":64123.4,"index_price":64120.1},
+                        "position":{"current_exposure":0.5,"target_exposure":0.75},
+                        "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
+                        "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                        "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                        "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(event.track_id, "btc-core");
+        match event.payload {
+            TrackStreamPayload::TrackDetailChanged { detail } => {
+                let detail: TrackDetailView = detail;
+                assert_eq!(detail.identity.id, "btc-core");
+            }
+            _ => panic!("unexpected payload variant"),
+        }
+    }
+
+    #[test]
+    fn deserializes_track_command_request() {
+        let request: TrackCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
+
+        assert_eq!(request.command, GridCommandType::Pause);
+    }
 }
 
 impl fmt::Display for GridStatus {
