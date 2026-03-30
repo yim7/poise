@@ -180,7 +180,7 @@ Task 1 code commit:
 - Test: `cargo test -p poise-server projector::tests:: -- --nocapture`
 - Test: `cargo test -p poise-server query_service::tests:: -- --nocapture`
 
-- [ ] **Step 1: 先运行旧类型不存在的新命名测试，确认 `Track*` 当前还没落地**
+- [x] **Step 1: 先运行旧类型不存在的新命名测试，确认 `Track*` 当前还没落地**
 
 Run:
 `cargo test -p poise-engine track_id -- --nocapture`
@@ -188,7 +188,7 @@ Run:
 Expected:
 测试筛选不到或编译失败，因为当前类型仍是 `Grid*`。
 
-- [ ] **Step 2: 在 engine 层完成模块和主类型重命名**
+- [x] **Step 2: 在 engine 层完成模块和主类型重命名**
 
 要求：
 - `engine/src/grid.rs` 改为 `engine/src/track.rs`
@@ -203,7 +203,7 @@ Expected:
 - `GridTransition` -> `TrackTransition`
 - `GridEffect` -> `TrackEffect`
 
-- [ ] **Step 3: 在 core / server / storage 中同步类型和字段主语**
+- [x] **Step 3: 在 core / server / storage 中同步类型和字段主语**
 
 要求：
 - `GridConfig` -> `TrackConfig`
@@ -212,7 +212,7 @@ Expected:
 - `GridReadModel` -> `TrackReadModel`
 - `GridProjector` / `GridQueryService` / `GridWriteService` 等 server 层类型同步收敛
 
-- [ ] **Step 4: 运行领域与投影层定向测试**
+- [x] **Step 4: 运行领域与投影层定向测试**
 
 Run:
 `cargo test -p poise-engine`
@@ -222,15 +222,17 @@ Run:
 Expected:
 engine 全量测试通过；server 中不依赖本地监听端口的 projector / query_service 测试通过；不再有 `Grid*` 类型残留导致的编译错误。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add core/src/strategy.rs engine/src/lib.rs engine/src/track.rs engine/src/manager.rs engine/src/runtime.rs engine/src/snapshot.rs engine/src/ports.rs engine/src/transition.rs engine/src/observation.rs engine/src/execution_plan.rs engine/src/executor server/src/assembly.rs server/src/read_model.rs server/src/query_service.rs server/src/write_service.rs server/src/runtime.rs server/src/projector.rs storage/src/sqlite.rs
 git commit -m "refactor(domain): rename grid types to track"
 ```
 
-Task 2 code commit:
-`TODO`
+Task 2 code commits:
+- `5b6a53487b4703cf29ce88dbfd54f7396494e1ff`
+- `702c6874240bb2702750107df1ebe0b7d7587a2a`
+- `0be73422f7f4dcfb54d2e84a80ee5ff9ef60de67`
 
 ---
 
