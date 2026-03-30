@@ -674,12 +674,15 @@ Task 4 code commit:
 - `effect worker` 收到停机信号后只完成当前 in-flight effect，不再拉取新的 persisted effect。
 
 **Files:**
+- Modify: `Cargo.toml` — 为 tokio 打开 `signal` feature
+- Modify: `engine/src/manager.rs` — 增加 shutdown 专用的 exchange state sync 路径
 - Modify: `server/src/main.rs` — SIGINT / SIGTERM 监听
 - Modify: `server/src/runtime.rs` — shutdown signal、ordered shutdown、final sync
 - Modify: `server/src/effect_worker.rs` — 支持 shutdown 后停止拉取新 effect
+- Modify: `server/src/write_service.rs` — 暴露不触发 follow-up reconcile 的 sync 方法
 - Test: `server/src/runtime.rs`, `server/src/effect_worker.rs`
 
-- [ ] **Step 1: 给 runtime / effect worker 增加 shutdown signal**
+- [x] **Step 1: 给 runtime / effect worker 增加 shutdown signal**
 
 在 `server/src/runtime.rs` 中为 `ServerRuntime` 增加 `watch::Sender<bool>`，`start()` 时把 `watch::Receiver<bool>` 传给市场任务、用户流任务、recovery 任务和 effect worker。
 
@@ -712,7 +715,7 @@ pub async fn run_until_shutdown(&self) -> Result<()> {
 }
 ```
 
-- [ ] **Step 2: runtime 实现有序 shutdown，并在 cleanup 后做 final sync**
+- [x] **Step 2: runtime 实现有序 shutdown，并在 cleanup 后做 final sync**
 
 `server/src/runtime.rs`：
 
@@ -769,7 +772,7 @@ impl ServerRuntime {
 }
 ```
 
-- [ ] **Step 3: main 中监听 SIGINT + SIGTERM**
+- [x] **Step 3: main 中监听 SIGINT + SIGTERM**
 
 `server/src/main.rs`：
 
@@ -793,7 +796,7 @@ let shutdown_signal = async {
 };
 ```
 
-- [ ] **Step 4: 写验收测试**
+- [x] **Step 4: 写验收测试**
 
 `server/src/effect_worker.rs` tests：
 
@@ -815,12 +818,12 @@ async fn shutdown_cancels_orders_and_persists_final_exchange_state() {
 }
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run: `cargo test -p grid-server`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/src/main.rs server/src/runtime.rs server/src/effect_worker.rs
@@ -830,6 +833,9 @@ Shutdown sequence is: stop intake -> drain in-flight effects (30s) ->
 cancel all open orders -> persist final exchange state -> abort
 remaining tasks. Supports both SIGINT and SIGTERM."
 ```
+
+Task 5 code commit:
+`ccca393`
 
 ---
 
