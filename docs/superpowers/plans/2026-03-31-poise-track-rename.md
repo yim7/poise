@@ -97,7 +97,7 @@
 - Test: `cargo check -p poise-server`
 - Test: `cargo check -p poise-tui`
 
-- [ ] **Step 1: 先运行 package 解析命令，确认新包名当前不存在**
+- [x] **Step 1: 先运行 package 解析命令，确认新包名当前不存在**
 
 Run:
 `cargo check -p poise-server`
@@ -105,7 +105,7 @@ Run:
 Expected:
 失败，并提示 package `poise-server` 不存在。
 
-- [ ] **Step 2: 修改 workspace 和 7 个 crate 的 package 名**
+- [x] **Step 2: 修改 workspace 和 7 个 crate 的 package 名**
 
 要求：
 - `grid-core` -> `poise-core`
@@ -118,7 +118,7 @@ Expected:
 
 同时修复各 `Cargo.toml` 中的 path 依赖 key，保证依赖声明也切到 `poise-*`。
 
-- [ ] **Step 3: 修改代码里所有 crate import 路径**
+- [x] **Step 3: 修改代码里所有 crate import 路径**
 
 全局搜索并替换：
 - `use grid_core::` -> `use poise_core::`
@@ -131,7 +131,7 @@ Expected:
 - `grid-server` -> `poise-server`
 - `grid-tui` -> `poise-tui`
 
-- [ ] **Step 4: 更新 `Cargo.lock` 并运行 compile-only 验证**
+- [x] **Step 4: 更新 `Cargo.lock` 并运行 compile-only 验证**
 
 Run:
 `cargo check -p poise-core`
@@ -142,7 +142,7 @@ Run:
 Expected:
 包名解析通过；如果还有编译错误，应只剩领域类型和协议命名未收敛导致的问题，不再出现旧 package 名解析错误。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add Cargo.toml Cargo.lock core/Cargo.toml engine/Cargo.toml storage/Cargo.toml protocol/Cargo.toml server/Cargo.toml tui/Cargo.toml exchanges/binance/Cargo.toml core engine storage protocol server tui exchanges/binance
@@ -150,7 +150,7 @@ git commit -m "refactor(workspace): rename packages to poise"
 ```
 
 Task 1 code commit:
-`TODO`
+`a8cd74aba2c3e078754fe37e28546e7887ec525f`
 
 ---
 
