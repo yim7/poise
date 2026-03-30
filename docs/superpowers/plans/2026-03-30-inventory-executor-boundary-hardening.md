@@ -56,8 +56,8 @@
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine executor::tests::submit_receipt_promotes_submit_pending_slot_to_working -- --exact`
-`cargo test -p grid-engine executor::tests::terminal_order_clears_matching_slot -- --exact`
+`cargo test -p poise-engine executor::tests::submit_receipt_promotes_submit_pending_slot_to_working -- --exact`
+`cargo test -p poise-engine executor::tests::terminal_order_clears_matching_slot -- --exact`
 
 Expected:
 测试失败或编译失败，因为当前槽位推进仍有一部分散在 `manager` 辅助函数里。
@@ -72,8 +72,8 @@ Expected:
 - [x] **Step 4: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine manager::tests::observe_order_clears_matching_inventory_core_slot_on_terminal_status -- --exact`
-`cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_via_receipt_writeback -- --exact`
+`cargo test -p poise-engine manager::tests::observe_order_clears_matching_inventory_core_slot_on_terminal_status -- --exact`
+`cargo test -p poise-server effect_worker::tests::submit_success_updates_working_order_via_receipt_writeback -- --exact`
 
 Expected:
 测试失败，因为当前 `manager` / `effect_worker` 还在调用直接改槽位的入口。
@@ -89,9 +89,9 @@ Expected:
 - [x] **Step 6: 运行 Task 1 的定向测试**
 
 Run:
-`cargo test -p grid-engine executor::tests:: -- --nocapture`
-`cargo test -p grid-engine manager::tests::observe_order_clears_matching_inventory_core_slot_on_terminal_status -- --exact`
-`cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_via_receipt_writeback -- --exact`
+`cargo test -p poise-engine executor::tests:: -- --nocapture`
+`cargo test -p poise-engine manager::tests::observe_order_clears_matching_inventory_core_slot_on_terminal_status -- --exact`
+`cargo test -p poise-server effect_worker::tests::submit_success_updates_working_order_via_receipt_writeback -- --exact`
 
 Expected:
 槽位推进相关测试通过，且外层不再直接改写槽位。
@@ -134,8 +134,8 @@ git commit -m "refactor(engine): internalize slot lifecycle transitions"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine executor::tests::submit_recovery_restores_live_order_from_receipt_backed_slot -- --exact`
-`cargo test -p grid-engine executor::tests::submit_recovery_supersedes_stale_effect_when_current_plan_changed -- --exact`
+`cargo test -p poise-engine executor::tests::submit_recovery_restores_live_order_from_receipt_backed_slot -- --exact`
+`cargo test -p poise-engine executor::tests::submit_recovery_supersedes_stale_effect_when_current_plan_changed -- --exact`
 
 Expected:
 测试失败，因为当前 `submit recovery` 仍在 `manager` 里单独分类。
@@ -150,9 +150,9 @@ Expected:
 - [x] **Step 4: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server effect_service::tests::list_pending_effects_returns_pending_submit_effects_without_recovery_filtering -- --exact`
-`cargo test -p grid-server effect_worker::tests::submit_recovery_waits_while_recovery_anomaly_is_active -- --exact`
-`cargo test -p grid-server runtime::tests::startup_sync_replans_even_when_pending_submit_effect_is_present -- --exact`
+`cargo test -p poise-server effect_service::tests::list_pending_effects_returns_pending_submit_effects_without_recovery_filtering -- --exact`
+`cargo test -p poise-server effect_worker::tests::submit_recovery_waits_while_recovery_anomaly_is_active -- --exact`
+`cargo test -p poise-server runtime::tests::startup_sync_replans_even_when_pending_submit_effect_is_present -- --exact`
 
 Expected:
 现有测试需要改写或新增，因为当前 server 侧仍持有 recovery 旁路判断。
@@ -169,10 +169,10 @@ Expected:
 - [x] **Step 6: 运行 Task 2 的定向测试**
 
 Run:
-`cargo test -p grid-engine executor::tests:: -- --nocapture`
-`cargo test -p grid-server effect_service::tests:: -- --nocapture`
-`cargo test -p grid-server effect_worker::tests:: -- --nocapture`
-`cargo test -p grid-server runtime::tests::startup_sync_replans_even_when_pending_submit_effect_is_present -- --exact`
+`cargo test -p poise-engine executor::tests:: -- --nocapture`
+`cargo test -p poise-server effect_service::tests:: -- --nocapture`
+`cargo test -p poise-server effect_worker::tests:: -- --nocapture`
+`cargo test -p poise-server runtime::tests::startup_sync_replans_even_when_pending_submit_effect_is_present -- --exact`
 
 Expected:
 `submit recovery` 的判断与恢复入口都统一回到执行器，server 侧测试通过。
@@ -207,8 +207,8 @@ git commit -m "refactor(server): move submit recovery into executor"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server write_service::tests::mutations_for_same_grid_remain_serialized -- --exact`
-`cargo test -p grid-server write_service::tests::mutations_for_different_grids_do_not_share_global_lock -- --exact`
+`cargo test -p poise-server write_service::tests::mutations_for_same_grid_remain_serialized -- --exact`
+`cargo test -p poise-server write_service::tests::mutations_for_different_grids_do_not_share_global_lock -- --exact`
 
 Expected:
 测试失败，因为当前 `write_service` 仍只有全局 `mutation_lock`。
@@ -224,8 +224,8 @@ Expected:
 - [x] **Step 4: 运行 Task 3 的定向测试**
 
 Run:
-`cargo test -p grid-server write_service::tests:: -- --nocapture`
-`cargo test -p grid-server runtime::tests:: -- --nocapture`
+`cargo test -p poise-server write_service::tests:: -- --nocapture`
+`cargo test -p poise-server runtime::tests:: -- --nocapture`
 
 Expected:
 写侧并发测试通过，现有 runtime 集成测试无回归。
@@ -251,10 +251,10 @@ git commit -m "refactor(server): serialize grid mutations per grid"
 - [x] **Step 1: 运行 crate 级回归**
 
 Run:
-`cargo test -p grid-engine`
-`cargo test -p grid-server`
-`cargo test -p grid-storage`
-`cargo test -p grid-tui`
+`cargo test -p poise-engine`
+`cargo test -p poise-server`
+`cargo test -p poise-storage`
+`cargo test -p poise-tui`
 
 Expected:
 相关 crate 全绿。
@@ -313,9 +313,9 @@ git commit -m "docs: sync inventory executor boundary hardening plan"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-storage sqlite::tests::list_pending_submit_effects_for_grid_returns_only_dispatchable_submit_effects -- --exact`
-`cargo test -p grid-server effect_service::tests::list_dispatchable_effects_returns_pending_submit_effects_without_recovery_filtering -- --exact`
-`cargo test -p grid-server write_service::tests::sync_exchange_state_reads_pending_submit_hints_from_grid_scoped_query -- --exact`
+`cargo test -p poise-storage sqlite::tests::list_pending_submit_effects_for_grid_returns_only_dispatchable_submit_effects -- --exact`
+`cargo test -p poise-server effect_service::tests::list_dispatchable_effects_returns_pending_submit_effects_without_recovery_filtering -- --exact`
+`cargo test -p poise-server write_service::tests::sync_exchange_state_reads_pending_submit_hints_from_grid_scoped_query -- --exact`
 
 Expected:
 编译失败或测试失败，因为当前仓储接口还只有全量 `list_pending_effects()`。
@@ -331,10 +331,10 @@ Expected:
 - [x] **Step 4: 运行 Task 5 的定向测试**
 
 Run:
-`cargo test -p grid-storage sqlite::tests::list_pending_submit_effects_for_grid_returns_only_dispatchable_submit_effects -- --exact`
-`cargo test -p grid-server effect_service::tests:: -- --nocapture`
-`cargo test -p grid-server effect_worker::tests:: -- --nocapture`
-`cargo test -p grid-server write_service::tests::sync_exchange_state_reads_pending_submit_hints_from_grid_scoped_query -- --exact`
+`cargo test -p poise-storage sqlite::tests::list_pending_submit_effects_for_grid_returns_only_dispatchable_submit_effects -- --exact`
+`cargo test -p poise-server effect_service::tests:: -- --nocapture`
+`cargo test -p poise-server effect_worker::tests:: -- --nocapture`
+`cargo test -p poise-server write_service::tests::sync_exchange_state_reads_pending_submit_hints_from_grid_scoped_query -- --exact`
 
 Expected:
 查询边界收紧后的定向测试通过。
@@ -373,8 +373,8 @@ git commit -m "refactor(server): scope pending effect queries by intent"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-storage sqlite::tests::save_transition_with_effect_status_advances_batch_after_success_update -- --exact`
-`cargo test -p grid-storage sqlite::tests::save_transition_with_effect_status_records_failed_attempt_count_and_error -- --exact`
+`cargo test -p poise-storage sqlite::tests::save_transition_with_effect_status_advances_batch_after_success_update -- --exact`
+`cargo test -p poise-storage sqlite::tests::save_transition_with_effect_status_records_failed_attempt_count_and_error -- --exact`
 
 Expected:
 测试失败，因为当前相关覆盖还依赖 `mark_effect_*` 旧接口。
@@ -389,8 +389,8 @@ Expected:
 - [x] **Step 4: 运行 Task 6 的定向测试**
 
 Run:
-`cargo test -p grid-storage sqlite::tests:: -- --nocapture`
-`cargo test -p grid-server write_service::tests:: -- --nocapture`
+`cargo test -p poise-storage sqlite::tests:: -- --nocapture`
+`cargo test -p poise-server write_service::tests:: -- --nocapture`
 
 Expected:
 effect 状态推进只剩统一提交路径，相关测试通过。
@@ -423,8 +423,8 @@ git commit -m "refactor(storage): remove direct effect status writes from reposi
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine executor::tests::current_submit_hint_returns_single_submit_effect_from_plan -- --exact`
-`cargo test -p grid-engine manager::tests::recover_submit_effect_reads_current_submit_hint_from_executor -- --exact`
+`cargo test -p poise-engine executor::tests::current_submit_hint_returns_single_submit_effect_from_plan -- --exact`
+`cargo test -p poise-engine manager::tests::recover_submit_effect_reads_current_submit_hint_from_executor -- --exact`
 
 Expected:
 测试失败，因为当前推导逻辑还留在 `manager::current_submit_recovery_request()`。
@@ -439,8 +439,8 @@ Expected:
 - [x] **Step 4: 运行 Task 7 的定向测试**
 
 Run:
-`cargo test -p grid-engine executor::tests:: -- --nocapture`
-`cargo test -p grid-engine manager::tests::recover_submit_effect_reads_current_submit_hint_from_executor -- --exact`
+`cargo test -p poise-engine executor::tests:: -- --nocapture`
+`cargo test -p poise-engine manager::tests::recover_submit_effect_reads_current_submit_hint_from_executor -- --exact`
 
 Expected:
 当前 submit hint 的推导边界回到 engine，相关测试通过。
@@ -474,8 +474,8 @@ git commit -m "refactor(engine): internalize current submit hint planning"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server write_service::tests::complete_effect_failed_returns_invariant_violation_when_grid_is_not_loaded -- --exact`
-`cargo test -p grid-server runtime::tests::effect_worker_reports_missing_loaded_grid_for_effect_writeback -- --exact`
+`cargo test -p poise-server write_service::tests::complete_effect_failed_returns_invariant_violation_when_grid_is_not_loaded -- --exact`
+`cargo test -p poise-server runtime::tests::effect_worker_reports_missing_loaded_grid_for_effect_writeback -- --exact`
 
 Expected:
 测试失败，因为当前只返回泛化的 `grid not found`。
@@ -490,8 +490,8 @@ Expected:
 - [x] **Step 4: 运行 Task 8 的定向测试**
 
 Run:
-`cargo test -p grid-server write_service::tests:: -- --nocapture`
-`cargo test -p grid-server runtime::tests::effect_worker_reports_missing_loaded_grid_for_effect_writeback -- --exact`
+`cargo test -p poise-server write_service::tests:: -- --nocapture`
+`cargo test -p poise-server runtime::tests::effect_worker_reports_missing_loaded_grid_for_effect_writeback -- --exact`
 
 Expected:
 不变量和错误语义被稳定锁住，相关测试通过。
@@ -521,7 +521,7 @@ git commit -m "refactor(server): codify loaded-grid invariant for effect updates
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server write_service::tests::recover_submit_effect_returns_invariant_violation_when_grid_is_not_loaded -- --exact`
+`cargo test -p poise-server write_service::tests::recover_submit_effect_returns_invariant_violation_when_grid_is_not_loaded -- --exact`
 
 Expected:
 测试失败，因为当前 `recover_submit_effect()` 仍返回普通 `Mutation(grid not found)`。
@@ -536,7 +536,7 @@ Expected:
 - [x] **Step 4: 运行 Task 9 的定向测试**
 
 Run:
-`cargo test -p grid-server write_service::tests:: -- --nocapture`
+`cargo test -p poise-server write_service::tests:: -- --nocapture`
 
 Expected:
 submit recovery 写回和其他 effect 状态写回统一使用 invariant violation 语义，相关测试通过。
@@ -575,8 +575,8 @@ git commit -m "fix(server): unify submit recovery loaded-grid invariant"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine executor::tests::terminal_order_clears_matching_slot_to_empty -- --exact`
-`cargo test -p grid-engine manager::tests::recover_submit_effect_supersede_plan_is_executor_owned -- --exact`
+`cargo test -p poise-engine executor::tests::terminal_order_clears_matching_slot_to_empty -- --exact`
+`cargo test -p poise-engine manager::tests::recover_submit_effect_supersede_plan_is_executor_owned -- --exact`
 
 Expected:
 测试失败，因为当前固定 slot 仍通过删除表达空态，submit recovery 的后续 effect 仍有 manager 侧协议。
@@ -592,8 +592,8 @@ Expected:
 - [x] **Step 4: 运行 Task 10 的定向测试**
 
 Run:
-`cargo test -p grid-engine -- --nocapture`
-`cargo test -p grid-server write_service::tests:: -- --nocapture`
+`cargo test -p poise-engine -- --nocapture`
+`cargo test -p poise-server write_service::tests:: -- --nocapture`
 `cargo fmt --all --check`
 
 Expected:

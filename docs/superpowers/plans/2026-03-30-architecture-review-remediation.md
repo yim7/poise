@@ -71,7 +71,7 @@ Task 1 (executor 拆分) ──→ Task 2 (replacement gate 参数化)
 
 - [x] **Step 1: 运行现有 executor 测试，记录基线**
 
-Run: `cargo test -p grid-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
+Run: `cargo test -p poise-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
 Result: 25 passed; 0 failed; 76 filtered out。
 
 - [x] **Step 2: 创建 `engine/src/executor/` 目录，把 `executor.rs` 原样移入 `mod.rs`**
@@ -81,7 +81,7 @@ mkdir engine/src/executor
 mv engine/src/executor.rs engine/src/executor/mod.rs
 ```
 
-Run: `cargo test -p grid-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
+Run: `cargo test -p poise-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
 Result: 25 passed; 0 failed; 76 filtered out。
 
 - [x] **Step 3: 提取 slots.rs —— 把 slot 辅助函数移出 mod.rs**
@@ -100,7 +100,7 @@ Result: 25 passed; 0 failed; 76 filtered out。
 
 mod.rs 加 `mod slots;` 并把调用点改为 `slots::xxx`。
 
-Run: `cargo test -p grid-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
+Run: `cargo test -p poise-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
 Result: 25 passed; 0 failed; 76 filtered out。
 
 - [x] **Step 4: 提取 recording.rs —— 把状态录入函数移出 mod.rs**
@@ -119,7 +119,7 @@ Result: 25 passed; 0 failed; 76 filtered out。
 
 mod.rs 加 `mod recording;` 并 re-export 对外需要的符号。
 
-Run: `cargo test -p grid-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
+Run: `cargo test -p poise-engine executor::tests:: -- --nocapture 2>&1 | tail -5`
 Result: 25 passed; 0 failed; 76 filtered out。
 
 - [x] **Step 5: 提取 recovery.rs —— 把恢复逻辑移出 mod.rs**
@@ -133,7 +133,7 @@ Result: 25 passed; 0 failed; 76 filtered out。
 
 mod.rs 加 `mod recovery;` 并 re-export。
 
-Run: `cargo test -p grid-engine executor::tests:: -- --nocapture 2>&1 | tail -20`
+Run: `cargo test -p poise-engine executor::tests:: -- --nocapture 2>&1 | tail -20`
 Result: 25 passed; 0 failed; 76 filtered out。
 
 - [x] **Step 6: 提取 planning.rs —— 把规划逻辑移出 mod.rs**
@@ -155,7 +155,7 @@ Result: 25 passed; 0 failed; 76 filtered out。
 
 mod.rs 加 `mod planning;` 并 re-export。mod.rs 中只保留类型定义（`ExecutionMode`、`ExecutionReason`、`INVENTORY_CORE_SLOT`）和 re-export 声明。
 
-Run: `cargo test -p grid-engine executor::tests:: -- --nocapture 2>&1 | tail -20`
+Run: `cargo test -p poise-engine executor::tests:: -- --nocapture 2>&1 | tail -20`
 Result: 25 passed; 0 failed; 76 filtered out。
 
 - [x] **Step 7: 缩小 pub 面——把不需要对 crate 外暴露的符号降级**
@@ -164,8 +164,8 @@ Result: 25 passed; 0 failed; 76 filtered out。
 
 具体检查方法：临时注释掉 mod.rs 中某个 re-export，跑 `cargo check --workspace`，如果只有 executor 内部测试报错则可以降级。
 
-Run: `cargo test -p grid-engine && cargo test -p grid-server`
-Result: `grid-engine` 101 passed; `grid-server` 119 passed。
+Run: `cargo test -p poise-engine && cargo test -p poise-server`
+Result: `poise-engine` 101 passed; `poise-server` 119 passed。
 
 Review:
 - `engine/src/executor/mod.rs` 已收敛为模块声明、re-export、`ExecutionMode` / `ExecutionReason` / `INVENTORY_CORE_SLOT` 和测试。
@@ -246,7 +246,7 @@ fn replacement_gate_reason_for_working_order(
 
 删除 `const BINANCE_TAKER_FEE_RATE: f64 = 0.0004;`。
 
-Run: `cargo check -p grid-engine`
+Run: `cargo check -p poise-engine`
 Expected: 编译通过。
 
 - [x] **Step 4: 补测试——验证不同 fee rate 组合产生不同 gate 结果**
@@ -255,7 +255,7 @@ Expected: 编译通过。
 - 同样的价格改善幅度，用 `maker_fee_rate: 0.0005, taker_fee_rate: 0.001`（高费率）应该触发 gate
 - 用 `maker_fee_rate: 0.0, taker_fee_rate: 0.0`（零费率）不应该触发
 
-Run: `cargo test -p grid-engine executor::tests::replacement_gate_threshold_uses_exchange_maker_and_taker_fee_rate -- --exact --nocapture`
+Run: `cargo test -p poise-engine executor::tests::replacement_gate_threshold_uses_exchange_maker_and_taker_fee_rate -- --exact --nocapture`
 Result:
 - 改实现前先跑到红灯，确认测试捕获的是 `maker_fee_rate` 缺失和旧 gate 公式。
 - 改实现后重新运行，新测试通过。
@@ -306,7 +306,7 @@ debug_assert_eq!(
 
 这需要 `GridRuntimeSnapshot` 实现 `PartialEq`（已有）。
 
-Run: `cargo test -p grid-engine -- runtime::tests --nocapture`
+Run: `cargo test -p poise-engine -- runtime::tests --nocapture`
 Result: 通过。`runtime::tests` 全部通过，debug_assert 没有发现遗漏字段。
 
 - [x] **Step 2: 写一个 regression 测试，证明 debug_assert 能抓住遗漏**
@@ -327,7 +327,7 @@ fn restore_from_snapshot_detects_missing_field_via_round_trip() {
 }
 ```
 
-Run: `cargo test -p grid-engine -- runtime::tests::restore_from_snapshot_detects --exact --nocapture`
+Run: `cargo test -p poise-engine -- runtime::tests::restore_from_snapshot_detects --exact --nocapture`
 Result: 通过——证明当前 restore 是完整的，且保护装置就位。
 
 - [x] **Step 3: 把 GridRuntime 字段从 pub 改为 pub(crate)**
@@ -375,12 +375,12 @@ impl GridRuntime {
 }
 ```
 
-逐个加，每加一个跑 `cargo check -p grid-server` 确认编译错误减少。
+逐个加，每加一个跑 `cargo check -p poise-server` 确认编译错误减少。
 
 Run: `cargo check --workspace`
 Result:
 - `cargo check --workspace` 通过。
-- `cargo test -p grid-server --no-run` 通过。
+- `cargo test -p poise-server --no-run` 通过。
 - server 运行时测试辅助方法改为读取 `snapshot()`，没有为了测试继续扩大 `GridRuntime` 的公开面。
 
 - [x] **Step 5: 全量测试验证**
@@ -423,8 +423,8 @@ Commit: `68b4f329c0e176d0b79ab770acc5f6cb22bc0932`
 
 - [x] **Step 1: 运行 server 测试基线**
 
-Run: `cargo test -p grid-server -- --nocapture 2>&1 | tail -5`
-Result: 通过，基线为 `grid-server` 119 个测试全部通过。
+Run: `cargo test -p poise-server -- --nocapture 2>&1 | tail -5`
+Result: 通过，基线为 `poise-server` 119 个测试全部通过。
 
 - [x] **Step 2: 把 engine/manager.rs 中的 StartupSyncMode 重命名为 ExchangeSyncMode 并改为 pub**
 
@@ -446,7 +446,7 @@ impl ExchangeSyncMode {
 
 同步更新 `manager.rs` 内部所有引用点。
 
-Run: `cargo check -p grid-engine`
+Run: `cargo check -p poise-engine`
 Result: 编译通过。
 
 - [x] **Step 3: 删除 write_service.rs 中的 StartupSyncMode 副本**
@@ -455,14 +455,14 @@ Result: 编译通过。
 
 把 `sync_exchange_state_inner` 的参数类型和内部调用适配到 `ExchangeSyncMode`。
 
-Run: `cargo check -p grid-server`
+Run: `cargo check -p poise-server`
 Result: 编译通过。
 
 - [x] **Step 4: 删除 runtime.rs 中的 ExchangeStateSyncMode 副本**
 
 删除 `server/src/runtime.rs` 中 `ExchangeStateSyncMode` 枚举（约 line 45-49），改为 `use grid_engine::manager::ExchangeSyncMode;`。把所有 `ExchangeStateSyncMode::RecoverOnly` / `RecoverAndReconcile` 替换为 `ExchangeSyncMode::RecoverOnly` / `RecoverAndReconcile`。
 
-Run: `cargo check -p grid-server`
+Run: `cargo check -p poise-server`
 Result: 编译通过。
 
 - [x] **Step 5: 评估并处理 EffectService**
@@ -474,13 +474,13 @@ Result: 编译通过。
 
 如果 EffectService 承担了其他职责，保留并记录原因。
 
-Run: `cargo check -p grid-server`
+Run: `cargo check -p poise-server`
 Result: 编译通过。`EffectService` 除了 `effect_worker` 和 `runtime` 的仓储直通调用外没有额外职责，因此已删除，`ServerState` 改为直接持有 `Arc<dyn StateRepositoryPort>`。
 
 - [x] **Step 6: 全量测试验证**
 
 Run: `cargo test`
-Result: workspace 全部通过。删除 `EffectService` 后，`grid-server` 测试数从 119 变为 117，因为移除了两个只验证转发层的测试。
+Result: workspace 全部通过。删除 `EffectService` 后，`poise-server` 测试数从 119 变为 117，因为移除了两个只验证转发层的测试。
 
 Review:
 - `ExchangeSyncMode` 现在只在 `engine/src/manager.rs` 定义一次，`write_service` 和 `runtime` 都直接依赖同一个 owner，没有再各自维护副本。
@@ -514,7 +514,7 @@ Commit: `65472b9266c309f865e996c61b0545d759381be3`
 
 - [x] **Step 1: 运行 projector 和 HTTP 测试基线**
 
-Run: `cargo test -p grid-server -- projector::tests --nocapture && cargo test -p grid-server -- http::tests --nocapture`
+Run: `cargo test -p poise-server -- projector::tests --nocapture && cargo test -p poise-server -- http::tests --nocapture`
 Expected: 全部通过。
 
 - [x] **Step 2: 创建 `server/src/read_model.rs`，定义 read model 结构体**
@@ -526,7 +526,7 @@ use grid_engine::ports::{PersistedGridEffect, StoredDomainEvent};
 
 pub struct GridReadModel {
     // Identity
-    pub grid_id: String,
+    pub track_id: String,
     pub venue: String,
     pub symbol: String,
 
@@ -585,7 +585,7 @@ pub struct ReadModelSlot {
 
 在 `server/src/main.rs` 中加 `mod read_model;`。
 
-Run: `cargo check -p grid-server`
+Run: `cargo check -p poise-server`
 Expected: 编译通过（新代码无调用者）。
 
 - [x] **Step 3: 让 query_service 返回 GridReadModel 而非 GridReadModelSource**
@@ -597,33 +597,33 @@ Expected: 编译通过（新代码无调用者）。
 
 暂时保留 `GridReadModelSource` 结构体（可能有测试依赖），但 pub API 全部切到 `GridReadModel`。
 
-Run: `cargo check -p grid-server`
+Run: `cargo check -p poise-server`
 Expected: projector.rs 和 http.rs 中使用 `GridReadModelSource` 的地方报错。
 
 - [x] **Step 4: 改写 projector 消费 GridReadModel**
 
 修改 `projector.rs` 中 `project_list_item` 和 `project_detail` 的参数类型，从 `&GridReadModelSource` 改为 `&GridReadModel`。逐字段替换属性访问：
 
-- `source.snapshot.grid_id.as_str()` → `source.grid_id.as_str()`
+- `source.snapshot.track_id.as_str()` → `source.track_id.as_str()`
 - `source.snapshot.current_exposure.0` → `source.current_exposure`
 - `source.snapshot.executor_state.stats.max_inventory_gap_abs.0` → `source.max_inventory_gap_abs`
 - 等等
 
 projector 不再 import 任何 `grid_engine::snapshot::*` 或 `grid_engine::runtime::ExecutorState`。
 
-Run: `cargo check -p grid-server`
+Run: `cargo check -p poise-server`
 Expected: 编译通过。
 
 - [x] **Step 5: 更新 projector 和 HTTP 测试**
 
 测试中原来构造 `GridReadModelSource` 的地方改为构造 `GridReadModel`。验证 JSON 输出不变。
 
-Run: `cargo test -p grid-server -- projector::tests --nocapture && cargo test -p grid-server -- http::tests --nocapture`
+Run: `cargo test -p poise-server -- projector::tests --nocapture && cargo test -p poise-server -- http::tests --nocapture`
 Expected: 全部通过。
 
 - [x] **Step 6: 删除 GridReadModelSource（如果不再被使用）**
 
-Run: `cargo test -p grid-server && cargo test -p grid-tui`
+Run: `cargo test -p poise-server && cargo test -p poise-tui`
 Expected: 全部通过。
 
 - [x] **Step 7: 提交**
@@ -639,10 +639,10 @@ Result:
 - `server/src/projector.rs` 已不再依赖 `GridRuntimeSnapshot` 或 `ExecutorState` 的嵌套结构，改为只消费 `GridReadModel` 的拍平字段。
 
 Verification:
-- 基线：`cargo test -p grid-server projector::tests -- --nocapture` 和 `cargo test -p grid-server http::tests -- --nocapture` 初始通过。
+- 基线：`cargo test -p poise-server projector::tests -- --nocapture` 和 `cargo test -p poise-server http::tests -- --nocapture` 初始通过。
 - TDD 红灯：新增 `query_service::tests::read_model_from_snapshot_flattens_runtime_state` 后，先失败在 `crate::read_model` 不存在；补模块后再次失败在 slot label 预期不符（`inventory` vs `Inventory Core`），随后按现有 projector 语义修正并完成实现。
-- 编译：`cargo check -p grid-server` 在 query_service 切换后按预期暴露 `projector` 对旧类型的依赖，迁移后恢复通过。
-- 回归：`cargo test -p grid-server projector::tests -- --nocapture`、`cargo test -p grid-server http::tests -- --nocapture`、`cargo test -p grid-server`、`cargo test -p grid-tui` 全部通过。
+- 编译：`cargo check -p poise-server` 在 query_service 切换后按预期暴露 `projector` 对旧类型的依赖，迁移后恢复通过。
+- 回归：`cargo test -p poise-server projector::tests -- --nocapture`、`cargo test -p poise-server http::tests -- --nocapture`、`cargo test -p poise-server`、`cargo test -p poise-tui` 全部通过。
 
 Review:
 - 没有发现新的高信号设计问题。当前实现符合 Task 5 的 phase 1 范围：只建立单一接触点和结构拍平，没有额外引入 server 自有第三份枚举，也没有把 phase 2 的完全类型解耦提前混进来。
@@ -723,4 +723,4 @@ Task 4 Step 5 中处理。如果最终保留了，记录原因。
 
 ### C. Read Model Phase 2：完全类型解耦
 
-Task 5 是 phase 1（单一接触点 + 结构拍平）。如果后续 engine 枚举类型变更频繁导致 read_model.rs 频繁跟改，再推进 phase 2：把边界敏感字段（GridStatus、ExecutionMode 等）改成 server 自有类型。当前不做——避免在 grid-protocol 已有 wire types 的情况下创建第三份枚举副本。
+Task 5 是 phase 1（单一接触点 + 结构拍平）。如果后续 engine 枚举类型变更频繁导致 read_model.rs 频繁跟改，再推进 phase 2：把边界敏感字段（GridStatus、ExecutionMode 等）改成 server 自有类型。当前不做——避免在 poise-protocol 已有 wire types 的情况下创建第三份枚举副本。

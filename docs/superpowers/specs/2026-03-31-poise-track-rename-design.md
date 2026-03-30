@@ -5,7 +5,7 @@
 产品名已经确定为 `Poise`，但当前仓库仍大量保留旧命名：
 
 - 仓库目录仍是 `grid-platform`
-- workspace 和 7 个 crate 仍使用 `grid-*`
+- workspace 和 7 个 crate 仍使用旧命名
 - 领域主对象仍使用 `Grid*` / `grid_*`
 - 配置、HTTP 路由、协议 DTO、SQLite schema、测试夹具和文档仍围绕 `grid`
 

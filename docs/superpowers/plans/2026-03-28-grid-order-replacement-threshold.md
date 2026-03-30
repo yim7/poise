@@ -20,25 +20,25 @@
 
 - [ ] **Step 2: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine reconcile_keeps_existing_pending_order_when_candidate_order_matches_exchange_rounded_values -- --exact`
+Run: `cargo test -p poise-engine reconcile_keeps_existing_pending_order_when_candidate_order_matches_exchange_rounded_values -- --exact`
 
 - [ ] **Step 3: 写失败测试，覆盖“同方向但改善不足手续费加 `5 bps` 时不重挂”**
 
 - [ ] **Step 4: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine reconcile_keeps_existing_pending_order_when_price_improvement_does_not_cover_replacement_threshold -- --exact`
+Run: `cargo test -p poise-engine reconcile_keeps_existing_pending_order_when_price_improvement_does_not_cover_replacement_threshold -- --exact`
 
 - [ ] **Step 5: 写失败测试，覆盖“同方向且改善超过门槛时撤旧换新”**
 
 - [ ] **Step 6: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine reconcile_replaces_pending_order_when_price_improvement_covers_replacement_threshold -- --exact`
+Run: `cargo test -p poise-engine reconcile_replaces_pending_order_when_price_improvement_covers_replacement_threshold -- --exact`
 
 - [ ] **Step 7: 写失败测试，覆盖“方向反转时立即撤旧换新”**
 
 - [ ] **Step 8: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine reconcile_replaces_pending_order_when_side_flips -- --exact`
+Run: `cargo test -p poise-engine reconcile_replaces_pending_order_when_side_flips -- --exact`
 
 ### Task 2: 在 reconciler 实现替换门槛
 
@@ -67,7 +67,7 @@ Run: `cargo test -p grid-engine reconcile_replaces_pending_order_when_side_flips
 
 - [ ] **Step 4: 运行 Task 1 的全部单测，确认转绿**
 
-Run: `cargo test -p grid-engine reconcile_ -- --nocapture`
+Run: `cargo test -p poise-engine reconcile_ -- --nocapture`
 
 ### Task 3: 回归验证
 
@@ -76,7 +76,7 @@ Run: `cargo test -p grid-engine reconcile_ -- --nocapture`
 
 - [ ] **Step 1: 运行 engine 全量测试**
 
-Run: `cargo test -p grid-engine`
+Run: `cargo test -p poise-engine`
 
 - [ ] **Step 2: 运行工作区全量测试**
 

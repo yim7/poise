@@ -1,31 +1,31 @@
-# 网格平台第一阶段实现计划：grid-core + grid-engine
+# 网格平台第一阶段实现计划：poise-core + poise-engine
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 搭建网格平台的领域核心和引擎编排层，形成可嵌入的策略计算库。
 
-**Architecture:** 六边形架构，grid-core 是纯函数库（无 async/IO），grid-engine 定义端口 trait 并编排策略→风控→执行。详见 [架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md) 和 [策略族设计 spec](../specs/2026-03-24-grid-strategy-family-design.md)。
+**Architecture:** 六边形架构，poise-core 是纯函数库（无 async/IO），poise-engine 定义端口 trait 并编排策略→风控→执行。详见 [架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md) 和 [策略族设计 spec](../specs/2026-03-24-grid-strategy-family-design.md)。
 
 **Tech Stack:** Rust 2024 edition, serde (core only), tokio + async-trait (engine only)
 
-**Scope:** 本计划只覆盖 grid-core 和 grid-engine。适配器（binance/storage）、服务端（server）和客户端（tui）各自有独立的后续计划。
+**Scope:** 本计划只覆盖 poise-core 和 poise-engine。适配器（binance/storage）、服务端（server）和客户端（tui）各自有独立的后续计划。
 
 ## 当前状态
 
 - [x] Task 1: 初始化 Workspace
-- [x] Task 2: grid-core 领域类型
-- [x] Task 3: grid-core 策略模型
-- [x] Task 4: grid-core 风控规则
-- [x] Task 5: grid-core 领域事件
-- [x] Task 6: grid-engine 端口 trait 定义
-- [x] Task 7: grid-engine 实例模型
-- [x] Task 8: grid-engine 执行计划类型
-- [x] Task 9: grid-engine 协调器
-- [x] Task 10: grid-engine 多实例管理器
+- [x] Task 2: poise-core 领域类型
+- [x] Task 3: poise-core 策略模型
+- [x] Task 4: poise-core 风控规则
+- [x] Task 5: poise-core 领域事件
+- [x] Task 6: poise-engine 端口 trait 定义
+- [x] Task 7: poise-engine 实例模型
+- [x] Task 8: poise-engine 执行计划类型
+- [x] Task 9: poise-engine 协调器
+- [x] Task 10: poise-engine 多实例管理器
 
 当前实现已合入 Git 历史，核心提交如下：
 
-- `960db66` `feat: initialize grid-core and grid-engine workspace`
+- `960db66` `feat: initialize poise-core and poise-engine workspace`
 - `2a225fa` `feat(core): add domain types, strategy model, risk rules and domain events`
 - `664b4b1` `feat(engine): add ports, instance model, execution plan, reconciler and manager`
 
@@ -96,7 +96,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 ```toml
 [package]
-name = "grid-core"
+name = "poise-core"
 version.workspace = true
 edition.workspace = true
 
@@ -104,7 +104,7 @@ edition.workspace = true
 serde.workspace = true
 ```
 
-注意：grid-core 不允许 tokio/async-trait/reqwest 等 IO 依赖。
+注意：poise-core 不允许 tokio/async-trait/reqwest 等 IO 依赖。
 
 - [ ] **Step 3: 创建 core/src/lib.rs**
 
@@ -119,12 +119,12 @@ pub mod events;
 
 ```toml
 [package]
-name = "grid-engine"
+name = "poise-engine"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-grid-core = { path = "../core" }
+poise-core = { path = "../core" }
 serde.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
@@ -154,12 +154,12 @@ Expected: 编译成功，无错误
 - [ ] **Step 8: 提交**
 
 ```bash
-git add -A && git commit -m "feat: initialize grid-core and grid-engine workspace"
+git add -A && git commit -m "feat: initialize poise-core and poise-engine workspace"
 ```
 
 ---
 
-### Task 2: grid-core 领域类型
+### Task 2: poise-core 领域类型
 
 **Files:**
 - Create: `core/src/types.rs`
@@ -191,7 +191,7 @@ mod tests {
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-core -- types`
+Run: `cargo test -p poise-core -- types`
 Expected: FAIL（类型未定义）
 
 - [ ] **Step 3: 实现类型**
@@ -241,7 +241,7 @@ pub struct ExchangeRules {
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p grid-core -- types`
+Run: `cargo test -p poise-core -- types`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
@@ -252,7 +252,7 @@ git add -A && git commit -m "feat(core): add domain types - Exposure, Side, Exch
 
 ---
 
-### Task 3: grid-core 策略模型
+### Task 3: poise-core 策略模型
 
 **Files:**
 - Create: `core/src/strategy.rs`
@@ -369,7 +369,7 @@ mod tests {
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-core -- strategy`
+Run: `cargo test -p poise-core -- strategy`
 Expected: FAIL
 
 - [ ] **Step 3: 实现策略模型**
@@ -463,7 +463,7 @@ impl GridConfig {
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p grid-core -- strategy`
+Run: `cargo test -p poise-core -- strategy`
 Expected: 全部 PASS
 
 - [ ] **Step 5: 提交**
@@ -474,7 +474,7 @@ git add -A && git commit -m "feat(core): add strategy model - GridConfig, target
 
 ---
 
-### Task 4: grid-core 风控规则
+### Task 4: poise-core 风控规则
 
 **Files:**
 - Create: `core/src/risk.rs`
@@ -528,7 +528,7 @@ mod tests {
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-core -- risk`
+Run: `cargo test -p poise-core -- risk`
 Expected: FAIL
 
 - [ ] **Step 3: 实现风控规则**
@@ -569,7 +569,7 @@ pub fn evaluate_risk(intent: &ExposureIntent, _budget: &CapacityBudget) -> RiskD
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p grid-core -- risk`
+Run: `cargo test -p poise-core -- risk`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
@@ -580,7 +580,7 @@ git add -A && git commit -m "feat(core): add risk model - CapacityBudget, evalua
 
 ---
 
-### Task 5: grid-core 领域事件
+### Task 5: poise-core 领域事件
 
 **Files:**
 - Create: `core/src/events.rs`
@@ -605,9 +605,9 @@ pub enum DomainEvent {
 
 （事件类型是值类型定义，不需要独立测试，后续在 reconciler 测试中覆盖。）
 
-- [ ] **Step 2: 验证 grid-core 全部测试通过**
+- [ ] **Step 2: 验证 poise-core 全部测试通过**
 
-Run: `cargo test -p grid-core`
+Run: `cargo test -p poise-core`
 Expected: 全部 PASS
 
 - [ ] **Step 3: 提交**
@@ -618,7 +618,7 @@ git add -A && git commit -m "feat(core): add domain events"
 
 ---
 
-### Task 6: grid-engine 端口 trait 定义
+### Task 6: poise-engine 端口 trait 定义
 
 **Files:**
 - Create: `engine/src/ports.rs`
@@ -725,7 +725,7 @@ pub trait ClockPort: Send + Sync {
 
 - [ ] **Step 2: 验证编译通过**
 
-Run: `cargo check -p grid-engine`
+Run: `cargo check -p poise-engine`
 Expected: 编译成功
 
 - [ ] **Step 3: 提交**
@@ -736,7 +736,7 @@ git add -A && git commit -m "feat(engine): define port traits - Exchange, Market
 
 ---
 
-### Task 7: grid-engine 实例模型
+### Task 7: poise-engine 实例模型
 
 **Files:**
 - Create: `engine/src/instance.rs`
@@ -788,7 +788,7 @@ impl StrategyInstance {
 
 - [ ] **Step 2: 验证编译通过**
 
-Run: `cargo check -p grid-engine`
+Run: `cargo check -p poise-engine`
 Expected: 编译成功
 
 - [ ] **Step 3: 提交**
@@ -799,7 +799,7 @@ git add -A && git commit -m "feat(engine): add StrategyInstance model"
 
 ---
 
-### Task 8: grid-engine 执行计划类型
+### Task 8: poise-engine 执行计划类型
 
 **Files:**
 - Create: `engine/src/execution_plan.rs`
@@ -844,7 +844,7 @@ impl ExecutionPlan {
 
 - [ ] **Step 2: 验证编译通过**
 
-Run: `cargo check -p grid-engine`
+Run: `cargo check -p poise-engine`
 Expected: 编译成功
 
 - [ ] **Step 3: 提交**
@@ -855,7 +855,7 @@ git add -A && git commit -m "feat(engine): add ExecutionPlan and ExecutionAction
 
 ---
 
-### Task 9: grid-engine 协调器
+### Task 9: poise-engine 协调器
 
 **Files:**
 - Create: `engine/src/reconciler.rs`
@@ -933,7 +933,7 @@ mod tests {
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-engine -- reconciler`
+Run: `cargo test -p poise-engine -- reconciler`
 Expected: FAIL
 
 - [ ] **Step 3: 实现协调器**
@@ -1049,7 +1049,7 @@ fn apply_out_of_band(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p grid-engine -- reconciler`
+Run: `cargo test -p poise-engine -- reconciler`
 Expected: 全部 PASS
 
 - [ ] **Step 5: 提交**
@@ -1060,7 +1060,7 @@ git add -A && git commit -m "feat(engine): add reconciler - core orchestration l
 
 ---
 
-### Task 10: grid-engine 多实例管理器
+### Task 10: poise-engine 多实例管理器
 
 **Files:**
 - Create: `engine/src/manager.rs`
@@ -1150,7 +1150,7 @@ impl InstanceManager {
 
 - [ ] **Step 2: 验证编译通过**
 
-Run: `cargo check -p grid-engine`
+Run: `cargo check -p poise-engine`
 Expected: 编译成功
 
 - [ ] **Step 3: 验证全部测试通过**
@@ -1170,19 +1170,19 @@ git add -A && git commit -m "feat(engine): add InstanceManager - multi-instance 
 
 完成上述 10 个 Task 后：
 
-1. `cargo test -p grid-core` 全部通过 — 策略计算、风控评估均有覆盖
-2. `cargo test -p grid-engine` 全部通过 — reconciler 流程有覆盖
+1. `cargo test -p poise-core` 全部通过 — 策略计算、风控评估均有覆盖
+2. `cargo test -p poise-engine` 全部通过 — reconciler 流程有覆盖
 3. `cargo check` 零警告编译 — 类型系统完整
-4. grid-core 的 Cargo.toml 不含 tokio/async 依赖 — 纯函数约束成立
-5. grid-engine 的 reconcile 是纯函数 — 无 IO 调用
+4. poise-core 的 Cargo.toml 不含 tokio/async 依赖 — 纯函数约束成立
+5. poise-engine 的 reconcile 是纯函数 — 无 IO 调用
 6. 端口 trait 定义完整 — ExchangePort, MarketDataPort, PersistencePort, ClockPort
 
 ## 验收记录
 
 验收时间：2026-03-24
 
-- `cargo test -p grid-core`：20 个测试通过
-- `cargo test -p grid-engine`：11 个测试通过
+- `cargo test -p poise-core`：20 个测试通过
+- `cargo test -p poise-engine`：11 个测试通过
 - `cargo check`：通过
 - `cargo test`：当前 workspace 全部通过
 
@@ -1196,7 +1196,7 @@ git add -A && git commit -m "feat(engine): add InstanceManager - multi-instance 
 
 本计划完成后，按顺序创建独立实现计划：
 
-1. **第二阶段：grid-storage** — SQLite 持久化适配器
-2. **第三阶段：grid-binance** — Binance 交易所适配器
-3. **第四阶段：grid-server** — HTTP/WS 服务端 + 组件组装
-4. **第五阶段：grid-tui** — 终端 UI 适配
+1. **第二阶段：poise-storage** — SQLite 持久化适配器
+2. **第三阶段：poise-binance** — Binance 交易所适配器
+3. **第四阶段：poise-server** — HTTP/WS 服务端 + 组件组装
+4. **第五阶段：poise-tui** — 终端 UI 适配

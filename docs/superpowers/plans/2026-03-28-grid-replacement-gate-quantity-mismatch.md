@@ -19,24 +19,24 @@
 
 - [x] **Step 1: 写失败测试，覆盖“同方向但数量失配时必须重挂”**
 
-Run: `cargo test -p grid-engine same_side_quantity_differs -- --nocapture`
+Run: `cargo test -p poise-engine same_side_quantity_differs -- --nocapture`
 Observed: FAIL，当前实现错误返回 `NoOp`
 
 - [x] **Step 2: 写最小实现，限制 replacement gate 只拦截同方向且数量等价的价格微调**
 
 - [x] **Step 3: 运行目标单测确认转绿**
 
-Run: `cargo test -p grid-engine same_side_quantity_differs -- --nocapture`
+Run: `cargo test -p poise-engine same_side_quantity_differs -- --nocapture`
 Observed: PASS
 
 - [x] **Step 4: 运行 replacement gate 相关回归**
 
-Run: `cargo test -p grid-engine replacement -- --nocapture`
+Run: `cargo test -p poise-engine replacement -- --nocapture`
 Observed: PASS
 
 - [x] **Step 5: 运行 engine 全量测试**
 
-Run: `cargo test -p grid-engine`
+Run: `cargo test -p poise-engine`
 Observed: PASS
 
 - [x] **Step 6: 检查格式**

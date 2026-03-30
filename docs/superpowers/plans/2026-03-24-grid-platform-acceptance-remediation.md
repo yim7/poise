@@ -4,7 +4,7 @@
 
 **Goal:** 修复当前验收阻塞项，让平台从“只会算目标值的框架”变成“状态语义正确、能发出真实订单、能回写真实仓位、能通过整体验收”的可继续演进基线。
 
-**Architecture:** 本次修复不再把问题拆成彼此独立的子计划，因为风险评估、目标/实际仓位分离、订单执行闭环、HTTP/TUI 快照契约共享同一套状态模型。实现上保持六边形架构不变：`grid-core` 负责纯计算，`grid-engine` 负责纯规划和状态变换，`grid-server` 负责把市场数据、用户数据、执行计划和持久化串成真实闭环。
+**Architecture:** 本次修复不再把问题拆成彼此独立的子计划，因为风险评估、目标/实际仓位分离、订单执行闭环、HTTP/TUI 快照契约共享同一套状态模型。实现上保持六边形架构不变：`poise-core` 负责纯计算，`poise-engine` 负责纯规划和状态变换，`poise-server` 负责把市场数据、用户数据、执行计划和持久化串成真实闭环。
 
 **Tech Stack:** Rust 2024 edition, tokio, axum, reqwest, tokio-tungstenite, rusqlite, serde
 
@@ -75,15 +75,15 @@ tui/tests/fixtures/*.json         # fixture 改成 snake_case 并补新字段
 
 ### 职责分解
 
-- `grid-core` 只定义纯数据和纯计算，不能知道 websocket、HTTP、SQLite。
-- `grid-engine` 负责两件事：
+- `poise-core` 只定义纯数据和纯计算，不能知道 websocket、HTTP、SQLite。
+- `poise-engine` 负责两件事：
   1. 在纯函数里算出“应当做什么”
   2. 在同步状态机里回写“已经发生了什么”
-- `grid-server` 负责三条异步链路：
+- `poise-server` 负责三条异步链路：
   1. 行情 tick 驱动 `reconcile`
   2. 执行计划调用交易所端口
   3. 用户数据 / 持仓回写真实仓位和挂单状态
-- `grid-tui` 只消费 server 给出的快照，不自己推导被风控裁剪后的目标仓位。
+- `poise-tui` 只消费 server 给出的快照，不自己推导被风控裁剪后的目标仓位。
 - 为了让交易所侧按 `symbol` 回写仓位和挂单时语义保持闭合，v1 明确限制“一个 `symbol` 只能绑定一个实例”；同品种多实例分摊同一真实仓位不在本轮范围内。
 
 ---
@@ -194,16 +194,16 @@ async fn assemble_rejects_duplicate_symbols() {
 
 - [ ] **Step 2: 运行这些测试，确认它们因为当前契约不匹配而失败**
 
-Run: `cargo test -p grid-server parses_snake_case_strategy_enums -- --exact`
+Run: `cargo test -p poise-server parses_snake_case_strategy_enums -- --exact`
 Expected: FAIL，原因是 snake_case 解析失败
 
-Run: `cargo test -p grid-server parse_config_path_requires_config_flag -- --exact`
+Run: `cargo test -p poise-server parse_config_path_requires_config_flag -- --exact`
 Expected: FAIL，原因是 `parse_config_path` 仍允许缺省
 
-Run: `cargo test -p grid-server assemble_rejects_duplicate_symbols -- --exact`
+Run: `cargo test -p poise-server assemble_rejects_duplicate_symbols -- --exact`
 Expected: FAIL，原因是当前还没有实例级 `symbol` 唯一性校验
 
-Run: `cargo test -p grid-tui deserializes_snake_case_snapshot -- --exact`
+Run: `cargo test -p poise-tui deserializes_snake_case_snapshot -- --exact`
 Expected: FAIL，原因是 `status` / `shape_family` / `out_of_band_policy` 仍使用 Rust 变体名
 
 - [ ] **Step 3: 最小实现 snake_case 契约和必填启动参数**
@@ -304,19 +304,19 @@ Message::Text(payload.to_string())
 
 - [ ] **Step 6: 重新运行最小验证**
 
-Run: `cargo test -p grid-server parses_snake_case_strategy_enums -- --exact`
+Run: `cargo test -p poise-server parses_snake_case_strategy_enums -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-server parse_config_path_requires_config_flag -- --exact`
+Run: `cargo test -p poise-server parse_config_path_requires_config_flag -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-server assemble_rejects_duplicate_symbols -- --exact`
+Run: `cargo test -p poise-server assemble_rejects_duplicate_symbols -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-tui deserializes_snake_case_snapshot -- --exact`
+Run: `cargo test -p poise-tui deserializes_snake_case_snapshot -- --exact`
 Expected: PASS
 
-Run: `cargo clippy -p grid-binance --tests -- -D warnings`
+Run: `cargo clippy -p poise-binance --tests -- -D warnings`
 Expected: PASS
 
 - [ ] **Step 7: 提交**
@@ -417,16 +417,16 @@ assert!(payload.pending_order.is_some());
 
 - [ ] **Step 2: 运行这些测试，确认它们因为 snapshot/state 还没扩宽而失败**
 
-Run: `cargo test -p grid-engine on_price_tick_updates_target_without_faking_current_exposure -- --exact`
+Run: `cargo test -p poise-engine on_price_tick_updates_target_without_faking_current_exposure -- --exact`
 Expected: FAIL，原因是 `add_instance` / `StrategyInstance` 还没有 `target_exposure`
 
-Run: `cargo test -p grid-engine on_price_tick_returns_tick_outcome_with_plan_and_events -- --exact`
+Run: `cargo test -p poise-engine on_price_tick_returns_tick_outcome_with_plan_and_events -- --exact`
 Expected: FAIL，原因是 `on_price_tick` 还没有返回可供 runtime 执行的 `TickOutcome`
 
-Run: `cargo test -p grid-storage save_and_load_roundtrip -- --exact`
+Run: `cargo test -p poise-storage save_and_load_roundtrip -- --exact`
 Expected: FAIL，原因是 snapshot 新字段尚未持久化
 
-Run: `cargo test -p grid-server get_snapshot_returns_instance_snapshot -- --exact`
+Run: `cargo test -p poise-server get_snapshot_returns_instance_snapshot -- --exact`
 Expected: FAIL，原因是 HTTP 快照里还没有目标仓位和挂单信息
 
 - [ ] **Step 3: 定义实例运行时的新状态模型**
@@ -565,19 +565,19 @@ pub fn on_price_tick(&mut self, tick: &PriceTick) -> Result<TickOutcome> {
 
 - [ ] **Step 7: 重新运行任务 2 的定向测试**
 
-Run: `cargo test -p grid-engine on_price_tick_updates_target_without_faking_current_exposure -- --exact`
+Run: `cargo test -p poise-engine on_price_tick_updates_target_without_faking_current_exposure -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-engine on_price_tick_returns_tick_outcome_with_plan_and_events -- --exact`
+Run: `cargo test -p poise-engine on_price_tick_returns_tick_outcome_with_plan_and_events -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-storage save_and_load_roundtrip -- --exact`
+Run: `cargo test -p poise-storage save_and_load_roundtrip -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-storage initialize_upgrades_existing_snapshot_table -- --exact`
+Run: `cargo test -p poise-storage initialize_upgrades_existing_snapshot_table -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-server get_snapshot_returns_instance_snapshot -- --exact`
+Run: `cargo test -p poise-server get_snapshot_returns_instance_snapshot -- --exact`
 Expected: PASS
 
 - [ ] **Step 8: 提交**
@@ -655,13 +655,13 @@ fn caps_to_zero_when_stop_loss_pct_is_breached() {
 
 - [ ] **Step 2: 跑纯函数测试，确认当前实现仍然全部 `Allow`**
 
-Run: `cargo test -p grid-core caps_target_when_max_notional_is_exceeded -- --exact`
+Run: `cargo test -p poise-core caps_target_when_max_notional_is_exceeded -- --exact`
 Expected: FAIL，原因是 `evaluate_risk` 还没消费 `max_notional`
 
-Run: `cargo test -p grid-core caps_to_zero_when_daily_loss_limit_is_breached -- --exact`
+Run: `cargo test -p poise-core caps_to_zero_when_daily_loss_limit_is_breached -- --exact`
 Expected: FAIL，原因是 `evaluate_risk` 还没消费 `daily_loss_limit`
 
-Run: `cargo test -p grid-core caps_to_zero_when_stop_loss_pct_is_breached -- --exact`
+Run: `cargo test -p poise-core caps_to_zero_when_stop_loss_pct_is_breached -- --exact`
 Expected: FAIL，原因是 `evaluate_risk` 还没消费 `stop_loss_pct`
 
 - [ ] **Step 3: 扩宽风控输入，而不是在 engine 外面偷偷裁剪**
@@ -735,10 +735,10 @@ fn reconcile_emits_risk_cap_event_when_budget_caps_target() { ... }
 
 - [ ] **Step 6: 重新运行 core + engine 的风险验证**
 
-Run: `cargo test -p grid-core risk::tests -- --nocapture`
+Run: `cargo test -p poise-core risk::tests -- --nocapture`
 Expected: PASS
 
-Run: `cargo test -p grid-engine reconciler::tests::reconcile_emits_risk_cap_event_when_budget_caps_target -- --exact`
+Run: `cargo test -p poise-engine reconciler::tests::reconcile_emits_risk_cap_event_when_budget_caps_target -- --exact`
 Expected: PASS
 
 - [ ] **Step 7: 提交**
@@ -808,13 +808,13 @@ fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
 
 - [ ] **Step 2: 运行这些测试，确认当前实现仍然只有 `NoOp`**
 
-Run: `cargo test -p grid-engine reconcile_generates_submit_order_for_delta -- --exact`
+Run: `cargo test -p poise-engine reconcile_generates_submit_order_for_delta -- --exact`
 Expected: FAIL，原因是 `ExecutionPlan` 还没生成真实下单动作
 
-Run: `cargo test -p grid-engine reconcile_does_not_resubmit_when_pending_order_already_matches_target -- --exact`
+Run: `cargo test -p poise-engine reconcile_does_not_resubmit_when_pending_order_already_matches_target -- --exact`
 Expected: FAIL，原因是当前实现还没有 pending order 匹配逻辑
 
-Run: `cargo test -p grid-engine freeze_keeps_last_in_band_target_instead_of_current_exposure -- --exact`
+Run: `cargo test -p poise-engine freeze_keeps_last_in_band_target_instead_of_current_exposure -- --exact`
 Expected: FAIL，原因是当前 `freeze` / `hold` 仍然按 `current_exposure` 冻结
 
 - [ ] **Step 3: 把交易所规则纳入实例状态**
@@ -1019,10 +1019,10 @@ fn apply_order_update_clears_matching_pending_order_on_terminal_status() { ... }
 
 - [ ] **Step 7: 重新跑 engine 的纯计划测试**
 
-Run: `cargo test -p grid-engine reconciler::tests -- --nocapture`
+Run: `cargo test -p poise-engine reconciler::tests -- --nocapture`
 Expected: PASS
 
-Run: `cargo test -p grid-engine manager::tests -- --nocapture`
+Run: `cargo test -p poise-engine manager::tests -- --nocapture`
 Expected: PASS，且新增测试覆盖 pending order 与 position sync
 
 - [ ] **Step 8: 提交**
@@ -1081,19 +1081,19 @@ async fn filled_order_updates_realized_pnl_and_trips_daily_loss_cap() { ... }
 
 - [ ] **Step 2: 运行这些集成测试，确认当前 server 还没有执行闭环**
 
-Run: `cargo test -p grid-server market_tick_submits_order_and_records_pending_order -- --exact`
+Run: `cargo test -p poise-server market_tick_submits_order_and_records_pending_order -- --exact`
 Expected: FAIL，原因是 `start_market_data_tasks` 还只做 tick → mutate，没有执行动作
 
-Run: `cargo test -p grid-server position_update_reconciles_actual_exposure_without_overwriting_target -- --exact`
+Run: `cargo test -p poise-server position_update_reconciles_actual_exposure_without_overwriting_target -- --exact`
 Expected: FAIL，原因是当前还没有 user stream / position sync 回写
 
-Run: `cargo test -p grid-server order_update_clears_pending_order_on_terminal_status -- --exact`
+Run: `cargo test -p poise-server order_update_clears_pending_order_on_terminal_status -- --exact`
 Expected: FAIL，原因是当前还没有 pending order 终态清理逻辑
 
-Run: `cargo test -p grid-server startup_sync_uses_live_position_and_open_orders_before_first_tick -- --exact`
+Run: `cargo test -p poise-server startup_sync_uses_live_position_and_open_orders_before_first_tick -- --exact`
 Expected: FAIL，原因是当前启动路径还没有把“恢复本地快照”与“实时状态覆盖”串成同一条启动链路
 
-Run: `cargo test -p grid-server filled_order_updates_realized_pnl_and_trips_daily_loss_cap -- --exact`
+Run: `cargo test -p poise-server filled_order_updates_realized_pnl_and_trips_daily_loss_cap -- --exact`
 Expected: FAIL，原因是当前 order update 还没有把 `realized_pnl_today` 串到风控
 
 - [ ] **Step 3: 新建 `server/src/runtime.rs`，把 assembly.rs 里的运行时逻辑搬出去**
@@ -1279,16 +1279,16 @@ async fn cancel_all(&self, symbol: &str) -> Result<()>;
 
 - [ ] **Step 8: 重新运行 server 闭环集成测试**
 
-Run: `cargo test -p grid-server assembly::tests -- --nocapture`
+Run: `cargo test -p poise-server assembly::tests -- --nocapture`
 Expected: PASS
 
-Run: `cargo test -p grid-server http::tests -- --nocapture`
+Run: `cargo test -p poise-server http::tests -- --nocapture`
 Expected: PASS，尤其是 pause/resume 和 snapshot 测试继续稳定
 
-Run: `cargo test -p grid-server startup_sync_uses_live_position_and_open_orders_before_first_tick -- --exact`
+Run: `cargo test -p poise-server startup_sync_uses_live_position_and_open_orders_before_first_tick -- --exact`
 Expected: PASS，并断言启动后第一笔 tick 不会对已存在挂单重复下单
 
-Run: `cargo test -p grid-server filled_order_updates_realized_pnl_and_trips_daily_loss_cap -- --exact`
+Run: `cargo test -p poise-server filled_order_updates_realized_pnl_and_trips_daily_loss_cap -- --exact`
 Expected: PASS
 
 - [ ] **Step 9: 提交**
@@ -1342,7 +1342,7 @@ InstanceSnapshot {
 
 - [ ] **Step 2: 运行 TUI 视图测试，确认当前界面还没有展示挂单和服务端目标值**
 
-Run: `cargo test -p grid-tui views::instance::tests::renders_instance_details_and_events -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_instance_details_and_events -- --exact`
 Expected: FAIL，原因是视图仍然只展示 `current exposure` 和客户端推导的 `target exposure`
 
 - [ ] **Step 3: 用服务端快照替代客户端猜测**
@@ -1379,10 +1379,10 @@ Line::from(format!(
 
 - [ ] **Step 4: 跑 TUI 定向测试**
 
-Run: `cargo test -p grid-tui views::instance::tests::renders_instance_details_and_events -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_instance_details_and_events -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-tui -- --nocapture`
+Run: `cargo test -p poise-tui -- --nocapture`
 Expected: PASS
 
 - [x] **Step 5: 跑整仓验证命令**

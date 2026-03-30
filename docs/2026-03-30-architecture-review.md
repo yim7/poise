@@ -75,7 +75,7 @@
 
 `GridReadModelSource` 直接持有 `GridRuntimeSnapshot`（engine 内部类型）。projector 深度穿透 engine 内部结构（如 `source.snapshot.executor_state.stats.max_inventory_gap_abs.0`），engine 的 `ExecutorState` 结构变化直接传导到展示层。
 
-这也是 `grid-protocol` 枚举与 `grid-core`/`grid-engine` 枚举长期 1:1 镜像的根因——当读模型就是 engine snapshot 本身时，protocol 类型不可能独立于 engine 演化。
+这也是 `poise-protocol` 枚举与 `poise-core`/`poise-engine` 枚举长期 1:1 镜像的根因——当读模型就是 engine snapshot 本身时，protocol 类型不可能独立于 engine 演化。
 
 **复杂度问题：** Information leakage — engine 内部结构变化的影响面扩散到 server 展示层，没有中间屏障。
 
@@ -113,7 +113,7 @@
 - **依赖方向正确：** core → engine → storage/binance → server，无环。
 - **测试质量高：** 每个 crate 有充分单元测试，server 含并发集成测试（`BlockingPersistence`）。
 - **per-grid 互斥锁：** `GridMutationGuards` 实现细粒度并发控制。
-- **协议边界独立：** `grid-protocol` 自持 wire contract 类型，projector 通过 exhaustive match 转换，编译期捕获漏改。
+- **协议边界独立：** `poise-protocol` 自持 wire contract 类型，projector 通过 exhaustive match 转换，编译期捕获漏改。
 
 ---
 

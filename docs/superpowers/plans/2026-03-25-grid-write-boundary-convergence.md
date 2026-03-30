@@ -78,8 +78,8 @@ async fn mark_effect_failed_updates_attempt_count_and_last_error() { /* ... */ }
 Run:
 
 ```bash
-cargo test -p grid-storage sqlite::tests::save_transition_persists_snapshot_events_and_effects_atomically
-cargo test -p grid-storage sqlite::tests::mark_effect_failed_updates_attempt_count_and_last_error
+cargo test -p poise-storage sqlite::tests::save_transition_persists_snapshot_events_and_effects_atomically
+cargo test -p poise-storage sqlite::tests::mark_effect_failed_updates_attempt_count_and_last_error
 ```
 
 Expected: 因为当前没有 effect outbox 接口和表结构而失败。
@@ -106,10 +106,10 @@ Expected: 因为当前没有 effect outbox 接口和表结构而失败。
 Run:
 
 ```bash
-cargo test -p grid-storage
+cargo test -p poise-storage
 ```
 
-Expected: `grid-storage` 全绿。
+Expected: `poise-storage` 全绿。
 
 - [x] **Step 5: 提交**
 
@@ -157,8 +157,8 @@ async fn mutate_grid_rolls_back_when_effect_outbox_persist_fails() { /* ... */ }
 Run:
 
 ```bash
-cargo test -p grid-server application::tests::mutate_grid_persists_effects_with_snapshot_and_events
-cargo test -p grid-server application::tests::mutate_grid_rolls_back_when_effect_outbox_persist_fails
+cargo test -p poise-server application::tests::mutate_grid_persists_effects_with_snapshot_and_events
+cargo test -p poise-server application::tests::mutate_grid_rolls_back_when_effect_outbox_persist_fails
 ```
 
 Expected: 当前 `application` 没有提交 effect outbox，测试失败。
@@ -180,8 +180,8 @@ Expected: 当前 `application` 没有提交 effect outbox，测试失败。
 Run:
 
 ```bash
-cargo test -p grid-server application::tests::
-cargo test -p grid-server runtime::tests::market_tick_submits_order_and_records_pending_order
+cargo test -p poise-server application::tests::
+cargo test -p poise-server runtime::tests::market_tick_submits_order_and_records_pending_order
 ```
 
 Expected:
@@ -232,9 +232,9 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() { /* ... */ }
 Run:
 
 ```bash
-cargo test -p grid-server runtime::tests::effect_worker_executes_persisted_submit_order_and_marks_success
-cargo test -p grid-server runtime::tests::effect_worker_restores_pending_effect_after_restart
-cargo test -p grid-server runtime::tests::failed_effect_does_not_roll_back_committed_snapshot
+cargo test -p poise-server runtime::tests::effect_worker_executes_persisted_submit_order_and_marks_success
+cargo test -p poise-server runtime::tests::effect_worker_restores_pending_effect_after_restart
+cargo test -p poise-server runtime::tests::failed_effect_does_not_roll_back_committed_snapshot
 ```
 
 Expected: 当前没有 effect worker，测试失败。
@@ -259,10 +259,10 @@ Expected: 当前没有 effect worker，测试失败。
 Run:
 
 ```bash
-cargo test -p grid-server
+cargo test -p poise-server
 ```
 
-Expected: `grid-server` 全绿。
+Expected: `poise-server` 全绿。
 
 - [x] **Step 5: 跑工作区全量验收**
 
@@ -306,12 +306,12 @@ git commit -m "refactor: execute persisted grid effects from write outbox"
 - [x] `SubmitOrder` 先把 `pending_order` 持久化成 `Submitting`，收到回执并写回状态后才标记 effect 成功
 - [x] receipt 写回失败时，把 submit effect 标成 `Failed`，并保留 `Submitting` pending order 作为恢复锚点
 - [x] 在没有 lease / timeout 恢复策略前，worker 不再把 effect 提前标成 `Executing`
-- [x] 定向验收通过：`cargo test -p grid-storage sqlite::tests::list_pending_effects_only_returns_batch_head_until_prior_effect_succeeds`
-- [x] 定向验收通过：`cargo test -p grid-server runtime::tests::effect_worker_leaves_submitting_pending_order_when_receipt_persistence_fails`
-- [x] 定向验收通过：`cargo test -p grid-server runtime::tests::effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_same_batch`
-- [x] 定向验收通过：`cargo test -p grid-server runtime::tests::effect_worker_keeps_effect_pending_while_submit_is_inflight`
-- [x] 全量验收通过：`cargo test -p grid-storage`
-- [x] 全量验收通过：`cargo test -p grid-server`
+- [x] 定向验收通过：`cargo test -p poise-storage sqlite::tests::list_pending_effects_only_returns_batch_head_until_prior_effect_succeeds`
+- [x] 定向验收通过：`cargo test -p poise-server runtime::tests::effect_worker_leaves_submitting_pending_order_when_receipt_persistence_fails`
+- [x] 定向验收通过：`cargo test -p poise-server runtime::tests::effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_same_batch`
+- [x] 定向验收通过：`cargo test -p poise-server runtime::tests::effect_worker_keeps_effect_pending_while_submit_is_inflight`
+- [x] 全量验收通过：`cargo test -p poise-storage`
+- [x] 全量验收通过：`cargo test -p poise-server`
 - [x] 全量验收通过：`cargo test`
 
 ### Review Follow-up: 重启恢复与旧库兼容加固
@@ -328,10 +328,10 @@ git commit -m "refactor: execute persisted grid effects from write outbox"
 - [x] worker 在 submit 前检查当前快照；若同一 `client_order_id` 已被恢复，则不再重复发单
 - [x] worker 在 `Submitting` 锚点仍待交易所回补时保持 effect `Pending`，避免不安全重放
 - [x] submit 失败且清理 `pending_order` 再失败时，effect 仍会被标记为 `Failed`
-- [x] 定向验收通过：`cargo test -p grid-storage schema::tests::initialize_rejects_legacy_grid_effects_table_without_batch_sequence -- --exact`
-- [x] 定向验收通过：`cargo test -p grid-server runtime::tests::startup_sync_preserves_submitting_pending_order_until_exchange_catches_up -- --exact`
-- [x] 定向验收通过：`cargo test -p grid-server runtime::tests::effect_worker_does_not_resubmit_when_matching_pending_order_is_already_restored -- --exact`
-- [x] 定向验收通过：`cargo test -p grid-server runtime::tests::effect_worker_marks_effect_failed_even_if_submit_cleanup_persistence_fails -- --exact`
-- [x] 全量验收通过：`cargo test -p grid-storage`
-- [x] 全量验收通过：`cargo test -p grid-server`
+- [x] 定向验收通过：`cargo test -p poise-storage schema::tests::initialize_rejects_legacy_grid_effects_table_without_batch_sequence -- --exact`
+- [x] 定向验收通过：`cargo test -p poise-server runtime::tests::startup_sync_preserves_submitting_pending_order_until_exchange_catches_up -- --exact`
+- [x] 定向验收通过：`cargo test -p poise-server runtime::tests::effect_worker_does_not_resubmit_when_matching_pending_order_is_already_restored -- --exact`
+- [x] 定向验收通过：`cargo test -p poise-server runtime::tests::effect_worker_marks_effect_failed_even_if_submit_cleanup_persistence_fails -- --exact`
+- [x] 全量验收通过：`cargo test -p poise-storage`
+- [x] 全量验收通过：`cargo test -p poise-server`
 - [x] 全量验收通过：`cargo test`

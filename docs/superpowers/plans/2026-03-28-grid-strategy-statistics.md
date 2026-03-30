@@ -4,7 +4,7 @@
 
 **Goal:** 为 grid detail 补齐稳定的收益统计链路，第一版在详情页显示 `Total PnL` 和 `Realized PnL`。
 
-**Architecture:** 先在 `engine` / `storage` 里新增并持久化“累计已实现收益”运行时事实，再由 `server/projector` 把该事实解释为 `statistics` 读模型，最后由 `grid-tui` 把它渲染成独立 `Statistics` 区块。展示样式先按视觉方案 C 落地，但结构上保留随时切回列表式方案 B 的空间。
+**Architecture:** 先在 `engine` / `storage` 里新增并持久化“累计已实现收益”运行时事实，再由 `server/projector` 把该事实解释为 `statistics` 读模型，最后由 `poise-tui` 把它渲染成独立 `Statistics` 区块。展示样式先按视觉方案 C 落地，但结构上保留随时切回列表式方案 B 的空间。
 
 **Tech Stack:** Rust, serde, rusqlite, axum, ratatui, cargo test
 
@@ -87,10 +87,10 @@ assert!((loaded.risk.realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
 
 - [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p grid-engine observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes -- --exact`
+Run: `cargo test -p poise-engine observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes -- --exact`
 Expected: FAIL，原因是 `RiskState` 里还没有 `realized_pnl_cumulative`
 
-Run: `cargo test -p grid-storage save_and_load_grid_runtime_snapshot_roundtrip -- --exact`
+Run: `cargo test -p poise-storage save_and_load_grid_runtime_snapshot_roundtrip -- --exact`
 Expected: FAIL，原因是 snapshot / sqlite 还没有累计收益字段
 
 - [x] **Step 3: 最小实现累计收益字段**
@@ -133,18 +133,18 @@ SQLite 插入和读取都要带上该列。
 
 - [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p grid-engine observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes -- --exact`
+Run: `cargo test -p poise-engine observe_order_keeps_cumulative_realized_pnl_when_utc_day_changes -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-storage save_and_load_grid_runtime_snapshot_roundtrip -- --exact`
+Run: `cargo test -p poise-storage save_and_load_grid_runtime_snapshot_roundtrip -- --exact`
 Expected: PASS
 
 - [x] **Step 5: 运行本 task 的回归测试**
 
-Run: `cargo test -p grid-engine`
+Run: `cargo test -p poise-engine`
 Expected: PASS
 
-Run: `cargo test -p grid-storage`
+Run: `cargo test -p poise-storage`
 Expected: PASS
 
 - [x] **Step 6: 提交本 task**
@@ -207,10 +207,10 @@ fixture 里的 `statistics` 先写成：
 
 - [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p grid-server project_detail_projects_statistics_from_risk_state -- --exact`
+Run: `cargo test -p poise-server project_detail_projects_statistics_from_risk_state -- --exact`
 Expected: FAIL，原因是 `GridDetailView` 里还没有 `statistics`
 
-Run: `cargo test -p grid-tui deserializes_grid_detail_view -- --exact`
+Run: `cargo test -p poise-tui deserializes_grid_detail_view -- --exact`
 Expected: FAIL，原因是 fixture 新增 `statistics` 后协议结构还没接上
 
 - [x] **Step 3: 最小实现 protocol 和 projector**
@@ -260,30 +260,30 @@ statistics: GridStatisticsView {
 
 - [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p grid-server project_detail_projects_statistics_from_risk_state -- --exact`
+Run: `cargo test -p poise-server project_detail_projects_statistics_from_risk_state -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-server get_grid_detail_returns_projected_detail -- --exact`
+Run: `cargo test -p poise-server get_grid_detail_returns_projected_detail -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-tui deserializes_grid_detail_view -- --exact`
+Run: `cargo test -p poise-tui deserializes_grid_detail_view -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-tui deserializes_grid_stream_detail_changed -- --exact`
+Run: `cargo test -p poise-tui deserializes_grid_stream_detail_changed -- --exact`
 Expected: PASS
 
-Run: `cargo test -p grid-tui get_grid_detail_decodes_projected_detail -- --exact`
+Run: `cargo test -p poise-tui get_grid_detail_decodes_projected_detail -- --exact`
 Expected: PASS
 
 - [x] **Step 5: 运行本 task 的回归测试**
 
-Run: `cargo test -p grid-server projector::tests -- --nocapture`
+Run: `cargo test -p poise-server projector::tests -- --nocapture`
 Expected: PASS
 
-Run: `cargo test -p grid-tui protocol::tests -- --nocapture`
+Run: `cargo test -p poise-tui protocol::tests -- --nocapture`
 Expected: PASS
 
-Run: `cargo test -p grid-tui api_client::tests -- --nocapture`
+Run: `cargo test -p poise-tui api_client::tests -- --nocapture`
 Expected: PASS
 
 - [x] **Step 6: 提交本 task**
@@ -319,7 +319,7 @@ assert!(text.contains("+980.10"));
 
 - [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p grid-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact`
 Expected: FAIL，原因是当前视图还没有 `Statistics` 区块
 
 - [x] **Step 3: 最小实现双列强调样式**
@@ -355,12 +355,12 @@ fn format_pnl(value: f64) -> String {
 
 - [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p grid-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact`
 Expected: PASS
 
 - [x] **Step 5: 运行最终回归测试**
 
-Run: `cargo test -p grid-tui`
+Run: `cargo test -p poise-tui`
 Expected: PASS
 
 Run: `cargo test`
@@ -396,7 +396,7 @@ Commit SHA: `2d9e7cd31eba84e5464179b6c2456ee36016c1d2`
 
 - [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p grid-tui without_statistics -- --nocapture`
+Run: `cargo test -p poise-tui without_statistics -- --nocapture`
 Expected: FAIL，原因是 `GridDetailView.statistics` 还是必填字段
 
 - [x] **Step 3: 最小实现协议默认值**
@@ -408,7 +408,7 @@ Expected: FAIL，原因是 `GridDetailView.statistics` 还是必填字段
 
 - [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p grid-tui without_statistics -- --nocapture`
+Run: `cargo test -p poise-tui without_statistics -- --nocapture`
 Expected: PASS
 
 - [x] **Step 5: 运行最终回归测试**

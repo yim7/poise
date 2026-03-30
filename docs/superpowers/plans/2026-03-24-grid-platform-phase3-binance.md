@@ -1,4 +1,4 @@
-# 网格平台第三阶段实现计划：grid-binance
+# 网格平台第三阶段实现计划：poise-binance
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,11 +6,11 @@
 
 **Goal:** 实现 Binance USDⓈ-M Futures 交易所适配器，完成 `ExchangePort` 和 `MarketDataPort` trait 的具体实现。
 
-**Architecture:** 六边形架构适配器层。grid-binance 实现 grid-engine 中定义的两个端口 trait，封装 Binance 特有的 REST/WS 协议、签名、限速和重连逻辑。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
+**Architecture:** 六边形架构适配器层。poise-binance 实现 poise-engine 中定义的两个端口 trait，封装 Binance 特有的 REST/WS 协议、签名、限速和重连逻辑。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
 
 **Tech Stack:** Rust, reqwest (REST), tokio-tungstenite (WebSocket), hmac-sha256 (签名)
 
-**前置依赖：** 第一阶段（grid-core + grid-engine）已完成。
+**前置依赖：** 第一阶段（poise-core + poise-engine）已完成。
 
 ---
 
@@ -35,7 +35,7 @@ exchanges/binance/
 
 ---
 
-### Task 1: 初始化 grid-binance crate
+### Task 1: 初始化 poise-binance crate
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -61,13 +61,13 @@ url = "2"
 
 ```toml
 [package]
-name = "grid-binance"
+name = "poise-binance"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-grid-engine = { path = "../../engine" }
-grid-core = { path = "../../core" }
+poise-engine = { path = "../../engine" }
+poise-core = { path = "../../core" }
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
 tokio.workspace = true
@@ -88,12 +88,12 @@ tracing = "0.1"
 
 - [x] **Step 4: 验证编译**
 
-Run: `cargo check -p grid-binance`
+Run: `cargo check -p poise-binance`
 
 - [x] **Step 5: 提交**
 
 ```bash
-git add -A && git commit -m "feat: initialize grid-binance crate"
+git add -A && git commit -m "feat: initialize poise-binance crate"
 ```
 
 ---
@@ -113,7 +113,7 @@ git add -A && git commit -m "feat: initialize grid-binance crate"
 
 - [x] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-binance -- types`
+Run: `cargo test -p poise-binance -- types`
 
 - [x] **Step 3: 实现类型定义和转换**
 
@@ -172,7 +172,7 @@ git add -A && git commit -m "feat(binance): add REST API client with HMAC signin
 
 - [x] **Step 2: 验证编译通过**
 
-Run: `cargo check -p grid-binance`
+Run: `cargo check -p poise-binance`
 
 - [x] **Step 3: 提交**
 
@@ -216,7 +216,7 @@ impl MarketDataPort for BinanceAdapter { ... }
 
 - [x] **Step 5: 验证全部测试通过**
 
-Run: `cargo test -p grid-binance`
+Run: `cargo test -p poise-binance`
 
 - [x] **Step 6: 提交**
 
@@ -228,7 +228,7 @@ git add -A && git commit -m "feat(binance): implement ExchangePort and MarketDat
 
 ## 验收标准
 
-1. `cargo test -p grid-binance` 全部通过
+1. `cargo test -p poise-binance` 全部通过
 2. `BinanceAdapter` 实现 `ExchangePort` 和 `MarketDataPort`
 3. 签名计算有独立测试覆盖
 4. Binance JSON ↔ engine 类型转换有测试覆盖

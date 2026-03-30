@@ -2,11 +2,11 @@
 
 `Poise` 是一个面向 Binance USDⓈ-M Futures 的探索型策略运行项目。当前主线把策略定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
 
-当前工作区仍保留 `grid-*` crate、二进制名，以及 `grid_id` 等内部术语；本次只统一产品名与对外文案。当前主线实现已经统一到下面这套结构：
+当前主线实现已经统一到下面这套结构：
 
-- `grid-server` 负责运行态、控制面、持久化和交易所接入
-- `grid-tui` 负责本地值守、联调和操作入口
-- `grid-protocol` 负责 `server` 与 `tui` 共享 DTO
+- `poise-server` 负责运行态、控制面、持久化和交易所接入
+- `poise-tui` 负责本地值守、联调和操作入口
+- `poise-protocol` 负责 `server` 与 `tui` 共享 DTO
 
 项目仍在持续调整设计，旧方案不会保留兼容层。文档以本文件、[`docs/protocol-contract.md`](docs/protocol-contract.md) 和当前架构 spec / plan 为准。
 
@@ -22,10 +22,10 @@
 
 ## 当前约束
 
-- 同一交易所内，同一 `symbol` 只允许一个网格
-- `grid_id` 是显式配置的稳定标识，不由 `symbol` 派生
-- HTTP / WebSocket 以 `grid_id` 作为一等标识
-- SQLite 默认路径是 `.data/<environment>/grid-server.sqlite`
+- 同一交易所内，同一 `symbol` 只允许一个轨道
+- `track_id` 是显式配置的稳定标识，不由 `symbol` 派生
+- HTTP / WebSocket 以 `track_id` 作为一等标识
+- SQLite 默认路径是 `.data/<environment>/poise-server.sqlite`
 - Binance 适配层当前用 `mark price` 作为策略 `reference_price`
 
 ## 快速开始
@@ -49,8 +49,8 @@ api_secret = ""
 rest_base_url = "https://demo-fapi.binance.com"
 ws_base_url = "wss://fstream.binancefuture.com"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 65500.0
@@ -62,7 +62,7 @@ notional_per_unit = 375.0
 
 补充说明：
 
-- 可以继续追加 `[[grids]]`，每个网格都要配置唯一的 `grid_id`
+- 可以继续追加 `[[tracks]]`，每个轨道都要配置唯一的 `track_id`
 - 当前同一交易所内每个 `symbol` 只能出现一次
 - `environment` 只决定数据目录和环境名，不自动切换交易所地址
 - 真实启动时必须显式配置 `exchange.rest_base_url`、`exchange.ws_base_url`、`exchange.api_key`、`exchange.api_secret`
@@ -72,10 +72,10 @@ notional_per_unit = 375.0
 
 ### 2. 启动服务端
 
-`Poise` 服务端当前仍通过 `grid-server` 二进制启动。
+`Poise` 服务端通过 `poise-server` 二进制启动。
 
 ```bash
-cargo run -p grid-server -- --config configs/binance-testnet.toml
+cargo run -p poise-server -- --config configs/binance-testnet.toml
 ```
 
 服务端启动后会：
@@ -87,10 +87,10 @@ cargo run -p grid-server -- --config configs/binance-testnet.toml
 
 ### 3. 启动 TUI
 
-`Poise` 终端界面当前仍通过 `grid-tui` 二进制启动。
+`Poise` 终端界面通过 `poise-tui` 二进制启动。
 
 ```bash
-cargo run -p grid-tui
+cargo run -p poise-tui
 ```
 
 默认连接：
@@ -100,46 +100,46 @@ cargo run -p grid-tui
 
 如果要改地址，可以在启动前设置：
 
-当前环境变量名仍保持兼容，继续使用 `GRID_PLATFORM_BASE_URL` 和 `GRID_PLATFORM_WS_URL`。
+环境变量使用 `POISE_BASE_URL` 和 `POISE_WS_URL`。
 
 ```bash
-export GRID_PLATFORM_BASE_URL=http://127.0.0.1:9000
-export GRID_PLATFORM_WS_URL=ws://127.0.0.1:9000/ws
-cargo run -p grid-tui
+export POISE_BASE_URL=http://127.0.0.1:9000
+export POISE_WS_URL=ws://127.0.0.1:9000/ws
+cargo run -p poise-tui
 ```
 
-`grid-tui` 会先请求 `/grids`，再加载当前网格详情，并订阅 `/ws`。
+`poise-tui` 会先请求 `/tracks`，再加载当前轨道详情，并订阅 `/ws`。
 
 ### 4. 用 HTTP 快速确认
 
 ```bash
-curl http://127.0.0.1:8000/grids
-curl http://127.0.0.1:8000/grids/btc-core
+curl http://127.0.0.1:8000/tracks
+curl http://127.0.0.1:8000/tracks/btc-core
 ```
 
 ## 当前协议
 
 当前对外接口只有 4 个入口：
 
-- `GET /grids`
-- `GET /grids/:id`
-- `POST /grids/:id/commands`
+- `GET /tracks`
+- `GET /tracks/:id`
+- `POST /tracks/:id/commands`
 - `GET /ws`
 
 字段和错误语义见 [`docs/protocol-contract.md`](docs/protocol-contract.md)。
 
 ## 数据
 
-- 服务端按 `environment` 使用单个 SQLite 文件保存全部网格状态
+- 服务端按 `environment` 使用单个 SQLite 文件保存全部轨道状态
 
 ## 开发与验证
 
 常用命令：
 
 ```bash
-cargo test -p grid-storage
-cargo test -p grid-server
-cargo test -p grid-tui
+cargo test -p poise-storage
+cargo test -p poise-server
+cargo test -p poise-tui
 cargo test
 ```
 

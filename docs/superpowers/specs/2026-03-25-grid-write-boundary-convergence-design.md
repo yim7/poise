@@ -154,7 +154,7 @@
 ```rust
 pub struct PersistedGridEffect {
     pub effect_id: String,
-    pub grid_id: GridId,
+    pub track_id: GridId,
     pub effect: GridEffect,
     pub status: EffectStatus,
     pub created_at: DateTime<Utc>,
@@ -192,11 +192,11 @@ pub struct GridWriteBatch {
 pub trait GridWriteRepositoryPort: Send + Sync {
     async fn commit_grid_write(
         &self,
-        grid_id: &GridId,
+        track_id: &GridId,
         batch: &GridWriteBatch,
     ) -> Result<CommittedGridWrite>;
 
-    async fn load_grid_state(&self, grid_id: &GridId) -> Result<Option<GridRuntimeSnapshot>>;
+    async fn load_grid_state(&self, track_id: &GridId) -> Result<Option<GridRuntimeSnapshot>>;
 
     async fn list_pending_effects(&self) -> Result<Vec<PersistedGridEffect>>;
     async fn mark_effect_executing(&self, effect_id: &str) -> Result<()>;
@@ -264,7 +264,7 @@ pub trait GridWriteRepositoryPort: Send + Sync {
 
 ## 8. 模块所有权
 
-### 8.1 `grid-engine`
+### 8.1 `poise-engine`
 
 拥有：
 
@@ -279,7 +279,7 @@ pub trait GridWriteRepositoryPort: Send + Sync {
 - effect 执行
 - 对外协议 DTO
 
-### 8.2 `grid-storage`
+### 8.2 `poise-storage`
 
 拥有：
 
@@ -291,7 +291,7 @@ pub trait GridWriteRepositoryPort: Send + Sync {
 - effect 执行策略
 - 协议投影
 
-### 8.3 `grid-server`
+### 8.3 `poise-server`
 
 写侧服务拥有：
 
@@ -317,7 +317,7 @@ SQLite 新增 `grid_effects` 表。
 建议字段：
 
 - `effect_id`
-- `grid_id`
+- `track_id`
 - `effect_json`
 - `status`
 - `attempt_count`

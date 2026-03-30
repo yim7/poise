@@ -74,7 +74,7 @@
 做法：
 
 - 把 `GridPlatformService` 拆成几个文件
-- `GET /grids/:id/snapshot` 继续暴露 `GridSnapshot`
+- `GET /tracks/:id/snapshot` 继续暴露 `GridSnapshot`
 - WebSocket 继续广播 `DomainEvent`
 
 优点：
@@ -154,7 +154,7 @@
 
 ## 6. 模块所有权
 
-### 6.1 `grid-engine`
+### 6.1 `poise-engine`
 
 拥有：
 
@@ -169,7 +169,7 @@
 - TUI 读模型
 - WebSocket 推送事件形状
 
-### 6.2 `grid-storage`
+### 6.2 `poise-storage`
 
 拥有：
 
@@ -182,7 +182,7 @@
 - 协议投影逻辑
 - TUI 展示语义
 
-### 6.3 `grid-server/write`
+### 6.3 `poise-server/write`
 
 建议引入 `GridWriteService`。
 
@@ -199,7 +199,7 @@
 - 协议 DTO 组装
 - WebSocket 对外消息格式
 
-### 6.4 `grid-server/query`
+### 6.4 `poise-server/query`
 
 建议引入 `GridQueryService`。
 
@@ -216,15 +216,15 @@
 #[async_trait]
 pub trait GridReadRepositoryPort: Send + Sync {
     async fn list_grid_snapshots(&self) -> Result<Vec<StoredGridSnapshot>>;
-    async fn load_grid_snapshot(&self, grid_id: &GridId) -> Result<Option<StoredGridSnapshot>>;
+    async fn load_grid_snapshot(&self, track_id: &GridId) -> Result<Option<StoredGridSnapshot>>;
     async fn list_recent_grid_events(
         &self,
-        grid_id: &GridId,
+        track_id: &GridId,
         limit: usize,
     ) -> Result<Vec<StoredDomainEvent>>;
     async fn list_recent_grid_effects(
         &self,
-        grid_id: &GridId,
+        track_id: &GridId,
         limit: usize,
     ) -> Result<Vec<PersistedGridEffect>>;
 }
@@ -238,7 +238,7 @@ pub trait GridReadRepositoryPort: Send + Sync {
 
 其中 `StoredGridSnapshot` 只是在 query 边界携带 `snapshot + updated_at` 的内部记录，不是 public DTO。
 
-### 6.5 `grid-server/projector`
+### 6.5 `poise-server/projector`
 
 建议引入 `GridProjector`。
 
@@ -277,8 +277,8 @@ pub trait GridReadRepositoryPort: Send + Sync {
 
 ```rust
 pub enum GridInternalNotification {
-    GridWriteCommitted { grid_id: GridId },
-    GridEffectStateChanged { grid_id: GridId },
+    GridWriteCommitted { track_id: GridId },
+    GridEffectStateChanged { track_id: GridId },
 }
 ```
 
@@ -356,21 +356,21 @@ pub trait GridProjector {
 
 保留两个查询入口：
 
-- `GET /grids`
-- `GET /grids/:id`
+- `GET /tracks`
+- `GET /tracks/:id`
 
 其中：
 
-- `GET /grids` 返回 `GridListResponse`
-- `GET /grids/:id` 返回 `GridDetailView`
+- `GET /tracks` 返回 `GridListResponse`
+- `GET /tracks/:id` 返回 `GridDetailView`
 
-原有 `GET /grids/:id/snapshot` 删除。
+原有 `GET /tracks/:id/snapshot` 删除。
 
 ### 9.2 HTTP 写入
 
 保留：
 
-- `POST /grids/:id/commands`
+- `POST /tracks/:id/commands`
 
 但命令请求体从字符串改成 typed command：
 
@@ -391,7 +391,7 @@ pub enum GridCommandType {
 
 ```rust
 pub struct GridCommandAccepted {
-    pub grid_id: String,
+    pub track_id: String,
     pub command: GridCommandType,
     pub accepted: bool,
 }
@@ -413,7 +413,7 @@ WebSocket 不再暴露 `DomainEvent`，改成统一流式 envelope：
 
 ```rust
 pub struct GridStreamEvent {
-    pub grid_id: String,
+    pub track_id: String,
     pub payload: GridStreamPayload,
 }
 
@@ -561,9 +561,9 @@ pub struct GridActivityItemView {
 
 覆盖：
 
-- `GET /grids` 返回 `GridListResponse`
-- `GET /grids/:id` 返回 `GridDetailView`
-- `POST /grids/:id/commands` 接受 typed command
+- `GET /tracks` 返回 `GridListResponse`
+- `GET /tracks/:id` 返回 `GridDetailView`
+- `POST /tracks/:id/commands` 接受 typed command
 - grid 不存在、命令无效、命令不可执行的错误形状
 
 ### 12.3 WebSocket contract 验收测试
@@ -602,8 +602,8 @@ pub struct GridActivityItemView {
    - 让 query 返回内部读源
    - 让 projector 负责 public DTO
 4. 重写 HTTP
-   - 删除 `/grids/:id/snapshot`
-   - 改成 `/grids/:id`
+   - 删除 `/tracks/:id/snapshot`
+   - 改成 `/tracks/:id`
    - `POST /commands` 改 typed command
 5. 重写 WebSocket
    - 从领域事件广播改成读模型更新推送
@@ -625,7 +625,7 @@ pub struct GridActivityItemView {
 
 - `GridPlatformService` 被拆解，不再同时承担写侧、查询和协议映射
 - 外部协议不再暴露 `GridSnapshot`、原始 `PendingOrder`、原始 `DomainEvent`
-- HTTP 查询改为 `GET /grids` 和 `GET /grids/:id`
+- HTTP 查询改为 `GET /tracks` 和 `GET /tracks/:id`
 - HTTP 命令改为 typed command
 - WebSocket 推送改为读模型更新，而不是领域事件广播
 - 查询侧通过独立只读仓储接口组织 projector 输入，不重新耦合写侧事务接口

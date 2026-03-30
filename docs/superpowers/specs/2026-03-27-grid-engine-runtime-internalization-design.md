@@ -207,7 +207,7 @@ pub fn sync_exchange_state(
 
 ## 5. 模块边界调整
 
-### 5.1 `grid-engine`
+### 5.1 `poise-engine`
 
 新增拥有：
 
@@ -221,7 +221,7 @@ pub fn sync_exchange_state(
 - HTTP / WebSocket DTO
 - 交易所 I/O
 
-### 5.2 `grid-server`
+### 5.2 `poise-server`
 
 `server/runtime.rs` 只保留：
 
@@ -319,7 +319,7 @@ pub async fn sync_exchange_state(
 
 ## 8. 测试策略
 
-### 8.1 `grid-engine`
+### 8.1 `poise-engine`
 
 新增并先写失败测试，覆盖：
 
@@ -334,7 +334,7 @@ pub async fn sync_exchange_state(
 - `OrderObservation::Canceled/Rejected/Expired` 在已有参考价时直接产出重算 effect
 - `OrderObservation::Filled/PartiallyFilled` 不提前重算
 
-### 8.2 `grid-server`
+### 8.2 `poise-server`
 
 新增并先写失败测试，覆盖：
 

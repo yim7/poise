@@ -23,7 +23,7 @@
 
 - [x] **Step 2: 运行单测确认红灯**
 
-Run: `cargo test -p grid-server parses_binance_testnet_example_config -- --exact`
+Run: `cargo test -p poise-server parses_binance_testnet_example_config -- --exact`
 Expected: FAIL，原因是示例配置当前带宽不是 `2000.0`
 
 - [x] **Step 3: 修改示例配置到当前价格附近的总带宽 `2000.0`**
@@ -36,12 +36,12 @@ Expected: FAIL，原因是示例配置当前带宽不是 `2000.0`
 
 - [x] **Step 5: 重新运行单测确认转绿**
 
-Run: `cargo test -p grid-server parses_binance_testnet_example_config -- --exact`
+Run: `cargo test -p poise-server parses_binance_testnet_example_config -- --exact`
 Expected: PASS
 
 - [x] **Step 6: 运行相关回归验证**
 
-Run: `cargo test -p grid-server`
+Run: `cargo test -p poise-server`
 
 - [x] **Step 7: 提交代码并回写 commit SHA**
 
@@ -54,8 +54,8 @@ git commit -m "chore: narrow binance testnet grid bandwidth"
 **Task 记录：**
 - 状态：已完成
 - 验收：
-  - `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
-  - `cargo test -p grid-server`
+  - `cargo test -p poise-server config::tests::parses_binance_testnet_example_config -- --exact`
+  - `cargo test -p poise-server`
   - `cargo fmt --all --check` 仍提示与本次任务无关的 `server/src/projector.rs` 既有格式差异
 - 实现 commit SHA：`babcc9d`
 
@@ -72,7 +72,7 @@ git commit -m "chore: narrow binance testnet grid bandwidth"
 
 - [x] **Step 2: 运行单测确认红灯**
 
-Run: `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
+Run: `cargo test -p poise-server config::tests::parses_binance_testnet_example_config -- --exact`
 Expected: FAIL，原因是当前等效每格宽度还是 `250 USD`
 
 - [x] **Step 3: 修改示例配置为线性模式下等效每格 `100 USD`**
@@ -85,12 +85,12 @@ Expected: FAIL，原因是当前等效每格宽度还是 `250 USD`
 
 - [x] **Step 5: 重新运行单测确认转绿**
 
-Run: `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
+Run: `cargo test -p poise-server config::tests::parses_binance_testnet_example_config -- --exact`
 Expected: PASS
 
 - [x] **Step 6: 运行相关回归验证**
 
-Run: `cargo test -p grid-server`
+Run: `cargo test -p poise-server`
 
 - [x] **Step 7: 提交代码并回写 commit SHA**
 
@@ -103,6 +103,6 @@ git commit -m "chore: tighten equivalent grid step to 100 usd"
 **Task 记录：**
 - 状态：已完成
 - 验收：
-  - `cargo test -p grid-server config::tests::parses_binance_testnet_example_config -- --exact`
-  - `cargo test -p grid-server`
+  - `cargo test -p poise-server config::tests::parses_binance_testnet_example_config -- --exact`
+  - `cargo test -p poise-server`
 - 实现 commit SHA：`285210f`

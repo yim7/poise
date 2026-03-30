@@ -30,45 +30,45 @@
 
 ```
 poise/
-├── core/           # grid-core (library)
-├── engine/         # grid-engine (library)
-├── protocol/       # grid-protocol (library)
+├── core/           # poise-core (library)
+├── engine/         # poise-engine (library)
+├── protocol/       # poise-protocol (library)
 ├── exchanges/
-│   └── binance/    # grid-binance (library)
-├── storage/        # grid-storage (library)
-├── server/         # grid-server (binary)
-└── tui/            # grid-tui (binary)
+│   └── binance/    # poise-binance (library)
+├── storage/        # poise-storage (library)
+├── server/         # poise-server (binary)
+└── tui/            # poise-tui (binary)
 ```
 
 依赖方向：
 
 ```
-grid-server (bin)
-  ├── grid-engine    → grid-core
-  ├── grid-protocol
-  ├── grid-binance   → grid-engine (实现端口 trait)
-  └── grid-storage   → grid-engine (实现端口 trait)
+poise-server (bin)
+  ├── poise-engine    → poise-core
+  ├── poise-protocol
+  ├── poise-binance   → poise-engine (实现端口 trait)
+  └── poise-storage   → poise-engine (实现端口 trait)
 
-grid-tui (bin)
-  ├── grid-protocol
-  └── 通过 HTTP/WS 连接 grid-server，不依赖 engine 或 core
+poise-tui (bin)
+  ├── poise-protocol
+  └── 通过 HTTP/WS 连接 poise-server，不依赖 engine 或 core
 ```
 
 | Crate | 职责 | 不做什么 |
 |---|---|---|
-| `grid-core` | 策略模型、风控规则、领域类型、领域事件。纯函数，无 IO | 不知道交易所、数据库、网络的存在 |
-| `grid-engine` | 引擎编排：实例生命周期、执行规划、风控拦截。定义端口 trait | 不实现任何具体适配器 |
-| `grid-binance` | Binance REST/WS 适配器 | 不包含策略逻辑 |
-| `grid-storage` | SQLite 持久化适配器 | 不包含业务规则 |
-| `grid-server` | HTTP/WS 服务 + 组件组装 + 启动入口 | 不包含策略逻辑 |
-| `grid-protocol` | 共享 HTTP / WS DTO，与服务端内部类型解耦 | 不依赖 engine / server 实现细节 |
-| `grid-tui` | 终端 UI，纯客户端 | 不直接依赖 engine |
+| `poise-core` | 策略模型、风控规则、领域类型、领域事件。纯函数，无 IO | 不知道交易所、数据库、网络的存在 |
+| `poise-engine` | 引擎编排：实例生命周期、执行规划、风控拦截。定义端口 trait | 不实现任何具体适配器 |
+| `poise-binance` | Binance REST/WS 适配器 | 不包含策略逻辑 |
+| `poise-storage` | SQLite 持久化适配器 | 不包含业务规则 |
+| `poise-server` | HTTP/WS 服务 + 组件组装 + 启动入口 | 不包含策略逻辑 |
+| `poise-protocol` | 共享 HTTP / WS DTO，与服务端内部类型解耦 | 不依赖 engine / server 实现细节 |
+| `poise-tui` | 终端 UI，纯客户端 | 不直接依赖 engine |
 
-`grid-core` 的 `Cargo.toml` 只允许 `serde`，不允许 `tokio`/`async`/`reqwest` 等 IO 依赖。
+`poise-core` 的 `Cargo.toml` 只允许 `serde`，不允许 `tokio`/`async`/`reqwest` 等 IO 依赖。
 
-嵌入库场景：依赖 `grid-core` + `grid-engine`，自行实现端口 trait。
+嵌入库场景：依赖 `poise-core` + `poise-engine`，自行实现端口 trait。
 
-## 4. grid-core — 纯领域核心
+## 4. poise-core — 纯领域核心
 
 零 async，零 IO，只有纯类型和纯函数。
 
@@ -183,7 +183,7 @@ pub enum DomainEvent {
 - `ExchangeRules` 作为传入参数，core 不知道交易所的存在
 - 领域事件是值类型，core 产生事件但不负责发布
 
-## 5. grid-engine — 引擎编排
+## 5. poise-engine — 引擎编排
 
 定义端口 trait，编排策略计算 → 风控拦截 → 执行决策。
 
@@ -306,7 +306,7 @@ pub enum ExecutionAction {
 
 ## 6. 适配器层
 
-### 6.1 grid-binance
+### 6.1 poise-binance
 
 ```
 exchanges/binance/src/
@@ -320,7 +320,7 @@ exchanges/binance/src/
 - Binance 的签名、限速、重连逻辑全部封装在此 crate
 - 加第二家交易所 = 新建 `exchanges/okx/`，实现同样的 trait
 
-### 6.2 grid-storage
+### 6.2 poise-storage
 
 ```
 storage/src/
@@ -329,7 +329,7 @@ storage/src/
 └── schema.rs       # 表结构定义
 ```
 
-## 7. grid-server — 服务端入口
+## 7. poise-server — 服务端入口
 
 ```
 server/src/
@@ -367,9 +367,9 @@ pub fn assemble(config: &Config) -> Result<ServerPlatform> {
 
 | 路径 | 方法 | 用途 |
 |---|---|---|
-| `/grids` | GET | 列出所有网格 |
-| `/grids/{id}/snapshot` | GET | 查询网格快照 |
-| `/grids/{id}/commands` | POST | 提交命令 |
+| `/tracks` | GET | 列出所有网格 |
+| `/tracks/{id}/snapshot` | GET | 查询网格快照 |
+| `/tracks/{id}/commands` | POST | 提交命令 |
 | `/ws` | WS | 实时事件流 |
 
 ## 8. 整体数据流
@@ -378,7 +378,7 @@ pub fn assemble(config: &Config) -> Result<ServerPlatform> {
 
 1. `MarketDataPort` 推送 `PriceTick`
 2. `GridManager` 根据 `Instrument` 找到对应 `GridRuntime`
-3. 调用 `observe(grid_id, GridObservation::Market(...))`
+3. 调用 `observe(track_id, GridObservation::Market(...))`
 4. engine 生成 `GridTransition`，如果 `effects` 为空则跳过执行
 5. 通过 `ExchangePort` 执行订单动作
 6. 执行成功后更新 `GridRuntime` 状态

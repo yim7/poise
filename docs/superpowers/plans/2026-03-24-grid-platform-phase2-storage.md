@@ -1,14 +1,14 @@
-# 网格平台第二阶段实现计划：grid-storage
+# 网格平台第二阶段实现计划：poise-storage
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 实现 SQLite 持久化适配器，完成 `PersistencePort` trait 的具体实现。
 
-**Architecture:** 六边形架构适配器层。grid-storage 实现 grid-engine 中定义的 `PersistencePort` trait。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
+**Architecture:** 六边形架构适配器层。poise-storage 实现 poise-engine 中定义的 `PersistencePort` trait。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
 
 **Tech Stack:** Rust, rusqlite, serde_json
 
-**前置依赖：** 第一阶段（grid-core + grid-engine）已完成。
+**前置依赖：** 第一阶段（poise-core + poise-engine）已完成。
 
 ---
 
@@ -31,7 +31,7 @@ storage/
 
 ---
 
-### Task 1: 初始化 grid-storage crate
+### Task 1: 初始化 poise-storage crate
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -53,13 +53,13 @@ serde_json = "1"
 
 ```toml
 [package]
-name = "grid-storage"
+name = "poise-storage"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-grid-engine = { path = "../engine" }
-grid-core = { path = "../core" }
+poise-engine = { path = "../engine" }
+poise-core = { path = "../core" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -78,13 +78,13 @@ pub mod sqlite;
 
 - [x] **Step 4: 验证编译**
 
-Run: `cargo check -p grid-storage`
+Run: `cargo check -p poise-storage`
 Expected: 编译成功
 
 - [x] **Step 5: 提交**
 
 ```bash
-git add -A && git commit -m "feat: initialize grid-storage crate"
+git add -A && git commit -m "feat: initialize poise-storage crate"
 ```
 
 ---
@@ -129,7 +129,7 @@ mod tests {
 
 - [x] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-storage -- schema`
+Run: `cargo test -p poise-storage -- schema`
 Expected: FAIL
 
 - [x] **Step 3: 实现 schema**
@@ -166,7 +166,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
 
 - [x] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p grid-storage -- schema`
+Run: `cargo test -p poise-storage -- schema`
 Expected: PASS
 
 - [x] **Step 5: 提交**
@@ -252,7 +252,7 @@ mod tests {
 
 - [x] **Step 2: 运行测试确认失败**
 
-Run: `cargo test -p grid-storage -- sqlite`
+Run: `cargo test -p poise-storage -- sqlite`
 Expected: FAIL
 
 - [x] **Step 3: 实现 SqliteStorage**
@@ -265,7 +265,7 @@ Expected: FAIL
 
 - [x] **Step 4: 运行测试确认通过**
 
-Run: `cargo test -p grid-storage`
+Run: `cargo test -p poise-storage`
 Expected: 全部 PASS
 
 - [x] **Step 5: 提交**
@@ -278,7 +278,7 @@ git add -A && git commit -m "feat(storage): implement SqliteStorage with Persist
 
 ## 验收标准
 
-1. `cargo test -p grid-storage` 全部通过
+1. `cargo test -p poise-storage` 全部通过
 2. `SqliteStorage` 实现 `PersistencePort` trait
 3. save → load roundtrip 数据完整
 4. 支持 in-memory 模式用于测试

@@ -25,7 +25,7 @@
 - `GridId` 成为唯一的一等运行时身份
 - `engine` 真正拥有网格运行态、状态迁移和快照
 - `server` 只负责事务编排、传输适配和外部接入
-- 外部事件进入系统后，不再依赖 `symbol -> grid_id` 回查和伪造 `PriceTick`
+- 外部事件进入系统后，不再依赖 `symbol -> track_id` 回查和伪造 `PriceTick`
 
 ### 2.2 非目标
 
@@ -49,8 +49,8 @@
 因此配置层需要显式声明：
 
 ```toml
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 ```
@@ -123,7 +123,7 @@ pub struct GridRuntime {
 pub trait GridEngine {
     fn register(&mut self, definition: GridDefinition, rules: ExchangeRules) -> Result<()>;
     fn restore(&mut self, snapshot: GridRuntimeSnapshot) -> Result<()>;
-    fn resolve_grid_id(&self, instrument: &Instrument) -> Option<GridId>;
+    fn resolve_track_id(&self, instrument: &Instrument) -> Option<GridId>;
     fn observe(&mut self, id: &GridId, observation: GridObservation) -> Result<GridTransition>;
     fn command(&mut self, id: &GridId, command: GridCommand) -> Result<GridTransition>;
     fn snapshot(&self, id: &GridId) -> Option<GridRuntimeSnapshot>;
@@ -134,7 +134,7 @@ pub trait GridEngine {
 设计重点：
 
 - 外部只能按 `GridId` 修改网格
-- `symbol` 解析逻辑收进 `resolve_grid_id()`
+- `symbol` 解析逻辑收进 `resolve_track_id()`
 - `server` 不再直接扫描 manager 内部实例
 
 ### 3.5 拆分 `GridObservation` 与 `GridCommand`
@@ -213,7 +213,7 @@ pub struct GridTransition {
 
 ## 4. 模块所有权
 
-### 4.1 `grid-core`
+### 4.1 `poise-core`
 
 拥有：
 
@@ -227,7 +227,7 @@ pub struct GridTransition {
 - 快照
 - 交易所路由
 
-### 4.2 `grid-engine`
+### 4.2 `poise-engine`
 
 拥有：
 
@@ -248,7 +248,7 @@ pub struct GridTransition {
 - SQLite 事务
 - Binance API 细节
 
-### 4.3 `grid-storage`
+### 4.3 `poise-storage`
 
 拥有：
 
@@ -259,7 +259,7 @@ pub struct GridTransition {
 - 快照结构的拼装知识
 - 协议投影
 
-### 4.4 `grid-server`
+### 4.4 `poise-server`
 
 分成三个明确边界：
 
@@ -276,7 +276,7 @@ pub struct GridTransition {
 - `symbol -> grid id` 路由规则
 - 快照拼装和回滚知识
 
-### 4.5 `grid-protocol`
+### 4.5 `poise-protocol`
 
 只拥有对外契约：
 
@@ -297,7 +297,7 @@ pub struct GridTransition {
 
 1. Binance 适配器产出 `MarketObservation`
 2. `server/runtime` 根据 `Instrument` 找到 `GridId`
-3. `application` 调用 `engine.observe(grid_id, GridObservation::Market(...))`
+3. `application` 调用 `engine.observe(track_id, GridObservation::Market(...))`
 4. engine 返回 `GridTransition`
 5. application 原子保存 `snapshot + events`
 6. application 发布事件并执行 `effects`
@@ -306,21 +306,21 @@ pub struct GridTransition {
 
 1. Binance 适配器产出 `OrderObservation` 或 `PositionObservation`
 2. `server/runtime` 根据 `Instrument` 找到 `GridId`
-3. `application` 调用 `engine.observe(grid_id, GridObservation::Position(...))` 或 `engine.observe(grid_id, GridObservation::Order(...))`
-4. 如果该观察更新要求立即重算，application 继续调用 `engine.command(grid_id, GridCommand::Reconcile)`
+3. `application` 调用 `engine.observe(track_id, GridObservation::Position(...))` 或 `engine.observe(track_id, GridObservation::Order(...))`
+4. 如果该观察更新要求立即重算，application 继续调用 `engine.command(track_id, GridCommand::Reconcile)`
 
 注意：这里的“立即重算”是显式业务动作，不再通过伪造市场 tick 间接触发。
 
 ### 5.3 HTTP 控制命令
 
-1. `http.rs` 解析 `grid_id`
-2. `application` 调用 `engine.command(grid_id, GridCommand::Pause)` 或 `engine.command(grid_id, GridCommand::Resume)`
+1. `http.rs` 解析 `track_id`
+2. `application` 调用 `engine.command(track_id, GridCommand::Pause)` 或 `engine.command(track_id, GridCommand::Resume)`
 3. engine 返回 transition
 4. application 保存并广播
 
 协议示例里应明确展示这种关系：
 
-- `grid_id = "btc-core"`
+- `track_id = "btc-core"`
 - `symbol = "BTCUSDT"`
 
 ## 6. 旧抽象替换表
@@ -359,7 +359,7 @@ pub struct GridTransition {
 
 ### 阶段 1：术语和身份模型收敛
 
-- 引入显式 `grid_id`
+- 引入显式 `track_id`
 - 引入 `Venue` 和 `Instrument`
 - `InstanceManager` 改成 `GridManager`
 - `StrategyInstance` 改成 `GridRuntime`

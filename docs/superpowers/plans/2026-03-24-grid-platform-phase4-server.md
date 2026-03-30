@@ -1,10 +1,10 @@
-# 网格平台第四阶段实现计划：grid-server
+# 网格平台第四阶段实现计划：poise-server
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 实现服务端入口，包含组件组装、HTTP API、WebSocket 事件推送和配置解析。
 
-**Architecture:** 六边形架构的最外层。grid-server 把 grid-engine + 适配器组装在一起，通过 HTTP/WS 对外提供服务。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
+**Architecture:** 六边形架构的最外层。poise-server 把 poise-engine + 适配器组装在一起，通过 HTTP/WS 对外提供服务。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
 
 **Tech Stack:** Rust, axum (HTTP), tokio-tungstenite (WebSocket), toml (配置)
 
@@ -33,7 +33,7 @@ server/
 
 ---
 
-### Task 1: 初始化 grid-server crate
+### Task 1: 初始化 poise-server crate
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -52,7 +52,7 @@ toml_edit = "0.22"
 
 - [x] **Step 2: 创建 server/Cargo.toml**
 
-依赖 grid-engine、grid-core、grid-binance、grid-storage 以及 axum、tokio 等。
+依赖 poise-engine、poise-core、poise-binance、poise-storage 以及 axum、tokio 等。
 
 - [x] **Step 3: 创建 main.rs 骨架**
 
@@ -60,20 +60,20 @@ toml_edit = "0.22"
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    tracing::info!("grid-server starting");
+    tracing::info!("poise-server starting");
     Ok(())
 }
 ```
 
 - [x] **Step 4: 验证编译和运行**
 
-Run: `cargo run -p grid-server`
-Expected: 打印 "grid-server starting" 后正常退出
+Run: `cargo run -p poise-server`
+Expected: 打印 "poise-server starting" 后正常退出
 
 - [x] **Step 5: 提交**
 
 ```bash
-git add -A && git commit -m "feat: initialize grid-server crate"
+git add -A && git commit -m "feat: initialize poise-server crate"
 ```
 
 ---
@@ -267,8 +267,8 @@ git add -A && git commit -m "feat(server): integrate full startup flow"
 
 ## 验收标准
 
-1. `cargo test -p grid-server` 全部通过
-2. `cargo run -p grid-server -- --config configs/test.toml` 能启动并响应 HTTP 请求
+1. `cargo test -p poise-server` 全部通过
+2. `cargo run -p poise-server -- --config configs/test.toml` 能启动并响应 HTTP 请求
 3. WebSocket 连接能接收实时事件
 4. 组件组装只在 `assembly.rs` 一个文件里完成
 5. engine/core 不依赖 axum 或任何 HTTP 框架

@@ -55,7 +55,7 @@ fn desired_order_to_request(
         side: desired_order.side,
         price: desired_order.price,
         quantity: desired_order.quantity,
-        client_order_id: format!("{}-reconcile", input.grid_id.as_str()),
+        client_order_id: format!("{}-reconcile", input.track_id.as_str()),
         reduce_only: desired_order.role == OrderRole::DecreaseInventory,
     }
 }
@@ -116,11 +116,11 @@ pub async fn new_order(&self, req: &OrderRequest) -> Result<OrderReceipt> {
 fn plan_sets_reduce_only_for_decrease_inventory_order() {
     let instrument = test_instrument();
     let rules = test_exchange_rules();
-    let grid_id = test_grid_id();
+    let track_id = test_track_id();
     let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
     let plan = plan(ExecutorInput {
-        grid_id: &grid_id,
+        track_id: &track_id,
         instrument: &instrument,
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
@@ -143,11 +143,11 @@ fn plan_sets_reduce_only_for_decrease_inventory_order() {
 fn plan_does_not_set_reduce_only_for_increase_inventory_order() {
     let instrument = test_instrument();
     let rules = test_exchange_rules();
-    let grid_id = test_grid_id();
+    let track_id = test_track_id();
     let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
     let plan = plan(ExecutorInput {
-        grid_id: &grid_id,
+        track_id: &track_id,
         instrument: &instrument,
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
@@ -176,7 +176,7 @@ fn plan_does_not_set_reduce_only_for_increase_inventory_order() {
 fn submit_recovery_supersedes_when_reduce_only_changes() {
     let instrument = test_instrument();
     let rules = test_exchange_rules();
-    let grid_id = test_grid_id();
+    let track_id = test_track_id();
     let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
     let old_request = OrderRequest {
@@ -184,7 +184,7 @@ fn submit_recovery_supersedes_when_reduce_only_changes() {
         side: Side::Sell,
         price: 100.0,
         quantity: 3.75,
-        client_order_id: format!("{}-reconcile", grid_id.as_str()),
+        client_order_id: format!("{}-reconcile", track_id.as_str()),
         reduce_only: true,
     };
 
@@ -202,7 +202,7 @@ fn submit_recovery_supersedes_when_reduce_only_changes() {
         target_exposure: &Exposure(10.0),
         exchange_rules: &rules,
         current_plan: Some(SubmitRecoveryPlanContext {
-            grid_id: &grid_id,
+            track_id: &track_id,
             instrument: &instrument,
             base_qty_per_unit: 3.75,
             target_exposure: Exposure(10.0),
@@ -311,7 +311,7 @@ Task 1 code commit:
 ```rust
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GridDefinition {
-    pub grid_id: String,
+    pub track_id: String,
     pub venue: Venue,
     pub symbol: String,
     pub lower_price: f64,
@@ -368,8 +368,8 @@ fn budget_uses_explicit_risk_limits_when_configured() {
         r#"
 environment = "test"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -396,8 +396,8 @@ fn budget_uses_safe_defaults_when_risk_limits_omitted() {
         r#"
 environment = "test"
 
-[[grids]]
-grid_id = "btc-core"
+[[tracks]]
+track_id = "btc-core"
 venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
@@ -419,7 +419,7 @@ notional_per_unit = 375.0
 
 - [x] **Step 5: 运行测试**
 
-Run: `cargo test -p grid-server`
+Run: `cargo test -p poise-server`
 Expected: PASS
 
 - [x] **Step 6: Commit**
@@ -439,7 +439,7 @@ Task 2 code commit:
 
 ## Task 3: client_order_id 唯一化
 
-当前所有 reconcile 订单使用固定的 `{grid_id}-reconcile`，存在 Binance 去重碰撞风险。
+当前所有 reconcile 订单使用固定的 `{track_id}-reconcile`，存在 Binance 去重碰撞风险。
 
 **关键设计决策：** 把 `client_order_id` 从 `submit_requests_match` 的等价比较中移除。`client_order_id` 仅用于交易所去重，不参与 recovery 等价判断。Recovery 等价性只看 (instrument, side, price, quantity, reduce_only)。这样 client_order_id 可以自由使用时间戳保证唯一，不会破坏 recovery 流程。
 
@@ -480,7 +480,7 @@ fn desired_order_to_request(
         side: desired_order.side,
         price: desired_order.price,
         quantity: desired_order.quantity,
-        client_order_id: format!("{}-{}", input.grid_id.as_str(), timestamp_suffix),
+        client_order_id: format!("{}-{}", input.track_id.as_str(), timestamp_suffix),
         reduce_only: desired_order.role == OrderRole::DecreaseInventory,
     }
 }
@@ -503,12 +503,12 @@ assert!(hint.request.client_order_id.starts_with("btc-core-"));
 fn plan_generates_unique_client_order_ids_across_calls() {
     let instrument = test_instrument();
     let rules = test_exchange_rules();
-    let grid_id = test_grid_id();
+    let track_id = test_track_id();
     let t1 = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
     let t2 = t1 + Duration::milliseconds(1);
 
     let plan1 = plan(ExecutorInput {
-        grid_id: &grid_id,
+        track_id: &track_id,
         instrument: &instrument,
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
@@ -519,7 +519,7 @@ fn plan_generates_unique_client_order_ids_across_calls() {
         observed_at: t1,
     });
     let plan2 = plan(ExecutorInput {
-        grid_id: &grid_id,
+        track_id: &track_id,
         instrument: &instrument,
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
@@ -646,7 +646,7 @@ async fn request_times_out_when_server_does_not_respond() {
 
 - [x] **Step 3: 运行测试**
 
-Run: `cargo test -p grid-binance`
+Run: `cargo test -p poise-binance`
 Expected: PASS
 
 - [x] **Step 4: Commit**
@@ -820,7 +820,7 @@ async fn shutdown_cancels_orders_and_persists_final_exchange_state() {
 
 - [x] **Step 5: 运行测试**
 
-Run: `cargo test -p grid-server`
+Run: `cargo test -p poise-server`
 Expected: PASS
 
 - [x] **Step 6: Commit**
@@ -950,9 +950,9 @@ fn flatten_grid(&mut self, id: &GridId) -> Result<(Vec<DomainEvent>, Vec<GridEff
 #[test]
 fn flatten_persists_manual_target_override_and_targets_zero() {
     let mut manager = test_manager_with_active_grid();
-    let grid_id = GridId::new("btc1");
+    let track_id = GridId::new("btc1");
 
-    let transition = manager.command(&grid_id, GridCommand::Flatten).unwrap();
+    let transition = manager.command(&track_id, GridCommand::Flatten).unwrap();
 
     let grid = manager.get_grid("btc1").unwrap();
     assert_eq!(grid.manual_target_override, Some(Exposure(0.0)));
@@ -963,11 +963,11 @@ fn flatten_persists_manual_target_override_and_targets_zero() {
 #[test]
 fn flatten_keeps_zero_target_even_when_price_is_in_band() {
     let mut manager = test_manager_with_active_grid();
-    let grid_id = GridId::new("btc1");
+    let track_id = GridId::new("btc1");
 
-    manager.command(&grid_id, GridCommand::Flatten).unwrap();
+    manager.command(&track_id, GridCommand::Flatten).unwrap();
     let transition = manager
-        .observe(&grid_id, GridObservation::Market(MarketObservation { reference_price: 100.0 }))
+        .observe(&track_id, GridObservation::Market(MarketObservation { reference_price: 100.0 }))
         .unwrap();
 
     assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
@@ -976,9 +976,9 @@ fn flatten_keeps_zero_target_even_when_price_is_in_band() {
 #[test]
 fn resume_clears_manual_target_override_after_flatten() {
     let mut manager = test_manager_with_active_grid();
-    let grid_id = GridId::new("btc1");
+    let track_id = GridId::new("btc1");
 
-    manager.command(&grid_id, GridCommand::Flatten).unwrap();
+    manager.command(&track_id, GridCommand::Flatten).unwrap();
     manager.resume_grid("btc1").unwrap();
 
     let grid = manager.get_grid("btc1").unwrap();
@@ -1158,16 +1158,16 @@ fn stale_market_data_suspends_follow_up_reconcile_without_overwriting_status() {
     let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
     let clock = MutableClock(Arc::new(std::sync::Mutex::new(started_at)));
     let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
-    let grid_id = GridId::new("btc1");
+    let track_id = GridId::new("btc1");
 
     manager.observe(
-        &grid_id,
+        &track_id,
         GridObservation::Market(MarketObservation { reference_price: 95.0 }),
     ).unwrap();
 
     clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
     let transition = manager.observe(
-        &grid_id,
+        &track_id,
         GridObservation::Position(PositionObservation { qty: 0.0, unrealized_pnl: 0.0 }),
     ).unwrap();
 
@@ -1181,21 +1181,21 @@ fn fresh_tick_clears_market_data_stale_flag() {
     let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
     let clock = MutableClock(Arc::new(std::sync::Mutex::new(started_at)));
     let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
-    let grid_id = GridId::new("btc1");
+    let track_id = GridId::new("btc1");
 
     manager.observe(
-        &grid_id,
+        &track_id,
         GridObservation::Market(MarketObservation { reference_price: 95.0 }),
     ).unwrap();
 
     clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
     let _ = manager.observe(
-        &grid_id,
+        &track_id,
         GridObservation::Position(PositionObservation { qty: 0.0, unrealized_pnl: 0.0 }),
     ).unwrap();
 
     let transition = manager.observe(
-        &grid_id,
+        &track_id,
         GridObservation::Market(MarketObservation { reference_price: 96.0 }),
     ).unwrap();
 
@@ -1253,5 +1253,5 @@ cargo test
 3. **client_order_id**: 同一网格连续两次 plan 产生的 `client_order_id` 不同；recovery 等价性不依赖 `client_order_id`，语义相同的请求仍被判为等价
 4. **HTTP 超时**: reqwest client 的 `connect_timeout=5s`、`timeout=15s`
 5. **优雅停机**: SIGINT / SIGTERM 触发有序停机：停止 intake -> drain in-flight effect -> `cancel_all` -> final sync -> abort 剩余任务
-6. **flatten**: `POST /grids/:id/commands {"command":"flatten"}` 返回 `200`，grid 持久化 `manual_target_override=0`，后续带内价格更新也不会把 target 拉回策略曲线；`Resume` 清掉 override 后恢复正常策略控制
+6. **flatten**: `POST /tracks/:id/commands {"command":"flatten"}` 返回 `200`，grid 持久化 `manual_target_override=0`，后续带内价格更新也不会把 target 拉回策略曲线；`Resume` 清掉 override 后恢复正常策略控制
 7. **tick 新鲜度**: 行情中断超过 `tick_timeout_secs` 后执行被暂停，detail / list 投影为 `attention_required`；新 tick 到达后 stale 标记清除并恢复正常执行

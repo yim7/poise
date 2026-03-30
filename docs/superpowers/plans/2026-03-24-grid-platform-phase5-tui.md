@@ -1,14 +1,14 @@
-# 网格平台第五阶段实现计划：grid-tui
+# 网格平台第五阶段实现计划：poise-tui
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现终端 UI 客户端，通过 HTTP/WS 连接 grid-server，提供运维监控和命令操作。
+**Goal:** 实现终端 UI 客户端，通过 HTTP/WS 连接 poise-server，提供运维监控和命令操作。
 
-**Architecture:** grid-tui 是独立二进制，不依赖 grid-engine 或 grid-core。只通过 HTTP/WS 协议与 grid-server 通信。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
+**Architecture:** poise-tui 是独立二进制，不依赖 poise-engine 或 poise-core。只通过 HTTP/WS 协议与 poise-server 通信。详见[架构设计 spec](../specs/2026-03-24-grid-platform-architecture-design.md)。
 
 **Tech Stack:** Rust, ratatui (TUI 框架), reqwest (HTTP), tokio-tungstenite (WebSocket)
 
-**前置依赖：** 第四阶段（grid-server）已完成。
+**前置依赖：** 第四阶段（poise-server）已完成。
 
 ---
 
@@ -22,7 +22,7 @@ tui/
 └── src/
     ├── main.rs         # 启动入口
     ├── app.rs          # 应用状态和生命周期
-    ├── api_client.rs   # HTTP/WS 客户端（与 grid-server 通信）
+    ├── api_client.rs   # HTTP/WS 客户端（与 poise-server 通信）
     ├── protocol.rs     # 线协议类型（与 server 共享的 JSON schema）
     ├── views/
     │   ├── mod.rs
@@ -39,7 +39,7 @@ tui/
 
 ---
 
-### Task 1: 初始化 grid-tui crate
+### Task 1: 初始化 poise-tui crate
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -57,7 +57,7 @@ crossterm = "0.28"
 
 依赖 ratatui、crossterm、reqwest、tokio-tungstenite、serde、tokio。
 
-注意：不依赖 grid-core 或 grid-engine。
+注意：不依赖 poise-core 或 poise-engine。
 
 - [x] **Step 3: 创建 main.rs 骨架**
 
@@ -65,13 +65,13 @@ crossterm = "0.28"
 
 - [x] **Step 4: 验证编译和运行**
 
-Run: `cargo run -p grid-tui`
+Run: `cargo run -p poise-tui`
 Expected: 进入 alternate screen，按 q 退出
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add -A && git commit -m "feat: initialize grid-tui crate with basic terminal setup"
+git add -A && git commit -m "feat: initialize poise-tui crate with basic terminal setup"
 ```
 
 ---
@@ -83,7 +83,7 @@ git add -A && git commit -m "feat: initialize grid-tui crate with basic terminal
 
 - [x] **Step 1: 定义客户端侧协议类型**
 
-与 grid-server HTTP/WS 响应对应的 serde struct：
+与 poise-server HTTP/WS 响应对应的 serde struct：
 - `InstanceSummary`（来自 `GET /instances`）
 - `InstanceSnapshot`（来自 `GET /instances/{id}/snapshot`）
 - `CommandResponse`（来自 `POST /instances/{id}/commands`）
@@ -260,8 +260,8 @@ git add -A && git commit -m "feat(tui): integrate full TUI main loop"
 
 ## 验收标准
 
-1. `cargo build -p grid-tui` 编译成功
-2. grid-tui 不依赖 grid-core 或 grid-engine
+1. `cargo build -p poise-tui` 编译成功
+2. poise-tui 不依赖 poise-core 或 poise-engine
 3. 启动后能通过 HTTP 拉取实例列表和快照
 4. WebSocket 连接能接收并展示实时事件
 5. 键盘操作流畅：切换实例、进入详情、退出

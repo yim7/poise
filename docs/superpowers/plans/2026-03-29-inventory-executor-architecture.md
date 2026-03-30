@@ -69,7 +69,7 @@
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine runtime::tests::snapshot_round_trips_executor_state -- --exact`
+`cargo test -p poise-engine runtime::tests::snapshot_round_trips_executor_state -- --exact`
 
 Expected:
 编译失败或测试失败，因为当前 `GridRuntimeSnapshot` 仍然只有 `pending_order`。
@@ -83,7 +83,7 @@ Expected:
 - [x] **Step 4: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-storage sqlite::tests::saves_and_loads_executor_state_with_working_orders -- --exact`
+`cargo test -p poise-storage sqlite::tests::saves_and_loads_executor_state_with_working_orders -- --exact`
 
 Expected:
 编译失败或测试失败，因为当前 schema 和 sqlite 读写逻辑还没有 `executor_state`。
@@ -101,8 +101,8 @@ Expected:
 - [x] **Step 6: 运行 Task 1 的定向测试**
 
 Run:
-`cargo test -p grid-engine runtime::tests::snapshot_round_trips_executor_state -- --exact`
-`cargo test -p grid-storage sqlite::tests::saves_and_loads_executor_state_with_working_orders -- --exact`
+`cargo test -p poise-engine runtime::tests::snapshot_round_trips_executor_state -- --exact`
+`cargo test -p poise-storage sqlite::tests::saves_and_loads_executor_state_with_working_orders -- --exact`
 
 Expected:
 两组测试通过。
@@ -141,7 +141,7 @@ git commit -m "refactor(engine): add inventory executor runtime state"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine executor::tests::plans_execution_mode_from_gap_and_age -- --exact`
+`cargo test -p poise-engine executor::tests::plans_execution_mode_from_gap_and_age -- --exact`
 
 Expected:
 编译失败，因为执行器规划逻辑还不存在。
@@ -156,8 +156,8 @@ Expected:
 - [x] **Step 4: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-engine manager::tests::observe_market_plans_through_inventory_executor -- --exact`
-`cargo test -p grid-engine manager::tests::executor_noop_when_working_orders_match_desired_orders -- --exact`
+`cargo test -p poise-engine manager::tests::observe_market_plans_through_inventory_executor -- --exact`
+`cargo test -p poise-engine manager::tests::executor_noop_when_working_orders_match_desired_orders -- --exact`
 
 Expected:
 测试失败，因为当前 `manager` / `reconciler` 仍然是单订单路径。
@@ -176,9 +176,9 @@ Expected:
 - [x] **Step 6: 运行 Task 2 的定向测试**
 
 Run:
-`cargo test -p grid-engine executor::tests:: -- --nocapture`
-`cargo test -p grid-engine manager::tests::observe_market_plans_through_inventory_executor -- --exact`
-`cargo test -p grid-engine manager::tests::executor_noop_when_working_orders_match_desired_orders -- --exact`
+`cargo test -p poise-engine executor::tests:: -- --nocapture`
+`cargo test -p poise-engine manager::tests::observe_market_plans_through_inventory_executor -- --exact`
+`cargo test -p poise-engine manager::tests::executor_noop_when_working_orders_match_desired_orders -- --exact`
 
 Expected:
 执行器模式与 diff 相关测试通过。
@@ -218,7 +218,7 @@ git commit -m "refactor(engine): move execution planning into inventory executor
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
+`cargo test -p poise-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
 
 Expected:
 测试失败，因为当前恢复仍围绕 `pending_order`。
@@ -233,8 +233,8 @@ Expected:
 - [x] **Step 4: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
-`cargo test -p grid-server write_service::tests::recovers_slot_workset_from_live_exchange_state -- --exact`
+`cargo test -p poise-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
+`cargo test -p poise-server write_service::tests::recovers_slot_workset_from_live_exchange_state -- --exact`
 
 Expected:
 测试失败，因为当前 write service / worker 仍围绕 `pending_order`。
@@ -252,9 +252,9 @@ Expected:
 - [x] **Step 6: 运行 Task 3 的定向测试**
 
 Run:
-`cargo test -p grid-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
-`cargo test -p grid-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
-`cargo test -p grid-server write_service::tests::recovers_slot_workset_from_live_exchange_state -- --exact`
+`cargo test -p poise-server runtime::tests::startup_sync_rebuilds_slot_workset_before_replanning -- --exact`
+`cargo test -p poise-server effect_worker::tests::submit_success_updates_working_order_without_pending_anchor -- --exact`
+`cargo test -p poise-server write_service::tests::recovers_slot_workset_from_live_exchange_state -- --exact`
 
 Expected:
 恢复链路与 worker 边界测试通过。
@@ -302,9 +302,9 @@ git commit -m "refactor(server): recover inventory executor working orders"
 - [x] **Step 2: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server projector::tests::projects_execution_badge_from_working_orders -- --exact`
-`cargo test -p grid-server projector::tests::projects_execution_slots_from_slot_workset -- --exact`
-`cargo test -p grid-server projector::tests::projects_execution_observability_statistics -- --exact`
+`cargo test -p poise-server projector::tests::projects_execution_badge_from_working_orders -- --exact`
+`cargo test -p poise-server projector::tests::projects_execution_slots_from_slot_workset -- --exact`
+`cargo test -p poise-server projector::tests::projects_execution_observability_statistics -- --exact`
 
 Expected:
 测试失败，因为当前 projector 还没有新的执行诊断和统计字段。
@@ -312,20 +312,20 @@ Expected:
 - [x] **Step 3: 更新 protocol、HTTP / WS、TUI 夹具，锁住可观测性字段**
 
 测试要覆盖：
-- `/grids` 返回 `execution_status` 和 `active_slot_count`
-- `/grids/:id` 返回 `execution.slots`
-- `/grids/:id` 新增稳定执行摘要和累计统计字段
+- `/tracks` 返回 `execution_status` 和 `active_slot_count`
+- `/tracks/:id` 返回 `execution.slots`
+- `/tracks/:id` 新增稳定执行摘要和累计统计字段
 - WebSocket 详情推送同步带出这些字段
 - TUI detail 视图能显示执行状态、偏差、偏差持续时间、活跃槽位数量、槽位视图和累计统计
 
 - [x] **Step 4: 运行定向测试确认失败**
 
 Run:
-`cargo test -p grid-server http::tests:: -- --nocapture`
-`cargo test -p grid-server websocket::tests:: -- --nocapture`
-`cargo test -p grid-tui renders_grid_detail_execution_activity_and_commands -- --exact`
-`cargo test -p grid-tui api_client::tests:: -- --nocapture`
-`cargo test -p grid-tui protocol::tests:: -- --nocapture`
+`cargo test -p poise-server http::tests:: -- --nocapture`
+`cargo test -p poise-server websocket::tests:: -- --nocapture`
+`cargo test -p poise-tui renders_grid_detail_execution_activity_and_commands -- --exact`
+`cargo test -p poise-tui api_client::tests:: -- --nocapture`
+`cargo test -p poise-tui protocol::tests:: -- --nocapture`
 
 Expected:
 协议与 TUI 夹具需要更新，新增字段测试失败。
@@ -344,11 +344,11 @@ Expected:
 - [x] **Step 6: 运行 Task 4 的定向测试**
 
 Run:
-`cargo test -p grid-server projector::tests:: -- --nocapture`
-`cargo test -p grid-server http::tests:: -- --nocapture`
-`cargo test -p grid-server websocket::tests:: -- --nocapture`
-`cargo test -p grid-tui renders_grid_detail_execution_activity_and_commands -- --exact`
-`cargo test -p grid-tui`
+`cargo test -p poise-server projector::tests:: -- --nocapture`
+`cargo test -p poise-server http::tests:: -- --nocapture`
+`cargo test -p poise-server websocket::tests:: -- --nocapture`
+`cargo test -p poise-tui renders_grid_detail_execution_activity_and_commands -- --exact`
+`cargo test -p poise-tui`
 
 Expected:
 投影和协议相关测试通过，detail / TUI 能直接看到稳定执行摘要和累计统计。
@@ -390,10 +390,10 @@ git commit -m "feat(observability): project inventory executor diagnostics and s
 - [x] **Step 2: 运行 crate 级回归**
 
 Run:
-`cargo test -p grid-engine`
-`cargo test -p grid-storage`
-`cargo test -p grid-server`
-`cargo test -p grid-tui`
+`cargo test -p poise-engine`
+`cargo test -p poise-storage`
+`cargo test -p poise-server`
+`cargo test -p poise-tui`
 
 Expected:
 四个 crate 全绿。

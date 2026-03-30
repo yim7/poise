@@ -23,19 +23,19 @@
 
 - [ ] **Step 2: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine replacement_gate_reason_rounded_match -- --exact`
+Run: `cargo test -p poise-engine replacement_gate_reason_rounded_match -- --exact`
 
 - [ ] **Step 3: 写失败测试，覆盖“改善不足会写入 bps 原因”**
 
 - [ ] **Step 4: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine replacement_gate_reason_improvement_below_threshold -- --exact`
+Run: `cargo test -p poise-engine replacement_gate_reason_improvement_below_threshold -- --exact`
 
 - [ ] **Step 5: 写失败测试，覆盖“替换发生后会清空当前原因”**
 
 - [ ] **Step 6: 运行单测确认红灯**
 
-Run: `cargo test -p grid-engine replacement_gate_reason_clears_when_order_is_replaced -- --exact`
+Run: `cargo test -p poise-engine replacement_gate_reason_clears_when_order_is_replaced -- --exact`
 
 - [ ] **Step 7: 最小实现 engine 侧结构和返回值**
 
@@ -54,7 +54,7 @@ Run: `cargo test -p grid-engine replacement_gate_reason_clears_when_order_is_rep
 
 - [ ] **Step 4: 运行 manager 相关单测确认红灯**
 
-Run: `cargo test -p grid-engine observe_market_replacement_gate -- --nocapture`
+Run: `cargo test -p poise-engine observe_market_replacement_gate -- --nocapture`
 
 - [ ] **Step 5: 最小实现 manager 中的原因变更比较和事件发出**
 
@@ -71,7 +71,7 @@ Run: `cargo test -p grid-engine observe_market_replacement_gate -- --nocapture`
 
 - [ ] **Step 3: 运行 projector 单测确认红灯**
 
-Run: `cargo test -p grid-server projector::tests::project_ -- --nocapture`
+Run: `cargo test -p poise-server projector::tests::project_ -- --nocapture`
 
 - [ ] **Step 4: 最小实现 protocol 结构和 projector 投影**
 
@@ -86,7 +86,7 @@ Run: `cargo test -p grid-server projector::tests::project_ -- --nocapture`
 
 - [ ] **Step 2: 运行 TUI 视图单测确认红灯**
 
-Run: `cargo test -p grid-tui renders_grid_detail_execution_activity_and_commands -- --exact`
+Run: `cargo test -p poise-tui renders_grid_detail_execution_activity_and_commands -- --exact`
 
 - [ ] **Step 3: 最小实现 instance view 渲染**
 
@@ -98,17 +98,17 @@ Run: `cargo test -p grid-tui renders_grid_detail_execution_activity_and_commands
 - Modify: `server/src/projector.rs`
 - Modify: `tui/src/views/instance.rs`
 
-- [ ] **Step 1: 运行 `grid-engine` 全量测试**
+- [ ] **Step 1: 运行 `poise-engine` 全量测试**
 
-Run: `cargo test -p grid-engine`
+Run: `cargo test -p poise-engine`
 
-- [ ] **Step 2: 运行 `grid-server` 全量测试**
+- [ ] **Step 2: 运行 `poise-server` 全量测试**
 
-Run: `cargo test -p grid-server`
+Run: `cargo test -p poise-server`
 
-- [ ] **Step 3: 运行 `grid-tui` 全量测试**
+- [ ] **Step 3: 运行 `poise-tui` 全量测试**
 
-Run: `cargo test -p grid-tui`
+Run: `cargo test -p poise-tui`
 
 - [ ] **Step 4: 运行工作区全量测试**
 

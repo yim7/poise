@@ -2,11 +2,11 @@
 
 **日期：** 2026-03-28
 
-**目标：** 保持服务端和协议里的 activity 时间戳继续使用 UTC RFC3339 字符串，只在 `grid-tui` 渲染 `Activity` 列表时把时间转换为运行 `grid-tui` 的机器本地时区显示。
+**目标：** 保持服务端和协议里的 activity 时间戳继续使用 UTC RFC3339 字符串，只在 `poise-tui` 渲染 `Activity` 列表时把时间转换为运行 `poise-tui` 的机器本地时区显示。
 
 ## 背景
 
-当前服务端 projector 会把 activity 事件时间序列化成 UTC RFC3339 字符串，`grid-tui` 直接原样显示。这样虽然协议稳定，但终端值守时阅读成本偏高，用户需要手动做时区换算。
+当前服务端 projector 会把 activity 事件时间序列化成 UTC RFC3339 字符串，`poise-tui` 直接原样显示。这样虽然协议稳定，但终端值守时阅读成本偏高，用户需要手动做时区换算。
 
 ## 决策
 
