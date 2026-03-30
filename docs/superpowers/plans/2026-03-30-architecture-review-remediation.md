@@ -393,12 +393,14 @@ Review:
 - `server/src/runtime.rs` 的测试辅助从返回 `GridRuntime` 改成返回 `GridRuntimeSnapshot`，把测试观察面压回已有读模型，而不是让测试反向决定生产 API。
 - Task 3 的实现仍然紧贴 finding：一边补 `restore` 的完整性保护，一边阻断 server 对 engine 运行态的随意直读，没有引入新的抽象层。
 
-- [ ] **Step 6: 提交（commit 后回填 SHA）**
+- [x] **Step 6: 提交**
 
 ```bash
-git add engine/src/runtime.rs engine/src/manager.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
+git add engine/src/runtime.rs server/src/write_service.rs server/src/assembly.rs server/src/runtime.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
 git commit -m "refactor(engine): encapsulate GridRuntime fields and add restore round-trip guard"
 ```
+
+Commit: `68b4f329c0e176d0b79ab770acc5f6cb22bc0932`
 
 ---
 
