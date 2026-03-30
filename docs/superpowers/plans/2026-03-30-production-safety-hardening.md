@@ -1028,9 +1028,10 @@ Task 6 code commit:
 - Modify: `server/src/config.rs` — `GridDefinition` 加 `tick_timeout_secs`
 - Modify: `server/src/assembly.rs` — 组装 `tick_timeout_secs`
 - Modify: `server/src/projector.rs` — stale data 也投影为 `AttentionRequired`
+- Modify: `storage/src/schema.rs` / `storage/src/sqlite.rs` — 持久化 stale 观测字段，保证重启后健康状态不丢失
 - Test: `engine/src/manager.rs`, `server/src/config.rs`, `server/src/projector.rs`
 
-- [ ] **Step 1: 在 runtime / snapshot 里增加行情健康字段**
+- [x] **Step 1: 在 runtime / snapshot 里增加行情健康字段**
 
 `engine/src/runtime.rs`：
 
@@ -1056,7 +1057,7 @@ pub struct ObservedState {
 }
 ```
 
-- [ ] **Step 2: config / assembly 把 tick_timeout_secs 传到 GridRuntime**
+- [x] **Step 2: config / assembly 把 tick_timeout_secs 传到 GridRuntime**
 
 `server/src/config.rs` 的 `GridDefinition` 增加：
 
@@ -1066,7 +1067,7 @@ pub tick_timeout_secs: Option<u64>,
 
 `server/src/assembly.rs` 在 `manager.add_grid(...)` 附近把默认值 `30` 秒传进去；相应扩展 `GridManager::add_grid(...)` / `GridRuntime::new(...)` 的参数列表。
 
-- [ ] **Step 3: manager 在 market tick 更新健康度，并在 reconcile 前做 freshness guard**
+- [x] **Step 3: manager 在 market tick 更新健康度，并在 reconcile 前做 freshness guard**
 
 `engine/src/manager.rs`：
 
@@ -1112,7 +1113,7 @@ fn guard_market_data_freshness(&mut self, id: &GridId) -> Result<bool> {
 
 在 `reconcile_grid()`、`command(Reconcile)`、以及会触发 follow-up reconcile 的 position / order 路径里，若 `guard_market_data_freshness()` 返回 `true`，则返回空 effect，不更新 target。
 
-- [ ] **Step 4: projector 把 stale data 也投影为 AttentionRequired**
+- [x] **Step 4: projector 把 stale data 也投影为 AttentionRequired**
 
 `server/src/projector.rs`：
 
@@ -1128,7 +1129,7 @@ fn project_execution_status(source: &GridReadModelSource) -> ExecutionStatusView
 }
 ```
 
-- [ ] **Step 5: 写验收测试**
+- [x] **Step 5: 写验收测试**
 
 `engine/src/manager.rs` tests。引入一个可变测试时钟：
 
@@ -1216,12 +1217,12 @@ fn stale_market_data_projects_attention_required() {
 }
 ```
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run: `cargo test`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/manager.rs server/src/config.rs server/src/assembly.rs server/src/projector.rs
@@ -1231,6 +1232,9 @@ Stale market data is modeled as observed health, not as GridStatus::Frozen.
 Execution is suspended while stale and projector surfaces
 attention_required until a fresh tick clears the condition."
 ```
+
+Task 7 code commit:
+`41865ce`
 
 ---
 
