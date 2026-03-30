@@ -7,6 +7,8 @@ mod notifications;
 mod projector;
 #[allow(dead_code)]
 mod query_service;
+#[allow(dead_code)]
+mod read_model;
 mod runtime;
 mod websocket;
 mod write_service;

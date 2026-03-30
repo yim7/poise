@@ -1,22 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use grid_engine::grid::GridId;
-use grid_engine::ports::{GridReadRepositoryPort, PersistedGridEffect, StoredDomainEvent};
-use grid_engine::snapshot::GridRuntimeSnapshot;
+use grid_engine::ports::GridReadRepositoryPort;
+
+use crate::read_model::GridReadModel;
 
 const LIST_EFFECTS_LIMIT: usize = 20;
 const DETAIL_EVENTS_LIMIT: usize = 20;
 const DETAIL_EFFECTS_LIMIT: usize = 20;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct GridReadModelSource {
-    pub snapshot: GridRuntimeSnapshot,
-    pub snapshot_updated_at: DateTime<Utc>,
-    pub recent_domain_events: Vec<StoredDomainEvent>,
-    pub recent_effects: Vec<PersistedGridEffect>,
-}
 
 pub struct GridQueryService {
     repository: Arc<dyn GridReadRepositoryPort>,
@@ -27,7 +19,7 @@ impl GridQueryService {
         Self { repository }
     }
 
-    pub async fn list_grid_sources(&self) -> Result<Vec<GridReadModelSource>> {
+    pub async fn list_grid_sources(&self) -> Result<Vec<GridReadModel>> {
         let mut snapshots = self.repository.list_grid_snapshots().await?;
         snapshots.sort_by(|left, right| {
             left.snapshot
@@ -43,21 +35,18 @@ impl GridQueryService {
                 .list_recent_grid_effects(&snapshot.snapshot.grid_id, LIST_EFFECTS_LIMIT)
                 .await?;
 
-            sources.push(GridReadModelSource {
-                snapshot: snapshot.snapshot,
-                snapshot_updated_at: snapshot.updated_at,
-                recent_domain_events: Vec::new(),
+            sources.push(GridReadModel::from_snapshot(
+                snapshot.snapshot,
+                snapshot.updated_at,
+                Vec::new(),
                 recent_effects,
-            });
+            ));
         }
 
         Ok(sources)
     }
 
-    pub async fn load_detail_source(
-        &self,
-        grid_id: &GridId,
-    ) -> Result<Option<GridReadModelSource>> {
+    pub async fn load_detail_source(&self, grid_id: &GridId) -> Result<Option<GridReadModel>> {
         let Some(snapshot) = self.repository.load_grid_snapshot(grid_id).await? else {
             return Ok(None);
         };
@@ -71,12 +60,12 @@ impl GridQueryService {
             .list_recent_grid_effects(grid_id, DETAIL_EFFECTS_LIMIT)
             .await?;
 
-        Ok(Some(GridReadModelSource {
-            snapshot: snapshot.snapshot,
-            snapshot_updated_at: snapshot.updated_at,
+        Ok(Some(GridReadModel::from_snapshot(
+            snapshot.snapshot,
+            snapshot.updated_at,
             recent_domain_events,
             recent_effects,
-        }))
+        )))
     }
 }
 
@@ -104,6 +93,8 @@ mod tests {
     use grid_engine::snapshot::{GridRuntimeSnapshot, ObservedState};
     use grid_engine::transition::GridEffect;
 
+    use crate::read_model::GridReadModel;
+
     use super::GridQueryService;
 
     #[tokio::test]
@@ -112,9 +103,9 @@ mod tests {
         let sources = service.list_grid_sources().await.unwrap();
 
         assert!(!sources.is_empty());
-        assert_eq!(sources[0].snapshot.grid_id.as_str(), "btc-core");
+        assert_eq!(sources[0].grid_id, "btc-core");
         assert_eq!(
-            sources[0].snapshot_updated_at,
+            sources[0].updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
         assert_eq!(sources[0].recent_domain_events.len(), 0);
@@ -135,13 +126,46 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(source.snapshot.grid_id.as_str(), "btc-core");
+        assert_eq!(source.grid_id, "btc-core");
         assert_eq!(
-            source.snapshot_updated_at,
+            source.updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
         assert_eq!(source.recent_domain_events.len(), 1);
         assert_eq!(source.recent_effects.len(), 1);
+    }
+
+    #[test]
+    fn read_model_from_snapshot_flattens_runtime_state() {
+        let repository = FakeReadRepository::new();
+        let stored = repository
+            .snapshots
+            .get("btc-core")
+            .expect("seeded snapshot should exist");
+        let event = repository.events.get("btc-core").unwrap()[0].clone();
+        let effect = repository.effects.get("btc-core").unwrap()[0].clone();
+
+        let read_model = GridReadModel::from_snapshot(
+            stored.snapshot.clone(),
+            stored.updated_at,
+            vec![event],
+            vec![effect],
+        );
+
+        assert_eq!(read_model.grid_id, "btc-core");
+        assert_eq!(read_model.venue, "binance");
+        assert_eq!(read_model.symbol, "BTCUSDT");
+        assert_eq!(read_model.reference_price, Some(101.25));
+        assert_eq!(read_model.current_exposure, 3.5);
+        assert_eq!(read_model.target_exposure, Some(4.0));
+        assert_eq!(read_model.executor_mode, ExecutionMode::Passive);
+        assert_eq!(read_model.inventory_gap, 0.5);
+        assert_eq!(read_model.max_inventory_gap_abs, 0.5);
+        assert_eq!(read_model.slots.len(), 1);
+        assert_eq!(read_model.slots[0].label, "inventory");
+        assert!(!read_model.slots[0].is_submit_pending);
+        assert_eq!(read_model.recent_domain_events.len(), 1);
+        assert_eq!(read_model.recent_effects.len(), 1);
     }
 
     fn test_query_service() -> (GridQueryService, Arc<FakeReadRepository>) {

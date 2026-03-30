@@ -1,4 +1,5 @@
 use grid_core::events::DomainEvent;
+use grid_engine::executor::OrderRole;
 use grid_engine::ports::EffectStatus;
 use grid_engine::runtime::GridStatus as EngineGridStatus;
 use grid_engine::transition::GridEffect;
@@ -12,7 +13,7 @@ use grid_protocol::{
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
 };
 
-use crate::query_service::GridReadModelSource;
+use crate::read_model::GridReadModel;
 
 pub struct GridProjector;
 
@@ -21,22 +22,18 @@ impl GridProjector {
         Self
     }
 
-    pub fn project_list_item(&self, source: &GridReadModelSource) -> GridListItemView {
+    pub fn project_list_item(&self, source: &GridReadModel) -> GridListItemView {
         GridListItemView {
-            id: source.snapshot.grid_id.as_str().to_string(),
-            instrument: project_instrument(&source.snapshot.instrument),
+            id: source.grid_id.clone(),
+            instrument: project_instrument(&source.venue, &source.symbol),
             lifecycle: GridLifecycleView {
-                status: project_grid_status(&source.snapshot.status),
-                updated_at: source.snapshot_updated_at.to_rfc3339(),
+                status: project_grid_status(&source.status),
+                updated_at: source.updated_at.to_rfc3339(),
             },
-            reference_price: source.snapshot.observed.reference_price,
+            reference_price: source.reference_price,
             exposure: ExposureSummaryView {
-                current: source.snapshot.current_exposure.0,
-                target: source
-                    .snapshot
-                    .target_exposure
-                    .as_ref()
-                    .map(|value| value.0),
+                current: source.current_exposure,
+                target: source.target_exposure,
             },
             execution: ExecutionBadgeView {
                 state: project_execution_state(source),
@@ -46,77 +43,61 @@ impl GridProjector {
         }
     }
 
-    pub fn project_detail(&self, source: &GridReadModelSource) -> GridDetailView {
+    pub fn project_detail(&self, source: &GridReadModel) -> GridDetailView {
         GridDetailView {
             identity: GridIdentityView {
-                id: source.snapshot.grid_id.as_str().to_string(),
-                instrument: project_instrument(&source.snapshot.instrument),
+                id: source.grid_id.clone(),
+                instrument: project_instrument(&source.venue, &source.symbol),
             },
             status: GridStatusPanelView {
                 lifecycle: GridLifecycleView {
-                    status: project_grid_status(&source.snapshot.status),
-                    updated_at: source.snapshot_updated_at.to_rfc3339(),
+                    status: project_grid_status(&source.status),
+                    updated_at: source.updated_at.to_rfc3339(),
                 },
-                reference_price: source.snapshot.observed.reference_price,
+                reference_price: source.reference_price,
             },
             strategy: GridStrategyView {
-                lower_price: source.snapshot.config.lower_price,
-                upper_price: source.snapshot.config.upper_price,
-                shape_family: project_shape_family(source.snapshot.config.shape_family),
-                out_of_band_policy: project_out_of_band_policy(
-                    source.snapshot.config.out_of_band_policy,
-                ),
+                lower_price: source.lower_price,
+                upper_price: source.upper_price,
+                shape_family: project_shape_family(source.shape_family),
+                out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
             },
             market: GridMarketView {
-                mark_price: source.snapshot.observed.reference_price,
-                index_price: source.snapshot.observed.reference_price,
+                mark_price: source.reference_price,
+                index_price: source.reference_price,
             },
             position: GridPositionView {
-                current_exposure: source.snapshot.current_exposure.0,
-                target_exposure: source
-                    .snapshot
-                    .target_exposure
-                    .as_ref()
-                    .map(|value| value.0),
+                current_exposure: source.current_exposure,
+                target_exposure: source.target_exposure,
             },
             statistics: GridStatisticsView {
-                total_pnl: source.snapshot.risk.realized_pnl_cumulative
-                    + source.snapshot.risk.unrealized_pnl,
-                realized_pnl: source.snapshot.risk.realized_pnl_cumulative,
-                max_inventory_gap_abs: source.snapshot.executor_state.stats.max_inventory_gap_abs.0,
-                max_gap_age_ms: source.snapshot.executor_state.stats.max_gap_age_ms,
-                stats_started_at: Some(
-                    source.snapshot.executor_state.stats.started_at.to_rfc3339(),
-                ),
+                total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
+                realized_pnl: source.realized_pnl_cumulative,
+                max_inventory_gap_abs: source.max_inventory_gap_abs,
+                max_gap_age_ms: source.max_gap_age_ms,
+                stats_started_at: Some(source.stats_started_at.to_rfc3339()),
             },
             execution: GridExecutionView {
                 state: project_execution_state(source),
                 execution_status: project_execution_status(source),
-                inventory_gap: source.snapshot.executor_state.inventory_gap.0,
+                inventory_gap: source.inventory_gap,
                 gap_age_ms: source
-                    .snapshot
-                    .executor_state
                     .gap_started_at
-                    .map(|started_at| {
-                        (source.snapshot_updated_at - started_at)
-                            .num_milliseconds()
-                            .max(0)
-                    })
+                    .map(|started_at| (source.updated_at - started_at).num_milliseconds().max(0))
                     .unwrap_or(0),
                 active_slot_count: active_slot_count(source),
                 slots: project_execution_slots(source),
                 replacement_gate: source
-                    .snapshot
                     .replacement_gate_reason
                     .as_ref()
                     .map(project_replacement_gate_reason),
             },
             activity: self.project_activity(source),
-            available_commands: project_available_commands(&source.snapshot),
+            available_commands: project_available_commands(source),
         }
     }
 
-    pub fn project_activity(&self, source: &GridReadModelSource) -> Vec<GridActivityItemView> {
+    pub fn project_activity(&self, source: &GridReadModel) -> Vec<GridActivityItemView> {
         let mut activity = Vec::new();
 
         for event in &source.recent_domain_events {
@@ -146,12 +127,13 @@ impl GridProjector {
     }
 }
 
-fn project_instrument(value: &grid_engine::grid::Instrument) -> InstrumentView {
+fn project_instrument(venue: &str, symbol: &str) -> InstrumentView {
     InstrumentView {
-        venue: match value.venue {
-            grid_engine::grid::Venue::Binance => "binance_futures".to_string(),
+        venue: match venue {
+            "binance" => "binance_futures".to_string(),
+            other => other.to_string(),
         },
-        symbol: value.symbol.clone(),
+        symbol: symbol.to_string(),
     }
 }
 
@@ -206,76 +188,52 @@ fn project_replacement_gate_reason(
     }
 }
 
-fn project_execution_state(source: &GridReadModelSource) -> ExecutionStateView {
-    match source.snapshot.status {
+fn project_execution_state(source: &GridReadModel) -> ExecutionStateView {
+    match source.status {
         EngineGridStatus::Paused => ExecutionStateView::Paused,
         EngineGridStatus::Terminated => ExecutionStateView::Closed,
         _ => ExecutionStateView::Open,
     }
 }
 
-fn project_execution_status(source: &GridReadModelSource) -> ExecutionStatusView {
-    if source.snapshot.executor_state.recovery_anomaly.is_some()
-        || source.snapshot.observed.market_data_stale_since.is_some()
-    {
+fn project_execution_status(source: &GridReadModel) -> ExecutionStatusView {
+    if source.has_recovery_anomaly || source.has_stale_market_data {
         ExecutionStatusView::AttentionRequired
     } else {
         ExecutionStatusView::Normal
     }
 }
 
-fn active_slot_count(source: &GridReadModelSource) -> u32 {
-    project_execution_slots(source).len() as u32
+fn active_slot_count(source: &GridReadModel) -> u32 {
+    source.slots.len() as u32
 }
 
-fn project_execution_slots(source: &GridReadModelSource) -> Vec<ExecutionSlotView> {
+fn project_execution_slots(source: &GridReadModel) -> Vec<ExecutionSlotView> {
     source
-        .snapshot
-        .executor_state
         .slots
         .iter()
-        .enumerate()
-        .filter_map(|(index, slot)| {
-            let order = slot.working_order.as_ref()?;
-            Some(ExecutionSlotView {
-                label: project_execution_slot_label(index, slot),
-                phase: match slot.state {
-                    grid_engine::runtime::SlotState::SubmitPending => {
-                        ExecutionSlotPhaseView::Opening
-                    }
-                    grid_engine::runtime::SlotState::Working => ExecutionSlotPhaseView::Working,
-                    grid_engine::runtime::SlotState::Empty => return None,
-                },
-                intent: match order.role {
-                    grid_engine::executor::OrderRole::IncreaseInventory => {
-                        ExecutionIntentView::IncreaseInventory
-                    }
-                    grid_engine::executor::OrderRole::DecreaseInventory => {
-                        ExecutionIntentView::DecreaseInventory
-                    }
-                },
-                order: Some(ExecutionSlotOrderView {
-                    side: project_side(order.side),
-                    price: order.price,
-                    quantity: order.quantity,
-                }),
-            })
+        .map(|slot| ExecutionSlotView {
+            label: slot.label.clone(),
+            phase: if slot.is_submit_pending {
+                ExecutionSlotPhaseView::Opening
+            } else {
+                ExecutionSlotPhaseView::Working
+            },
+            intent: match slot.role {
+                OrderRole::IncreaseInventory => ExecutionIntentView::IncreaseInventory,
+                OrderRole::DecreaseInventory => ExecutionIntentView::DecreaseInventory,
+            },
+            order: Some(ExecutionSlotOrderView {
+                side: project_side(slot.side),
+                price: slot.price,
+                quantity: slot.quantity,
+            }),
         })
         .collect()
 }
 
-fn project_execution_slot_label(
-    index: usize,
-    slot: &grid_engine::runtime::ExecutionSlot,
-) -> String {
-    match slot.slot.0.as_str() {
-        "inventory_core" => "inventory".to_string(),
-        _ => format!("slot {}", index + 1),
-    }
-}
-
-fn project_available_commands(snapshot: &grid_engine::snapshot::GridRuntimeSnapshot) -> Vec<GridCommandView> {
-    let status = &snapshot.status;
+fn project_available_commands(source: &GridReadModel) -> Vec<GridCommandView> {
+    let status = &source.status;
     vec![
         GridCommandView {
             command: GridCommandType::Pause,
@@ -292,10 +250,10 @@ fn project_available_commands(snapshot: &grid_engine::snapshot::GridRuntimeSnaps
         GridCommandView {
             command: GridCommandType::Resume,
             enabled: matches!(status, EngineGridStatus::Paused)
-                || snapshot.manual_target_override.is_some(),
+                || source.manual_target_override.is_some(),
             disabled_reason: match status {
                 EngineGridStatus::Paused => None,
-                _ if snapshot.manual_target_override.is_some() => None,
+                _ if source.manual_target_override.is_some() => None,
                 EngineGridStatus::Terminated => Some("terminated grid cannot be resumed".into()),
                 _ => Some("grid is not paused".into()),
             },
@@ -405,9 +363,7 @@ mod tests {
     use grid_core::events::DomainEvent;
     use grid_core::strategy::{GridConfig, OutOfBandPolicy, ShapeFamily};
     use grid_core::types::{Exposure, Side};
-    use grid_engine::executor::{
-        ExecutionMode, ExecutionReason, OrderRole, OrderSlot, RecoveryAnomaly,
-    };
+    use grid_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use grid_engine::grid::{GridId, Instrument, Venue};
     use grid_engine::ports::{
         EffectStatus, OrderRequest, OrderStatus, PersistedGridEffect, StoredDomainEvent,
@@ -424,7 +380,7 @@ mod tests {
     };
 
     use super::GridProjector;
-    use crate::query_service::GridReadModelSource;
+    use crate::read_model::GridReadModel;
 
     #[test]
     fn projects_execution_badge_from_working_orders() {
@@ -438,8 +394,7 @@ mod tests {
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
 
         let mut anomaly_source = source_with_submitting_effect();
-        anomaly_source.snapshot.executor_state.recovery_anomaly =
-            Some(RecoveryAnomaly::UnknownLiveOrder);
+        anomaly_source.has_recovery_anomaly = true;
         let anomaly_item = GridProjector::new().project_list_item(&anomaly_source);
         assert_eq!(
             anomaly_item.execution.execution_status,
@@ -485,8 +440,8 @@ mod tests {
     #[test]
     fn project_detail_enables_resume_when_manual_flatten_is_active() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.snapshot.status = GridStatus::ReducingOnly;
-        source.snapshot.manual_target_override = Some(Exposure(0.0));
+        source.status = GridStatus::ReducingOnly;
+        source.manual_target_override = Some(0.0);
 
         let detail = GridProjector::new().project_detail(&source);
         let resume = detail
@@ -502,8 +457,7 @@ mod tests {
     #[test]
     fn stale_market_data_projects_attention_required() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.snapshot.observed.market_data_stale_since =
-            Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        source.has_stale_market_data = true;
 
         let detail = GridProjector::new().project_detail(&source);
         assert_eq!(
@@ -560,7 +514,7 @@ mod tests {
     #[test]
     fn project_detail_includes_replacement_gate_reason() {
         let mut source = source_with_submitting_effect();
-        source.snapshot.replacement_gate_reason = Some(
+        source.replacement_gate_reason = Some(
             grid_core::events::ReplacementGateReason::ImprovementBelowThreshold {
                 improvement_bps: 9.0,
                 threshold_bps: 13.0,
@@ -617,20 +571,20 @@ mod tests {
         assert_eq!(activity[0].level, ActivityLevelView::Info);
     }
 
-    fn source_with_submitting_effect() -> GridReadModelSource {
-        GridReadModelSource {
-            snapshot: test_snapshot(),
-            snapshot_updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            recent_domain_events: Vec::new(),
-            recent_effects: vec![test_effect(EffectStatus::Executing, None)],
-        }
+    fn source_with_submitting_effect() -> GridReadModel {
+        GridReadModel::from_snapshot(
+            test_snapshot(),
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            Vec::new(),
+            vec![test_effect(EffectStatus::Executing, None)],
+        )
     }
 
-    fn source_with_failed_effect_and_recent_event() -> GridReadModelSource {
-        GridReadModelSource {
-            snapshot: test_snapshot(),
-            snapshot_updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            recent_domain_events: vec![StoredDomainEvent {
+    fn source_with_failed_effect_and_recent_event() -> GridReadModel {
+        GridReadModel::from_snapshot(
+            test_snapshot(),
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            vec![StoredDomainEvent {
                 id: 1,
                 grid_id: GridId::new("btc-core"),
                 event: DomainEvent::ExposureTargetChanged {
@@ -639,11 +593,11 @@ mod tests {
                 },
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
             }],
-            recent_effects: vec![test_effect(
+            vec![test_effect(
                 EffectStatus::Failed,
                 Some("submit order rejected".into()),
             )],
-        }
+        )
     }
 
     fn test_effect(status: EffectStatus, last_error: Option<String>) -> PersistedGridEffect {
