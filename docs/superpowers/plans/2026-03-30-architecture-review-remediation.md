@@ -512,12 +512,12 @@ Commit: `65472b9266c309f865e996c61b0545d759381be3`
 - Modify: `server/src/query_service.rs`
 - Modify: `server/src/projector.rs`
 
-- [ ] **Step 1: 运行 projector 和 HTTP 测试基线**
+- [x] **Step 1: 运行 projector 和 HTTP 测试基线**
 
 Run: `cargo test -p grid-server -- projector::tests --nocapture && cargo test -p grid-server -- http::tests --nocapture`
 Expected: 全部通过。
 
-- [ ] **Step 2: 创建 `server/src/read_model.rs`，定义 read model 结构体**
+- [x] **Step 2: 创建 `server/src/read_model.rs`，定义 read model 结构体**
 
 ```rust
 use chrono::{DateTime, Utc};
@@ -588,7 +588,7 @@ pub struct ReadModelSlot {
 Run: `cargo check -p grid-server`
 Expected: 编译通过（新代码无调用者）。
 
-- [ ] **Step 3: 让 query_service 返回 GridReadModel 而非 GridReadModelSource**
+- [x] **Step 3: 让 query_service 返回 GridReadModel 而非 GridReadModelSource**
 
 修改 `query_service.rs`：
 - `list_grid_sources()` 返回 `Vec<GridReadModel>`
@@ -600,7 +600,7 @@ Expected: 编译通过（新代码无调用者）。
 Run: `cargo check -p grid-server`
 Expected: projector.rs 和 http.rs 中使用 `GridReadModelSource` 的地方报错。
 
-- [ ] **Step 4: 改写 projector 消费 GridReadModel**
+- [x] **Step 4: 改写 projector 消费 GridReadModel**
 
 修改 `projector.rs` 中 `project_list_item` 和 `project_detail` 的参数类型，从 `&GridReadModelSource` 改为 `&GridReadModel`。逐字段替换属性访问：
 
@@ -614,24 +614,41 @@ projector 不再 import 任何 `grid_engine::snapshot::*` 或 `grid_engine::runt
 Run: `cargo check -p grid-server`
 Expected: 编译通过。
 
-- [ ] **Step 5: 更新 projector 和 HTTP 测试**
+- [x] **Step 5: 更新 projector 和 HTTP 测试**
 
 测试中原来构造 `GridReadModelSource` 的地方改为构造 `GridReadModel`。验证 JSON 输出不变。
 
 Run: `cargo test -p grid-server -- projector::tests --nocapture && cargo test -p grid-server -- http::tests --nocapture`
 Expected: 全部通过。
 
-- [ ] **Step 6: 删除 GridReadModelSource（如果不再被使用）**
+- [x] **Step 6: 删除 GridReadModelSource（如果不再被使用）**
 
 Run: `cargo test -p grid-server && cargo test -p grid-tui`
 Expected: 全部通过。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add server/src/main.rs server/src/read_model.rs server/src/query_service.rs server/src/projector.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
 git commit -m "refactor(server): introduce server-owned read model boundary"
 ```
+
+Result:
+- `server/src/read_model.rs` 已新增，`GridReadModel::from_snapshot(...)` 成为 snapshot -> read model 的唯一接触点；slot label、submit pending、exposure/risk/statistics 拍平都收在这个模块里。
+- `server/src/query_service.rs` 的公开返回类型已切到 `GridReadModel`，`GridReadModelSource` 已直接删除。这里实际没有保留过渡结构，因为剩余调用点很少，同一轮编译错误足够把迁移面完整暴露出来。
+- `server/src/projector.rs` 已不再依赖 `GridRuntimeSnapshot` 或 `ExecutorState` 的嵌套结构，改为只消费 `GridReadModel` 的拍平字段。
+
+Verification:
+- 基线：`cargo test -p grid-server projector::tests -- --nocapture` 和 `cargo test -p grid-server http::tests -- --nocapture` 初始通过。
+- TDD 红灯：新增 `query_service::tests::read_model_from_snapshot_flattens_runtime_state` 后，先失败在 `crate::read_model` 不存在；补模块后再次失败在 slot label 预期不符（`inventory` vs `Inventory Core`），随后按现有 projector 语义修正并完成实现。
+- 编译：`cargo check -p grid-server` 在 query_service 切换后按预期暴露 `projector` 对旧类型的依赖，迁移后恢复通过。
+- 回归：`cargo test -p grid-server projector::tests -- --nocapture`、`cargo test -p grid-server http::tests -- --nocapture`、`cargo test -p grid-server`、`cargo test -p grid-tui` 全部通过。
+
+Review:
+- 没有发现新的高信号设计问题。当前实现符合 Task 5 的 phase 1 范围：只建立单一接触点和结构拍平，没有额外引入 server 自有第三份枚举，也没有把 phase 2 的完全类型解耦提前混进来。
+- `projector` 现在只负责协议投影，不再承担 engine snapshot 结构遍历；结构性知识已下沉到 `read_model.rs`，和本 task 的边界目标一致。
+
+Commit: `109a7f30f5414c6c7a44f7616086c9f2ee4df8af`
 
 ---
 
