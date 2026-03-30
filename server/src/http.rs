@@ -127,6 +127,9 @@ fn map_query_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
 
 fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     match error.downcast::<GridMutationError>() {
+        Ok(GridMutationError::LoadedGridInvariant { grid_id }) => {
+            internal_error(GridMutationError::LoadedGridInvariant { grid_id }.to_string())
+        }
         Ok(GridMutationError::Mutation(error)) => bad_request(error.to_string()),
         Ok(GridMutationError::Persistence(error)) => internal_error(error.to_string()),
         Err(error) => internal_error(error.to_string()),

@@ -161,6 +161,13 @@ impl EffectWorker {
                     .await
                 {
                     Ok(()) => Err(anyhow!(failure_message)),
+                    Err(clear_error)
+                        if crate::write_service::is_loaded_grid_invariant_violation(
+                            &clear_error,
+                        ) =>
+                    {
+                        Err(clear_error)
+                    }
                     Err(clear_error) => Err(anyhow!(
                         "submit order failed: {error}; failed to record submit failure: {clear_error}"
                     )),

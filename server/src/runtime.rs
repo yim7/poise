@@ -429,6 +429,8 @@ fn order_observation(order: &ExchangeOrder) -> OrderObservation {
 mod tests {
     use std::collections::HashMap;
     use std::future::Future;
+    use std::io;
+    use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -456,6 +458,7 @@ mod tests {
     use grid_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
+    use tracing_subscriber::fmt::MakeWriter;
 
     use crate::assembly::{ServerState, build_server_state};
     use crate::effect_service::EffectService;
@@ -1570,6 +1573,89 @@ mod tests {
 
         release_submit.notify_waiters();
         task.await.unwrap().unwrap();
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(StdArc<Mutex<Vec<u8>>>);
+
+    struct SharedLogWriter(StdArc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(StdArc::clone(&self.0))
+        }
+    }
+
+    impl io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn effect_worker_reports_missing_loaded_grid_for_effect_writeback() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        persistence
+            .seed_effect(PersistedGridEffect {
+                effect_id: "BTCUSDT:batch:0".into(),
+                grid_id: GridId::new("BTCUSDT"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: ExecutionAction::CancelOrder {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+        let manager = GridManager::new(clock);
+        let (events, _) = broadcast::channel(16);
+        let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
+        let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
+        let state = build_server_state(
+            Arc::new(GridWriteService::new(
+                manager,
+                state_repository.clone(),
+                events,
+            )),
+            Arc::new(EffectService::new(state_repository)),
+            Arc::new(GridQueryService::new(read_repository)),
+            Arc::new(GridProjector::new()),
+        );
+        let worker = EffectWorker::new(
+            state,
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+        let logs = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        worker.run_once().await.unwrap();
+
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(captured.contains("loaded-grid invariant violated"));
+        assert!(!captured.contains("submit order failed"));
     }
 
     #[tokio::test]

@@ -61,6 +61,7 @@ pub struct PreparedSubmitExecution {
 
 #[derive(Debug)]
 pub enum GridMutationError {
+    LoadedGridInvariant { grid_id: String },
     Mutation(anyhow::Error),
     Persistence(anyhow::Error),
 }
@@ -76,9 +77,28 @@ impl std::error::Error for GridMutationError {}
 impl GridMutationError {
     pub fn message(&self) -> String {
         match self {
+            Self::LoadedGridInvariant { grid_id } => format!(
+                "loaded-grid invariant violated for effect writeback: grid `{grid_id}` is not loaded in write-side runtime"
+            ),
             Self::Mutation(error) | Self::Persistence(error) => error.to_string(),
         }
     }
+
+    fn loaded_grid_invariant(grid_id: &str) -> Self {
+        Self::LoadedGridInvariant {
+            grid_id: grid_id.to_string(),
+        }
+    }
+
+    fn is_loaded_grid_invariant_violation(&self) -> bool {
+        matches!(self, Self::LoadedGridInvariant { .. })
+    }
+}
+
+pub(crate) fn is_loaded_grid_invariant_violation(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<GridMutationError>()
+        .is_some_and(GridMutationError::is_loaded_grid_invariant_violation)
 }
 
 pub(crate) trait TransitionResult {
@@ -466,11 +486,11 @@ impl GridWriteService {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
             let result = mutate(&mut manager).map_err(GridMutationError::Mutation)?;
             let next_snapshot = manager
                 .snapshot(id)
-                .ok_or_else(|| GridMutationError::Mutation(anyhow!("grid `{id}` not found")))?;
+                .ok_or_else(|| GridMutationError::loaded_grid_invariant(id))?;
             (previous_snapshot, result, next_snapshot)
         };
 
@@ -1145,6 +1165,21 @@ mod tests {
             .expect("effect should remain persisted");
         assert_eq!(effect.status, EffectStatus::Failed);
         assert_eq!(effect.last_error.as_deref(), Some("submit order rejected"));
+    }
+
+    #[tokio::test]
+    async fn complete_effect_failed_returns_invariant_violation_when_grid_is_not_loaded() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = multi_grid_service(repository as Arc<dyn StateRepositoryPort>, &[]);
+
+        let error = service
+            .complete_effect_failed("btc-core", "btc-core:batch:0", "submit order rejected")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("loaded-grid invariant violated"));
+        assert!(error.to_string().contains("btc-core"));
+        assert!(!error.to_string().contains("grid `btc-core` not found"));
     }
 
     fn working_order(
