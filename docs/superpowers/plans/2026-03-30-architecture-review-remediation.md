@@ -414,14 +414,19 @@ Commit: `68b4f329c0e176d0b79ab770acc5f6cb22bc0932`
 - Modify: `engine/src/manager.rs`
 - Modify: `server/src/runtime.rs`
 - Modify: `server/src/write_service.rs`
-- Modify: `server/src/effect_service.rs`（可能删除）
+- Modify: `server/src/assembly.rs`
+- Modify: `server/src/effect_worker.rs`
+- Modify: `server/src/http.rs`
+- Modify: `server/src/websocket.rs`
+- Modify: `server/src/main.rs`
+- Delete: `server/src/effect_service.rs`
 
-- [ ] **Step 1: 运行 server 测试基线**
+- [x] **Step 1: 运行 server 测试基线**
 
 Run: `cargo test -p grid-server -- --nocapture 2>&1 | tail -5`
-Expected: 全部通过，记录通过数量。
+Result: 通过，基线为 `grid-server` 119 个测试全部通过。
 
-- [ ] **Step 2: 把 engine/manager.rs 中的 StartupSyncMode 重命名为 ExchangeSyncMode 并改为 pub**
+- [x] **Step 2: 把 engine/manager.rs 中的 StartupSyncMode 重命名为 ExchangeSyncMode 并改为 pub**
 
 当前名称 `StartupSyncMode` 语义偏窄——实际上 shutdown 和 recovery retry 也复用同一模式，不只是 startup。重命名为 `ExchangeSyncMode` 更准确地描述"从交易所同步状态时是否追加 reconcile"。
 
@@ -442,25 +447,25 @@ impl ExchangeSyncMode {
 同步更新 `manager.rs` 内部所有引用点。
 
 Run: `cargo check -p grid-engine`
-Expected: 编译通过。
+Result: 编译通过。
 
-- [ ] **Step 3: 删除 write_service.rs 中的 StartupSyncMode 副本**
+- [x] **Step 3: 删除 write_service.rs 中的 StartupSyncMode 副本**
 
 删除 `server/src/write_service.rs` 中 `StartupSyncMode` 枚举和 `impl` 块（约 line 23-33），改为 `use grid_engine::manager::ExchangeSyncMode;`。
 
 把 `sync_exchange_state_inner` 的参数类型和内部调用适配到 `ExchangeSyncMode`。
 
 Run: `cargo check -p grid-server`
-Expected: 编译通过。
+Result: 编译通过。
 
-- [ ] **Step 4: 删除 runtime.rs 中的 ExchangeStateSyncMode 副本**
+- [x] **Step 4: 删除 runtime.rs 中的 ExchangeStateSyncMode 副本**
 
 删除 `server/src/runtime.rs` 中 `ExchangeStateSyncMode` 枚举（约 line 45-49），改为 `use grid_engine::manager::ExchangeSyncMode;`。把所有 `ExchangeStateSyncMode::RecoverOnly` / `RecoverAndReconcile` 替换为 `ExchangeSyncMode::RecoverOnly` / `RecoverAndReconcile`。
 
 Run: `cargo check -p grid-server`
-Expected: 编译通过。
+Result: 编译通过。
 
-- [ ] **Step 5: 评估并处理 EffectService**
+- [x] **Step 5: 评估并处理 EffectService**
 
 检查 `server/src/effect_service.rs` 的调用者。如果只有 `effect_worker.rs` 在用，且 EffectService 仍然只是对 `StateRepositoryPort` 的转发，则：
 - 删除 `effect_service.rs`
@@ -470,17 +475,23 @@ Expected: 编译通过。
 如果 EffectService 承担了其他职责，保留并记录原因。
 
 Run: `cargo check -p grid-server`
-Expected: 编译通过。
+Result: 编译通过。`EffectService` 除了 `effect_worker` 和 `runtime` 的仓储直通调用外没有额外职责，因此已删除，`ServerState` 改为直接持有 `Arc<dyn StateRepositoryPort>`。
 
-- [ ] **Step 6: 全量测试验证**
+- [x] **Step 6: 全量测试验证**
 
 Run: `cargo test`
-Expected: workspace 全部通过。
+Result: workspace 全部通过。删除 `EffectService` 后，`grid-server` 测试数从 119 变为 117，因为移除了两个只验证转发层的测试。
 
-- [ ] **Step 7: 提交**
+Review:
+- `ExchangeSyncMode` 现在只在 `engine/src/manager.rs` 定义一次，`write_service` 和 `runtime` 都直接依赖同一个 owner，没有再各自维护副本。
+- 语义残留也一起清掉了：测试名和 manager 内部 helper 不再继续用 `startup` 这个过窄名字描述 recovery/shutdown 共用的同步模式。
+- `EffectService` 删除后，仓储访问只落在 `ServerState.state_repository` 这一处共享入口，没有再新增别的 server 侧包装层。
+
+- [ ] **Step 7: 提交（commit 后回填 SHA）**
 
 ```bash
-git add engine/src/manager.rs server/src/runtime.rs server/src/write_service.rs server/src/effect_service.rs server/src/effect_worker.rs server/src/assembly.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
+git add engine/src/manager.rs server/src/assembly.rs server/src/write_service.rs server/src/runtime.rs server/src/effect_worker.rs server/src/http.rs server/src/websocket.rs server/src/main.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
+git rm server/src/effect_service.rs
 git commit -m "refactor: converge ExchangeSyncMode to single engine definition"
 ```
 

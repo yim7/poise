@@ -1,6 +1,5 @@
 mod assembly;
 mod config;
-mod effect_service;
 mod effect_worker;
 mod http;
 mod notifications;

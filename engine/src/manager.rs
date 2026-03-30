@@ -23,13 +23,13 @@ use crate::transition::{GridEffect, GridTransition};
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupSyncMode {
+pub enum ExchangeSyncMode {
     RecoverOnly,
     RecoverAndReconcile,
 }
 
-impl StartupSyncMode {
-    fn allows_follow_up_reconcile(self) -> bool {
+impl ExchangeSyncMode {
+    pub fn allows_follow_up_reconcile(self) -> bool {
         matches!(self, Self::RecoverAndReconcile)
     }
 }
@@ -137,12 +137,12 @@ impl GridManager {
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<GridTransition> {
-        let (events, effects) = self.apply_startup_exchange_state(
+        let (events, effects) = self.apply_exchange_state_sync(
             id,
             position,
             open_orders,
             pending_submit_hints,
-            StartupSyncMode::RecoverAndReconcile,
+            ExchangeSyncMode::RecoverAndReconcile,
         )?;
         self.transition_for(id, events, effects)
     }
@@ -154,12 +154,12 @@ impl GridManager {
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<GridTransition> {
-        let (events, effects) = self.apply_startup_exchange_state(
+        let (events, effects) = self.apply_exchange_state_sync(
             id,
             position,
             open_orders,
             pending_submit_hints,
-            StartupSyncMode::RecoverOnly,
+            ExchangeSyncMode::RecoverOnly,
         )?;
         self.transition_for(id, events, effects)
     }
@@ -574,13 +574,13 @@ impl GridManager {
         Ok(())
     }
 
-    fn apply_startup_exchange_state(
+    fn apply_exchange_state_sync(
         &mut self,
         id: &GridId,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
-        mode: StartupSyncMode,
+        mode: ExchangeSyncMode,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
         self.observe_position(id, position)?;
         let observed_at = self.clock.now();
@@ -911,9 +911,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_sync_mode_explicitly_controls_follow_up_reconcile() {
-        assert!(!StartupSyncMode::RecoverOnly.allows_follow_up_reconcile());
-        assert!(StartupSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
+    fn exchange_sync_mode_explicitly_controls_follow_up_reconcile() {
+        assert!(!ExchangeSyncMode::RecoverOnly.allows_follow_up_reconcile());
+        assert!(ExchangeSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
     }
 
     fn test_manager() -> GridManager {

@@ -161,7 +161,6 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::assembly::{ServerState, build_server_state};
-    use crate::effect_service::EffectService;
     use crate::notifications::GridInternalNotification;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
@@ -210,16 +209,15 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
-            state_repository,
+            state_repository.clone(),
             notifications,
         ));
 
         build_server_state(
             write_service,
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )
@@ -434,16 +432,14 @@ mod tests {
                 .expect("seeded manager should expose runtime snapshot"),
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<GridInternalNotification>(16);
-        let effect_service = Arc::new(EffectService::new(
-            repository.clone() as Arc<dyn StateRepositoryPort>
-        ));
+        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
         let app = router(build_server_state(
             Arc::new(GridWriteService::new(
                 manager,
-                repository.clone() as Arc<dyn StateRepositoryPort>,
+                state_repository.clone(),
                 notifications,
             )),
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(
                 repository as Arc<dyn GridReadRepositoryPort>,
             )),

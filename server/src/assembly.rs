@@ -14,7 +14,6 @@ use grid_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
 use crate::config::{Config, ExchangeConfig};
-use crate::effect_service::EffectService;
 use crate::projector::GridProjector;
 use crate::query_service::GridQueryService;
 use crate::runtime::{RuntimeHandles, ServerRuntime};
@@ -22,7 +21,7 @@ use crate::write_service::GridWriteService;
 #[derive(Clone)]
 pub struct ServerState {
     pub write_service: Arc<GridWriteService>,
-    pub effect_service: Arc<EffectService>,
+    pub state_repository: Arc<dyn StateRepositoryPort>,
     #[allow(dead_code)]
     pub query_service: Arc<GridQueryService>,
     #[allow(dead_code)]
@@ -163,15 +162,14 @@ where
     let (notifications, _) = broadcast::channel(256);
     let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
     let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-    let effect_service = Arc::new(EffectService::new(state_repository.clone()));
     let write_service = Arc::new(GridWriteService::new(
         manager,
-        state_repository,
+        state_repository.clone(),
         notifications.clone(),
     ));
     let query_service = Arc::new(GridQueryService::new(read_repository));
     let projector = Arc::new(GridProjector::new());
-    let server_state = build_server_state(write_service, effect_service, query_service, projector);
+    let server_state = build_server_state(write_service, state_repository, query_service, projector);
 
     Ok(ServerPlatform {
         state: server_state.clone(),
@@ -208,13 +206,13 @@ impl ClockPort for SystemClock {
 
 pub(crate) fn build_server_state(
     write_service: Arc<GridWriteService>,
-    effect_service: Arc<EffectService>,
+    state_repository: Arc<dyn StateRepositoryPort>,
     query_service: Arc<GridQueryService>,
     projector: Arc<GridProjector>,
 ) -> ServerState {
     ServerState {
         write_service,
-        effect_service,
+        state_repository,
         query_service,
         projector,
     }
@@ -244,7 +242,6 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, GridDefinition};
-    use crate::effect_service::EffectService;
     use crate::http::router;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
@@ -729,15 +726,14 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
-            state_repository,
+            state_repository.clone(),
             events.clone(),
         ));
         let state = build_server_state(
             write_service,
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         );

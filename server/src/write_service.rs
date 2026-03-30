@@ -6,7 +6,7 @@ use grid_core::events::DomainEvent;
 use grid_engine::command::GridCommand;
 use grid_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
 use grid_engine::grid::{GridId, Instrument};
-use grid_engine::manager::GridManager;
+use grid_engine::manager::{ExchangeSyncMode, GridManager};
 use grid_engine::observation::{
     GridObservation, MarketObservation, OrderObservation, PositionObservation,
 };
@@ -19,18 +19,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 use crate::notifications::GridInternalNotification;
 
 pub type SharedManager = Arc<RwLock<GridManager>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupSyncMode {
-    RecoverOnly,
-    RecoverAndReconcile,
-}
-
-impl StartupSyncMode {
-    fn allows_follow_up_reconcile(self) -> bool {
-        matches!(self, Self::RecoverAndReconcile)
-    }
-}
 
 #[derive(Default)]
 struct GridMutationGuards {
@@ -266,7 +254,7 @@ impl GridWriteService {
             id,
             position,
             open_orders,
-            StartupSyncMode::RecoverAndReconcile,
+            ExchangeSyncMode::RecoverAndReconcile,
         )
         .await
     }
@@ -277,7 +265,7 @@ impl GridWriteService {
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
     ) -> Result<GridTransition> {
-        self.sync_exchange_state_inner(id, position, open_orders, StartupSyncMode::RecoverOnly)
+        self.sync_exchange_state_inner(id, position, open_orders, ExchangeSyncMode::RecoverOnly)
             .await
     }
 
@@ -286,7 +274,7 @@ impl GridWriteService {
         id: &str,
         position: PositionObservation,
         open_orders: Vec<OrderObservation>,
-        mode: StartupSyncMode,
+        mode: ExchangeSyncMode,
     ) -> Result<GridTransition> {
         let _mutation_guard = self.lock_grid_mutation(id).await;
         let pending_submit_hints = self
@@ -711,7 +699,7 @@ mod tests {
     use grid_engine::command::GridCommand;
     use grid_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
     use grid_engine::grid::{GridId, Instrument, Venue};
-    use grid_engine::manager::GridManager;
+    use grid_engine::manager::{ExchangeSyncMode, GridManager};
     use grid_engine::observation::{
         GridObservation, MarketObservation, OrderObservation, PositionObservation,
     };
@@ -729,7 +717,7 @@ mod tests {
 
     use crate::notifications::GridInternalNotification;
 
-    use super::{GridWriteService, StartupSyncMode};
+    use super::GridWriteService;
 
     #[tokio::test]
     async fn mutate_grid_persists_tick_events_and_emits_notification_after_save() {
@@ -863,9 +851,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_sync_mode_explicitly_controls_follow_up_reconcile() {
-        assert!(!StartupSyncMode::RecoverOnly.allows_follow_up_reconcile());
-        assert!(StartupSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
+    fn exchange_sync_mode_explicitly_controls_follow_up_reconcile() {
+        assert!(!ExchangeSyncMode::RecoverOnly.allows_follow_up_reconcile());
+        assert!(ExchangeSyncMode::RecoverAndReconcile.allows_follow_up_reconcile());
     }
 
     #[tokio::test]

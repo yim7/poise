@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use grid_engine::manager::ExchangeSyncMode;
 use grid_engine::observation::{OrderObservation, PositionObservation};
 use grid_engine::ports::{
     ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
@@ -40,12 +41,6 @@ pub struct RuntimeHandles {
 struct RecoveryTrackedGrid {
     instrument: grid_engine::grid::Instrument,
     next_retry_at: Instant,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExchangeStateSyncMode {
-    RecoverOnly,
-    RecoverAndReconcile,
 }
 
 impl ServerRuntime {
@@ -122,7 +117,7 @@ impl ServerRuntime {
                 &self.exchange,
                 &grid.id,
                 &grid.instrument,
-                ExchangeStateSyncMode::RecoverOnly,
+                ExchangeSyncMode::RecoverOnly,
             )
             .await
             {
@@ -330,7 +325,7 @@ impl ServerRuntime {
                                 &exchange,
                                 &grid_id,
                                 &instrument,
-                                ExchangeStateSyncMode::RecoverAndReconcile,
+                                ExchangeSyncMode::RecoverAndReconcile,
                             )
                             .await {
                                 tracing::warn!(
@@ -455,7 +450,7 @@ async fn sync_exchange_state_from_exchange(
     exchange: &Arc<dyn ExchangePort>,
     grid_id: &str,
     instrument: &grid_engine::grid::Instrument,
-    mode: ExchangeStateSyncMode,
+    mode: ExchangeSyncMode,
 ) -> std::result::Result<(), GridMutationError> {
     let position = exchange
         .get_position(instrument)
@@ -465,7 +460,7 @@ async fn sync_exchange_state_from_exchange(
         .get_open_orders(instrument)
         .await
         .map_err(GridMutationError::Persistence)?;
-    if matches!(mode, ExchangeStateSyncMode::RecoverAndReconcile) {
+    if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
         let _ = state
             .write_service
             .sync_exchange_state(
@@ -524,7 +519,7 @@ async fn seed_recovery_tracking(
 ) -> std::collections::HashMap<String, RecoveryTrackedGrid> {
     let mut tracked = std::collections::HashMap::new();
     for grid in instruments {
-        let Ok(Some(snapshot)) = state.effect_service.load_grid_state(&grid.id).await else {
+        let Ok(Some(snapshot)) = state.state_repository.load_grid_state(&grid.id).await else {
             continue;
         };
         update_recovery_tracking(
@@ -604,7 +599,6 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     use crate::assembly::{ServerState, build_server_state};
-    use crate::effect_service::EffectService;
     use crate::effect_worker::EffectWorker;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
@@ -1784,7 +1778,7 @@ mod tests {
                 state_repository.clone(),
                 events,
             )),
-            Arc::new(EffectService::new(state_repository)),
+            state_repository,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         );
@@ -1885,7 +1879,6 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1893,7 +1886,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            effect_service,
+            persistence.clone(),
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -1975,7 +1968,6 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -1983,7 +1975,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            effect_service,
+            persistence.clone(),
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -3035,7 +3027,6 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -3043,7 +3034,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            effect_service,
+            persistence.clone(),
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -3074,16 +3065,13 @@ mod tests {
         )));
         let persistence = Arc::new(MemoryPersistence::default());
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(
-            persistence.clone() as Arc<dyn StateRepositoryPort>
-        ));
         let state = build_server_state(
             Arc::new(GridWriteService::new(
                 manager,
                 persistence.clone() as Arc<dyn StateRepositoryPort>,
                 events.clone(),
             )),
-            effect_service,
+            persistence.clone() as Arc<dyn StateRepositoryPort>,
             Arc::new(GridQueryService::new(
                 persistence as Arc<dyn GridReadRepositoryPort>,
             )),
@@ -3205,7 +3193,6 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -3213,7 +3200,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            effect_service,
+            persistence.clone(),
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -3309,7 +3296,6 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let effect_service = Arc::new(EffectService::new(persistence.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
             persistence.clone(),
@@ -3317,7 +3303,7 @@ mod tests {
         ));
         let state = build_server_state(
             write_service,
-            effect_service,
+            persistence.clone(),
             Arc::new(GridQueryService::new(
                 persistence.clone() as Arc<dyn GridReadRepositoryPort>
             )),
@@ -3369,15 +3355,14 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
-            state_repository,
+            state_repository.clone(),
             events.clone(),
         ));
         build_server_state(
             write_service,
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )
@@ -3414,15 +3399,14 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = persistence;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
-            state_repository,
+            state_repository.clone(),
             events.clone(),
         ));
         build_server_state(
             write_service,
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )

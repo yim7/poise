@@ -85,7 +85,7 @@ impl EffectWorker {
 
             let Some(effect) = self
                 .state
-                .effect_service
+                .state_repository
                 .list_dispatchable_effects()
                 .await?
                 .into_iter()
@@ -341,7 +341,6 @@ mod tests {
     use tokio::time::timeout;
 
     use crate::assembly::build_server_state;
-    use crate::effect_service::EffectService;
     use crate::projector::GridProjector;
     use crate::query_service::GridQueryService;
     use crate::write_service::GridWriteService;
@@ -764,15 +763,14 @@ mod tests {
         let (notifications, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn GridReadRepositoryPort> = repository;
-        let effect_service = Arc::new(EffectService::new(state_repository.clone()));
         let write_service = Arc::new(GridWriteService::new(
             manager,
-            state_repository,
+            state_repository.clone(),
             notifications.clone(),
         ));
         build_server_state(
             write_service,
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(read_repository)),
             Arc::new(GridProjector::new()),
         )

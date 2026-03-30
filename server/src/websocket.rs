@@ -126,7 +126,6 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::assembly::{ServerState, build_server_state};
-    use crate::effect_service::EffectService;
     use crate::effect_worker::EffectWorker;
     use crate::notifications::GridInternalNotification;
     use crate::projector::GridProjector;
@@ -154,17 +153,15 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
-        let effect_service = Arc::new(EffectService::new(
-            repository.clone() as Arc<dyn StateRepositoryPort>
-        ));
+        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
         let service = Arc::new(GridWriteService::new(
             test_manager(),
-            repository.clone() as Arc<dyn StateRepositoryPort>,
+            state_repository.clone(),
             notifications,
         ));
         let state = build_server_state(
             Arc::clone(&service),
-            effect_service,
+            state_repository,
             Arc::new(GridQueryService::new(
                 repository.clone() as Arc<dyn GridReadRepositoryPort>
             )),
