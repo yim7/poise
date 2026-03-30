@@ -603,7 +603,7 @@ reqwest client 没有设置任何超时，卡住的请求会阻塞 effect worker
 - Modify: `exchanges/binance/src/rest.rs` — `build_http_client` 加超时
 - Test: `exchanges/binance/src/rest.rs` tests
 
-- [ ] **Step 1: 给 reqwest client 加超时**
+- [x] **Step 1: 给 reqwest client 加超时**
 
 `exchanges/binance/src/rest.rs` 的 `build_http_client`：
 
@@ -619,7 +619,7 @@ fn build_http_client(base_url: &str) -> reqwest::Client {
 }
 ```
 
-- [ ] **Step 2: 写验收测试 — 连接超时**
+- [x] **Step 2: 写验收测试 — 连接超时**
 
 ```rust
 #[tokio::test]
@@ -644,12 +644,12 @@ async fn request_times_out_when_server_does_not_respond() {
 }
 ```
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 Run: `cargo test -p grid-binance`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add exchanges/binance/src/rest.rs
@@ -658,6 +658,9 @@ git commit -m "fix: add connect and request timeouts to Binance REST client
 connect_timeout=5s, request_timeout=15s. Prevents effect worker from
 hanging indefinitely on unresponsive exchange API."
 ```
+
+Task 4 code commit:
+`e213079eefd5cf8b614d1c2b01d1dec09755bea8`
 
 ---
 
