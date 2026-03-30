@@ -139,21 +139,20 @@ impl BinanceRestClient {
     }
 
     pub async fn new_order(&self, req: &OrderRequest) -> Result<OrderReceipt> {
+        let mut params = vec![
+            ("symbol", req.instrument.symbol.clone()),
+            ("side", side_to_binance(req.side).to_string()),
+            ("type", "LIMIT".to_string()),
+            ("timeInForce", "GTC".to_string()),
+            ("quantity", format_decimal(req.quantity)),
+            ("price", format_decimal(req.price)),
+            ("newClientOrderId", req.client_order_id.clone()),
+        ];
+        if req.reduce_only {
+            params.push(("reduceOnly", "true".to_string()));
+        }
         let response: BinanceOrderResponse = self
-            .send_request(
-                Method::POST,
-                "/fapi/v1/order",
-                vec![
-                    ("symbol", req.instrument.symbol.clone()),
-                    ("side", side_to_binance(req.side).to_string()),
-                    ("type", "LIMIT".to_string()),
-                    ("timeInForce", "GTC".to_string()),
-                    ("quantity", format_decimal(req.quantity)),
-                    ("price", format_decimal(req.price)),
-                    ("newClientOrderId", req.client_order_id.clone()),
-                ],
-                AuthMode::Signed,
-            )
+            .send_request(Method::POST, "/fapi/v1/order", params, AuthMode::Signed)
             .await?;
 
         response.try_into()
@@ -733,6 +732,7 @@ mod tests {
             price: 0.1 + 0.2,
             quantity: 0.024000000000000004,
             client_order_id: "grid-open-006".to_string(),
+            reduce_only: false,
         };
 
         let _ = client.new_order(&request).await.unwrap();

@@ -1781,6 +1781,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 95.0,
             quantity: 0.4,
+            reduce_only: false,
         };
         let receipt = OrderReceipt {
             order_id: "order-1".into(),
@@ -1833,6 +1834,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(4.0),
                 &OrderReceipt {
@@ -1873,6 +1875,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(4.0),
                 &OrderReceipt {
@@ -1908,6 +1911,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
+            reduce_only: false,
         };
         seed_executor_slot(
             manager.grids.get_mut(&GridId::new("btc1")).unwrap(),
@@ -1939,6 +1943,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 92.5,
                     quantity: test_config().base_qty_per_unit() * 6.0,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(6.0),
                 None,
@@ -1982,6 +1987,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 94.0,
                     quantity: test_config().base_qty_per_unit() * 6.0,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(6.0),
                 None,
@@ -2068,6 +2074,7 @@ mod tests {
                     side: grid_core::types::Side::Buy,
                     price: 90.0,
                     quantity: 4.0,
+                    reduce_only: false,
                 },
                 grid_core::types::Exposure(4.0),
                 None,
@@ -2317,6 +2324,7 @@ mod tests {
                         side: grid_core::types::Side::Buy,
                         price: 94.5,
                         quantity: 0.25,
+                        reduce_only: false,
                     },
                     target_exposure: grid_core::types::Exposure(6.0),
                 }],
@@ -2518,6 +2526,7 @@ mod tests {
             side: grid_core::types::Side::Buy,
             price: 94.5,
             quantity: 0.25,
+            reduce_only: false,
         };
         manager
             .record_submit_request(

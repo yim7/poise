@@ -897,6 +897,7 @@ mod tests {
             price: 95.0,
             quantity: 0.25,
             client_order_id: "client-2".into(),
+            reduce_only: false,
         }
     }
 

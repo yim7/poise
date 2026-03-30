@@ -623,6 +623,7 @@ mod tests {
                     price: 100.5,
                     quantity: 0.1,
                     client_order_id: "client-1".into(),
+                    reduce_only: false,
                 },
                 target_exposure: Exposure(4.0),
             },

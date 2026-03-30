@@ -120,6 +120,7 @@ mod tests {
                 price: 64000.5,
                 quantity: 0.01,
                 client_order_id: "grid-order-005".to_string(),
+                reduce_only: false,
             })
             .await
             .unwrap();
@@ -132,6 +133,40 @@ mod tests {
                 .path
                 .starts_with("/fapi/v1/order?symbol=BTCUSDT")
         );
+    }
+
+    #[tokio::test]
+    async fn submit_reduce_only_order_includes_reduce_only_param() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{
+                "orderId": 20072994038,
+                "clientOrderId": "grid-order-006",
+                "status": "NEW"
+            }"#,
+        )])
+        .await;
+        let adapter = BinanceAdapter::new(
+            "api-key",
+            "secret-key",
+            server.base_url(),
+            "ws://127.0.0.1:1",
+        );
+
+        adapter
+            .submit_order(OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: Side::Sell,
+                price: 64000.5,
+                quantity: 0.01,
+                client_order_id: "grid-order-006".to_string(),
+                reduce_only: true,
+            })
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+
+        assert!(requests[0].path.contains("reduceOnly=true"));
     }
 
     #[tokio::test]

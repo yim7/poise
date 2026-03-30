@@ -925,6 +925,7 @@ mod tests {
             side: Side::Buy,
             price: 94.0,
             quantity: snapshot.config.base_qty_per_unit() * 6.0,
+            reduce_only: false,
         };
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(6.0));
@@ -1116,6 +1117,7 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 Exposure(4.0),
                 &OrderReceipt {
@@ -1204,6 +1206,7 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 0.4,
+                    reduce_only: false,
                 },
                 Exposure(4.0),
                 None,
@@ -1353,6 +1356,7 @@ mod tests {
             side: Side::Buy,
             price: 94.0,
             quantity: snapshot.config.base_qty_per_unit() * 6.0,
+            reduce_only: false,
         };
         snapshot.current_exposure = Exposure(0.0);
         snapshot.target_exposure = Some(Exposure(6.0));

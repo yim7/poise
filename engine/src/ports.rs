@@ -22,6 +22,8 @@ pub struct OrderRequest {
     pub price: f64,
     pub quantity: f64,
     pub client_order_id: String,
+    #[serde(default)]
+    pub reduce_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

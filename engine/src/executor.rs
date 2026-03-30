@@ -891,6 +891,7 @@ fn desired_order_to_request(
         price: desired_order.price,
         quantity: desired_order.quantity,
         client_order_id: format!("{}-reconcile", input.grid_id.as_str()),
+        reduce_only: desired_order.role == OrderRole::DecreaseInventory,
     }
 }
 
@@ -1100,6 +1101,7 @@ pub fn submit_requests_match(
     left.instrument == right.instrument
         && left.side == right.side
         && left.client_order_id == right.client_order_id
+        && left.reduce_only == right.reduce_only
         && values_match_with_step(left.price, right.price, exchange_rules.price_tick)
         && values_match_with_step(left.quantity, right.quantity, exchange_rules.quantity_step)
 }
@@ -1422,6 +1424,7 @@ mod tests {
         let hint = hint.expect("expected current plan to expose a single submit hint");
         assert_eq!(hint.request.instrument, instrument);
         assert_eq!(hint.request.client_order_id, "btc-core-reconcile");
+        assert!(!hint.request.reduce_only);
         assert_eq!(hint.request.side, Side::Buy);
         assert_eq!(hint.request.price, 95.0);
         assert_eq!(hint.request.quantity, 15.0);
@@ -1452,6 +1455,33 @@ mod tests {
     }
 
     #[test]
+    fn plan_sets_reduce_only_for_decrease_inventory_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(6.0),
+            target_exposure: Exposure(2.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        let submit = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request),
+            _ => None,
+        });
+        assert!(submit.is_some());
+        assert!(submit.unwrap().reduce_only);
+    }
+
+    #[test]
     fn submit_receipt_promotes_submit_pending_slot_to_working() {
         let instrument = test_instrument();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
@@ -1461,6 +1491,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
 
         let pending = record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
@@ -1515,6 +1546,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let mut state = ExecutorState::empty(now);
         state.slots.push(sibling_slot());
@@ -1543,6 +1575,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let SubmitReceiptResolution::Recorded {
             state: receipt_backed,
@@ -1584,6 +1617,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let mut state = record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
         state.slots.push(ExecutionSlot {
@@ -1625,6 +1659,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let SubmitReceiptResolution::Recorded {
             state: receipt_backed,
@@ -1657,6 +1692,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let SubmitReceiptResolution::Recorded { state: working } = record_submit_receipt(
             &record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0)),
@@ -1860,6 +1896,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let previous_state =
             record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
@@ -1916,6 +1953,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let SubmitReceiptResolution::Recorded {
             state: previous_state,
@@ -1981,6 +2019,7 @@ mod tests {
             price: 94.0,
             quantity: 22.5,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let previous_state =
             record_submit_request(&ExecutorState::empty(now), &request, Exposure(6.0));
@@ -2018,6 +2057,7 @@ mod tests {
                     price: 95.0,
                     quantity: 15.0,
                     client_order_id: "grid-1-reconcile".into(),
+                    reduce_only: false,
                 },
                 target_exposure: Exposure(4.0),
             }]
@@ -2042,6 +2082,29 @@ mod tests {
     }
 
     #[test]
+    fn submit_requests_match_rejects_different_reduce_only_semantics() {
+        let rules = test_exchange_rules();
+        let left = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Sell,
+            price: 100.0,
+            quantity: 3.8,
+            client_order_id: "client-1".into(),
+            reduce_only: true,
+        };
+        let right = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Sell,
+            price: 100.0,
+            quantity: 3.8,
+            client_order_id: "client-1".into(),
+            reduce_only: false,
+        };
+
+        assert!(!submit_requests_match(&left, &right, &rules));
+    }
+
+    #[test]
     fn submit_recovery_proceed_updates_slot_target_to_current_plan_target() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
@@ -2053,6 +2116,7 @@ mod tests {
             price: 90.0,
             quantity: 4.0,
             client_order_id: "grid-1-reconcile".into(),
+            reduce_only: false,
         };
         let previous_state =
             record_submit_request(&ExecutorState::empty(now), &request, Exposure(6.0));
@@ -2106,6 +2170,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let SubmitReceiptResolution::Recorded {
             state: previous_state,
@@ -2152,6 +2217,7 @@ mod tests {
             price: 95.0,
             quantity: 15.0,
             client_order_id: "client-1".into(),
+            reduce_only: false,
         };
         let SubmitReceiptResolution::Recorded {
             state: previous_state,
