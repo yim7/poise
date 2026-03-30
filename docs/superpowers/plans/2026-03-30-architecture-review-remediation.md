@@ -487,13 +487,15 @@ Review:
 - 语义残留也一起清掉了：测试名和 manager 内部 helper 不再继续用 `startup` 这个过窄名字描述 recovery/shutdown 共用的同步模式。
 - `EffectService` 删除后，仓储访问只落在 `ServerState.state_repository` 这一处共享入口，没有再新增别的 server 侧包装层。
 
-- [ ] **Step 7: 提交（commit 后回填 SHA）**
+- [x] **Step 7: 提交**
 
 ```bash
 git add engine/src/manager.rs server/src/assembly.rs server/src/write_service.rs server/src/runtime.rs server/src/effect_worker.rs server/src/http.rs server/src/websocket.rs server/src/main.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
 git rm server/src/effect_service.rs
 git commit -m "refactor: converge ExchangeSyncMode to single engine definition"
 ```
+
+Commit: `65472b9266c309f865e996c61b0545d759381be3`
 
 ---
 
