@@ -215,7 +215,9 @@ fn project_execution_state(source: &GridReadModelSource) -> ExecutionStateView {
 }
 
 fn project_execution_status(source: &GridReadModelSource) -> ExecutionStatusView {
-    if source.snapshot.executor_state.recovery_anomaly.is_some() {
+    if source.snapshot.executor_state.recovery_anomaly.is_some()
+        || source.snapshot.observed.market_data_stale_since.is_some()
+    {
         ExecutionStatusView::AttentionRequired
     } else {
         ExecutionStatusView::Normal
@@ -498,6 +500,19 @@ mod tests {
     }
 
     #[test]
+    fn stale_market_data_projects_attention_required() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.snapshot.observed.market_data_stale_since =
+            Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+
+        let detail = GridProjector::new().project_detail(&source);
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+    }
+
+    #[test]
     fn projects_execution_slots_from_slot_workset() {
         let detail = GridProjector::new().project_detail(&source_with_submitting_effect());
 
@@ -710,6 +725,8 @@ mod tests {
             observed: ObservedState {
                 reference_price: Some(101.25),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }

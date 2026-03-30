@@ -137,6 +137,9 @@ pub struct GridRuntime {
     pub risk_state: RiskState,
     pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
+    pub last_tick_at: Option<DateTime<Utc>>,
+    pub market_data_stale_since: Option<DateTime<Utc>>,
+    pub tick_timeout_secs: u64,
 }
 
 impl GridRuntime {
@@ -147,6 +150,26 @@ impl GridRuntime {
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
+    ) -> Self {
+        Self::with_tick_timeout_secs(
+            id,
+            instrument,
+            config,
+            budget,
+            exchange_rules,
+            started_at,
+            30,
+        )
+    }
+
+    pub fn with_tick_timeout_secs(
+        id: GridId,
+        instrument: Instrument,
+        config: GridConfig,
+        budget: CapacityBudget,
+        exchange_rules: ExchangeRules,
+        started_at: DateTime<Utc>,
+        tick_timeout_secs: u64,
     ) -> Self {
         Self {
             id,
@@ -163,6 +186,9 @@ impl GridRuntime {
             risk_state: RiskState::default(),
             reference_price: None,
             out_of_band_since: None,
+            last_tick_at: None,
+            market_data_stale_since: None,
+            tick_timeout_secs,
         }
     }
 
@@ -185,6 +211,8 @@ impl GridRuntime {
             observed: ObservedState {
                 reference_price: self.reference_price,
                 out_of_band_since: self.out_of_band_since,
+                last_tick_at: self.last_tick_at,
+                market_data_stale_since: self.market_data_stale_since,
             },
         }
     }
@@ -220,6 +248,8 @@ impl GridRuntime {
         self.risk_state = snapshot.risk.clone();
         self.reference_price = snapshot.observed.reference_price;
         self.out_of_band_since = snapshot.observed.out_of_band_since;
+        self.last_tick_at = snapshot.observed.last_tick_at;
+        self.market_data_stale_since = snapshot.observed.market_data_stale_since;
 
         Ok(())
     }
@@ -319,6 +349,17 @@ mod tests {
         runtime.current_exposure = Exposure(4.0);
         runtime.target_exposure = Some(Exposure(6.0));
         runtime.manual_target_override = Some(Exposure(0.0));
+        runtime.last_tick_at = Some(
+            DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        runtime.market_data_stale_since = Some(
+            DateTime::parse_from_rfc3339("2026-03-29T08:01:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        runtime.tick_timeout_secs = 45;
         runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
         runtime.risk_state = RiskState {
             realized_pnl_day: None,
@@ -349,12 +390,19 @@ mod tests {
         );
 
         let mut restored = test_runtime();
+        restored.tick_timeout_secs = 45;
         restored.restore_from_snapshot(&snapshot).unwrap();
 
         assert_eq!(restored.status, GridStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
         assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(restored.last_tick_at, runtime.last_tick_at);
+        assert_eq!(
+            restored.market_data_stale_since,
+            runtime.market_data_stale_since
+        );
+        assert_eq!(restored.tick_timeout_secs, 45);
         assert_eq!(restored.executor_state, runtime.executor_state);
         assert_eq!(
             restored.executor_state.stats.started_at,

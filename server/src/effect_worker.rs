@@ -810,6 +810,8 @@ mod tests {
             observed: ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }
@@ -855,6 +857,8 @@ mod tests {
             observed: ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }
@@ -898,6 +902,8 @@ mod tests {
             observed: ObservedState {
                 reference_price: Some(reference_price),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }

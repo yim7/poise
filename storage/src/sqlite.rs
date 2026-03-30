@@ -180,6 +180,11 @@ impl SqliteStorage {
             .observed
             .out_of_band_since
             .map(|value| value.to_rfc3339());
+        let last_tick_at = state.observed.last_tick_at.map(|value| value.to_rfc3339());
+        let market_data_stale_since = state
+            .observed
+            .market_data_stale_since
+            .map(|value| value.to_rfc3339());
         let updated_at = Utc::now();
         let updated_at_text = updated_at.to_rfc3339();
         let batch_nonce = updated_at
@@ -209,8 +214,10 @@ impl SqliteStorage {
                 unrealized_pnl,
                 reference_price,
                 out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 id,
                 state.instrument.venue.as_str(),
@@ -228,6 +235,8 @@ impl SqliteStorage {
                 state.risk.unrealized_pnl,
                 state.observed.reference_price,
                 out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
                 updated_at_text
             ],
         )
@@ -341,7 +350,7 @@ impl SqliteStorage {
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
-                        reference_price, out_of_band_since
+                        reference_price, out_of_band_since, last_tick_at, market_data_stale_since
                  FROM grid_snapshots
                  WHERE grid_id = ?1",
                 params![id],
@@ -364,7 +373,7 @@ impl SqliteStorage {
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
-                        reference_price, out_of_band_since, updated_at
+                        reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM grid_snapshots
                  WHERE grid_id = ?1",
                 params![id],
@@ -384,6 +393,8 @@ impl SqliteStorage {
         let replacement_gate_reason_json: Option<String> = row.get(9)?;
         let realized_pnl_day: Option<String> = row.get(10)?;
         let out_of_band_since: Option<String> = row.get(15)?;
+        let last_tick_at: Option<String> = row.get(16)?;
+        let market_data_stale_since: Option<String> = row.get(17)?;
         let config = Self::deserialize_grid_config(&config_json)?;
         let status = Self::deserialize_grid_status(&status_json)?;
         let venue = Self::deserialize_venue(&venue)?;
@@ -432,6 +443,32 @@ impl SqliteStorage {
                     })
             })
             .transpose()?;
+        let last_tick_at = last_tick_at
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|parsed| parsed.with_timezone(&Utc))
+                    .map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            16,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })
+            })
+            .transpose()?;
+        let market_data_stale_since = market_data_stale_since
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|parsed| parsed.with_timezone(&Utc))
+                    .map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            17,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })
+            })
+            .transpose()?;
 
         Ok(GridRuntimeSnapshot {
             grid_id: GridId::new(row.get::<_, String>(0)?),
@@ -452,6 +489,8 @@ impl SqliteStorage {
             observed: ObservedState {
                 reference_price: row.get(14)?,
                 out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
             },
         })
     }
@@ -459,11 +498,11 @@ impl SqliteStorage {
     fn stored_grid_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredGridSnapshot> {
-        let updated_at: String = row.get(16)?;
+        let updated_at: String = row.get(18)?;
 
         Ok(StoredGridSnapshot {
             snapshot: Self::grid_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 16)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 18)?,
         })
     }
 
@@ -477,7 +516,7 @@ impl SqliteStorage {
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
-                        reference_price, out_of_band_since, updated_at
+                        reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM grid_snapshots
                  ORDER BY grid_id ASC",
             )
@@ -883,6 +922,8 @@ mod tests {
                         .unwrap()
                         .with_timezone(&Utc),
                 ),
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         }
     }

@@ -147,12 +147,13 @@ where
     for grid in &config.grids {
         let grid_id = grid.grid_id();
         let info = exchange.get_exchange_info(&grid.instrument()).await?;
-        manager.add_grid(
+        manager.add_grid_with_tick_timeout_secs(
             grid_id.clone(),
             grid.instrument(),
             grid.grid_config(),
             grid.budget(),
             info.rules,
+            grid.tick_timeout_secs(),
         )?;
         if let Some(snapshot) = repository.load_grid_state(grid_id.as_str()).await? {
             manager.restore_grid_state(&snapshot)?;
@@ -294,6 +295,7 @@ mod tests {
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
+                    tick_timeout_secs: None,
                 },
                 GridDefinition {
                     grid_id: "eth-core".into(),
@@ -309,6 +311,7 @@ mod tests {
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
+                    tick_timeout_secs: None,
                 },
             ],
             exchange: ExchangeConfig {
@@ -374,6 +377,7 @@ mod tests {
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
+                    tick_timeout_secs: None,
                 },
                 GridDefinition {
                     grid_id: "btc-alt".into(),
@@ -389,6 +393,7 @@ mod tests {
                     max_notional: None,
                     daily_loss_limit: None,
                     stop_loss_pct: None,
+                    tick_timeout_secs: None,
                 },
             ],
             exchange: ExchangeConfig {
@@ -422,6 +427,7 @@ mod tests {
                 max_notional: None,
                 daily_loss_limit: None,
                 stop_loss_pct: None,
+                tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
                 rest_base_url: Some("https://demo-fapi.binance.com".into()),
@@ -458,6 +464,7 @@ mod tests {
                 max_notional: None,
                 daily_loss_limit: None,
                 stop_loss_pct: None,
+                tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
                 api_key: Some("demo-key".into()),
@@ -544,6 +551,7 @@ mod tests {
                 max_notional: None,
                 daily_loss_limit: None,
                 stop_loss_pct: None,
+                tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
                 rest_base_url: Some("http://127.0.0.1:1".into()),

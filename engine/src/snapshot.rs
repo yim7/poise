@@ -12,6 +12,10 @@ use crate::runtime::{ExecutorState, GridStatus, RiskState};
 pub struct ObservedState {
     pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_tick_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub market_data_stale_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

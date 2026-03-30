@@ -31,6 +31,7 @@ pub struct GridDefinition {
     pub max_notional: Option<f64>,
     pub daily_loss_limit: Option<f64>,
     pub stop_loss_pct: Option<f64>,
+    pub tick_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -60,6 +61,10 @@ impl Config {
 }
 
 impl GridDefinition {
+    pub fn tick_timeout_secs(&self) -> u64 {
+        self.tick_timeout_secs.unwrap_or(30)
+    }
+
     pub fn grid_id(&self) -> GridId {
         GridId::new(self.grid_id.clone())
     }
@@ -199,6 +204,29 @@ notional_per_unit = 375.0
             config.grids[0].grid_config().out_of_band_policy,
             grid_core::strategy::OutOfBandPolicy::Freeze
         );
+    }
+
+    #[test]
+    fn parses_optional_tick_timeout_secs() {
+        let config = parse_config(
+            r#"
+environment = "paper"
+
+[[grids]]
+grid_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+tick_timeout_secs = 45
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.grids[0].tick_timeout_secs, Some(45));
     }
 
     #[test]

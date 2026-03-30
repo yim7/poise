@@ -2147,6 +2147,8 @@ mod tests {
             observed: grid_engine::snapshot::ObservedState {
                 reference_price: Some(100.0),
                 out_of_band_since: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         };
         set_executor_state(
@@ -3612,6 +3614,8 @@ mod tests {
             observed: grid_engine::snapshot::ObservedState {
                 reference_price: Some(95.0),
                 out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
+                last_tick_at: None,
+                market_data_stale_since: None,
             },
         };
         set_executor_state(

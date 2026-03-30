@@ -20,6 +20,8 @@ use crate::runtime::{ExecutorState, GridRuntime, GridStatus};
 use crate::snapshot::GridRuntimeSnapshot;
 use crate::transition::{GridEffect, GridTransition};
 
+const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
+
 pub struct GridManager {
     grids: HashMap<GridId, GridRuntime>,
     instruments: HashMap<Instrument, GridId>,
@@ -43,6 +45,25 @@ impl GridManager {
         budget: CapacityBudget,
         exchange_rules: ExchangeRules,
     ) -> Result<()> {
+        self.add_grid_with_tick_timeout_secs(
+            id,
+            instrument,
+            config,
+            budget,
+            exchange_rules,
+            DEFAULT_TICK_TIMEOUT_SECS,
+        )
+    }
+
+    pub fn add_grid_with_tick_timeout_secs(
+        &mut self,
+        id: GridId,
+        instrument: Instrument,
+        config: GridConfig,
+        budget: CapacityBudget,
+        exchange_rules: ExchangeRules,
+        tick_timeout_secs: u64,
+    ) -> Result<()> {
         if self.grids.contains_key(&id) {
             bail!("duplicate grid id `{}`", id.as_str());
         }
@@ -63,6 +84,8 @@ impl GridManager {
             exchange_rules,
             self.clock.now(),
         );
+        let mut grid = grid;
+        grid.tick_timeout_secs = tick_timeout_secs;
         self.grids.insert(id.clone(), grid);
         self.instruments.insert(instrument, id);
         Ok(())
@@ -480,6 +503,13 @@ impl GridManager {
         id: &GridId,
         observation: MarketObservation,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        let now = self.clock.now();
+        let grid = self
+            .grids
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+        grid.last_tick_at = Some(now);
+        grid.market_data_stale_since = None;
         self.reconcile_grid(id, observation.reference_price)
     }
 
@@ -639,6 +669,10 @@ impl GridManager {
         id: &GridId,
         reference_price: f64,
     ) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        if self.guard_market_data_freshness(id)? {
+            return Ok((vec![], vec![]));
+        }
+
         if matches!(self.grids[&id].status, GridStatus::Paused) {
             let grid = self.grids.get_mut(id).unwrap();
             grid.reference_price = Some(reference_price);
@@ -679,6 +713,33 @@ impl GridManager {
         }
 
         Ok((events, effects))
+    }
+
+    fn guard_market_data_freshness(&mut self, id: &GridId) -> Result<bool> {
+        let now = self.clock.now();
+        let grid = self
+            .grids
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+
+        let Some(last_tick_at) = grid.last_tick_at else {
+            return Ok(false);
+        };
+
+        let age_ms = (now - last_tick_at).num_milliseconds().max(0);
+        if age_ms
+            <= i64::try_from(grid.tick_timeout_secs)
+                .unwrap_or(i64::try_from(DEFAULT_TICK_TIMEOUT_SECS).unwrap_or(30))
+                * 1000
+        {
+            return Ok(false);
+        }
+
+        if grid.market_data_stale_since.is_none() {
+            grid.market_data_stale_since = Some(now);
+        }
+
+        Ok(true)
     }
 
     fn submit_recovery_plan_context<'a>(
@@ -780,6 +841,8 @@ fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
@@ -805,6 +868,21 @@ mod tests {
     impl ClockPort for FixedClock {
         fn now(&self) -> chrono::DateTime<Utc> {
             self.0
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableClock(Arc<Mutex<chrono::DateTime<Utc>>>);
+
+    impl ClockPort for MutableClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    impl MutableClock {
+        fn set(&self, value: chrono::DateTime<Utc>) {
+            *self.0.lock().unwrap() = value;
         }
     }
 
@@ -2283,6 +2361,79 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, GridEffect::SubmitOrder { .. }))
         );
+    }
+
+    #[test]
+    fn stale_market_data_suspends_follow_up_reconcile_without_overwriting_status() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid_id = GridId::new("btc1");
+
+        manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        let transition = manager
+            .observe(
+                &grid_id,
+                GridObservation::Position(PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                }),
+            )
+            .unwrap();
+
+        assert!(transition.effects.is_empty());
+        assert!(transition.snapshot.observed.market_data_stale_since.is_some());
+        assert_eq!(transition.snapshot.status, GridStatus::Active);
+    }
+
+    #[test]
+    fn fresh_tick_clears_market_data_stale_flag() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_grid(&mut manager, "btc1", "BTCUSDT");
+        let grid_id = GridId::new("btc1");
+
+        manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        let _ = manager
+            .observe(
+                &grid_id,
+                GridObservation::Position(PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                }),
+            )
+            .unwrap();
+
+        let transition = manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 96.0,
+                }),
+            )
+            .unwrap();
+
+        assert!(transition.snapshot.observed.market_data_stale_since.is_none());
     }
 
     #[test]
