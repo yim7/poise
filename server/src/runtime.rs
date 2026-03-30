@@ -2143,7 +2143,7 @@ mod tests {
             matches!(
                 &effect.effect,
                 ExecutionAction::SubmitOrder { request, target_exposure }
-                    if request.client_order_id == "BTCUSDT-reconcile"
+                    if request.client_order_id.starts_with("BTCUSDT-")
                         && (request.price - 95.0).abs() < f64::EPSILON
                         && (request.quantity - 7.5).abs() < f64::EPSILON
                         && *target_exposure == Exposure(4.0)
@@ -2204,8 +2204,9 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+            inventory_core_order(&instance)
+                .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
+            Some(true)
         );
 
         let effects = fixture.persistence.all_effects().await;
@@ -2213,7 +2214,7 @@ mod tests {
             matches!(
                 &effect.effect,
                 ExecutionAction::SubmitOrder { request, target_exposure }
-                    if request.client_order_id == "BTCUSDT-reconcile"
+                    if request.client_order_id.starts_with("BTCUSDT-")
                         && (request.price - 95.0).abs() < f64::EPSILON
                         && (request.quantity - 15.0).abs() < f64::EPSILON
                         && *target_exposure == Exposure(4.0)
@@ -2348,8 +2349,9 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+            inventory_core_order(&instance)
+                .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
+            Some(true)
         );
         assert_ne!(
             inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
@@ -2408,18 +2410,14 @@ mod tests {
         fixture.runtime.startup_sync().await.unwrap();
 
         let instance = current_instance(&fixture.state).await;
-        assert_eq!(
-            inventory_core_order(&instance),
-            Some(&working_order(
-                None,
-                "BTCUSDT-reconcile",
-                Side::Buy,
-                95.0,
-                7.5,
-                Exposure(4.0),
-                OrderStatus::Submitting,
-            ))
-        );
+        let order = inventory_core_order(&instance).expect("expected submit pending working order");
+        assert!(order.client_order_id.starts_with("BTCUSDT-"));
+        assert_eq!(order.order_id, None);
+        assert_eq!(order.side, Side::Buy);
+        assert_eq!(order.price, 95.0);
+        assert_eq!(order.quantity, 7.5);
+        assert_eq!(order.target_exposure, Exposure(4.0));
+        assert_eq!(order.status, OrderStatus::Submitting);
 
         let transition = fixture
             .state
@@ -2519,8 +2517,9 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(
-            inventory_core_order(&instance).map(|order| order.client_order_id.as_str()),
-            Some("BTCUSDT-reconcile")
+            inventory_core_order(&instance)
+                .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
+            Some(true)
         );
 
         let transition = fixture

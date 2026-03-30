@@ -890,7 +890,7 @@ fn desired_order_to_request(
         side: desired_order.side,
         price: desired_order.price,
         quantity: desired_order.quantity,
-        client_order_id: format!("{}-reconcile", input.grid_id.as_str()),
+        client_order_id: format!("{}-{}", input.grid_id.as_str(), input.observed_at.timestamp_millis()),
         reduce_only: desired_order.role == OrderRole::DecreaseInventory,
     }
 }
@@ -1100,7 +1100,6 @@ pub fn submit_requests_match(
 ) -> bool {
     left.instrument == right.instrument
         && left.side == right.side
-        && left.client_order_id == right.client_order_id
         && left.reduce_only == right.reduce_only
         && values_match_with_step(left.price, right.price, exchange_rules.price_tick)
         && values_match_with_step(left.quantity, right.quantity, exchange_rules.quantity_step)
@@ -1423,7 +1422,10 @@ mod tests {
 
         let hint = hint.expect("expected current plan to expose a single submit hint");
         assert_eq!(hint.request.instrument, instrument);
-        assert_eq!(hint.request.client_order_id, "btc-core-reconcile");
+        assert_eq!(
+            hint.request.client_order_id,
+            format!("btc-core-{}", now.timestamp_millis())
+        );
         assert!(!hint.request.reduce_only);
         assert_eq!(hint.request.side, Side::Buy);
         assert_eq!(hint.request.price, 95.0);
@@ -2056,7 +2058,7 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    client_order_id: "grid-1-reconcile".into(),
+                    client_order_id: format!("grid-1-{}", now.timestamp_millis()),
                     reduce_only: false,
                 },
                 target_exposure: Exposure(4.0),
@@ -2069,7 +2071,7 @@ mod tests {
                 state: SlotState::SubmitPending,
                 working_order: Some(WorkingOrder {
                     order_id: None,
-                    client_order_id: "grid-1-reconcile".into(),
+                    client_order_id: format!("grid-1-{}", now.timestamp_millis()),
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
@@ -2102,6 +2104,75 @@ mod tests {
         };
 
         assert!(!submit_requests_match(&left, &right, &rules));
+    }
+
+    #[test]
+    fn submit_requests_match_ignores_client_order_id() {
+        let rules = test_exchange_rules();
+        let left = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 3.8,
+            client_order_id: "btc-core-1711699500000".into(),
+            reduce_only: false,
+        };
+        let right = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 3.8,
+            client_order_id: "btc-core-1711699500050".into(),
+            reduce_only: false,
+        };
+
+        assert!(submit_requests_match(&left, &right, &rules));
+    }
+
+    #[test]
+    fn plan_generates_unique_client_order_ids_across_calls() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let grid_id = test_grid_id();
+        let t1 = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let t2 = t1 + Duration::milliseconds(1);
+
+        let plan1 = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: t1,
+        });
+        let plan2 = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: t2,
+        });
+
+        let id1 = plan1.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request.client_order_id.clone()),
+            _ => None,
+        });
+        let id2 = plan2.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request.client_order_id.clone()),
+            _ => None,
+        });
+
+        assert!(id1.is_some());
+        assert!(id2.is_some());
+        assert_ne!(id1, id2);
+        assert!(id1.unwrap().starts_with("btc-core-"));
     }
 
     #[test]
