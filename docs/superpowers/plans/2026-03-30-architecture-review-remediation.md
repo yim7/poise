@@ -270,12 +270,14 @@ Review:
 - Binance 适配层只保留了一个明确注释的 VIP0 默认值，没有把 `commissionRate` 拉进本次 task，避免提前引入新的运行时依赖。
 - `manager::tests::observe_market_replacement_gate_emits_event_when_reason_changes` 只同步了阈值断言，从 13 bps 改为 11 bps，保留了“reason 发生变化时要发事件”这个原始测试意图。
 
-- [ ] **Step 6: 提交（commit 后回填 SHA）**
+- [x] **Step 6: 提交**
 
 ```bash
 git add core/src/types.rs engine/src/executor/planning.rs exchanges/binance/src/types.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
 git commit -m "refactor(engine): parameterize replacement gate fees via ExchangeRules"
 ```
+
+Commit: `67e7c5125024d56b739d1beab23b3158cefabc87`
 
 ---
 
