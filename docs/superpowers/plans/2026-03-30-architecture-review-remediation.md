@@ -172,12 +172,14 @@ Review:
 - `planning.rs` / `recovery.rs` / `recording.rs` / `slots.rs` 的职责边界已分开，`manager.rs` 只保留一处与 `RecoveryInput` 收敛相关的无行为改动。
 - Step 7 实际采用“收紧 re-export”而不是继续暴露子模块，保留了 `runtime` / `write_service` 需要的公共类型，其余 helper 和输入结构降为 `pub(crate)`。
 
-- [ ] **Step 8: 提交（commit 后回填 SHA）**
+- [x] **Step 8: 提交**
 
 ```bash
 git add engine/src/lib.rs engine/src/executor/ docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
 git commit -m "refactor(engine): split executor into planning/recovery/recording/slots submodules"
 ```
+
+Commit: `ad4248db896186e9843b7dcf7da3244e7e449710`
 
 ---
 
@@ -191,7 +193,7 @@ git commit -m "refactor(engine): split executor into planning/recovery/recording
 - Modify: `engine/src/executor/planning.rs`
 - Modify: `exchanges/binance/src/types.rs`
 
-- [ ] **Step 1: 给 ExchangeRules 加 taker_fee_rate 字段**
+- [x] **Step 1: 给 ExchangeRules 加 maker_fee_rate 和 taker_fee_rate 字段**
 
 在 `core/src/types.rs` 的 `ExchangeRules` 中加：
 
@@ -201,23 +203,24 @@ pub struct ExchangeRules {
     pub quantity_step: f64,
     pub min_qty: f64,
     pub min_notional: f64,
+    pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
 }
 ```
 
 Run: `cargo check --workspace`
-Expected: 编译失败——所有构造 `ExchangeRules` 的地方缺少 `taker_fee_rate` 字段。
+Result: 编译失败，新测试先报 `maker_fee_rate` 字段不存在；随后 `cargo check --workspace` 也暴露出所有 `ExchangeRules` 构造点都需要补新字段。
 
-- [ ] **Step 2: 在所有构造点补上 taker_fee_rate**
+- [x] **Step 2: 在所有构造点补上 fee rate 字段**
 
-- `exchanges/binance/src/types.rs`（约 line 130）：填 `taker_fee_rate: 0.0004`（Binance USDⓈ-M taker 费率）
-- engine 和 server 测试中的 `test_exchange_rules()` 辅助函数：填 `taker_fee_rate: 0.0`（测试不依赖费率时用 0）
+- `exchanges/binance/src/types.rs`（约 line 130）：填 `maker_fee_rate: 0.0002, taker_fee_rate: 0.0004`（Binance USDⓈ-M VIP0 费率）。注：exchangeInfo API 不返回 fee rate，此处用硬编码默认值；后续可从 `/fapi/v1/commissionRate` 接口动态获取。
+- engine 和 server 测试中的 `test_exchange_rules()` 辅助函数：填 `maker_fee_rate: 0.0, taker_fee_rate: 0.0`（测试不依赖费率时用 0）
 - `server/src/assembly.rs` 测试中的 `test_exchange_rules()`：同上
 
 Run: `cargo check --workspace`
-Expected: 编译通过。
+Result: 编译通过。
 
-- [ ] **Step 3: 改写 replacement_gate_reason_for_working_order 读取 rules.taker_fee_rate**
+- [x] **Step 3: 改写 replacement gate 公式，使用 maker + taker 费率**
 
 在 `engine/src/executor/planning.rs` 中：
 
@@ -233,33 +236,45 @@ fn replacement_gate_reason_for_working_order(
     let improvement_ratio =
         replacement_improvement_ratio(current_order, desired_order, reference_price);
     let threshold_rate =
-        (rules.taker_fee_rate * 2.0) + (REPLACEMENT_SAFETY_BUFFER_BPS / BPS_DENOMINATOR);
+        (rules.maker_fee_rate + rules.taker_fee_rate)
+            + (REPLACEMENT_SAFETY_BUFFER_BPS / BPS_DENOMINATOR);
     // ... rest unchanged ...
 }
 ```
+
+公式含义：取消旧 maker 单的机会成本（maker_fee）+ 新单可能 cross spread 的成本（taker_fee）+ 安全缓冲。比原来的 `taker * 2` 更准确。
 
 删除 `const BINANCE_TAKER_FEE_RATE: f64 = 0.0004;`。
 
 Run: `cargo check -p grid-engine`
 Expected: 编译通过。
 
-- [ ] **Step 4: 补测试——验证不同 taker_fee_rate 产生不同 gate 结果**
+- [x] **Step 4: 补测试——验证不同 fee rate 组合产生不同 gate 结果**
 
-在 executor 测试中加一个测试：同样的价格改善幅度，用 `taker_fee_rate: 0.001`（高费率）应该触发 gate，用 `taker_fee_rate: 0.0`（零费率）不应该触发。
+在 executor 测试中加测试：
+- 同样的价格改善幅度，用 `maker_fee_rate: 0.0005, taker_fee_rate: 0.001`（高费率）应该触发 gate
+- 用 `maker_fee_rate: 0.0, taker_fee_rate: 0.0`（零费率）不应该触发
 
-Run: `cargo test -p grid-engine -- executor::tests --nocapture`
-Expected: 新测试通过，现有测试无回归。
+Run: `cargo test -p grid-engine executor::tests::replacement_gate_threshold_uses_exchange_maker_and_taker_fee_rate -- --exact --nocapture`
+Result:
+- 改实现前先跑到红灯，确认测试捕获的是 `maker_fee_rate` 缺失和旧 gate 公式。
+- 改实现后重新运行，新测试通过。
 
-- [ ] **Step 5: 全量验证**
+- [x] **Step 5: 全量验证**
 
 Run: `cargo test`
-Expected: workspace 全部通过。
+Result: workspace 全部通过。
 
-- [ ] **Step 6: 提交**
+Review:
+- 这次改动仍然停留在计划主线内：新增 `ExchangeRules` 的 fee 字段、更新 Binance 默认值、改写 `replacement_gate` 公式，并补齐所有 `ExchangeRules` 构造点。
+- Binance 适配层只保留了一个明确注释的 VIP0 默认值，没有把 `commissionRate` 拉进本次 task，避免提前引入新的运行时依赖。
+- `manager::tests::observe_market_replacement_gate_emits_event_when_reason_changes` 只同步了阈值断言，从 13 bps 改为 11 bps，保留了“reason 发生变化时要发事件”这个原始测试意图。
+
+- [ ] **Step 6: 提交（commit 后回填 SHA）**
 
 ```bash
 git add core/src/types.rs engine/src/executor/planning.rs exchanges/binance/src/types.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
-git commit -m "refactor(engine): parameterize replacement gate taker fee via ExchangeRules"
+git commit -m "refactor(engine): parameterize replacement gate fees via ExchangeRules"
 ```
 
 ---

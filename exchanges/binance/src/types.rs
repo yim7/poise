@@ -138,6 +138,10 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
                     "notional",
                     min_notional_filter.notional.as_deref(),
                 )?,
+                // exchangeInfo does not include fee rates; default to VIP0 until
+                // commissionRate is wired in.
+                maker_fee_rate: 0.0002,
+                taker_fee_rate: 0.0004,
             },
         })
     }
@@ -300,6 +304,8 @@ mod tests {
                     quantity_step: 0.001,
                     min_qty: 0.001,
                     min_notional: 100.0,
+                    maker_fee_rate: 0.0002,
+                    taker_fee_rate: 0.0004,
                 },
             }
         );

@@ -957,6 +957,8 @@ mod tests {
             quantity_step: 0.1,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         }
     }
 
@@ -1652,6 +1654,8 @@ mod tests {
             quantity_step: 0.5,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         };
         seed_executor_slot(
             grid,
@@ -1700,6 +1704,8 @@ mod tests {
             quantity_step: 0.5,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         };
         seed_executor_slot(
             grid,
@@ -1757,6 +1763,8 @@ mod tests {
         let grid = manager.grids.get_mut(&GridId::new("btc1")).unwrap();
         grid.status = GridStatus::Active;
         grid.current_exposure = grid_core::types::Exposure(0.0);
+        grid.exchange_rules.maker_fee_rate = 0.0002;
+        grid.exchange_rules.taker_fee_rate = 0.0004;
         seed_executor_slot(
             grid,
             working_order(
@@ -1785,7 +1793,7 @@ mod tests {
             transition.snapshot.replacement_gate_reason,
             Some(ReplacementGateReason::ImprovementBelowThreshold {
                 improvement_bps: 10.0,
-                threshold_bps: 13.0,
+                threshold_bps: 11.0,
             })
         );
         assert!(transition.events.iter().any(|event| matches!(
@@ -1797,7 +1805,7 @@ mod tests {
                         threshold_bps,
                     },
             } if (*improvement_bps - 10.0).abs() < f64::EPSILON
-                && (*threshold_bps - 13.0).abs() < f64::EPSILON
+                && (*threshold_bps - 11.0).abs() < f64::EPSILON
         )));
     }
 
@@ -1903,6 +1911,8 @@ mod tests {
             quantity_step: 0.5,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         };
         seed_executor_slot(
             grid,
@@ -2375,6 +2385,8 @@ mod tests {
             quantity_step: 1.0,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         };
         let expected_target = grid_core::strategy::target_exposure(94.99, &grid.config);
         grid.target_exposure = Some(expected_target.clone());

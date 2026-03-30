@@ -175,6 +175,8 @@ mod tests {
             quantity_step: 0.0,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         }
     }
 

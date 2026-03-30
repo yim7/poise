@@ -38,6 +38,7 @@ pub const INVENTORY_CORE_SLOT: &str = "inventory_core";
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
+    use grid_core::events::ReplacementGateReason;
     use grid_core::types::{ExchangeRules, Exposure, Side};
 
     use super::*;
@@ -61,6 +62,8 @@ mod tests {
             quantity_step: 0.1,
             min_qty: 0.0,
             min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         }
     }
 
@@ -348,6 +351,59 @@ mod tests {
         });
         assert!(submit.is_some());
         assert!(!submit.unwrap().reduce_only);
+    }
+
+    #[test]
+    fn replacement_gate_threshold_uses_exchange_maker_and_taker_fee_rate() {
+        let instrument = test_instrument();
+        let grid_id = test_grid_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+
+        let low_fee_rules = test_exchange_rules();
+        let low_fee_plan = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &low_fee_rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 94.9,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        let mut high_fee_rules = test_exchange_rules();
+        high_fee_rules.maker_fee_rate = 0.0005;
+        high_fee_rules.taker_fee_rate = 0.001;
+        let high_fee_plan = plan(ExecutorInput {
+            grid_id: &grid_id,
+            instrument: &instrument,
+            exchange_rules: &high_fee_rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(4.0),
+            reference_price: 94.9,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        assert_eq!(low_fee_plan.replacement_gate_reason, None);
+        assert!(matches!(
+            low_fee_plan.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder { .. }
+            ] if order_id == "order-1"
+        ));
+        assert!(matches!(
+            high_fee_plan.replacement_gate_reason,
+            Some(ReplacementGateReason::ImprovementBelowThreshold {
+                improvement_bps: 10.5,
+                threshold_bps: 20.0,
+            })
+        ));
+        assert_eq!(high_fee_plan.effects, vec![ExecutionAction::NoOp]);
     }
 
     #[test]

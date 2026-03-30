@@ -38,6 +38,8 @@ pub struct ExchangeRules {
     pub quantity_step: f64,
     pub min_qty: f64,
     pub min_notional: f64,
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
 }
 
 #[cfg(test)]

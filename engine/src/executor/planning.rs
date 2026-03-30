@@ -68,7 +68,6 @@ const CATCH_UP_GAP_THRESHOLD: f64 = 5.0;
 const REBALANCE_AGE_MS: i64 = 60_000;
 const CATCH_UP_AGE_MS: i64 = 180_000;
 const REPLACEMENT_SAFETY_BUFFER_BPS: f64 = 5.0;
-const BINANCE_TAKER_FEE_RATE: f64 = 0.0004;
 const BPS_DENOMINATOR: f64 = 10_000.0;
 
 pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
@@ -430,8 +429,8 @@ fn replacement_gate_reason_for_working_order(
 
     let improvement_ratio =
         replacement_improvement_ratio(current_order, desired_order, reference_price);
-    let threshold_rate =
-        (BINANCE_TAKER_FEE_RATE * 2.0) + (REPLACEMENT_SAFETY_BUFFER_BPS / BPS_DENOMINATOR);
+    let threshold_rate = (rules.maker_fee_rate + rules.taker_fee_rate)
+        + (REPLACEMENT_SAFETY_BUFFER_BPS / BPS_DENOMINATOR);
     (improvement_ratio < threshold_rate).then(|| ReplacementGateReason::ImprovementBelowThreshold {
         improvement_bps: ratio_to_bps(improvement_ratio),
         threshold_bps: ratio_to_bps(threshold_rate),

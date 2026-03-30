@@ -295,6 +295,8 @@ mod tests {
                 quantity_step: 0.01,
                 min_qty: 0.01,
                 min_notional: 5.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
             },
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         )

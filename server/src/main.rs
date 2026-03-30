@@ -256,6 +256,8 @@ notional_per_unit = 375.0
                     quantity_step: 0.1,
                     min_qty: 0.0,
                     min_notional: 0.0,
+                    maker_fee_rate: 0.0,
+                    taker_fee_rate: 0.0,
                 },
             })
         }
