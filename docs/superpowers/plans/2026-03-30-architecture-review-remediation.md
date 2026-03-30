@@ -680,7 +680,7 @@ Expected: workspace 全部通过。
 在 `docs/2026-03-30-architecture-review.md` 末尾标记每条 finding 的完成状态。
 在本文件中勾选已完成步骤并记录 commit SHA。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/2026-03-30-architecture-review.md docs/superpowers/plans/2026-03-30-architecture-review-remediation.md
@@ -702,6 +702,8 @@ Verification:
 
 Review:
 - 没有发现新的高信号问题。Task 6 主要做验收和文档收尾；唯一新增代码变更是把 `projector` 测试 helper 从 snapshot 构造改成 read model 直构，这个修改缩小了测试侧对 engine 结构的耦合，方向与 finding #6 保持一致。
+
+Commit: `f0bee09502d9b9ec8f79a0f38ae4959b0ecbc263`
 
 ---
 
