@@ -505,3 +505,104 @@ Task 8 code commit:
 git add server/src/write_service.rs server/src/effect_worker.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
 git commit -m "refactor(server): codify loaded-grid invariant for effect updates"
 ```
+
+### Task 9: 统一 submit recovery 写回的 loaded-grid invariant
+
+**Files:**
+- Modify: `server/src/write_service.rs`
+- Test: `server/src/write_service.rs`
+
+- [x] **Step 1: 写失败测试，锁住 submit recovery 写回也返回 invariant violation**
+
+测试至少覆盖：
+- `recover_submit_effect()` 在 `grid` 未加载时返回稳定的 loaded-grid invariant
+- 错误信息不再退化成泛化的 `grid not found`
+
+- [x] **Step 2: 运行定向测试确认失败**
+
+Run:
+`cargo test -p grid-server write_service::tests::recover_submit_effect_returns_invariant_violation_when_grid_is_not_loaded -- --exact`
+
+Expected:
+测试失败，因为当前 `recover_submit_effect()` 仍返回普通 `Mutation(grid not found)`。
+
+- [x] **Step 3: 做最小实现，统一 submit recovery 写回错误契约**
+
+要求：
+- `recover_submit_effect()` 的前后快照缺失也统一返回 `LoadedGridInvariant`
+- 不引入新的错误类型分支
+- 保持已有 submit recovery 成功/等待/ supersede 路径不变
+
+- [x] **Step 4: 运行 Task 9 的定向测试**
+
+Run:
+`cargo test -p grid-server write_service::tests:: -- --nocapture`
+
+Expected:
+submit recovery 写回和其他 effect 状态写回统一使用 invariant violation 语义，相关测试通过。
+
+- [x] **Step 5: 提交**
+
+Task 9 code commit:
+`a48f207cf0d6ef32524845661b5d73d5a6c614fc`
+
+```bash
+git add server/src/write_service.rs docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
+git commit -m "fix(server): unify submit recovery loaded-grid invariant"
+```
+
+### Task 10: 让固定 slot 常驻并把 submit recovery 后续决策收回 executor
+
+**Files:**
+- Modify: `engine/src/executor.rs`
+- Modify: `engine/src/manager.rs`
+- Modify: `engine/src/runtime.rs`
+- Modify: `server/src/write_service.rs`
+- Modify: `docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md`
+- Test: `engine/src/executor.rs`
+- Test: `engine/src/manager.rs`
+- Test: `server/src/write_service.rs`
+
+- [ ] **Step 1: 写失败测试，锁住固定 slot 常驻和 executor-owned recovery 决策**
+
+测试至少覆盖：
+- 固定 slot 在清理后推进到 `Empty`，而不是从 `ExecutorState` 删除
+- `recover_submit_effect()` 由 executor 直接返回 supersede 后续 effect，不再依赖 manager 侧二次重规划
+- manager 不再自己推导 `current_submit_hint_for_grid()` 这类旁路协议
+
+- [ ] **Step 2: 运行定向测试确认失败**
+
+Run:
+`cargo test -p grid-engine executor::tests::terminal_order_clears_matching_slot_to_empty -- --exact`
+`cargo test -p grid-engine manager::tests::recover_submit_effect_supersede_plan_is_executor_owned -- --exact`
+
+Expected:
+测试失败，因为当前固定 slot 仍通过删除表达空态，submit recovery 的后续 effect 仍有 manager 侧协议。
+
+- [ ] **Step 3: 做最小实现，把剩余边界彻底收紧**
+
+要求：
+- 固定 slot 常驻 `ExecutorState`，只推进 `Empty / SubmitPending / Working`
+- executor 提供 submit recovery 的完整决策输出，包含 supersede 后续 effect
+- manager 只传递事实和消费 executor 结果，不再持有 `current_submit_hint_for_grid()` / `stage_superseding_effects()` 这类 submit recovery 专属协议
+- 相应 spec 文案改成“已按显式 slot 状态落地”，不保留口头约定
+
+- [ ] **Step 4: 运行 Task 10 的定向测试**
+
+Run:
+`cargo test -p grid-engine -- --nocapture`
+`cargo test -p grid-server write_service::tests:: -- --nocapture`
+`cargo fmt --all --check`
+
+Expected:
+固定 slot 与 submit recovery 边界完全收紧，相关测试和格式检查通过。
+
+- [ ] **Step 5: 提交**
+
+Task 10 code commit:
+`TODO`
+
+```bash
+git add engine/src/executor.rs engine/src/manager.rs engine/src/runtime.rs server/src/write_service.rs docs/superpowers/specs/2026-03-29-inventory-executor-architecture-design.md docs/superpowers/plans/2026-03-30-inventory-executor-boundary-hardening.md
+git commit -m "refactor(engine): finalize slot and submit recovery ownership"
+```
