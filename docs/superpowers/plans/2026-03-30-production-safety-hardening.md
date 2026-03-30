@@ -857,10 +857,11 @@ Task 5 code commit:
 - Modify: `engine/src/manager.rs` — `flatten_grid` / `resume_grid` 收敛控制语义
 - Modify: `server/src/http.rs` — 放行 `Flatten`
 - Modify: `server/src/projector.rs` — `available_commands` 反映 flatten 已实现
+- Modify: `storage/src/schema.rs` / `storage/src/sqlite.rs` — 持久化 `manual_target_override`，保证重启后 override 不丢失
 - Modify: `docs/protocol-contract.md` — 同步命令语义
 - Test: `engine/src/manager.rs`, `engine/src/runtime.rs`, `server/src/http.rs`, `server/src/projector.rs`
 
-- [ ] **Step 1: 在 runtime / snapshot 中增加持久化的 manual_target_override**
+- [x] **Step 1: 在 runtime / snapshot 中增加持久化的 manual_target_override**
 
 `engine/src/runtime.rs`：
 
@@ -883,7 +884,7 @@ pub struct GridRuntimeSnapshot {
 
 同时更新 `snapshot()` / `restore_from_snapshot()` 和相关 round-trip 测试。
 
-- [ ] **Step 2: 在 reconciler 中让 override 优先于曲线 target**
+- [x] **Step 2: 在 reconciler 中让 override 优先于曲线 target**
 
 `engine/src/reconciler.rs`：
 
@@ -908,7 +909,7 @@ pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetRecon
 
 **关键点：** override 生效时不再看 band status，也不把 `Frozen/Holding/ReduceOnly` 的策略语义和人工退出意图混在一起。
 
-- [ ] **Step 3: manager 实现 flatten / resume 的控制语义**
+- [x] **Step 3: manager 实现 flatten / resume 的控制语义**
 
 `engine/src/manager.rs`：
 
@@ -937,11 +938,11 @@ fn flatten_grid(&mut self, id: &GridId) -> Result<(Vec<DomainEvent>, Vec<GridEff
 - `Paused` 时保留现有语义
 - `manual_target_override.is_some()` 且当前为人工 flatten 状态时，清掉 override 后再按当前价格恢复正常 target
 
-- [ ] **Step 4: HTTP / projector / 协议文档同步 flatten 已实现**
+- [x] **Step 4: HTTP / projector / 协议文档同步 flatten 已实现**
 
 `server/src/http.rs` 放行 `Flatten`；`server/src/projector.rs` 里的 `available_commands` 不再把 flatten 固定标成 disabled；`docs/protocol-contract.md` 去掉“flatten 未实现”的描述。
 
-- [ ] **Step 5: 写验收测试**
+- [x] **Step 5: 写验收测试**
 
 `engine/src/manager.rs` tests：
 
@@ -989,12 +990,12 @@ fn resume_clears_manual_target_override_after_flatten() {
 - `flatten` 返回 `200`
 - detail 中 `available_commands` 不再显示“flatten command is not implemented”
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run: `cargo test`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/command.rs engine/src/reconciler.rs engine/src/manager.rs server/src/http.rs server/src/projector.rs docs/protocol-contract.md
@@ -1004,6 +1005,9 @@ Flatten now sets manual_target_override=0 and keeps that override
 across reprice and restart. Resume clears the override and returns
 the grid to strategy-owned targeting."
 ```
+
+Task 6 code commit:
+`6d64cf4`
 
 ---
 
