@@ -112,7 +112,7 @@ impl GridProjector {
                     .map(project_replacement_gate_reason),
             },
             activity: self.project_activity(source),
-            available_commands: project_available_commands(&source.snapshot.status),
+            available_commands: project_available_commands(&source.snapshot),
         }
     }
 
@@ -272,7 +272,8 @@ fn project_execution_slot_label(
     }
 }
 
-fn project_available_commands(status: &EngineGridStatus) -> Vec<GridCommandView> {
+fn project_available_commands(snapshot: &grid_engine::snapshot::GridRuntimeSnapshot) -> Vec<GridCommandView> {
+    let status = &snapshot.status;
     vec![
         GridCommandView {
             command: GridCommandType::Pause,
@@ -288,9 +289,11 @@ fn project_available_commands(status: &EngineGridStatus) -> Vec<GridCommandView>
         },
         GridCommandView {
             command: GridCommandType::Resume,
-            enabled: matches!(status, EngineGridStatus::Paused),
+            enabled: matches!(status, EngineGridStatus::Paused)
+                || snapshot.manual_target_override.is_some(),
             disabled_reason: match status {
                 EngineGridStatus::Paused => None,
+                _ if snapshot.manual_target_override.is_some() => None,
                 EngineGridStatus::Terminated => Some("terminated grid cannot be resumed".into()),
                 _ => Some("grid is not paused".into()),
             },
@@ -308,8 +311,9 @@ fn project_available_commands(status: &EngineGridStatus) -> Vec<GridCommandView>
         },
         GridCommandView {
             command: GridCommandType::Flatten,
-            enabled: false,
-            disabled_reason: Some("flatten command is not implemented".into()),
+            enabled: !matches!(status, EngineGridStatus::Terminated),
+            disabled_reason: matches!(status, EngineGridStatus::Terminated)
+                .then_some("terminated grid cannot be flattened".into()),
         },
     ]
 }
@@ -459,7 +463,7 @@ mod tests {
             detail.available_commands[3].command,
             GridCommandType::Flatten
         );
-        assert!(!detail.available_commands[3].enabled);
+        assert!(detail.available_commands[3].enabled);
         assert_eq!(detail.activity.len(), 2);
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);
         assert_eq!(detail.activity[1].level, ActivityLevelView::Error);
@@ -474,6 +478,23 @@ mod tests {
                 .get("client_order_id")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn project_detail_enables_resume_when_manual_flatten_is_active() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.snapshot.status = GridStatus::ReducingOnly;
+        source.snapshot.manual_target_override = Some(Exposure(0.0));
+
+        let detail = GridProjector::new().project_detail(&source);
+        let resume = detail
+            .available_commands
+            .iter()
+            .find(|command| command.command == GridCommandType::Resume)
+            .expect("resume command should be present");
+
+        assert!(resume.enabled);
+        assert_eq!(resume.disabled_reason, None);
     }
 
     #[test]
@@ -651,6 +672,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(0.5),

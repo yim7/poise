@@ -270,6 +270,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(3.5),
             target_exposure: Some(Exposure(4.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(0.5),

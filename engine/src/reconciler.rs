@@ -13,6 +13,22 @@ pub struct TargetReconcileResult {
 }
 
 pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetReconcileResult {
+    if let Some(target_override) = grid.manual_target_override.clone() {
+        let delta = grid.current_exposure.delta(&target_override);
+        return TargetReconcileResult {
+            events: (!delta.is_zero())
+                .then_some(DomainEvent::ExposureTargetChanged {
+                    from: grid.current_exposure.clone(),
+                    to: target_override.clone(),
+                })
+                .into_iter()
+                .collect(),
+            target_exposure: target_override,
+            new_status: Some(GridStatus::ReducingOnly),
+            suppress_execution: delta.is_zero(),
+        };
+    }
+
     let band = strategy::band_status(reference_price, &grid.config);
 
     let (target, new_status) = match &band {

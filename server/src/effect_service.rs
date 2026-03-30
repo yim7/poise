@@ -138,6 +138,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState::empty(Utc::now()),
             replacement_gate_reason: None,
             risk: RiskState::default(),
@@ -164,6 +165,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),

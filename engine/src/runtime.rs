@@ -131,6 +131,7 @@ pub struct GridRuntime {
     pub current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
     pub target_exposure: Option<Exposure>,
+    pub manual_target_override: Option<Exposure>,
     pub executor_state: ExecutorState,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub risk_state: RiskState,
@@ -156,6 +157,7 @@ impl GridRuntime {
             status: GridStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             target_exposure: None,
+            manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
             risk_state: RiskState::default(),
@@ -176,6 +178,7 @@ impl GridRuntime {
             status: self.status.clone(),
             current_exposure: self.current_exposure.clone(),
             target_exposure: self.target_exposure.clone(),
+            manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
             risk: self.risk_state.clone(),
@@ -211,6 +214,7 @@ impl GridRuntime {
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
         self.target_exposure = snapshot.target_exposure.clone();
+        self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.risk_state = snapshot.risk.clone();
@@ -314,6 +318,7 @@ mod tests {
         runtime.status = GridStatus::Active;
         runtime.current_exposure = Exposure(4.0);
         runtime.target_exposure = Some(Exposure(6.0));
+        runtime.manual_target_override = Some(Exposure(0.0));
         runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
         runtime.risk_state = RiskState {
             realized_pnl_day: None,
@@ -349,6 +354,7 @@ mod tests {
         assert_eq!(restored.status, GridStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
         assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
         assert_eq!(restored.executor_state, runtime.executor_state);
         assert_eq!(
             restored.executor_state.stats.started_at,

@@ -135,10 +135,7 @@ impl GridManager {
                 self.pause_grid(id.as_str())?;
                 (vec![], vec![])
             }
-            GridCommand::Resume => {
-                self.resume_grid(id.as_str())?;
-                (vec![], vec![])
-            }
+            GridCommand::Resume => self.resume_grid(id.as_str())?,
             GridCommand::Reconcile => {
                 let Some(reference_price) = self
                     .grids
@@ -150,6 +147,7 @@ impl GridManager {
                 };
                 self.reconcile_grid(id, reference_price)?
             }
+            GridCommand::Flatten => self.flatten_grid(id)?,
         };
 
         self.transition_for(id, events, effects)
@@ -166,12 +164,38 @@ impl GridManager {
         Ok(())
     }
 
-    pub fn resume_grid(&mut self, id: &str) -> Result<()> {
+    pub fn resume_grid(&mut self, id: &str) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        let grid_id = GridId::from(id);
+        if self
+            .grids
+            .get(&grid_id)
+            .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?
+            .manual_target_override
+            .is_some()
+        {
+            let reference_price = {
+                let grid = self
+                    .grids
+                    .get_mut(&grid_id)
+                    .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
+                grid.manual_target_override = None;
+                grid.status = GridStatus::WaitingMarketData;
+                grid.target_exposure = None;
+                grid.replacement_gate_reason = None;
+                grid.reference_price
+            };
+
+            return match reference_price {
+                Some(reference_price) => self.reconcile_grid(&grid_id, reference_price),
+                None => Ok((vec![], vec![])),
+            };
+        }
+
         let resumed_at = self.clock.now();
         let resumed_state = {
             let grid = self
                 .grids
-                .get(&GridId::from(id))
+                .get(&grid_id)
                 .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
 
             if !matches!(grid.status, GridStatus::Paused) {
@@ -206,7 +230,7 @@ impl GridManager {
 
         let grid = self
             .grids
-            .get_mut(&GridId::from(id))
+            .get_mut(&grid_id)
             .ok_or_else(|| anyhow::anyhow!("grid `{id}` not found"))?;
         let (status, exposure, replacement_gate_reason, executor_state) = resumed_state;
         grid.status = status;
@@ -214,7 +238,29 @@ impl GridManager {
         grid.replacement_gate_reason = replacement_gate_reason;
         grid.executor_state = executor_state;
 
-        Ok(())
+        Ok((vec![], vec![]))
+    }
+
+    fn flatten_grid(&mut self, id: &GridId) -> Result<(Vec<DomainEvent>, Vec<GridEffect>)> {
+        let reference_price = {
+            let grid = self
+                .grids
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("grid `{}` not found", id.as_str()))?;
+
+            if matches!(grid.status, GridStatus::Terminated) {
+                bail!("cannot flatten terminated grid `{}`", id.as_str());
+            }
+
+            grid.manual_target_override = Some(Exposure(0.0));
+            grid.status = GridStatus::ReducingOnly;
+            grid.reference_price
+        };
+
+        match reference_price {
+            Some(reference_price) => self.reconcile_grid(id, reference_price),
+            None => Ok((vec![], vec![])),
+        }
     }
 
     pub fn snapshot(&self, id: &str) -> Option<GridRuntimeSnapshot> {
@@ -1655,6 +1701,53 @@ mod tests {
         let error = manager.resume_grid("btc1").unwrap_err();
 
         assert!(error.to_string().contains("cannot resume"));
+    }
+
+    #[test]
+    fn flatten_persists_manual_target_override_and_targets_zero() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid_id = GridId::new("btc-core");
+
+        let transition = manager.command(&grid_id, GridCommand::Flatten).unwrap();
+
+        let grid = manager.get_grid("btc-core").unwrap();
+        assert_eq!(grid.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(grid.status, GridStatus::ReducingOnly);
+        assert_eq!(transition.snapshot.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
+    }
+
+    #[test]
+    fn flatten_keeps_zero_target_even_when_price_is_in_band() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid_id = GridId::new("btc-core");
+
+        manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        let transition = manager
+            .observe(
+                &grid_id,
+                GridObservation::Market(MarketObservation {
+                    reference_price: 100.0,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.snapshot.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
+        assert_eq!(transition.snapshot.status, GridStatus::ReducingOnly);
+    }
+
+    #[test]
+    fn resume_clears_manual_target_override_after_flatten() {
+        let mut manager = test_manager_with_cached_price(95.0);
+        let grid_id = GridId::new("btc-core");
+
+        manager.command(&grid_id, GridCommand::Flatten).unwrap();
+        manager.resume_grid("btc-core").unwrap();
+
+        let grid = manager.get_grid("btc-core").unwrap();
+        assert!(grid.manual_target_override.is_none());
+        assert_ne!(grid.status, GridStatus::ReducingOnly);
     }
 
     #[test]

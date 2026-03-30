@@ -11,6 +11,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL,
             current_exposure REAL NOT NULL,
             target_exposure REAL,
+            manual_target_override REAL,
             executor_state_json TEXT,
             replacement_gate_reason_json TEXT,
             realized_pnl_day TEXT,
@@ -44,6 +45,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
 
     add_column_if_missing(conn, "grid_snapshots", "executor_state_json", "TEXT")?;
+    add_column_if_missing(conn, "grid_snapshots", "manual_target_override", "REAL")?;
     add_column_if_missing(
         conn,
         "grid_snapshots",
@@ -68,6 +70,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "status",
             "current_exposure",
             "target_exposure",
+            "manual_target_override",
             "executor_state_json",
             "replacement_gate_reason_json",
             "realized_pnl_day",

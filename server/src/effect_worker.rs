@@ -20,6 +20,7 @@ pub struct EffectWorker {
 }
 
 impl EffectWorker {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
@@ -785,6 +786,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(0.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(6.0),
@@ -820,6 +822,7 @@ mod tests {
             status: GridStatus::Active,
             current_exposure: Exposure(2.0),
             target_exposure: Some(Exposure(6.0)),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(4.0),
@@ -871,6 +874,7 @@ mod tests {
                 reference_price,
                 &config,
             )),
+            manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
                 inventory_gap: Exposure(order.target_exposure.0),
