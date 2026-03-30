@@ -630,7 +630,7 @@ mod tests {
             Ok(None)
         }
 
-        async fn list_events(
+        async fn list_track_events(
             &self,
             _id: &str,
         ) -> anyhow::Result<Vec<poise_core::events::DomainEvent>> {
@@ -673,7 +673,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<poise_engine::ports::StoredDomainEvent>> {
+        ) -> anyhow::Result<Vec<poise_engine::ports::StoredTrackEvent>> {
             Ok(Vec::new())
         }
 

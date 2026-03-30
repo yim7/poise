@@ -118,7 +118,7 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
-        OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort, StoredDomainEvent,
+        OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort, StoredTrackEvent,
         StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -444,7 +444,7 @@ mod tests {
     #[derive(Default)]
     struct TestRepository {
         snapshots: Mutex<HashMap<String, StoredTrackSnapshot>>,
-        events: Mutex<HashMap<String, Vec<StoredDomainEvent>>>,
+        events: Mutex<HashMap<String, Vec<StoredTrackEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         next_event_id: Mutex<i64>,
         read_delay: Mutex<Option<Duration>>,
@@ -522,7 +522,7 @@ mod tests {
                 let entry = stored_events.entry(id.to_string()).or_default();
                 for event in events {
                     *next_event_id += 1;
-                    entry.push(StoredDomainEvent {
+                    entry.push(StoredTrackEvent {
                         id: *next_event_id,
                         track_id: TrackId::new(id),
                         event: event.clone(),
@@ -585,7 +585,7 @@ mod tests {
                 .map(|stored| stored.snapshot))
         }
 
-        async fn list_events(&self, id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(&self, id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(self
                 .events
                 .lock()
@@ -653,7 +653,7 @@ mod tests {
             &self,
             track_id: &TrackId,
             limit: usize,
-        ) -> Result<Vec<StoredDomainEvent>> {
+        ) -> Result<Vec<StoredTrackEvent>> {
             self.maybe_delay_read().await;
             let mut events = self
                 .events

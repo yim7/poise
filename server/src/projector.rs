@@ -100,7 +100,7 @@ impl TrackProjector {
     pub fn project_activity(&self, source: &TrackReadModel) -> Vec<GridActivityItemView> {
         let mut activity = Vec::new();
 
-        for event in &source.recent_domain_events {
+        for event in &source.recent_track_events {
             activity.push((
                 event.created_at,
                 GridActivityItemView {
@@ -367,7 +367,7 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole};
     use poise_engine::ports::{
-        EffectStatus, OrderRequest, PersistedTrackEffect, StoredDomainEvent,
+        EffectStatus, OrderRequest, PersistedTrackEffect, StoredTrackEvent,
     };
     use poise_engine::runtime::TrackStatus;
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn project_activity_renders_replacement_gate_event_message() {
         let mut source = source_with_submitting_effect();
-        source.recent_domain_events = vec![StoredDomainEvent {
+        source.recent_track_events = vec![StoredTrackEvent {
             id: 1,
             track_id: TrackId::new("btc-core"),
             event: DomainEvent::ReplacementGateApplied {
@@ -603,14 +603,14 @@ mod tests {
                 role: OrderRole::IncreaseInventory,
             }],
             manual_target_override: None,
-            recent_domain_events: Vec::new(),
+            recent_track_events: Vec::new(),
             recent_effects: vec![test_effect(EffectStatus::Executing, None)],
         }
     }
 
     fn source_with_failed_effect_and_recent_event() -> TrackReadModel {
         TrackReadModel {
-            recent_domain_events: vec![StoredDomainEvent {
+            recent_track_events: vec![StoredTrackEvent {
                 id: 1,
                 track_id: TrackId::new("btc-core"),
                 event: DomainEvent::ExposureTargetChanged {
