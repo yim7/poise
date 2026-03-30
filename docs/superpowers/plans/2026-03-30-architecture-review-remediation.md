@@ -288,9 +288,11 @@ Commit: `67e7c5125024d56b739d1beab23b3158cefabc87`
 
 **Files:**
 - Modify: `engine/src/runtime.rs`
-- Modify: `engine/src/manager.rs`
+- Modify: `server/src/write_service.rs`
+- Modify: `server/src/assembly.rs`
+- Modify: `server/src/runtime.rs`
 
-- [ ] **Step 1: 给 restore_from_snapshot 加 debug_assert round-trip 保护**
+- [x] **Step 1: 给 restore_from_snapshot 加 debug_assert round-trip 保护**
 
 在 `engine/src/runtime.rs` 的 `restore_from_snapshot()` 末尾 `Ok(())` 之前加：
 
@@ -305,9 +307,9 @@ debug_assert_eq!(
 这需要 `GridRuntimeSnapshot` 实现 `PartialEq`（已有）。
 
 Run: `cargo test -p grid-engine -- runtime::tests --nocapture`
-Expected: 全部通过。debug_assert 验证当前所有字段都被正确 restore。
+Result: 通过。`runtime::tests` 全部通过，debug_assert 没有发现遗漏字段。
 
-- [ ] **Step 2: 写一个 regression 测试，证明 debug_assert 能抓住遗漏**
+- [x] **Step 2: 写一个 regression 测试，证明 debug_assert 能抓住遗漏**
 
 ```rust
 #[test]
@@ -326,9 +328,9 @@ fn restore_from_snapshot_detects_missing_field_via_round_trip() {
 ```
 
 Run: `cargo test -p grid-engine -- runtime::tests::restore_from_snapshot_detects --exact --nocapture`
-Expected: 通过——证明当前 restore 是完整的，且保护装置就位。
+Result: 通过——证明当前 restore 是完整的，且保护装置就位。
 
-- [ ] **Step 3: 把 GridRuntime 字段从 pub 改为 pub(crate)**
+- [x] **Step 3: 把 GridRuntime 字段从 pub 改为 pub(crate)**
 
 把 `engine/src/runtime.rs` 中 `GridRuntime` 的所有字段从 `pub` 改为 `pub(crate)`。
 
@@ -356,9 +358,9 @@ pub struct GridRuntime {
 ```
 
 Run: `cargo check --workspace`
-Expected: engine 内部（manager.rs 等）编译通过；server 中如果有直接字段访问会报错。
+Result: engine 内部编译通过，server 侧首先暴露出 `write_service.rs` 对 `id` / `instrument` 的跨 crate 直读。
 
-- [ ] **Step 4: 给 server 层需要的只读访问加 pub accessor**
+- [x] **Step 4: 给 server 层需要的只读访问加 pub accessor**
 
 检查 server crate 中对 GridRuntime 字段的直接访问（通过 `manager.get_grid()` / `manager.list_grids()` 返回的 `&GridRuntime`）。为每个被访问的字段加 pub accessor。
 
@@ -376,14 +378,22 @@ impl GridRuntime {
 逐个加，每加一个跑 `cargo check -p grid-server` 确认编译错误减少。
 
 Run: `cargo check --workspace`
-Expected: workspace 编译通过。
+Result:
+- `cargo check --workspace` 通过。
+- `cargo test -p grid-server --no-run` 通过。
+- server 运行时测试辅助方法改为读取 `snapshot()`，没有为了测试继续扩大 `GridRuntime` 的公开面。
 
-- [ ] **Step 5: 全量测试验证**
+- [x] **Step 5: 全量测试验证**
 
 Run: `cargo test`
-Expected: workspace 全部通过。
+Result: workspace 全部通过。
 
-- [ ] **Step 6: 提交**
+Review:
+- `GridRuntime` 对外公开面只新增了 4 个只读 accessor：`id()`、`instrument()`、`status()`、`budget()`；没有把 `current_exposure`、`executor_state`、`risk_state` 这类实现细节重新公开出去。
+- `server/src/runtime.rs` 的测试辅助从返回 `GridRuntime` 改成返回 `GridRuntimeSnapshot`，把测试观察面压回已有读模型，而不是让测试反向决定生产 API。
+- Task 3 的实现仍然紧贴 finding：一边补 `restore` 的完整性保护，一边阻断 server 对 engine 运行态的随意直读，没有引入新的抽象层。
+
+- [ ] **Step 6: 提交（commit 后回填 SHA）**
 
 ```bash
 git add engine/src/runtime.rs engine/src/manager.rs docs/superpowers/plans/2026-03-30-architecture-review-remediation.md

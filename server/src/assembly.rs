@@ -329,7 +329,7 @@ mod tests {
 
         assert_eq!(manager.list_grids().len(), 2);
         let grid = manager.get_grid("btc-core").unwrap();
-        assert_eq!(grid.budget.max_notional, 3000.0);
+        assert_eq!(grid.budget().max_notional, 3000.0);
         assert!(
             std::path::Path::new(".data")
                 .join(&suffix)
@@ -584,7 +584,7 @@ mod tests {
         let manager = manager_handle.read().await;
         let grid = manager.get_grid("btc-core").unwrap();
 
-        assert_eq!(grid.status, grid_engine::runtime::GridStatus::Paused);
+        assert_eq!(grid.status(), &grid_engine::runtime::GridStatus::Paused);
 
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }

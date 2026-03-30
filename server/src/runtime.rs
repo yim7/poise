@@ -595,8 +595,8 @@ mod tests {
         StateRepositoryPort, StoredDomainEvent, StoredGridSnapshot, UserDataEvent, UserDataPayload,
     };
     use grid_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, GridRuntime, GridStatus, RiskState,
-        SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, GridStatus, RiskState, SlotState,
+        WorkingOrder,
     };
     use grid_engine::transition::GridEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -1581,7 +1581,7 @@ mod tests {
         persistence
             .save_transition(
                 "BTCUSDT",
-                &current_instance(&state).await.snapshot(),
+                &current_instance(&state).await,
                 &[],
                 &[],
             )
@@ -1846,7 +1846,7 @@ mod tests {
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
-        assert!((instance.risk_state.unrealized_pnl - 11.0).abs() < f64::EPSILON);
+        assert!((instance.risk.unrealized_pnl - 11.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
     }
@@ -2265,7 +2265,7 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(2.0));
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert_eq!(
-            instance.out_of_band_since,
+            instance.observed.out_of_band_since,
             Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap())
         );
         let executor_state = &instance.executor_state;
@@ -2947,17 +2947,20 @@ mod tests {
         let handles = fixture.runtime.start().await.unwrap();
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
 
-        wait_until_instance(&fixture.state, |instance| instance.last_tick_at.is_some()).await;
+        wait_until_instance(&fixture.state, |instance| {
+            instance.observed.last_tick_at.is_some()
+        })
+        .await;
 
         clock.set(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 31).unwrap());
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.market_data_stale_since.is_some()
+            instance.observed.market_data_stale_since.is_some()
         })
         .await;
 
         let instance = current_instance(&fixture.state).await;
-        assert!(instance.market_data_stale_since.is_some());
+        assert!(instance.observed.market_data_stale_since.is_some());
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
 
         shutdown(handles).await;
@@ -3003,7 +3006,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert!((instance.risk_state.unrealized_pnl - 3.0).abs() < f64::EPSILON);
+        assert!((instance.risk.unrealized_pnl - 3.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
     }
@@ -3123,7 +3126,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert!((instance.risk_state.unrealized_pnl - 3.0).abs() < f64::EPSILON);
+        assert!((instance.risk.unrealized_pnl - 3.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
     }
@@ -3161,7 +3164,7 @@ mod tests {
             .unwrap();
 
         wait_until_instance(&fixture.state, |instance| {
-            (instance.risk_state.realized_pnl_today + 20.0).abs() < f64::EPSILON
+            (instance.risk.realized_pnl_today + 20.0).abs() < f64::EPSILON
         })
         .await;
 
@@ -3425,10 +3428,10 @@ mod tests {
         )
     }
 
-    async fn current_instance(state: &ServerState) -> GridRuntime {
+    async fn current_instance(state: &ServerState) -> grid_engine::snapshot::GridRuntimeSnapshot {
         let manager_handle = state.write_service.manager();
         let manager = manager_handle.read().await;
-        manager.get_grid("BTCUSDT").unwrap().clone()
+        manager.get_grid("BTCUSDT").unwrap().snapshot()
     }
 
     async fn shutdown(handles: RuntimeHandles) {
@@ -3460,7 +3463,7 @@ mod tests {
 
     async fn wait_until_instance<F>(state: &ServerState, predicate: F)
     where
-        F: Fn(&GridRuntime) -> bool,
+        F: Fn(&grid_engine::snapshot::GridRuntimeSnapshot) -> bool,
     {
         timeout(Duration::from_secs(1), async {
             loop {
@@ -3672,7 +3675,9 @@ mod tests {
         };
     }
 
-    fn inventory_core_order(grid: &GridRuntime) -> Option<&WorkingOrder> {
+    fn inventory_core_order(
+        grid: &grid_engine::snapshot::GridRuntimeSnapshot,
+    ) -> Option<&WorkingOrder> {
         grid.executor_state
             .slots
             .first()

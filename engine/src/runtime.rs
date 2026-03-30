@@ -122,24 +122,24 @@ impl ExecutorState {
 
 #[derive(Debug, Clone)]
 pub struct GridRuntime {
-    pub id: GridId,
-    pub instrument: Instrument,
-    pub config: GridConfig,
-    pub budget: CapacityBudget,
-    pub exchange_rules: ExchangeRules,
-    pub status: GridStatus,
-    pub current_exposure: Exposure,
+    pub(crate) id: GridId,
+    pub(crate) instrument: Instrument,
+    pub(crate) config: GridConfig,
+    pub(crate) budget: CapacityBudget,
+    pub(crate) exchange_rules: ExchangeRules,
+    pub(crate) status: GridStatus,
+    pub(crate) current_exposure: Exposure,
     // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
-    pub target_exposure: Option<Exposure>,
-    pub manual_target_override: Option<Exposure>,
-    pub executor_state: ExecutorState,
-    pub replacement_gate_reason: Option<ReplacementGateReason>,
-    pub risk_state: RiskState,
-    pub reference_price: Option<f64>,
-    pub out_of_band_since: Option<DateTime<Utc>>,
-    pub last_tick_at: Option<DateTime<Utc>>,
-    pub market_data_stale_since: Option<DateTime<Utc>>,
-    pub tick_timeout_secs: u64,
+    pub(crate) target_exposure: Option<Exposure>,
+    pub(crate) manual_target_override: Option<Exposure>,
+    pub(crate) executor_state: ExecutorState,
+    pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
+    pub(crate) risk_state: RiskState,
+    pub(crate) reference_price: Option<f64>,
+    pub(crate) out_of_band_since: Option<DateTime<Utc>>,
+    pub(crate) last_tick_at: Option<DateTime<Utc>>,
+    pub(crate) market_data_stale_since: Option<DateTime<Utc>>,
+    pub(crate) tick_timeout_secs: u64,
 }
 
 impl GridRuntime {
@@ -196,6 +196,22 @@ impl GridRuntime {
         &self.instrument.symbol
     }
 
+    pub fn id(&self) -> &GridId {
+        &self.id
+    }
+
+    pub fn instrument(&self) -> &Instrument {
+        &self.instrument
+    }
+
+    pub fn status(&self) -> &GridStatus {
+        &self.status
+    }
+
+    pub fn budget(&self) -> &CapacityBudget {
+        &self.budget
+    }
+
     pub fn snapshot(&self) -> GridRuntimeSnapshot {
         GridRuntimeSnapshot {
             grid_id: self.id.clone(),
@@ -250,6 +266,12 @@ impl GridRuntime {
         self.out_of_band_since = snapshot.observed.out_of_band_since;
         self.last_tick_at = snapshot.observed.last_tick_at;
         self.market_data_stale_since = snapshot.observed.market_data_stale_since;
+
+        debug_assert_eq!(
+            self.snapshot(),
+            *snapshot,
+            "restore_from_snapshot left persisted fields unsynced"
+        );
 
         Ok(())
     }
@@ -410,5 +432,21 @@ mod tests {
             restored.executor_state.stats.started_at,
             runtime.executor_state.stats.started_at
         );
+    }
+
+    #[test]
+    fn restore_from_snapshot_detects_missing_field_via_round_trip() {
+        let mut runtime = test_runtime();
+        runtime.status = GridStatus::Active;
+        runtime.current_exposure = Exposure(4.0);
+        runtime.target_exposure = Some(Exposure(6.0));
+        runtime.reference_price = Some(96.0);
+        runtime.executor_state = test_executor_state();
+
+        let snapshot = runtime.snapshot();
+        let mut fresh = test_runtime();
+        fresh.restore_from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(fresh.snapshot(), snapshot);
     }
 }

@@ -186,8 +186,8 @@ impl GridWriteService {
             .list_grids()
             .into_iter()
             .map(|grid| GridInstrument {
-                id: grid.id.as_str().to_string(),
-                instrument: grid.instrument.clone(),
+                id: grid.id().as_str().to_string(),
+                instrument: grid.instrument().clone(),
             })
             .collect()
     }
