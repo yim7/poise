@@ -1650,54 +1650,6 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
                 .collect())
         }
-
-        async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
-            let mut effects = self.effects.lock().unwrap();
-            let effect = effects
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
-            effect.status = EffectStatus::Executing;
-            effect.updated_at = Utc::now();
-            Ok(())
-        }
-
-        async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
-            let mut effects = self.effects.lock().unwrap();
-            let effect = effects
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
-            effect.status = EffectStatus::Succeeded;
-            effect.last_error = None;
-            effect.updated_at = Utc::now();
-            Ok(())
-        }
-
-        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
-            let mut effects = self.effects.lock().unwrap();
-            let effect = effects
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
-            effect.status = EffectStatus::Superseded;
-            effect.last_error = None;
-            effect.updated_at = Utc::now();
-            Ok(())
-        }
-
-        async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
-            let mut effects = self.effects.lock().unwrap();
-            let effect = effects
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-                .ok_or_else(|| anyhow!("effect `{effect_id}` not found"))?;
-            effect.status = EffectStatus::Failed;
-            effect.attempt_count += 1;
-            effect.last_error = Some(error.to_string());
-            effect.updated_at = Utc::now();
-            Ok(())
-        }
     }
 
     #[derive(Default)]
@@ -1733,22 +1685,6 @@ mod tests {
             _grid_id: &GridId,
         ) -> Result<Vec<PersistedGridEffect>> {
             Ok(Vec::new())
-        }
-
-        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_superseded(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
-            Ok(())
         }
     }
 

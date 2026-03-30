@@ -843,22 +843,6 @@ mod tests {
         ) -> Result<Vec<grid_engine::ports::PersistedGridEffect>> {
             Ok(Vec::new())
         }
-
-        async fn mark_effect_executing(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_succeeded(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_superseded(&self, _effect_id: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn mark_effect_failed(&self, _effect_id: &str, _error: &str) -> Result<()> {
-            Ok(())
-        }
     }
 
     #[async_trait::async_trait]

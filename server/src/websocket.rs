@@ -622,63 +622,6 @@ mod tests {
                 .cloned()
                 .collect())
         }
-
-        async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
-            if let Some(effect) = self
-                .effects
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-            {
-                effect.status = EffectStatus::Executing;
-                effect.updated_at = Utc::now();
-            }
-            Ok(())
-        }
-
-        async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
-            if let Some(effect) = self
-                .effects
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-            {
-                effect.status = EffectStatus::Succeeded;
-                effect.updated_at = Utc::now();
-            }
-            Ok(())
-        }
-
-        async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
-            if let Some(effect) = self
-                .effects
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-            {
-                effect.status = EffectStatus::Superseded;
-                effect.updated_at = Utc::now();
-            }
-            Ok(())
-        }
-
-        async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
-            if let Some(effect) = self
-                .effects
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_id)
-            {
-                effect.status = EffectStatus::Failed;
-                effect.last_error = Some(error.to_string());
-                effect.updated_at = Utc::now();
-            }
-            Ok(())
-        }
     }
 
     #[async_trait::async_trait]

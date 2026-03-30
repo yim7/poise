@@ -657,37 +657,6 @@ impl SqliteStorage {
             .filter(|effect| matches!(effect.effect, GridEffect::SubmitOrder { .. }))
             .collect())
     }
-
-    fn mark_effect_status_blocking(
-        conn: Arc<Mutex<Connection>>,
-        effect_id: String,
-        status: EffectStatus,
-        attempt_delta: u32,
-        last_error: Option<String>,
-    ) -> Result<()> {
-        let updated_at = Utc::now().to_rfc3339();
-        let conn = Self::lock_connection(&conn)?;
-        let changed = conn
-            .execute(
-                "UPDATE grid_effects
-                 SET status = ?1,
-                     attempt_count = attempt_count + ?2,
-                     last_error = ?3,
-                     updated_at = ?4
-                 WHERE effect_id = ?5",
-                params![
-                    status.as_str(),
-                    i64::from(attempt_delta),
-                    last_error,
-                    updated_at,
-                    effect_id
-                ],
-            )
-            .context("failed to update grid effect status")?;
-
-        ensure!(changed == 1, "effect status update affected {changed} rows");
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -758,51 +727,6 @@ impl StateRepositoryPort for SqliteStorage {
         })
         .await
         .context("failed to join list_pending_submit_effects_for_grid blocking task")?
-    }
-
-    async fn mark_effect_executing(&self, effect_id: &str) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
-        let effect_id = effect_id.to_owned();
-
-        tokio::task::spawn_blocking(move || {
-            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Executing, 0, None)
-        })
-        .await
-        .context("failed to join mark_effect_executing blocking task")?
-    }
-
-    async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
-        let effect_id = effect_id.to_owned();
-
-        tokio::task::spawn_blocking(move || {
-            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Succeeded, 0, None)
-        })
-        .await
-        .context("failed to join mark_effect_succeeded blocking task")?
-    }
-
-    async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
-        let effect_id = effect_id.to_owned();
-
-        tokio::task::spawn_blocking(move || {
-            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Superseded, 0, None)
-        })
-        .await
-        .context("failed to join mark_effect_superseded blocking task")?
-    }
-
-    async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
-        let effect_id = effect_id.to_owned();
-        let error = error.to_owned();
-
-        tokio::task::spawn_blocking(move || {
-            Self::mark_effect_status_blocking(conn, effect_id, EffectStatus::Failed, 1, Some(error))
-        })
-        .await
-        .context("failed to join mark_effect_failed blocking task")?
     }
 }
 
@@ -1007,6 +931,28 @@ mod tests {
             },
             DomainEvent::BandReentered { price: 100.0 },
         ]
+    }
+
+    async fn save_effect_status_update(
+        storage: &SqliteStorage,
+        grid_id: &str,
+        effect_status_update: EffectStatusUpdate,
+    ) {
+        let snapshot = storage
+            .load_grid_state(grid_id)
+            .await
+            .unwrap()
+            .expect("snapshot should exist before updating effect status");
+        storage
+            .save_transition_with_effect_status(
+                grid_id,
+                &snapshot,
+                &[],
+                &[],
+                Some(&effect_status_update),
+            )
+            .await
+            .unwrap();
     }
 
     async fn persist_effect_batches_for_two_grids(
@@ -1262,7 +1208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_effect_failed_updates_attempt_count_and_last_error() {
+    async fn save_transition_with_effect_status_records_failed_attempt_count_and_last_error() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
         let effects = vec![GridEffect::SubmitOrder {
@@ -1276,10 +1222,17 @@ mod tests {
             .unwrap();
         let effect_id = persisted.effects[0].effect_id.clone();
 
-        storage
-            .mark_effect_failed(&effect_id, "submit order rejected")
-            .await
-            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "test-1",
+            EffectStatusUpdate {
+                effect_id: effect_id.clone(),
+                status: EffectStatus::Failed,
+                attempt_delta: 1,
+                last_error: Some("submit order rejected".into()),
+            },
+        )
+        .await;
 
         let conn = storage.conn.lock().unwrap();
         let effect_row = conn
@@ -1326,10 +1279,12 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].effect_id, persisted.effects[0].effect_id);
 
-        storage
-            .mark_effect_succeeded(&persisted.effects[0].effect_id)
-            .await
-            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "test-1",
+            EffectStatusUpdate::succeeded(persisted.effects[0].effect_id.clone()),
+        )
+        .await;
 
         let pending = storage.list_dispatchable_effects().await.unwrap();
         assert_eq!(pending.len(), 1);
@@ -1355,10 +1310,12 @@ mod tests {
             .await
             .unwrap();
 
-        storage
-            .mark_effect_superseded(&persisted.effects[0].effect_id)
-            .await
-            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "test-1",
+            EffectStatusUpdate::superseded(persisted.effects[0].effect_id.clone()),
+        )
+        .await;
 
         let pending = storage.list_dispatchable_effects().await.unwrap();
         assert_eq!(pending.len(), 1);
@@ -1384,10 +1341,17 @@ mod tests {
             .await
             .unwrap();
 
-        storage
-            .mark_effect_failed(&persisted.effects[0].effect_id, "cancel rejected")
-            .await
-            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "test-1",
+            EffectStatusUpdate {
+                effect_id: persisted.effects[0].effect_id.clone(),
+                status: EffectStatus::Failed,
+                attempt_delta: 1,
+                last_error: Some("cancel rejected".into()),
+            },
+        )
+        .await;
 
         let pending = storage.list_dispatchable_effects().await.unwrap();
         assert!(pending.is_empty());
@@ -1430,10 +1394,12 @@ mod tests {
                 .is_empty()
         );
 
-        storage
-            .mark_effect_succeeded(&btc_persisted.effects[0].effect_id)
-            .await
-            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "btc-core",
+            EffectStatusUpdate::succeeded(btc_persisted.effects[0].effect_id.clone()),
+        )
+        .await;
 
         let btc_submit_hints = storage
             .list_pending_submit_effects_for_grid(&GridId::new("btc-core"))
@@ -1527,10 +1493,17 @@ mod tests {
         overwrite_effect_updated_at(&storage, &second.effect_id, "2026-03-24T10:00:01+00:00");
         overwrite_effect_updated_at(&storage, &third.effect_id, "2026-03-24T10:00:02+00:00");
 
-        storage
-            .mark_effect_failed(&first.effect_id, "submit order rejected")
-            .await
-            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "btc-core",
+            EffectStatusUpdate {
+                effect_id: first.effect_id.clone(),
+                status: EffectStatus::Failed,
+                attempt_delta: 1,
+                last_error: Some("submit order rejected".into()),
+            },
+        )
+        .await;
 
         let effects = storage
             .list_recent_grid_effects(&GridId::new("btc-core"), 2)

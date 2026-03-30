@@ -166,10 +166,6 @@ pub trait StateRepositoryPort: Send + Sync {
         &self,
         grid_id: &GridId,
     ) -> Result<Vec<PersistedGridEffect>>;
-    async fn mark_effect_executing(&self, effect_id: &str) -> Result<()>;
-    async fn mark_effect_succeeded(&self, effect_id: &str) -> Result<()>;
-    async fn mark_effect_superseded(&self, effect_id: &str) -> Result<()>;
-    async fn mark_effect_failed(&self, effect_id: &str, error: &str) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
