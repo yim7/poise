@@ -447,7 +447,7 @@ Task 2 code commit:
 - Modify: `engine/src/executor.rs` — `desired_order_to_request` 生成唯一 id；`submit_requests_match` 移除 `client_order_id` 比较
 - Test: `engine/src/executor.rs` tests
 
-- [ ] **Step 1: 从 submit_requests_match 移除 client_order_id 比较**
+- [x] **Step 1: 从 submit_requests_match 移除 client_order_id 比较**
 
 `engine/src/executor.rs`：
 
@@ -467,7 +467,7 @@ pub fn submit_requests_match(
 
 **为什么移除而非保留：** recovery 等价性的语义是"这个 pending submit 是否仍然是当前计划想做的事"。决定这件事的是 instrument/side/price/quantity/reduce_only，不是交易所去重 ID。保留 `client_order_id` 比较会导致：换了 ID 生成策略后，语义相同的订单被判为 stale，触发不必要的 supersede。
 
-- [ ] **Step 2: 在 desired_order_to_request 生成唯一 client_order_id**
+- [x] **Step 2: 在 desired_order_to_request 生成唯一 client_order_id**
 
 ```rust
 fn desired_order_to_request(
@@ -486,7 +486,7 @@ fn desired_order_to_request(
 }
 ```
 
-- [ ] **Step 3: 修复引用 client_order_id 固定字符串的测试**
+- [x] **Step 3: 修复引用 client_order_id 固定字符串的测试**
 
 搜索测试中 `"btc-core-reconcile"` 的硬编码断言，改为检查前缀：
 
@@ -496,7 +496,7 @@ assert!(hint.request.client_order_id.starts_with("btc-core-"));
 
 同样修复 `server/src/runtime.rs`、`server/src/effect_worker.rs` 等测试中硬编码的 `client_order_id`。
 
-- [ ] **Step 4: 写验收测试 — 不同时间戳产生不同 id**
+- [x] **Step 4: 写验收测试 — 不同时间戳产生不同 id**
 
 ```rust
 #[test]
@@ -546,7 +546,7 @@ fn plan_generates_unique_client_order_ids_across_calls() {
 }
 ```
 
-- [ ] **Step 5: 写验收测试 — recovery 不因 client_order_id 不同而 supersede**
+- [x] **Step 5: 写验收测试 — recovery 不因 client_order_id 不同而 supersede**
 
 验证语义相同（instrument/side/price/quantity/reduce_only 相同）但 client_order_id 不同的请求，recovery 仍判定为 match：
 
@@ -574,12 +574,12 @@ fn submit_requests_match_ignores_client_order_id() {
 }
 ```
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run: `cargo test`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add engine/src/executor.rs
@@ -589,6 +589,9 @@ client_order_id uses timestamp suffix for Binance dedup uniqueness.
 submit_requests_match no longer compares client_order_id — recovery
 equivalence is based on (instrument, side, price, quantity, reduce_only)."
 ```
+
+Task 3 code commit:
+`825c75f1a68f7939f87d23025cad9e1e180aa99b`
 
 ---
 
