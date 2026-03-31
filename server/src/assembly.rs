@@ -329,12 +329,14 @@ pub(crate) fn build_server_state(
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
 ) -> ServerState {
+    let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
+    write_service.set_account_margin_guard(account_margin_guard.clone());
     ServerState {
         write_service,
         state_repository,
         query_service,
         projector,
-        account_margin_guard: Arc::new(AccountMarginGuardStore::default()),
+        account_margin_guard,
     }
 }
 

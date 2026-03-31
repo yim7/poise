@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -13,11 +13,13 @@ use poise_engine::ports::{
     EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, PersistedTrackEffect,
     StateRepositoryPort,
 };
+use poise_engine::runtime::AccountCapacityConstraint;
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 use crate::notifications::TrackInternalNotification;
+use crate::runtime::AccountMarginGuardStore;
 
 pub type SharedManager = Arc<RwLock<TrackManager>>;
 
@@ -47,6 +49,7 @@ pub struct TrackWriteService {
     repository: Arc<dyn StateRepositoryPort>,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<TrackInternalNotification>,
+    account_margin_guard: Arc<StdMutex<Option<Arc<AccountMarginGuardStore>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +151,7 @@ impl TrackWriteService {
             repository,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
+            account_margin_guard: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -158,6 +162,10 @@ impl TrackWriteService {
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<TrackInternalNotification> {
         self.notifications.subscribe()
+    }
+
+    pub fn set_account_margin_guard(&self, account_margin_guard: Arc<AccountMarginGuardStore>) {
+        *self.account_margin_guard.lock().unwrap() = Some(account_margin_guard);
     }
 
     pub(crate) fn emit_internal_notification(&self, notification: TrackInternalNotification) {
@@ -297,6 +305,8 @@ impl TrackWriteService {
             .collect::<Vec<_>>();
         let (previous_snapshot, transition, next_snapshot) = {
             let mut manager = self.manager.write().await;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
@@ -507,6 +517,8 @@ impl TrackWriteService {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, plan, next_snapshot) = {
             let mut manager = self.manager.write().await;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
@@ -562,6 +574,8 @@ impl TrackWriteService {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
@@ -621,6 +635,8 @@ impl TrackWriteService {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
@@ -645,6 +661,25 @@ impl TrackWriteService {
 
     async fn lock_track_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
         self.mutation_guards.lock(id).await
+    }
+
+    fn sync_account_capacity_constraint(&self, manager: &mut TrackManager, id: &str) -> Result<()> {
+        let Some(account_margin_guard) = self.account_margin_guard.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let Some(mut snapshot) = manager.snapshot(id) else {
+            return Ok(());
+        };
+        let constraint = account_margin_guard.constraint_for(&snapshot.instrument);
+        if snapshot.risk.account_capacity_constraint == constraint {
+            return Ok(());
+        }
+        snapshot.risk.account_capacity_constraint = AccountCapacityConstraint {
+            increase_blocked: constraint.increase_blocked,
+            blocked_reason: constraint.blocked_reason,
+            max_increase_notional: constraint.max_increase_notional,
+        };
+        manager.restore_track_state(&snapshot)
     }
 
     async fn pending_submit_effects_for_track_batch(

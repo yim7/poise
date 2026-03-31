@@ -714,6 +714,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
+    use poise_core::events::DomainEvent;
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
@@ -1073,6 +1074,67 @@ mod tests {
             constraint.blocked_reason.as_deref(),
             Some("insufficient_margin")
         );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
+        let exchange = Arc::new(FakeExchange::with_submit_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            r#"request POST /fapi/v1/order failed with status 400 Bad Request: {"code":-2019,"msg":"Margin is insufficient."}"#,
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+
+        let handles = runtime.start().await.unwrap();
+
+        wait_until(|| {
+            state
+                .account_margin_guard
+                .constraint_for(&btc_instrument())
+                .increase_blocked
+        })
+        .await;
+
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+
+        assert!(
+            transition
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::RiskDenied { .. }))
+        );
+        assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
+
+        let instance = current_instance(&state).await;
+        assert!(instance.risk.account_capacity_constraint.increase_blocked);
 
         shutdown(handles).await;
     }
