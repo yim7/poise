@@ -31,7 +31,7 @@ pub fn record_submit_request(
                 quantity: request.quantity,
                 target_exposure,
                 status: OrderStatus::Submitting,
-                role: slots::role_for_side(request.side),
+                role: slots::role_for_reduce_only(request.reduce_only),
             }),
         },
     );

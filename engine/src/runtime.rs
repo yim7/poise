@@ -10,9 +10,9 @@ use poise_core::types::{ExchangeRules, Exposure, Side};
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
-use crate::track::{TrackId, Instrument};
 use crate::ports::OrderStatus;
-use crate::snapshot::{TrackRuntimeSnapshot, ObservedState};
+use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
+use crate::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -282,16 +282,16 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
-    use crate::track::{TrackId, Instrument, Venue};
     use crate::ports::OrderStatus;
+    use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
-        ExecutionSlot, ExecutionStats, ExecutorState, TrackRuntime, TrackStatus, RiskState,
-        SlotState, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackRuntime,
+        TrackStatus, WorkingOrder,
     };
 
     fn test_runtime() -> TrackRuntime {

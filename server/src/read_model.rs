@@ -4,7 +4,7 @@ use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole};
 use poise_engine::ports::{PersistedTrackEffect, StoredTrackEvent};
-use poise_engine::runtime::{TrackStatus, SlotState};
+use poise_engine::runtime::{SlotState, TrackStatus};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 
 #[derive(Debug, Clone, PartialEq)]

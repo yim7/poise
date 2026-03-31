@@ -3,7 +3,9 @@
 target/
 /.env
 /.data/
+/.logs/
 /service/.data/
 /.worktrees/
 /.agents
 .superpowers
+configs/*.local.toml

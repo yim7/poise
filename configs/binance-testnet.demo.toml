@@ -1,0 +1,19 @@
+environment = "testnet"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+api_key = ""
+api_secret = ""
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 63000
+upper_price = 68500
+long_exposure_units = 20
+short_exposure_units = 20
+notional_per_unit = 1000
+max_notional = 20000
+daily_loss_limit = -2000
+stop_loss_pct = 10

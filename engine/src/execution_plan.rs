@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use poise_core::events::DomainEvent;
 use poise_core::types::{ExchangeRules, Exposure};
 
-use crate::track::Instrument;
 use crate::ports::OrderRequest;
+use crate::track::Instrument;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {

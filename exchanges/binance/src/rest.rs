@@ -787,7 +787,10 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(2), client.get_server_time()).await;
 
-        assert!(result.is_ok(), "request should complete without external timeout");
+        assert!(
+            result.is_ok(),
+            "request should complete without external timeout"
+        );
         assert!(result.unwrap().is_err(), "request should fail with timeout");
     }
 

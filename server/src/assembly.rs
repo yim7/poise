@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::env;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,8 +13,9 @@ use poise_engine::ports::{
 use poise_engine::track::{Instrument, TrackId};
 use poise_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
+use tokio::time::{Duration, sleep};
 
-use crate::config::{Config, ExchangeConfig};
+use crate::config::Config;
 use crate::projector::TrackProjector;
 use crate::query_service::TrackQueryService;
 use crate::runtime::{RuntimeHandles, ServerRuntime};
@@ -33,12 +35,19 @@ pub struct ServerPlatform {
     pub runtime: ServerRuntime,
 }
 
+#[derive(Debug)]
 struct ValidatedExchangeRuntimeConfig {
     api_key: String,
     api_secret: String,
     rest_base_url: String,
     ws_base_url: String,
 }
+
+const STARTUP_RETRY_ATTEMPTS: usize = 5;
+#[cfg(test)]
+const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(1);
+#[cfg(not(test))]
+const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 fn validate_unique_instruments(
     instruments: impl IntoIterator<Item = Instrument>,
@@ -76,27 +85,59 @@ fn required_exchange_field(value: Option<&str>, field_name: &str) -> Result<Stri
     Ok(value.to_string())
 }
 
-fn validate_exchange_runtime_config(
-    exchange: &ExchangeConfig,
-) -> Result<ValidatedExchangeRuntimeConfig> {
+fn validate_exchange_runtime_config(config: &Config) -> Result<ValidatedExchangeRuntimeConfig> {
+    let api_key = required_exchange_field(config.exchange.api_key.as_deref(), "exchange.api_key")?;
+    let api_secret =
+        required_exchange_field(config.exchange.api_secret.as_deref(), "exchange.api_secret")?;
+    let (rest_base_url, ws_base_url) = resolve_binance_endpoints(&config.environment)?;
     Ok(ValidatedExchangeRuntimeConfig {
-        rest_base_url: required_exchange_field(
-            exchange.rest_base_url.as_deref(),
-            "exchange.rest_base_url",
-        )?,
-        ws_base_url: required_exchange_field(
-            exchange.ws_base_url.as_deref(),
-            "exchange.ws_base_url",
-        )?,
-        api_key: required_exchange_field(exchange.api_key.as_deref(), "exchange.api_key")?,
-        api_secret: required_exchange_field(exchange.api_secret.as_deref(), "exchange.api_secret")?,
+        rest_base_url,
+        ws_base_url,
+        api_key,
+        api_secret,
     })
+}
+
+fn resolve_binance_endpoints(environment: &str) -> Result<(String, String)> {
+    resolve_binance_endpoints_with_lookup(environment, |name| env::var(name).ok())
+}
+
+fn resolve_binance_endpoints_with_lookup(
+    environment: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(String, String)> {
+    if environment.eq_ignore_ascii_case("testnet") {
+        return Ok((
+            "https://demo-fapi.binance.com".to_string(),
+            "wss://fstream.binancefuture.com".to_string(),
+        ));
+    }
+    if environment.eq_ignore_ascii_case("mainnet") {
+        return Ok((
+            "https://fapi.binance.com".to_string(),
+            "wss://fstream.binance.com".to_string(),
+        ));
+    }
+    if environment.eq_ignore_ascii_case("test") {
+        let rest_base_url = lookup("POISE_TEST_BINANCE_REST_BASE_URL");
+        let ws_base_url = lookup("POISE_TEST_BINANCE_WS_BASE_URL");
+        if let (Some(rest_base_url), Some(ws_base_url)) = (rest_base_url, ws_base_url) {
+            return Ok((rest_base_url, ws_base_url));
+        }
+        return Err(anyhow!(
+            "environment `test` is reserved for automated tests; set `POISE_TEST_BINANCE_REST_BASE_URL` and `POISE_TEST_BINANCE_WS_BASE_URL` to start the real Binance runtime in test mode"
+        ));
+    }
+
+    Err(anyhow!(
+        "unsupported runtime environment `{environment}`; expected `testnet` or `mainnet`"
+    ))
 }
 
 pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
     validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
-    let exchange_config = validate_exchange_runtime_config(&config.exchange)?;
+    let exchange_config = validate_exchange_runtime_config(config)?;
 
     let adapter = Arc::new(BinanceAdapter::new(
         exchange_config.api_key,
@@ -145,7 +186,7 @@ where
     let mut manager = TrackManager::new(clock);
     for track in &config.tracks {
         let track_id = track.track_id();
-        let info = exchange.get_exchange_info(&track.instrument()).await?;
+        let info = load_exchange_info_with_retry(exchange.as_ref(), &track.instrument()).await?;
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             track.instrument(),
@@ -176,6 +217,35 @@ where
         state: server_state.clone(),
         runtime: ServerRuntime::new(server_state, exchange, market_data),
     })
+}
+
+async fn load_exchange_info_with_retry(
+    exchange: &dyn ExchangePort,
+    instrument: &Instrument,
+) -> Result<poise_engine::ports::ExchangeInfo> {
+    let mut last_error = None;
+
+    for attempt in 0..STARTUP_RETRY_ATTEMPTS {
+        match exchange.get_exchange_info(instrument).await {
+            Ok(info) => return Ok(info),
+            Err(error) => {
+                if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    instrument = %instrument.symbol,
+                    attempt = attempt + 1,
+                    max_attempts = STARTUP_RETRY_ATTEMPTS,
+                    "startup exchange info probe failed: {error}"
+                );
+                last_error = Some(error);
+            }
+        }
+
+        sleep(STARTUP_RETRY_DELAY).await;
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to load exchange info")))
 }
 
 impl ServerPlatform {
@@ -249,8 +319,9 @@ mod tests {
     use crate::write_service::TrackWriteService;
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_server_state, validate_unique_instruments,
-        validate_unique_track_ids,
+        ServerPlatform, SystemClock, assemble, build_server_state, resolve_binance_endpoints,
+        resolve_binance_endpoints_with_lookup, validate_exchange_runtime_config,
+        validate_unique_instruments, validate_unique_track_ids,
     };
 
     fn test_exchange_rules() -> poise_core::types::ExchangeRules {
@@ -315,8 +386,6 @@ mod tests {
                 },
             ],
             exchange: ExchangeConfig {
-                rest_base_url: Some("http://127.0.0.1:1".into()),
-                ws_base_url: Some("ws://127.0.0.1:1".into()),
                 ..Default::default()
             },
         };
@@ -397,8 +466,6 @@ mod tests {
                 },
             ],
             exchange: ExchangeConfig {
-                rest_base_url: Some("http://127.0.0.1:1".into()),
-                ws_base_url: Some("ws://127.0.0.1:1".into()),
                 ..Default::default()
             },
         };
@@ -430,8 +497,6 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
-                rest_base_url: Some("https://demo-fapi.binance.com".into()),
-                ws_base_url: Some("wss://fstream.binancefuture.com".into()),
                 ..Default::default()
             },
         };
@@ -444,11 +509,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn assemble_requires_explicit_exchange_urls_for_real_runtime() {
-        let suffix = unique_test_environment();
+    #[test]
+    fn real_runtime_rejects_test_environment() {
         let config = Config {
-            environment: suffix,
+            environment: "test".into(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
@@ -469,16 +533,77 @@ mod tests {
             exchange: ExchangeConfig {
                 api_key: Some("demo-key".into()),
                 api_secret: Some("demo-secret".into()),
-                ..Default::default()
             },
         };
 
-        let error = assemble(&config).await.err().unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("missing required exchange.rest_base_url")
+        let error = validate_exchange_runtime_config(&config).unwrap_err();
+        assert!(error.to_string().contains("reserved for automated tests"));
+    }
+
+    #[test]
+    fn testnet_runtime_uses_fixed_demo_endpoints() {
+        let (rest_base_url, ws_base_url) = resolve_binance_endpoints("testnet").unwrap();
+        assert_eq!(rest_base_url, "https://demo-fapi.binance.com");
+        assert_eq!(ws_base_url, "wss://fstream.binancefuture.com");
+    }
+
+    #[tokio::test]
+    async fn assemble_retries_transient_exchange_info_failures() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let exchange = Arc::new(FlakyExchangeInfoExchange::new(2));
+        let config = Config {
+            environment: unique_test_environment(),
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
+                venue: Venue::Binance,
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                max_notional: None,
+                daily_loss_limit: None,
+                stop_loss_pct: None,
+                tick_timeout_secs: None,
+            }],
+            exchange: ExchangeConfig::default(),
+        };
+
+        let platform = super::assemble_with_components(
+            &config,
+            exchange.clone(),
+            Arc::new(FakeMarketData::empty()),
+            repository,
+            Arc::new(SystemClock),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            exchange.get_exchange_info_calls.load(Ordering::SeqCst),
+            3,
+            "should retry until exchange info succeeds"
         );
+        let manager = platform.state().write_service.manager();
+        assert_eq!(manager.read().await.list_tracks().len(), 1);
+    }
+
+    #[test]
+    fn test_runtime_reads_endpoints_from_env_lookup() {
+        let (rest_base_url, ws_base_url) =
+            resolve_binance_endpoints_with_lookup("test", |name| match name {
+                "POISE_TEST_BINANCE_REST_BASE_URL" => Some("http://127.0.0.1:19080".into()),
+                "POISE_TEST_BINANCE_WS_BASE_URL" => Some("ws://127.0.0.1:19081".into()),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(rest_base_url, "http://127.0.0.1:19080");
+        assert_eq!(ws_base_url, "ws://127.0.0.1:19081");
     }
 
     #[tokio::test]
@@ -554,8 +679,6 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
-                rest_base_url: Some("http://127.0.0.1:1".into()),
-                ws_base_url: Some("ws://127.0.0.1:1".into()),
                 ..Default::default()
             },
         };
@@ -750,6 +873,20 @@ mod tests {
 
     struct FakeExchange;
 
+    struct FlakyExchangeInfoExchange {
+        remaining_failures: AtomicUsize,
+        get_exchange_info_calls: AtomicUsize,
+    }
+
+    impl FlakyExchangeInfoExchange {
+        fn new(initial_failures: usize) -> Self {
+            Self {
+                remaining_failures: AtomicUsize::new(initial_failures),
+                get_exchange_info_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
     #[async_trait::async_trait]
     impl ExchangePort for FakeExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
@@ -786,6 +923,47 @@ mod tests {
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangePort for FlakyExchangeInfoExchange {
+        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+            self.get_exchange_info_calls.fetch_add(1, Ordering::SeqCst);
+            let remaining = self.remaining_failures.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+                return Err(anyhow!("temporary exchange info timeout"));
+            }
+
+            Ok(ExchangeInfo {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                rules: test_exchange_rules(),
+            })
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+            Err(anyhow!("not used in tests"))
         }
     }
 

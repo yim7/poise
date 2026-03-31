@@ -262,14 +262,9 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<GridCommandView> {
         },
         GridCommandView {
             command: GridCommandType::Terminate,
-            enabled: false,
-            disabled_reason: Some(
-                match status {
-                    EngineGridStatus::Terminated => "grid is already terminated",
-                    _ => "terminate command is not implemented",
-                }
-                .into(),
-            ),
+            enabled: !matches!(status, EngineGridStatus::Terminated),
+            disabled_reason: matches!(status, EngineGridStatus::Terminated)
+                .then_some("grid is already terminated".into()),
         },
         GridCommandView {
             command: GridCommandType::Flatten,
@@ -366,9 +361,7 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_engine::ports::{
-        EffectStatus, OrderRequest, PersistedTrackEffect, StoredTrackEvent,
-    };
+    use poise_engine::ports::{EffectStatus, OrderRequest, PersistedTrackEffect, StoredTrackEvent};
     use poise_engine::runtime::TrackStatus;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -413,7 +406,8 @@ mod tests {
             detail.available_commands[2].command,
             GridCommandType::Terminate
         );
-        assert!(!detail.available_commands[2].enabled);
+        assert!(detail.available_commands[2].enabled);
+        assert_eq!(detail.available_commands[2].disabled_reason, None);
         assert_eq!(
             detail.available_commands[3].command,
             GridCommandType::Flatten
@@ -433,6 +427,21 @@ mod tests {
                 .get("client_order_id")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn project_detail_enables_terminate_when_grid_is_not_terminated() {
+        let source = source_with_failed_effect_and_recent_event();
+
+        let detail = TrackProjector::new().project_detail(&source);
+        let terminate = detail
+            .available_commands
+            .iter()
+            .find(|command| command.command == GridCommandType::Terminate)
+            .expect("terminate command should be present");
+
+        assert!(terminate.enabled);
+        assert_eq!(terminate.disabled_reason, None);
     }
 
     #[test]

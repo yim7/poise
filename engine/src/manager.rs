@@ -10,14 +10,14 @@ use poise_core::types::Exposure;
 
 use crate::command::TrackCommand;
 use crate::executor;
-use crate::track::{TrackId, Instrument};
 use crate::observation::{
-    TrackObservation, MarketObservation, OrderObservation, PositionObservation,
+    MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
 use crate::reconciler;
 use crate::runtime::{ExecutorState, TrackRuntime, TrackStatus};
 use crate::snapshot::TrackRuntimeSnapshot;
+use crate::track::{Instrument, TrackId};
 use crate::transition::{TrackEffect, TrackTransition};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
@@ -107,7 +107,11 @@ impl TrackManager {
         self.instruments.get(instrument).cloned()
     }
 
-    pub fn observe(&mut self, id: &TrackId, observation: TrackObservation) -> Result<TrackTransition> {
+    pub fn observe(
+        &mut self,
+        id: &TrackId,
+        observation: TrackObservation,
+    ) -> Result<TrackTransition> {
         let (events, effects) = match observation {
             TrackObservation::Market(observation) => self.observe_market(id, observation)?,
             TrackObservation::Position(observation) => {
@@ -182,6 +186,7 @@ impl TrackManager {
                 };
                 self.reconcile_track(id, reference_price)?
             }
+            TrackCommand::Terminate => self.terminate_track(id)?,
             TrackCommand::Flatten => self.flatten_track(id)?,
         };
 
@@ -198,6 +203,9 @@ impl TrackManager {
             .tracks
             .get_mut(&TrackId::from(id))
             .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
+        if matches!(track.status, TrackStatus::Terminated) {
+            bail!("cannot pause terminated track `{id}`");
+        }
         // Pause disables strategy targeting, but does not rewrite observed exchange state.
         track.status = TrackStatus::Paused;
         track.target_exposure = None;
@@ -206,13 +214,15 @@ impl TrackManager {
 
     pub fn resume_track(&mut self, id: &str) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let track_id = TrackId::from(id);
-        if self
+        let track = self
             .tracks
             .get(&track_id)
-            .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?
-            .manual_target_override
-            .is_some()
-        {
+            .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
+        if matches!(track.status, TrackStatus::Terminated) {
+            bail!("cannot resume terminated track `{id}`");
+        }
+
+        if track.manual_target_override.is_some() {
             let reference_price = {
                 let track = self
                     .tracks
@@ -279,6 +289,30 @@ impl TrackManager {
         track.executor_state = executor_state;
 
         Ok((vec![], vec![]))
+    }
+
+    fn terminate_track(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
+        let reference_price = {
+            let track = self
+                .tracks
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+
+            if matches!(track.status, TrackStatus::Terminated) {
+                bail!("track `{}` is already terminated", id.as_str());
+            }
+
+            track.manual_target_override = None;
+            track.status = TrackStatus::Terminated;
+            track.target_exposure = Some(Exposure(0.0));
+            track.replacement_gate_reason = None;
+            track.reference_price
+        };
+
+        match reference_price {
+            Some(reference_price) => self.reconcile_track(id, reference_price),
+            None => Ok((vec![], vec![])),
+        }
     }
 
     fn flatten_track(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
@@ -871,7 +905,7 @@ mod tests {
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
     use crate::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
@@ -1003,7 +1037,8 @@ mod tests {
     }
 
     fn seed_executor_slot(track: &mut TrackRuntime, order: WorkingOrder, state: SlotState) {
-        track.executor_state
+        track
+            .executor_state
             .slots
             .retain(|slot| slot.slot != OrderSlot::new("inventory_core"));
         track.executor_state.slots.insert(
@@ -1022,7 +1057,8 @@ mod tests {
         order: WorkingOrder,
         state: SlotState,
     ) {
-        track.executor_state
+        track
+            .executor_state
             .slots
             .retain(|slot| slot.slot != OrderSlot::new(slot_name));
         track.executor_state.slots.push(ExecutionSlot {
@@ -1036,26 +1072,34 @@ mod tests {
         request: &OrderRequest,
         target_exposure: poise_core::types::Exposure,
     ) -> WorkingOrder {
-        working_order(
-            None,
-            &request.client_order_id,
-            request.side,
-            request.price,
-            request.quantity,
+        WorkingOrder {
+            order_id: None,
+            client_order_id: request.client_order_id.clone(),
+            side: request.side,
+            price: request.price,
+            quantity: request.quantity,
             target_exposure,
-            OrderStatus::Submitting,
-        )
+            status: OrderStatus::Submitting,
+            role: if request.reduce_only {
+                OrderRole::DecreaseInventory
+            } else {
+                OrderRole::IncreaseInventory
+            },
+        }
     }
 
     fn inventory_core_order(track: &TrackRuntime) -> Option<&WorkingOrder> {
-        track.executor_state
+        track
+            .executor_state
             .slots
             .iter()
             .find(|slot| slot.slot == OrderSlot::new("inventory_core"))
             .and_then(|slot| slot.working_order.as_ref())
     }
 
-    fn inventory_core_order_from_snapshot(snapshot: &TrackRuntimeSnapshot) -> Option<&WorkingOrder> {
+    fn inventory_core_order_from_snapshot(
+        snapshot: &TrackRuntimeSnapshot,
+    ) -> Option<&WorkingOrder> {
         snapshot
             .executor_state
             .slots
@@ -1820,6 +1864,30 @@ mod tests {
     }
 
     #[test]
+    fn terminated_track_keeps_zero_target_even_when_price_is_in_band() {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+        let track_id = TrackId::new("btc1");
+
+        let track = manager.tracks.get_mut(&track_id).unwrap();
+        track.status = TrackStatus::Terminated;
+        track.current_exposure = Exposure(0.0);
+
+        let transition = manager
+            .observe(
+                &track_id,
+                TrackObservation::Market(MarketObservation {
+                    reference_price: 95.0,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.snapshot.status, TrackStatus::Terminated);
+        assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
+    }
+
+    #[test]
     fn flatten_persists_manual_target_override_and_targets_zero() {
         let mut manager = test_manager_with_cached_price(95.0);
         let track_id = TrackId::new("btc-core");
@@ -1993,7 +2061,10 @@ mod tests {
         manager.resume_track("btc1").unwrap();
 
         let track = manager.get_track("btc1").unwrap();
-        assert_eq!(track.executor_state.slots, vec![empty_inventory_core_slot()]);
+        assert_eq!(
+            track.executor_state.slots,
+            vec![empty_inventory_core_slot()]
+        );
         assert_eq!(track.executor_state.last_reprice_at, None);
 
         let transition = manager
@@ -2799,7 +2870,10 @@ mod tests {
         assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
 
         let track = manager.get_track("btc1").unwrap();
-        assert_eq!(track.target_exposure, Some(poise_core::types::Exposure(6.0)));
+        assert_eq!(
+            track.target_exposure,
+            Some(poise_core::types::Exposure(6.0))
+        );
         assert!(inventory_core_order(track).is_none());
         assert_eq!(
             track.executor_state.recovery_anomaly.as_ref(),
@@ -2828,7 +2902,10 @@ mod tests {
         assert!(transition.effects.is_empty());
 
         let track = manager.get_track("btc1").unwrap();
-        assert_eq!(track.executor_state.slots, vec![empty_inventory_core_slot()]);
+        assert_eq!(
+            track.executor_state.slots,
+            vec![empty_inventory_core_slot()]
+        );
         assert!(inventory_core_order(track).is_none());
     }
 
@@ -3072,7 +3149,10 @@ mod tests {
             track.executor_state.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
-        assert_eq!(track.executor_state.slots, vec![empty_inventory_core_slot()]);
+        assert_eq!(
+            track.executor_state.slots,
+            vec![empty_inventory_core_slot()]
+        );
     }
 
     #[test]
@@ -3131,7 +3211,8 @@ mod tests {
         track.executor_state.inventory_gap = Exposure(2.0);
         track.executor_state.gap_started_at =
             Some(Utc.with_ymd_and_hms(2026, 3, 29, 10, 0, 0).unwrap());
-        track.executor_state.stats.started_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 45, 0).unwrap();
+        track.executor_state.stats.started_at =
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 45, 0).unwrap();
 
         let transition = manager
             .observe(

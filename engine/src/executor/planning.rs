@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
-use crate::track::{TrackId, Instrument};
 use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
+use crate::track::{Instrument, TrackId};
 
 use super::{ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, recording, slots};
 
@@ -267,10 +267,7 @@ fn desired_inventory_order(
         price,
         quantity,
         target_exposure: target_exposure.clone(),
-        role: match side {
-            Side::Buy => OrderRole::IncreaseInventory,
-            Side::Sell => OrderRole::DecreaseInventory,
-        },
+        role: slots::role_for_target_change(current_exposure, target_exposure),
     })
 }
 

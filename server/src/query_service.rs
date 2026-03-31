@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_engine::track::TrackId;
 use poise_engine::ports::TrackReadRepositoryPort;
+use poise_engine::track::TrackId;
 
 use crate::read_model::TrackReadModel;
 
@@ -46,7 +46,10 @@ impl TrackQueryService {
         Ok(sources)
     }
 
-    pub async fn load_track_detail_source(&self, track_id: &TrackId) -> Result<Option<TrackReadModel>> {
+    pub async fn load_track_detail_source(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<TrackReadModel>> {
         let Some(snapshot) = self.repository.load_track_snapshot(track_id).await? else {
             return Ok(None);
         };
@@ -78,19 +81,19 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
-        EffectStatus, TrackReadRepositoryPort, OrderRequest, OrderStatus, PersistedTrackEffect,
-        StoredTrackEvent, StoredTrackSnapshot,
+        EffectStatus, OrderRequest, OrderStatus, PersistedTrackEffect, StoredTrackEvent,
+        StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
     };
-    use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+    use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
     use crate::read_model::TrackReadModel;
@@ -245,7 +248,10 @@ mod tests {
             Ok(self.snapshots.values().cloned().collect())
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self.snapshots.get(track_id.as_str()).cloned())
         }
 

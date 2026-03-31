@@ -13,6 +13,23 @@ pub struct TargetReconcileResult {
 }
 
 pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReconcileResult {
+    if matches!(grid.status, TrackStatus::Terminated) {
+        let target = Exposure(0.0);
+        let delta = grid.current_exposure.delta(&target);
+        return TargetReconcileResult {
+            events: (!delta.is_zero())
+                .then_some(DomainEvent::ExposureTargetChanged {
+                    from: grid.current_exposure.clone(),
+                    to: target.clone(),
+                })
+                .into_iter()
+                .collect(),
+            target_exposure: target,
+            new_status: Some(TrackStatus::Terminated),
+            suppress_execution: delta.is_zero(),
+        };
+    }
+
     if let Some(target_override) = grid.manual_target_override.clone() {
         let delta = grid.current_exposure.delta(&target_override);
         return TargetReconcileResult {

@@ -1540,14 +1540,12 @@ mod tests {
             &config_path,
             format!(
                 r#"
-environment = "tui-e2e"
+environment = "test"
 bind_address = "{bind_address}"
 
 [exchange]
 api_key = "demo-key"
 api_secret = "demo-secret"
-rest_base_url = "{rest_base_url}"
-ws_base_url = "{ws_base_url}"
 
 [[tracks]]
 track_id = "btc-core"
@@ -1571,8 +1569,6 @@ notional_per_unit = 2000.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
-                rest_base_url = exchange.rest_base_url,
-                ws_base_url = exchange.ws_base_url
             ),
         )
         .unwrap();
@@ -1580,6 +1576,8 @@ out_of_band_policy = "hold"
         let mut server = Command::new(server_binary)
             .arg("--config")
             .arg(&config_path)
+            .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
+            .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1656,14 +1654,12 @@ out_of_band_policy = "hold"
             &config_path,
             format!(
                 r#"
-environment = "tui-proxy-e2e"
+environment = "test"
 bind_address = "{bind_address}"
 
 [exchange]
 api_key = "demo-key"
 api_secret = "demo-secret"
-rest_base_url = "{rest_base_url}"
-ws_base_url = "{ws_base_url}"
 
 [[tracks]]
 track_id = "btc-core"
@@ -1675,8 +1671,6 @@ long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
 "#,
-                rest_base_url = exchange.rest_base_url,
-                ws_base_url = exchange.ws_base_url
             ),
         )
         .unwrap();
@@ -1684,6 +1678,8 @@ notional_per_unit = 375.0
         let mut server = Command::new(server_binary)
             .arg("--config")
             .arg(&config_path)
+            .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
+            .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .env("HTTP_PROXY", "http://127.0.0.1:9")
             .env("HTTPS_PROXY", "http://127.0.0.1:9")
             .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -1716,14 +1712,12 @@ notional_per_unit = 375.0
             &config_path,
             format!(
                 r#"
-environment = "tui-binary-e2e"
+environment = "test"
 bind_address = "{bind_address}"
 
 [exchange]
 api_key = "demo-key"
 api_secret = "demo-secret"
-rest_base_url = "{rest_base_url}"
-ws_base_url = "{ws_base_url}"
 
 [[tracks]]
 track_id = "btc-core"
@@ -1747,8 +1741,6 @@ notional_per_unit = 2000.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
-                rest_base_url = exchange.rest_base_url,
-                ws_base_url = exchange.ws_base_url
             ),
         )
         .unwrap();
@@ -1756,6 +1748,8 @@ out_of_band_policy = "hold"
         let mut server = Command::new(server_binary)
             .arg("--config")
             .arg(&config_path)
+            .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
+            .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

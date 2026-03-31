@@ -14,8 +14,8 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
 };
 
-use poise_engine::track::{Instrument, Venue};
 use poise_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
+use poise_engine::track::{Instrument, Venue};
 
 use crate::rest::BinanceRestClient;
 use crate::types::parse_order_status;
@@ -640,8 +640,8 @@ mod tests {
     };
 
     use poise_core::types::Side;
-    use poise_engine::track::{Instrument, Venue};
     use poise_engine::ports::{ExchangeOrder, OrderStatus, Position, UserDataPayload};
+    use poise_engine::track::{Instrument, Venue};
 
     use super::*;
 

@@ -585,7 +585,10 @@ mod tests {
                 .map(|stored| stored.snapshot))
         }
 
-        async fn list_track_events(&self, id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(
+            &self,
+            id: &str,
+        ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(self
                 .events
                 .lock()

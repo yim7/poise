@@ -43,10 +43,10 @@ mod tests {
 
     use super::*;
     use crate::execution_plan::ExecutionAction;
-    use crate::track::{TrackId, Instrument, Venue};
     use crate::observation::OrderObservation;
     use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
     use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
+    use crate::track::{Instrument, TrackId, Venue};
 
     fn test_track_id() -> TrackId {
         TrackId::new("btc-core")
@@ -351,6 +351,142 @@ mod tests {
         });
         assert!(submit.is_some());
         assert!(!submit.unwrap().reduce_only);
+    }
+
+    #[test]
+    fn plan_does_not_set_reduce_only_when_increasing_short_inventory() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(-0.5),
+            target_exposure: Exposure(-2.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        let submit = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request),
+            _ => None,
+        });
+        assert!(submit.is_some());
+        assert_eq!(submit.unwrap().side, Side::Sell);
+        assert!(!submit.unwrap().reduce_only);
+        assert_eq!(
+            plan.desired_orders.first().map(|order| order.role.clone()),
+            Some(OrderRole::IncreaseInventory)
+        );
+    }
+
+    #[test]
+    fn plan_sets_reduce_only_when_buying_to_reduce_short_inventory() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(-2.0),
+            target_exposure: Exposure(-0.5),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        let submit = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request),
+            _ => None,
+        });
+        assert!(submit.is_some());
+        assert_eq!(submit.unwrap().side, Side::Buy);
+        assert!(submit.unwrap().reduce_only);
+        assert_eq!(
+            plan.desired_orders.first().map(|order| order.role.clone()),
+            Some(OrderRole::DecreaseInventory)
+        );
+    }
+
+    #[test]
+    fn plan_does_not_set_reduce_only_when_crossing_from_short_to_long() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            current_exposure: Exposure(-2.0),
+            target_exposure: Exposure(1.0),
+            reference_price: 95.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        let submit = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request),
+            _ => None,
+        });
+        assert!(submit.is_some());
+        assert_eq!(submit.unwrap().side, Side::Buy);
+        assert!(!submit.unwrap().reduce_only);
+        assert_eq!(
+            plan.desired_orders.first().map(|order| order.role.clone()),
+            Some(OrderRole::IncreaseInventory)
+        );
+    }
+
+    #[test]
+    fn record_submit_request_uses_reduce_only_flag_instead_of_side() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let state = ExecutorState::empty(now);
+        let non_reduce_only_sell = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Sell,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-sell".into(),
+            reduce_only: false,
+        };
+        let reduce_only_buy = OrderRequest {
+            instrument: test_instrument(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-buy".into(),
+            reduce_only: true,
+        };
+
+        let non_reduce_state = record_submit_request(&state, &non_reduce_only_sell, Exposure(-4.0));
+        let reduce_state = record_submit_request(&state, &reduce_only_buy, Exposure(-1.0));
+
+        assert_eq!(
+            non_reduce_state.slots[0]
+                .working_order
+                .as_ref()
+                .map(|order| order.role.clone()),
+            Some(OrderRole::IncreaseInventory)
+        );
+        assert_eq!(
+            reduce_state.slots[0]
+                .working_order
+                .as_ref()
+                .map(|order| order.role.clone()),
+            Some(OrderRole::DecreaseInventory)
+        );
     }
 
     #[test]

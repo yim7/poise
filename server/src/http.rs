@@ -18,8 +18,16 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct HealthResponse {
+    status: String,
+    track_count: usize,
+    attention_required_count: usize,
+}
+
 pub fn router(state: ServerState) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
         .route("/tracks/:id/commands", post(submit_command))
@@ -41,6 +49,38 @@ async fn list_tracks(
         .map(|source| state.projector.project_list_item(source))
         .collect();
     Ok(Json(TrackListResponse { items }))
+}
+
+async fn health(
+    State(state): State<ServerState>,
+) -> Result<(StatusCode, Json<HealthResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let sources = state
+        .query_service
+        .list_track_sources()
+        .await
+        .map_err(map_query_error)?;
+    let attention_required_count = sources
+        .iter()
+        .filter(|source| source.has_recovery_anomaly || source.has_stale_market_data)
+        .count();
+    let status = if attention_required_count == 0 {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    Ok((
+        status,
+        Json(HealthResponse {
+            status: if attention_required_count == 0 {
+                "ok".to_string()
+            } else {
+                "attention_required".to_string()
+            },
+            track_count: sources.len(),
+            attention_required_count,
+        }),
+    ))
 }
 
 async fn get_track_detail(
@@ -86,20 +126,8 @@ fn map_command(
     match command {
         GridCommandType::Pause => Ok(TrackCommand::Pause),
         GridCommandType::Resume => Ok(TrackCommand::Resume),
+        GridCommandType::Terminate => Ok(TrackCommand::Terminate),
         GridCommandType::Flatten => Ok(TrackCommand::Flatten),
-        GridCommandType::Terminate => Err(bad_request(format!(
-            "command `{}` is not implemented",
-            command_name(command)
-        ))),
-    }
-}
-
-fn command_name(command: GridCommandType) -> &'static str {
-    match command {
-        GridCommandType::Pause => "pause",
-        GridCommandType::Resume => "resume",
-        GridCommandType::Terminate => "terminate",
-        GridCommandType::Flatten => "flatten",
     }
 }
 
@@ -302,6 +330,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_returns_ok_for_normal_runtime_state() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["track_count"], 1);
+        assert_eq!(payload["attention_required_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_when_attention_required_present() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = build_test_state(repository.clone()).await;
+        let mut snapshot = test_manager()
+            .snapshot("btc-core")
+            .expect("seeded manager should expose runtime snapshot");
+        snapshot.observed.market_data_stale_since = Some(Utc::now());
+        repository
+            .save_transition("btc-core", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "attention_required");
+        assert_eq!(payload["track_count"], 1);
+        assert_eq!(payload["attention_required_count"], 1);
+    }
+
+    #[tokio::test]
     async fn get_grid_detail_returns_projected_detail() {
         let response = router(app_state().await)
             .oneshot(
@@ -400,6 +479,33 @@ mod tests {
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
         assert_eq!(payload.command, GridCommandType::Flatten);
+    }
+
+    #[tokio::test]
+    async fn submit_command_accepts_terminate() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks/btc-core/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&TrackCommandRequest {
+                            command: GridCommandType::Terminate,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TrackCommandAccepted = serde_json::from_slice(&body).unwrap();
+        assert!(payload.accepted);
+        assert_eq!(payload.track_id, "btc-core");
+        assert_eq!(payload.command, GridCommandType::Terminate);
     }
 
     #[tokio::test]

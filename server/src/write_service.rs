@@ -5,14 +5,14 @@ use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
-use poise_engine::track::{TrackId, Instrument};
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
-    TrackObservation, MarketObservation, OrderObservation, PositionObservation,
+    MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use poise_engine::ports::{
     EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
 };
+use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
@@ -371,10 +371,14 @@ impl TrackWriteService {
         client_order_id: &str,
         error: &str,
     ) -> Result<()> {
-        self.mutate_track_with_effect_status(id, effect_status_failed(effect_id, error), |manager| {
-            manager.record_submit_failure(&TrackId::new(id), client_order_id)?;
-            Ok(())
-        })
+        self.mutate_track_with_effect_status(
+            id,
+            effect_status_failed(effect_id, error),
+            |manager| {
+                manager.record_submit_failure(&TrackId::new(id), client_order_id)?;
+                Ok(())
+            },
+        )
         .await
         .map(|_| ())
         .map_err(anyhow::Error::new)
@@ -694,14 +698,13 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::command::TrackCommand;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::{ExchangeSyncMode, TrackManager};
     use poise_engine::observation::{
-        TrackObservation, MarketObservation, OrderObservation, PositionObservation,
+        MarketObservation, OrderObservation, PositionObservation, TrackObservation,
     };
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, OrderReceipt,
@@ -711,6 +714,7 @@ mod tests {
         ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder,
     };
     use poise_engine::snapshot::TrackRuntimeSnapshot;
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use tokio::sync::Notify;
     use tokio::time::timeout;
@@ -931,10 +935,11 @@ mod tests {
         repository.wait_for_save_started("btc-core", 1).await;
 
         let second_service = service.clone();
-        let second_mutation =
-            tokio::spawn(
-                async move { second_service.command("btc-core", TrackCommand::Pause).await },
-            );
+        let second_mutation = tokio::spawn(async move {
+            second_service
+                .command("btc-core", TrackCommand::Pause)
+                .await
+        });
 
         assert!(
             timeout(
@@ -967,10 +972,11 @@ mod tests {
         repository.wait_for_save_started("btc-core", 1).await;
 
         let second_service = service.clone();
-        let second_mutation =
-            tokio::spawn(
-                async move { second_service.command("eth-core", TrackCommand::Pause).await },
-            );
+        let second_mutation = tokio::spawn(async move {
+            second_service
+                .command("eth-core", TrackCommand::Pause)
+                .await
+        });
 
         let completed_before_release = timeout(
             Duration::from_millis(100),
@@ -1269,7 +1275,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("loaded-track invariant violated"));
+        assert!(
+            error
+                .to_string()
+                .contains("loaded-track invariant violated")
+        );
         assert!(error.to_string().contains("btc-core"));
         assert!(!error.to_string().contains("track `btc-core` not found"));
     }
@@ -1300,7 +1310,11 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("loaded-track invariant violated"));
+        assert!(
+            error
+                .to_string()
+                .contains("loaded-track invariant violated")
+        );
         assert!(error.to_string().contains("btc-core"));
         assert!(!error.to_string().contains("track `btc-core` not found"));
     }

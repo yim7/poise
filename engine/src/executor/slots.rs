@@ -1,4 +1,4 @@
-use poise_core::types::{Exposure, Side};
+use poise_core::types::Exposure;
 
 use crate::observation::OrderObservation;
 use crate::runtime::{ExecutionSlot, ExecutorState, SlotState, WorkingOrder};
@@ -129,7 +129,7 @@ pub(super) fn rebuild_slot_from_live_order(
         .working_order
         .as_ref()
         .map(|order| order.role.clone())
-        .unwrap_or_else(|| role_for_side(live_order.side));
+        .unwrap_or_else(|| role_for_target_change(current_exposure, &target_exposure));
 
     ExecutionSlot {
         slot: slot.slot.clone(),
@@ -159,9 +159,40 @@ pub(super) fn empty_slot(slot: &OrderSlot) -> ExecutionSlot {
     }
 }
 
-pub(super) fn role_for_side(side: Side) -> OrderRole {
-    match side {
-        Side::Buy => OrderRole::IncreaseInventory,
-        Side::Sell => OrderRole::DecreaseInventory,
+pub(super) fn role_for_target_change(
+    current_exposure: &Exposure,
+    target_exposure: &Exposure,
+) -> OrderRole {
+    if is_reduce_only_target_change(current_exposure, target_exposure) {
+        OrderRole::DecreaseInventory
+    } else {
+        OrderRole::IncreaseInventory
     }
+}
+
+pub(super) fn role_for_reduce_only(reduce_only: bool) -> OrderRole {
+    if reduce_only {
+        OrderRole::DecreaseInventory
+    } else {
+        OrderRole::IncreaseInventory
+    }
+}
+
+fn is_reduce_only_target_change(current_exposure: &Exposure, target_exposure: &Exposure) -> bool {
+    let current = current_exposure.0;
+    let target = target_exposure.0;
+
+    if current.abs() <= f64::EPSILON {
+        return false;
+    }
+
+    if target.abs() <= f64::EPSILON {
+        return true;
+    }
+
+    if current.signum() != target.signum() {
+        return false;
+    }
+
+    target.abs() + f64::EPSILON < current.abs()
 }

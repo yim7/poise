@@ -1105,7 +1105,10 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_track_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(
+            &self,
+            _id: &str,
+        ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 

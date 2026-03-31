@@ -10,13 +10,13 @@ use crate::schema;
 use poise_core::events::{DomainEvent, ReplacementGateReason};
 use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
-use poise_engine::track::{TrackId, Instrument, Venue};
 use poise_engine::ports::{
-    CommittedTrackWrite, EffectStatus, EffectStatusUpdate, TrackReadRepositoryPort,
-    PersistedTrackEffect, StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot,
+    CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
+    StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
 };
-use poise_engine::runtime::{ExecutorState, TrackStatus, RiskState};
-use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+use poise_engine::runtime::{ExecutorState, RiskState, TrackStatus};
+use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
+use poise_engine::track::{Instrument, TrackId, Venue};
 use poise_engine::transition::TrackEffect;
 
 pub struct SqliteStorage {
@@ -115,7 +115,9 @@ impl SqliteStorage {
             })
     }
 
-    fn persisted_effect_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedTrackEffect> {
+    fn persisted_effect_from_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<PersistedTrackEffect> {
         let effect_id = row.get::<_, String>(0)?;
         let track_id = TrackId::new(row.get::<_, String>(1)?);
         let batch_id = row.get::<_, String>(2)?;
@@ -839,18 +841,18 @@ mod tests {
 
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::ports::{
-        EffectStatus, TrackReadRepositoryPort, OrderRequest, OrderStatus, StateRepositoryPort,
+        EffectStatus, OrderRequest, OrderStatus, StateRepositoryPort, TrackReadRepositoryPort,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
     };
-    use poise_engine::snapshot::{TrackRuntimeSnapshot, ObservedState};
+    use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use rusqlite::Connection;
 

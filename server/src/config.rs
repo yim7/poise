@@ -38,8 +38,6 @@ pub struct TrackDefinition {
 pub struct ExchangeConfig {
     pub api_key: Option<String>,
     pub api_secret: Option<String>,
-    pub rest_base_url: Option<String>,
-    pub ws_base_url: Option<String>,
 }
 
 pub fn load_config(path: &str) -> Result<Config> {
@@ -124,8 +122,6 @@ bind_address = "127.0.0.1:9000"
 [exchange]
 api_key = "demo-key"
 api_secret = "demo-secret"
-rest_base_url = "http://127.0.0.1:18080"
-ws_base_url = "ws://127.0.0.1:18081"
 
 [[tracks]]
 track_id = "btc-core"
@@ -166,10 +162,7 @@ out_of_band_policy = "hold"
             poise_core::strategy::OutOfBandPolicy::Hold
         );
         assert_eq!(config.exchange.api_key.as_deref(), Some("demo-key"));
-        assert_eq!(
-            config.exchange.ws_base_url.as_deref(),
-            Some("ws://127.0.0.1:18081")
-        );
+        assert_eq!(config.exchange.api_secret.as_deref(), Some("demo-secret"));
     }
 
     #[test]
@@ -350,23 +343,15 @@ notional_per_unit = 375.0
 
     #[test]
     fn parses_binance_testnet_example_config() {
-        let config = parse_config(include_str!("../../configs/binance-testnet.toml")).unwrap();
+        let config = parse_config(include_str!("../../configs/binance-testnet.demo.toml")).unwrap();
         let grid = &config.tracks[0];
         let equivalent_grid_step = (grid.upper_price - grid.lower_price)
             / (grid.long_exposure_units + grid.short_exposure_units);
 
         assert_eq!(config.environment, "testnet");
-        assert_eq!(
-            config.exchange.rest_base_url.as_deref(),
-            Some("https://demo-fapi.binance.com")
-        );
-        assert_eq!(
-            config.exchange.ws_base_url.as_deref(),
-            Some("wss://fstream.binancefuture.com")
-        );
         assert_eq!(config.tracks.len(), 1);
         assert_eq!(grid.track_id().as_str(), "btc-core");
-        assert_eq!(grid.upper_price - grid.lower_price, 2000.0);
-        assert!((equivalent_grid_step - 100.0).abs() < f64::EPSILON);
+        assert_eq!(grid.upper_price - grid.lower_price, 5500.0);
+        assert!((equivalent_grid_step - 137.5).abs() < f64::EPSILON);
     }
 }

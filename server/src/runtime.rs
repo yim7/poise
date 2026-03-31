@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use poise_engine::ports::{
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::{Instant, MissedTickBehavior, sleep};
 
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
@@ -36,6 +37,12 @@ pub struct RuntimeHandles {
     #[cfg_attr(not(test), allow(dead_code))]
     pub recovery_task: JoinHandle<()>,
 }
+
+const STARTUP_RETRY_ATTEMPTS: usize = 5;
+#[cfg(test)]
+const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(1);
+#[cfg(not(test))]
+const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct RecoveryTrackedGrid {
@@ -70,8 +77,9 @@ impl ServerRuntime {
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
         let mut user_receiver = self.market_data.subscribe_user_data().await?;
-        let startup_cutoff = self.exchange.get_server_time().await?;
-        self.startup_sync().await?;
+        let startup_cutoff =
+            retry_startup_step("get_server_time", || self.exchange.get_server_time()).await?;
+        retry_startup_step("startup_sync", || self.startup_sync()).await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
@@ -420,6 +428,36 @@ impl ServerRuntime {
     }
 }
 
+async fn retry_startup_step<T, F, Fut>(step_name: &'static str, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut last_error = None;
+
+    for attempt in 0..STARTUP_RETRY_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    step = step_name,
+                    attempt = attempt + 1,
+                    max_attempts = STARTUP_RETRY_ATTEMPTS,
+                    "startup step failed: {error}"
+                );
+                last_error = Some(error);
+            }
+        }
+
+        sleep(STARTUP_RETRY_DELAY).await;
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("startup step `{step_name}` failed")))
+}
+
 async fn apply_user_data_event(
     state: &ServerState,
     track_id: &str,
@@ -576,23 +614,24 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{TrackConfig, OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::ExecutionAction;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::track::{TrackId, Instrument, Venue};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, TrackReadRepositoryPort, TrackSnapshot, MarketDataPort,
-        OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
-        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, UserDataEvent, UserDataPayload,
+        ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus,
+        PersistedTrackEffect, Position, PriceTick, StateRepositoryPort, StoredTrackEvent,
+        StoredTrackSnapshot, TrackReadRepositoryPort, TrackSnapshot, UserDataEvent,
+        UserDataPayload,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, TrackStatus, RiskState, SlotState,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
     };
+    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
@@ -623,6 +662,36 @@ mod tests {
         let order = inventory_core_order(&instance).unwrap();
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
         assert_eq!(order.target_exposure, Exposure(4.0));
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn start_retries_transient_startup_failures() {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+        fixture.exchange.fail_next_server_time_requests(2);
+        fixture.exchange.fail_next_open_orders_requests(1);
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        assert_eq!(
+            fixture
+                .exchange
+                .get_server_time_calls
+                .load(Ordering::SeqCst),
+            3
+        );
+        assert_eq!(
+            fixture.exchange.get_position_calls.load(Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            fixture
+                .exchange
+                .get_open_orders_calls
+                .load(Ordering::SeqCst),
+            2
+        );
 
         shutdown(handles).await;
     }
@@ -1573,12 +1642,7 @@ mod tests {
         )
         .await;
         persistence
-            .save_transition(
-                "BTCUSDT",
-                &current_instance(&state).await,
-                &[],
-                &[],
-            )
+            .save_transition("BTCUSDT", &current_instance(&state).await, &[], &[])
             .await
             .unwrap();
         persistence
@@ -3662,7 +3726,8 @@ mod tests {
     fn inventory_core_order(
         track: &poise_engine::snapshot::TrackRuntimeSnapshot,
     ) -> Option<&WorkingOrder> {
-        track.executor_state
+        track
+            .executor_state
             .slots
             .first()
             .and_then(|slot| slot.working_order.as_ref())
@@ -3733,8 +3798,12 @@ mod tests {
         submitted_orders: Mutex<Vec<OrderRequest>>,
         canceled_order_ids: Mutex<Vec<String>>,
         cancel_all_symbols: Mutex<Vec<String>>,
+        get_server_time_calls: AtomicUsize,
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
+        server_time_failures_remaining: AtomicUsize,
+        position_failures_remaining: AtomicUsize,
+        open_orders_failures_remaining: AtomicUsize,
         submit_error: Mutex<Option<String>>,
         cancel_order_error: Mutex<Option<String>>,
         cancel_all_error: Mutex<Option<String>>,
@@ -3763,8 +3832,12 @@ mod tests {
                 submitted_orders: Mutex::new(Vec::new()),
                 canceled_order_ids: Mutex::new(Vec::new()),
                 cancel_all_symbols: Mutex::new(Vec::new()),
+                get_server_time_calls: AtomicUsize::new(0),
                 get_position_calls: AtomicUsize::new(0),
                 get_open_orders_calls: AtomicUsize::new(0),
+                server_time_failures_remaining: AtomicUsize::new(0),
+                position_failures_remaining: AtomicUsize::new(0),
+                open_orders_failures_remaining: AtomicUsize::new(0),
                 submit_error: Mutex::new(None),
                 cancel_order_error: Mutex::new(None),
                 cancel_all_error: Mutex::new(None),
@@ -3805,6 +3878,16 @@ mod tests {
             exchange.submit_started = Some(submit_started);
             exchange.release_submit = Some(release_submit);
             exchange
+        }
+
+        fn fail_next_server_time_requests(&self, count: usize) {
+            self.server_time_failures_remaining
+                .store(count, Ordering::SeqCst);
+        }
+
+        fn fail_next_open_orders_requests(&self, count: usize) {
+            self.open_orders_failures_remaining
+                .store(count, Ordering::SeqCst);
         }
     }
 
@@ -3854,11 +3937,21 @@ mod tests {
 
         async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            if self.position_failures_remaining.load(Ordering::SeqCst) > 0 {
+                self.position_failures_remaining
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(anyhow!("temporary get_position timeout"));
+            }
             Ok(self.position.lock().unwrap().clone())
         }
 
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
+            if self.open_orders_failures_remaining.load(Ordering::SeqCst) > 0 {
+                self.open_orders_failures_remaining
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(anyhow!("temporary get_open_orders timeout"));
+            }
             Ok(self.open_orders.lock().unwrap().clone())
         }
 
@@ -3867,6 +3960,12 @@ mod tests {
         }
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+            self.get_server_time_calls.fetch_add(1, Ordering::SeqCst);
+            if self.server_time_failures_remaining.load(Ordering::SeqCst) > 0 {
+                self.server_time_failures_remaining
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(anyhow!("temporary get_server_time timeout"));
+            }
             Ok(self.server_time)
         }
     }
@@ -3931,7 +4030,10 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_track_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(
+            &self,
+            _id: &str,
+        ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -3983,7 +4085,10 @@ mod tests {
                 .collect())
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -4089,7 +4194,10 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_track_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(
+            &self,
+            _id: &str,
+        ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -4133,7 +4241,10 @@ mod tests {
                 .collect())
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -4250,7 +4361,10 @@ mod tests {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
-        async fn list_track_events(&self, _id: &str) -> Result<Vec<poise_core::events::DomainEvent>> {
+        async fn list_track_events(
+            &self,
+            _id: &str,
+        ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
 
@@ -4288,7 +4402,10 @@ mod tests {
                 .collect())
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()

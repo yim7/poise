@@ -34,8 +34,9 @@
 
 服务端只接受 `--config <path>` 方式启动。
 
-- 手工联调 Binance USDⓈ-M Futures 测试网时，直接复制或修改 [`configs/binance-testnet.toml`](configs/binance-testnet.toml)
-- [`configs/test.toml`](configs/test.toml) 只给仓库内自动化测试使用，里面是本地假地址，不能直接拿来连 Binance
+- 手工联调 Binance USDⓈ-M Futures 测试网时，先复制 [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 为本地未跟踪文件，例如 `configs/binance-testnet.local.toml`
+- [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，里面是本地假地址，不能直接拿来连 Binance
+- 仓库默认忽略 `configs/*.local.toml`
 
 测试网最小示例如下：
 
@@ -46,8 +47,6 @@ bind_address = "127.0.0.1:8000"
 [exchange]
 api_key = ""
 api_secret = ""
-rest_base_url = "https://demo-fapi.binance.com"
-ws_base_url = "wss://fstream.binancefuture.com"
 
 [[tracks]]
 track_id = "btc-core"
@@ -64,8 +63,10 @@ notional_per_unit = 375.0
 
 - 可以继续追加 `[[tracks]]`，每个轨道都要配置唯一的 `track_id`
 - 当前同一交易所内每个 `symbol` 只能出现一次
-- `environment` 只决定数据目录和环境名，不自动切换交易所地址
-- 真实启动时必须显式配置 `exchange.rest_base_url`、`exchange.ws_base_url`、`exchange.api_key`、`exchange.api_secret`
+- `environment = "testnet"` 时，服务端固定接 Binance USDⓈ-M Futures 测试网地址
+- `environment = "mainnet"` 时，服务端固定接 Binance USDⓈ-M Futures 主网地址
+- `environment = "test"` 只保留给仓库内自动化测试，不用于真实运行
+- 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
 - 示例里的 `btc-core` 区间总带宽是 `2000 USD`，在线性模式下等效每格约 `100 USD`
 - 联调前要按当前测试网价格手动平移这个区间
@@ -75,7 +76,13 @@ notional_per_unit = 375.0
 `Poise` 服务端通过 `poise-server` 二进制启动。
 
 ```bash
-cargo run -p poise-server -- --config configs/binance-testnet.toml
+cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
+```
+
+把 `configs/binance-testnet.local.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后启动：
+
+```bash
+cargo run -p poise-server -- --config configs/binance-testnet.local.toml
 ```
 
 服务端启动后会：
@@ -113,18 +120,26 @@ cargo run -p poise-tui
 ### 4. 用 HTTP 快速确认
 
 ```bash
+curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/tracks
 curl http://127.0.0.1:8000/tracks/btc-core
 ```
 
 ## 当前协议
 
-当前对外接口只有 4 个入口：
+当前对外接口只有 5 个入口：
 
+- `GET /health`
 - `GET /tracks`
 - `GET /tracks/:id`
 - `POST /tracks/:id/commands`
 - `GET /ws`
+
+`GET /health` 的语义：
+
+- `200`：当前全部轨道都没有 `attention_required`
+- `503`：至少一个轨道出现 `stale market data` 或 `recovery anomaly`
+- 响应体包含 `status`、`track_count`、`attention_required_count`
 
 字段和错误语义见 [`docs/protocol-contract.md`](docs/protocol-contract.md)。
 
@@ -144,6 +159,95 @@ cargo test
 ```
 
 最近一次完整验证已通过 `cargo test`。
+
+## 用 zellij 连续跑模拟仓
+
+这套方式适合本机连续值守测试网。它解决的是“会话托管”和“固定巡检”，不替代系统级 supervisor。
+
+仓库内置了 3 个运行资产：
+
+- [`scripts/start-paper-zellij.sh`](scripts/start-paper-zellij.sh)：创建或附着到 `zellij` session
+- [`scripts/run-paper-server.sh`](scripts/run-paper-server.sh)：启动 `poise-server` 并把日志落到本地
+- [`scripts/probe-health.sh`](scripts/probe-health.sh)：循环探测 `GET /health`
+
+对应布局文件在 [`ops/zellij/poise-paper.kdl`](ops/zellij/poise-paper.kdl)。
+
+### 1. 先准备本地配置
+
+```bash
+cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
+```
+
+把 `configs/binance-testnet.local.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证。
+
+### 2. 启动 zellij 会话
+
+先确保本机已经安装 `zellij`，然后执行：
+
+```bash
+./scripts/start-paper-zellij.sh
+```
+
+默认会创建或附着到名为 `poise-paper` 的 session。布局里有 3 个 pane：
+
+- 上方：`poise-server`
+- 左下：`/health` 巡检
+- 右下：空白 shell，方便你手工执行 `curl`、启动 `poise-tui` 或查日志
+
+### 3. 常用环境变量
+
+如果你想改默认值，可以在启动前设置：
+
+```bash
+export POISE_CONFIG_PATH=configs/binance-testnet.local.toml
+export POISE_HEALTH_BASE_URL=http://127.0.0.1:8000
+export POISE_LOG_DIR=.logs/paper
+export POISE_ZELLIJ_SESSION_NAME=poise-paper
+./scripts/start-paper-zellij.sh
+```
+
+### 4. 日志位置
+
+默认日志目录是 `.logs/paper/`，主要看这两个文件：
+
+- `.logs/paper/poise-server.log`
+- `.logs/paper/health-probe.log`
+
+### 5. 巡检脚本
+
+手工单次探测：
+
+```bash
+./scripts/probe-health.sh --once
+```
+
+只看脚本会用什么参数，不真正启动：
+
+```bash
+./scripts/start-paper-zellij.sh --dry-run
+./scripts/run-paper-server.sh --dry-run
+./scripts/probe-health.sh --dry-run
+```
+
+### 6. 会话管理
+
+列出当前 session：
+
+```bash
+zellij list-sessions
+```
+
+重新附着：
+
+```bash
+zellij attach poise-paper
+```
+
+结束这套模拟仓会话：
+
+```bash
+zellij kill-sessions poise-paper
+```
 
 ## 当前文档
 

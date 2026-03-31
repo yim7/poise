@@ -5,5 +5,6 @@ pub enum TrackCommand {
     Pause,
     Resume,
     Reconcile,
+    Terminate,
     Flatten,
 }

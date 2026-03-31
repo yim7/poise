@@ -6,8 +6,10 @@
 
 ## 1. HTTP 路由
 
-当前服务端暴露 3 个业务路由：
+当前服务端暴露 4 个业务路由：
 
+- `GET /health`
+  返回服务健康摘要。
 - `GET /tracks`
   返回 `TrackListResponse`。
 - `GET /tracks/:id`
@@ -30,6 +32,29 @@
 - `500`：查询、持久化或运行时内部错误。
 
 ## 2. HTTP DTO
+
+### 2.0 `GET /health`
+
+响应体：
+
+```json
+{
+  "status": "ok",
+  "track_count": 1,
+  "attention_required_count": 0
+}
+```
+
+状态码语义：
+
+- `200`：当前全部轨道都没有 `attention_required`
+- `503`：至少一个轨道出现 `stale market data` 或 `recovery anomaly`
+
+字段语义：
+
+- `status`：当前服务健康摘要，稳定值为 `ok` 和 `attention_required`
+- `track_count`：当前已加载轨道数
+- `attention_required_count`：当前需要人工关注的轨道数
 
 ### 2.1 `GET /tracks` -> `TrackListResponse`
 
@@ -136,15 +161,15 @@
 
 - `pause`
 - `resume`
+- `terminate`
 - `flatten`
 
-`terminate` 目前会返回 `400`，错误消息形如：
+`terminate` 的语义：
 
-```json
-{
-  "error": "command `terminate` is not implemented"
-}
-```
+- 进入真正终态
+- 目标占用收敛到 `0`
+- 后续不会因为价格重新进入带内而恢复策略目标
+- 已终止轨道不能再执行 `pause`、`resume`、`terminate` 或 `flatten`
 
 ## 3. WebSocket
 

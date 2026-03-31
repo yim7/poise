@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use poise_core::events::DomainEvent;
 use poise_core::types::Side;
 
-use crate::track::{TrackId, Instrument};
 use crate::snapshot::TrackRuntimeSnapshot;
+use crate::track::{Instrument, TrackId};
 use crate::transition::TrackEffect;
 
 pub use crate::snapshot::TrackRuntimeSnapshot as TrackSnapshot;
@@ -187,10 +187,7 @@ pub struct StoredTrackSnapshot {
 #[async_trait]
 pub trait TrackReadRepositoryPort: Send + Sync {
     async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>>;
-    async fn load_track_snapshot(
-        &self,
-        track_id: &TrackId,
-    ) -> Result<Option<StoredTrackSnapshot>>;
+    async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>>;
     async fn list_recent_track_events(
         &self,
         track_id: &TrackId,

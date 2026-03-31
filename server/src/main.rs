@@ -120,10 +120,10 @@ mod tests {
     #[test]
     fn parse_config_path_reads_flag_value() {
         let path = parse_config_path(
-            vec!["--config".to_string(), "configs/test.toml".to_string()].into_iter(),
+            vec!["--config".to_string(), "configs/test.demo.toml".to_string()].into_iter(),
         )
         .unwrap();
-        assert_eq!(path, "configs/test.toml");
+        assert_eq!(path, "configs/test.demo.toml");
     }
 
     #[test]
@@ -147,8 +147,8 @@ environment = "{suffix}"
 bind_address = "{bind_address}"
 
 [exchange]
-rest_base_url = "http://127.0.0.1:1"
-ws_base_url = "ws://127.0.0.1:1"
+api_key = "demo-key"
+api_secret = "demo-secret"
 
 [[tracks]]
 track_id = "btc-core"

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use poise_engine::track::{Instrument, Venue};
 use poise_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position};
+use poise_engine::track::{Instrument, Venue};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceOrderResponse {
