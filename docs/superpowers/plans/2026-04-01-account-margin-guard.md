@@ -314,22 +314,22 @@ Task 5 code commit: `fd23ccf`
 - Modify: 无
 - Test: 全量相关测试
 
-- [ ] **Step 1: 运行 engine 测试**
+- [x] **Step 1: 运行 engine 测试**
 
 Run: `cargo test -p poise-engine`
 Expected: PASS
 
-- [ ] **Step 2: 运行 Binance 适配层测试**
+- [x] **Step 2: 运行 Binance 适配层测试**
 
 Run: `cargo test -p poise-binance`
 Expected: PASS
 
-- [ ] **Step 3: 运行 server 测试**
+- [x] **Step 3: 运行 server 测试**
 
 Run: `cargo test -p poise-server`
 Expected: PASS
 
-- [ ] **Step 4: 如有需要，补一次手工验收**
+- [x] **Step 4: 如有需要，补一次手工验收**
 
 在 testnet 配置下使用一个明显不足以支撑 `max_notional` 的账号启动：
 - 启动前预检失败
@@ -340,9 +340,13 @@ Expected: PASS
 - `reduce_only` 仍可继续执行
 - engine 侧看不到账号级 `snapshot` / `blocked_at` 细节，只消费最小约束视图
 
-- [ ] **Step 5: 提交**
+本次没有额外执行手工验收，因为以上场景已经分别被 `startup_margin_preflight`、`insufficient_margin_guard` 和 `margin_guard_reconcile` 自动测试覆盖。
+
+- [x] **Step 5: 提交**
 
 ```bash
 git add core/src/risk.rs engine/src/reconciler.rs engine/src/manager.rs engine/src/ports.rs engine/src/runtime.rs engine/src/snapshot.rs exchanges/binance/src/types.rs exchanges/binance/src/rest.rs exchanges/binance/src/adapter.rs server/src/assembly.rs server/src/runtime.rs server/src/effect_worker.rs server/src/notifications.rs server/src/projector.rs server/src/main.rs
 git commit -m "test: verify account margin guard end to end"
 ```
+
+Task 6 final fix commit: `fad5c0f`
