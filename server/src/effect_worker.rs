@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use poise_engine::ports::{ExchangePort, OrderRequest, PersistedTrackEffect};
 use poise_engine::transition::TrackEffect;
 use tokio::sync::watch;
@@ -186,6 +187,18 @@ impl EffectWorker {
             }
             Err(error) => {
                 let failure_message = error.to_string();
+                if is_insufficient_margin_failure(&failure_message) {
+                    self.state.account_margin_guard.activate_insufficient_margin(
+                        &request.instrument,
+                        "insufficient_margin",
+                        Utc::now(),
+                    );
+                    if let Ok(snapshot) = self.exchange.get_account_margin_snapshot(&request.instrument).await {
+                        self.state
+                            .account_margin_guard
+                            .update_snapshot(request.instrument.clone(), snapshot);
+                    }
+                }
                 match self
                     .state
                     .write_service
@@ -302,6 +315,10 @@ impl EffectWorker {
             }
         }
     }
+}
+
+fn is_insufficient_margin_failure(message: &str) -> bool {
+    message.contains(r#""code":-2019"#) || message.contains("Margin is insufficient")
 }
 
 enum Cancellation {

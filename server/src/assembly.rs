@@ -18,7 +18,7 @@ use tokio::time::{Duration, sleep};
 use crate::config::Config;
 use crate::projector::TrackProjector;
 use crate::query_service::TrackQueryService;
-use crate::runtime::{RuntimeHandles, ServerRuntime};
+use crate::runtime::{AccountMarginGuardStore, RuntimeHandles, ServerRuntime};
 use crate::write_service::TrackWriteService;
 #[derive(Clone)]
 pub struct ServerState {
@@ -28,6 +28,7 @@ pub struct ServerState {
     pub query_service: Arc<TrackQueryService>,
     #[allow(dead_code)]
     pub projector: Arc<TrackProjector>,
+    pub account_margin_guard: Arc<AccountMarginGuardStore>,
 }
 
 pub struct ServerPlatform {
@@ -333,6 +334,7 @@ pub(crate) fn build_server_state(
         state_repository,
         query_service,
         projector,
+        account_margin_guard: Arc::new(AccountMarginGuardStore::default()),
     }
 }
 
