@@ -87,7 +87,7 @@ Task 1 code commit: `e03d1ec`
 - Modify: `server/src/main.rs` 及其他测试内 `ExchangePort` 假实现 — 补齐新 trait 方法
 - Test: `exchanges/binance/src/rest.rs`, `exchanges/binance/src/adapter.rs`
 
-- [ ] **Step 1: 写 failing test，验证 adapter 能返回账号容量快照**
+- [x] **Step 1: 写 failing test，验证 adapter 能返回账号容量快照**
 
 在 `exchanges/binance/src/adapter.rs` 增加测试，mock Binance 账户接口响应，断言：
 - `available_balance`
@@ -96,12 +96,12 @@ Task 1 code commit: `e03d1ec`
 
 都被正确映射。
 
-- [ ] **Step 2: 运行单测，确认当前失败**
+- [x] **Step 2: 运行单测，确认当前失败**
 
 Run: `cargo test -p poise-binance account_margin_snapshot -- --nocapture`
 Expected: FAIL，因为还没有账户接口和解析实现。
 
-- [ ] **Step 3: 增加 Binance 账户查询**
+- [x] **Step 3: 增加 Binance 账户查询**
 
 在 `rest.rs` 增加一个新方法，例如：
 
@@ -117,23 +117,25 @@ pub async fn get_account_margin_snapshot(&self, symbol: &str) -> Result<AccountM
 
 不要把 Binance 原始 JSON 直接暴露到 engine。
 
-- [ ] **Step 4: 实现 adapter 接口并补齐 mock server 测试**
+- [x] **Step 4: 实现 adapter 接口并补齐 mock server 测试**
 
 在 `adapter.rs` 的 `impl ExchangePort for BinanceAdapter` 里实现新方法。
 
 同时全局搜索 `impl ExchangePort for`，把 server 内的 fake exchange / mock exchange 一并补齐，否则新增 trait 方法后会导致整个 workspace 编译失败。
 
-- [ ] **Step 5: 运行单测，确认通过**
+- [x] **Step 5: 运行单测，确认通过**
 
 Run: `cargo test -p poise-binance account_margin_snapshot -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add exchanges/binance/src/types.rs exchanges/binance/src/rest.rs exchanges/binance/src/adapter.rs
 git commit -m "feat: expose binance account margin snapshot"
 ```
+
+Task 2 code commit: `f6b7bab`
 
 ## Task 3: 启动时执行账号容量预检
 
