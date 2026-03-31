@@ -921,6 +921,19 @@ mod tests {
             })
         }
 
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
         }
@@ -959,6 +972,19 @@ mod tests {
             Ok(ExchangeInfo {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: test_exchange_rules(),
+            })
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: chrono::Utc::now(),
             })
         }
 

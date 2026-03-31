@@ -334,6 +334,7 @@ mod tests {
                 realized_pnl_today: 0.0,
                 realized_pnl_cumulative: 0.0,
                 unrealized_pnl: 0.0,
+                ..RiskState::default()
             },
             observed: ObservedState {
                 reference_price: Some(101.25),

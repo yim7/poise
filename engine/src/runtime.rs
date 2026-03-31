@@ -27,11 +27,20 @@ pub enum TrackStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AccountCapacityConstraint {
+    pub increase_blocked: bool,
+    pub blocked_reason: Option<String>,
+    pub max_increase_notional: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RiskState {
     pub realized_pnl_day: Option<NaiveDate>,
     pub realized_pnl_today: f64,
     pub realized_pnl_cumulative: f64,
     pub unrealized_pnl: f64,
+    #[serde(default)]
+    pub account_capacity_constraint: AccountCapacityConstraint,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -279,6 +288,8 @@ impl TrackRuntime {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use chrono::{DateTime, TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
     use poise_core::risk::CapacityBudget;
@@ -287,11 +298,12 @@ mod tests {
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::OrderStatus;
+    use crate::snapshot::TrackRuntimeSnapshot;
     use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackRuntime,
-        TrackStatus, WorkingOrder,
+        AccountCapacityConstraint, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
+        SlotState, TrackRuntime, TrackStatus, WorkingOrder,
     };
 
     fn test_runtime() -> TrackRuntime {
@@ -367,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_round_trips_executor_state() {
+    fn margin_guard_snapshot_round_trips_executor_state() {
         let mut runtime = test_runtime();
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
@@ -390,6 +402,11 @@ mod tests {
             realized_pnl_today: 1.0,
             realized_pnl_cumulative: 2.0,
             unrealized_pnl: -0.5,
+            account_capacity_constraint: AccountCapacityConstraint {
+                increase_blocked: true,
+                blocked_reason: Some("insufficient_margin".into()),
+                max_increase_notional: Some(1_500.0),
+            },
         };
         runtime.reference_price = Some(96.0);
         runtime.out_of_band_since = Some(
@@ -432,6 +449,10 @@ mod tests {
             restored.executor_state.stats.started_at,
             runtime.executor_state.stats.started_at
         );
+        assert_eq!(
+            restored.risk_state.account_capacity_constraint,
+            runtime.risk_state.account_capacity_constraint
+        );
     }
 
     #[test]
@@ -448,5 +469,91 @@ mod tests {
         fresh.restore_from_snapshot(&snapshot).unwrap();
 
         assert_eq!(fresh.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn margin_guard_snapshot_round_trips_account_capacity_constraint_json() {
+        let mut runtime = test_runtime();
+        runtime.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+            increase_blocked: true,
+            blocked_reason: Some("insufficient_margin".into()),
+            max_increase_notional: Some(900.0),
+        };
+
+        let snapshot = runtime.snapshot();
+        let serialized = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(
+            serialized["risk"]["account_capacity_constraint"],
+            json!({
+                "increase_blocked": true,
+                "blocked_reason": "insufficient_margin",
+                "max_increase_notional": 900.0
+            })
+        );
+
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(serialized).unwrap();
+        assert_eq!(
+            restored.risk.account_capacity_constraint,
+            snapshot.risk.account_capacity_constraint
+        );
+    }
+
+    #[test]
+    fn margin_guard_snapshot_deserializes_missing_account_capacity_constraint_with_default() {
+        let legacy_snapshot = json!({
+            "track_id": "grid-1",
+            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+            "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_exposure_units": 8.0,
+                "short_exposure_units": 8.0,
+                "notional_per_unit": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+            },
+            "status": "active",
+            "current_exposure": 4.0,
+            "target_exposure": 6.0,
+            "executor_state": {
+                "mode": "passive",
+                "inventory_gap": 2.0,
+                "gap_started_at": null,
+                "last_reprice_at": null,
+                "slots": [{
+                    "slot": "inventory_core",
+                    "state": "empty",
+                    "working_order": null
+                }],
+                "last_execution_reason": null,
+                "recovery_anomaly": null,
+                "stats": {
+                    "started_at": "2026-03-29T09:00:00Z",
+                    "max_inventory_gap_abs": 0.0,
+                    "max_gap_age_ms": 0
+                }
+            },
+            "replacement_gate_reason": null,
+            "risk": {
+                "realized_pnl_day": null,
+                "realized_pnl_today": 0.0,
+                "realized_pnl_cumulative": 0.0,
+                "unrealized_pnl": 0.0
+            },
+            "observed": {
+                "reference_price": 96.0,
+                "out_of_band_since": null,
+                "last_tick_at": null,
+                "market_data_stale_since": null
+            }
+        });
+
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+
+        assert_eq!(
+            restored.risk.account_capacity_constraint,
+            AccountCapacityConstraint::default()
+        );
     }
 }

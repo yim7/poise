@@ -1009,6 +1009,19 @@ mod tests {
             })
         }
 
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+            })
+        }
+
         async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
             Ok(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap())
         }

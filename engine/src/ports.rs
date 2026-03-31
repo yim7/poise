@@ -8,7 +8,7 @@ use poise_core::events::DomainEvent;
 use poise_core::types::Side;
 
 use crate::snapshot::TrackRuntimeSnapshot;
-use crate::track::{Instrument, TrackId};
+use crate::track::{Instrument, TrackId, Venue};
 use crate::transition::TrackEffect;
 
 pub use crate::snapshot::TrackRuntimeSnapshot as TrackSnapshot;
@@ -101,6 +101,15 @@ pub struct ExchangeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountMarginSnapshot {
+    pub venue: Venue,
+    pub available_balance: f64,
+    pub total_wallet_balance: f64,
+    pub max_increase_notional: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UserDataPayload {
     OrderUpdate(ExchangeOrder),
     PositionUpdate(Position),
@@ -131,6 +140,10 @@ pub trait ExchangePort: Send + Sync {
     async fn get_position(&self, instrument: &Instrument) -> Result<Position>;
     async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>>;
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo>;
+    async fn get_account_margin_snapshot(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<AccountMarginSnapshot>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
 }
 
