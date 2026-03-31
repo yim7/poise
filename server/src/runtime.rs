@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,8 +7,10 @@ use anyhow::{Result, anyhow};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
+    AccountMarginSnapshot, ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent,
+    UserDataPayload,
 };
+use poise_engine::track::Instrument;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, sleep};
@@ -22,6 +25,8 @@ pub struct ServerRuntime {
     state: ServerState,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
+    #[allow(dead_code)]
+    account_margin_snapshots: Arc<std::sync::Mutex<HashMap<Instrument, AccountMarginSnapshot>>>,
     recovery_retry_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -56,7 +61,31 @@ impl ServerRuntime {
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
-        Self::with_recovery_retry_interval(state, exchange, market_data, Duration::from_secs(1))
+        Self::with_account_margin_snapshots(
+            state,
+            exchange,
+            market_data,
+            HashMap::new(),
+            Duration::from_secs(1),
+        )
+    }
+
+    pub(crate) fn with_account_margin_snapshots(
+        state: ServerState,
+        exchange: Arc<dyn ExchangePort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account_margin_snapshots: HashMap<Instrument, AccountMarginSnapshot>,
+        recovery_retry_interval: Duration,
+    ) -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
+        Self {
+            state,
+            exchange,
+            market_data,
+            account_margin_snapshots: Arc::new(std::sync::Mutex::new(account_margin_snapshots)),
+            recovery_retry_interval,
+            shutdown_tx,
+        }
     }
 
     fn with_recovery_retry_interval(
@@ -65,14 +94,13 @@ impl ServerRuntime {
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
     ) -> Self {
-        let (shutdown_tx, _) = watch::channel(false);
-        Self {
+        Self::with_account_margin_snapshots(
             state,
             exchange,
             market_data,
+            HashMap::new(),
             recovery_retry_interval,
-            shutdown_tx,
-        }
+        )
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
