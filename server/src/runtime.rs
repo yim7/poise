@@ -4053,6 +4053,22 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .collect())
         }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            track_id: &TrackId,
+            batch_id: &str,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(effects
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.batch_id == batch_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
+        }
     }
 
     impl MemoryPersistence {
@@ -4215,6 +4231,22 @@ mod tests {
                 .into_iter()
                 .filter(|effect| effect.track_id == *track_id)
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .collect())
+        }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            track_id: &TrackId,
+            batch_id: &str,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(effects
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.batch_id == batch_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
                 .collect())
         }
     }
@@ -4382,6 +4414,22 @@ mod tests {
                 .into_iter()
                 .filter(|effect| effect.track_id == *track_id)
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .collect())
+        }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            track_id: &TrackId,
+            batch_id: &str,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            let effects = self.effects.lock().await;
+            Ok(effects
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.batch_id == batch_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
                 .collect())
         }
     }

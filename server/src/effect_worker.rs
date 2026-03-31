@@ -260,6 +260,8 @@ impl EffectWorker {
                             .record_cancel_order_success(
                                 persisted.track_id.as_str(),
                                 &persisted.effect_id,
+                                &persisted.batch_id,
+                                persisted.sequence,
                                 order_id,
                             )
                             .await
@@ -1133,6 +1135,24 @@ mod tests {
                 .await
                 .iter()
                 .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
+        }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            track_id: &TrackId,
+            batch_id: &str,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.batch_id == batch_id)
                 .filter(|effect| effect.status == EffectStatus::Pending)
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .cloned()

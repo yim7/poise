@@ -1049,6 +1049,14 @@ mod tests {
         ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            _track_id: &TrackId,
+            _batch_id: &str,
+        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
     }
 
     #[async_trait::async_trait]

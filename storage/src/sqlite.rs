@@ -705,6 +705,38 @@ impl SqliteStorage {
             .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
             .collect())
     }
+
+    fn list_pending_submit_effects_for_track_batch_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+        batch_id: String,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects
+                 WHERE track_id = ?1
+                   AND batch_id = ?2
+                   AND status = ?3
+                 ORDER BY sequence ASC, effect_id ASC",
+            )
+            .context("failed to prepare batch-scoped pending submit effect query")?;
+
+        let effects = stmt
+            .query_map(
+                params![track_id.as_str(), batch_id, EffectStatus::Pending.as_str()],
+                Self::persisted_effect_from_row,
+            )
+            .context("failed to query batch-scoped pending submit effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize batch-scoped pending submit effects")?;
+
+        Ok(effects
+            .into_iter()
+            .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -775,6 +807,22 @@ impl StateRepositoryPort for SqliteStorage {
         })
         .await
         .context("failed to join list_pending_submit_effects_for_track blocking task")?
+    }
+
+    async fn list_pending_submit_effects_for_track_batch(
+        &self,
+        track_id: &TrackId,
+        batch_id: &str,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Arc::clone(&self.conn);
+        let track_id = track_id.clone();
+        let batch_id = batch_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_pending_submit_effects_for_track_batch_blocking(conn, track_id, batch_id)
+        })
+        .await
+        .context("failed to join list_pending_submit_effects_for_track_batch blocking task")?
     }
 }
 
@@ -1461,6 +1509,61 @@ mod tests {
         assert_eq!(btc_submit_hints[0].track_id.as_str(), "btc-core");
         assert!(matches!(
             btc_submit_hints[0].effect,
+            TrackEffect::SubmitOrder { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_pending_submit_effects_for_track_batch_returns_same_batch_submit_without_ready_filter()
+     {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+        let replacement_effects = vec![
+            TrackEffect::CancelOrder {
+                instrument: snapshot.instrument.clone(),
+                order_id: "old-order-1".into(),
+            },
+            TrackEffect::SubmitOrder {
+                request: test_order_request_for_symbol("BTCUSDT"),
+                target_exposure: Exposure(4.0),
+            },
+        ];
+        let unrelated_effects = vec![TrackEffect::SubmitOrder {
+            request: OrderRequest {
+                client_order_id: "other-batch".into(),
+                ..test_order_request_for_symbol("BTCUSDT")
+            },
+            target_exposure: Exposure(2.0),
+        }];
+
+        let replacement_persisted = storage
+            .save_transition("btc-core", &snapshot, &[], &replacement_effects)
+            .await
+            .unwrap();
+        storage
+            .save_transition("btc-core", &snapshot, &[], &unrelated_effects)
+            .await
+            .unwrap();
+
+        let batch_effects = storage
+            .list_pending_submit_effects_for_track_batch(
+                &TrackId::new("btc-core"),
+                &replacement_persisted.effects[0].batch_id,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(batch_effects.len(), 1);
+        assert_eq!(
+            batch_effects[0].effect_id,
+            replacement_persisted.effects[1].effect_id
+        );
+        assert_eq!(
+            batch_effects[0].batch_id,
+            replacement_persisted.effects[0].batch_id
+        );
+        assert!(matches!(
+            batch_effects[0].effect,
             TrackEffect::SubmitOrder { .. }
         ));
     }

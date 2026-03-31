@@ -168,6 +168,12 @@ pub trait StateRepositoryPort: Send + Sync {
         &self,
         track_id: &TrackId,
     ) -> Result<Vec<PersistedTrackEffect>>;
+
+    async fn list_pending_submit_effects_for_track_batch(
+        &self,
+        track_id: &TrackId,
+        batch_id: &str,
+    ) -> Result<Vec<PersistedTrackEffect>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

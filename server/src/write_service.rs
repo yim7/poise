@@ -4,13 +4,14 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
 use poise_engine::command::TrackCommand;
-use poise_engine::executor::{SubmitRecoveryPlan, SubmitRecoveryResolution};
+use poise_engine::executor::{OrderSlot, SubmitRecoveryPlan, SubmitRecoveryResolution};
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use poise_engine::ports::{
-    EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, StateRepositoryPort,
+    EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, PersistedTrackEffect,
+    StateRepositoryPort,
 };
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
@@ -388,19 +389,47 @@ impl TrackWriteService {
         &self,
         id: &str,
         effect_id: &str,
+        batch_id: &str,
+        sequence: u32,
         order_id: &str,
     ) -> Result<()> {
-        self.mutate_track_with_effect_status(
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let replacement_submit = self
+            .pending_submit_effects_for_track_batch(id, batch_id)
+            .await
+            .map_err(anyhow::Error::new)
+            .and_then(|effects| select_replacement_submit_effect(&effects, sequence))?;
+        let effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
+        let (previous_snapshot, next_snapshot) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            manager
+                .record_cancel_order_success(&TrackId::new(id), order_id)
+                .map_err(TrackMutationError::Mutation)?;
+            if let Some(replacement_submit) = replacement_submit.as_ref() {
+                restore_ready_pending_submit_effect(&mut manager, id, replacement_submit)
+                    .map_err(TrackMutationError::Mutation)?;
+            }
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            (previous_snapshot, next_snapshot)
+        };
+
+        self.commit_track_mutation(
             id,
-            EffectStatusUpdate::succeeded(effect_id.to_string()),
-            |manager| {
-                manager.record_cancel_order_success(&TrackId::new(id), order_id)?;
-                Ok(())
-            },
+            &previous_snapshot,
+            &next_snapshot,
+            &(),
+            Some(&effect_status_update),
+            false,
         )
         .await
-        .map(|_| ())
-        .map_err(anyhow::Error::new)
+        .map_err(anyhow::Error::new)?;
+
+        Ok(())
     }
 
     pub async fn record_cancel_all_success(&self, id: &str, effect_id: &str) -> Result<()> {
@@ -618,6 +647,17 @@ impl TrackWriteService {
         self.mutation_guards.lock(id).await
     }
 
+    async fn pending_submit_effects_for_track_batch(
+        &self,
+        id: &str,
+        batch_id: &str,
+    ) -> std::result::Result<Vec<PersistedTrackEffect>, TrackMutationError> {
+        self.repository
+            .list_pending_submit_effects_for_track_batch(&TrackId::new(id), batch_id)
+            .await
+            .map_err(TrackMutationError::Persistence)
+    }
+
     async fn commit_track_mutation<R>(
         &self,
         id: &str,
@@ -684,6 +724,58 @@ fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
         status: poise_engine::ports::EffectStatus::Failed,
         attempt_delta: 1,
         last_error: Some(error.to_string()),
+    }
+}
+
+fn restore_ready_pending_submit_effect(
+    manager: &mut TrackManager,
+    id: &str,
+    replacement_submit: &PersistedTrackEffect,
+) -> Result<()> {
+    let snapshot = manager
+        .snapshot(id)
+        .ok_or_else(|| anyhow!("track `{id}` not found"))?;
+    let inventory_core_has_working_order = snapshot
+        .executor_state
+        .slots
+        .iter()
+        .find(|slot| slot.slot == OrderSlot::new("inventory_core"))
+        .and_then(|slot| slot.working_order.as_ref())
+        .is_some();
+    if inventory_core_has_working_order {
+        return Ok(());
+    }
+
+    let TrackEffect::SubmitOrder {
+        request,
+        target_exposure,
+    } = &replacement_submit.effect
+    else {
+        return Err(anyhow!(
+            "replacement effect `{}` is not submit order",
+            replacement_submit.effect_id
+        ));
+    };
+
+    manager.record_submit_request(&TrackId::new(id), request, target_exposure.clone())?;
+    Ok(())
+}
+
+fn select_replacement_submit_effect(
+    effects: &[PersistedTrackEffect],
+    after_sequence: u32,
+) -> Result<Option<PersistedTrackEffect>> {
+    let matching = effects
+        .iter()
+        .filter(|effect| effect.sequence > after_sequence)
+        .cloned()
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [effect] => Ok(Some(effect.clone())),
+        _ => Err(anyhow!(
+            "multiple replacement submit effects found after sequence {after_sequence}"
+        )),
     }
 }
 
@@ -802,7 +894,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutate_track_rolls_back_and_does_not_broadcast_when_save_fails() {
-        let repository = Arc::new(FailOnSaveRepository);
+        let repository = Arc::new(FailOnSaveRepository::default());
         let service = test_service(repository as Arc<dyn StateRepositoryPort>);
         let mut receiver = service.subscribe_notifications();
 
@@ -1570,6 +1662,315 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_cancel_order_success_restores_ready_replacement_submit_before_command_reconcile()
+     {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let request = OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            client_order_id: "btc-core-replacement".into(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: snapshot.config.base_qty_per_unit() * 4.0,
+            reduce_only: false,
+        };
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: old_order_id.into(),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: request.clone(),
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        service
+            .record_cancel_order_success(
+                "btc-core",
+                "btc-core:replacement:0",
+                "replacement",
+                0,
+                old_order_id,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .all_effects()
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:replacement:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Succeeded)
+        );
+        assert_eq!(
+            repository
+                .snapshot_for("btc-core")
+                .map(|snapshot| snapshot.executor_state.slots),
+            Some(vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::SubmitPending,
+                working_order: Some(working_order_from_submit_request(&request, Exposure(4.0),)),
+            }])
+        );
+
+        let transition = service
+            .command("btc-core", TrackCommand::Reconcile)
+            .await
+            .unwrap();
+        assert_eq!(
+            transition.effects,
+            vec![TrackEffect::NoOp],
+            "replacement submit restored by cancel success should suppress manual reconcile"
+        );
+        assert_eq!(repository.all_effects().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_cancel_order_success_restores_same_batch_replacement_submit() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let expected_request = OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            client_order_id: "btc-core-replacement".into(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: snapshot.config.base_qty_per_unit() * 4.0,
+            reduce_only: false,
+        };
+        let unrelated_request = OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            client_order_id: "btc-core-unrelated".into(),
+            side: Side::Buy,
+            price: 96.0,
+            quantity: snapshot.config.base_qty_per_unit() * 2.0,
+            reduce_only: false,
+        };
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:other:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "other".into(),
+            sequence: 0,
+            effect: TrackEffect::SubmitOrder {
+                request: unrelated_request,
+                target_exposure: Exposure(2.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: old_order_id.into(),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: expected_request.clone(),
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        service
+            .record_cancel_order_success(
+                "btc-core",
+                "btc-core:replacement:0",
+                "replacement",
+                0,
+                old_order_id,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .snapshot_for("btc-core")
+                .and_then(|snapshot| snapshot.executor_state.slots.into_iter().next())
+                .and_then(|slot| slot.working_order)
+                .map(|order| order.client_order_id),
+            Some(expected_request.client_order_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn record_cancel_order_success_rolls_back_when_atomic_save_fails() {
+        let repository = Arc::new(FailOnSaveRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let request = OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            client_order_id: "btc-core-replacement".into(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: snapshot.config.base_qty_per_unit() * 4.0,
+            reduce_only: false,
+        };
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request,
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        let error = service
+            .record_cancel_order_success(
+                "btc-core",
+                "btc-core:replacement:0",
+                "replacement",
+                0,
+                old_order_id,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("injected save failure"));
+        assert_eq!(
+            service
+                .manager()
+                .read()
+                .await
+                .snapshot("btc-core")
+                .unwrap()
+                .executor_state
+                .slots,
+            snapshot.executor_state.slots
+        );
+    }
+
+    #[tokio::test]
     async fn resolves_track_id_from_instrument() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
@@ -1832,10 +2233,36 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .collect())
         }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            track_id: &TrackId,
+            batch_id: &str,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.batch_id == batch_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
+        }
     }
 
     #[derive(Default)]
-    struct FailOnSaveRepository;
+    struct FailOnSaveRepository {
+        effects: Mutex<Vec<PersistedTrackEffect>>,
+    }
+
+    impl FailOnSaveRepository {
+        fn seed_effect(&self, effect: PersistedTrackEffect) {
+            self.effects.lock().unwrap().push(effect);
+        }
+    }
 
     #[async_trait::async_trait]
     impl StateRepositoryPort for FailOnSaveRepository {
@@ -1867,6 +2294,24 @@ mod tests {
             _track_id: &TrackId,
         ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
+        }
+
+        async fn list_pending_submit_effects_for_track_batch(
+            &self,
+            track_id: &TrackId,
+            batch_id: &str,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.batch_id == batch_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
         }
     }
 
