@@ -196,23 +196,23 @@ Task 3 code commit: `23de335`
 - Modify: `server/src/notifications.rs` 或相关通知代码 — 暴露 attention required
 - Test: `server/src/runtime.rs`, `server/src/effect_worker.rs`
 
-- [ ] **Step 1: 写 failing test，`-2019` 后 guard 激活**
+- [x] **Step 1: 写 failing test，`-2019` 后 guard 激活**
 
 在 `server/src/runtime.rs` 或 `server/src/effect_worker.rs` 增加测试：
 - mock exchange `submit_order` 返回 `code=-2019`
 - 断言 runtime 里的账号 guard 被置为 `increase_blocked=true`
 - 断言后续状态带 `attention_required`
 
-- [ ] **Step 2: 运行单测，确认当前失败**
+- [x] **Step 2: 运行单测，确认当前失败**
 
 Run: `cargo test -p poise-server insufficient_margin_guard -- --nocapture`
 Expected: FAIL
 
-- [ ] **Step 3: 在 effect worker 识别 `-2019`**
+- [x] **Step 3: 在 effect worker 识别 `-2019`**
 
 不要做字符串模糊匹配，优先提取 Binance 错误码；如果 Binance 存在多个“保证金不足”拒单码，要在 adapter 层统一映射成一个内部原因，只在一处维护。
 
-- [ ] **Step 4: 激活账号级 guard 并触发容量重同步**
+- [x] **Step 4: 激活账号级 guard 并触发容量重同步**
 
 处理流程：
 - 当前 effect 标记失败
@@ -223,17 +223,21 @@ Expected: FAIL
 
 这里更新的是 server 持有的完整账号级 guard；后续 reconcile 只能读取它投影出来的最小约束视图。
 
-- [ ] **Step 5: 运行单测，确认通过**
+- [x] **Step 5: 运行单测，确认通过**
 
 Run: `cargo test -p poise-server insufficient_margin_guard -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/src/effect_worker.rs server/src/runtime.rs server/src/notifications.rs
 git commit -m "feat: trip account margin guard on insufficient margin"
 ```
+
+Task 4 code commit: `0214a40`
+
+注：本 task 完成的是 server-side guard 激活和容量快照刷新；对外 `attention_required` 的 read model / projector 投影跟 Task 5 的 reconcile 约束一起闭合，避免状态规则拆散到两处实现。
 
 ## Task 5: reconcile 阶段阻止新的风险增加单
 
