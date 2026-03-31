@@ -248,7 +248,7 @@ Task 4 code commit: `0214a40`
 - Modify: `server/src/projector.rs` — 活动和状态文案展示 `RiskDenied`
 - Test: `core/src/risk.rs`, `engine/src/reconciler.rs`, `server/src/runtime.rs`
 
-- [ ] **Step 1: 写 failing test，guard 激活时不会再产出风险增加单**
+- [x] **Step 1: 写 failing test，guard 激活时不会再产出风险增加单**
 
 在 `engine/src/reconciler.rs` 增加测试：
 - 当前仓位 `1.0`
@@ -258,17 +258,17 @@ Task 4 code commit: `0214a40`
 - 断言 `suppress_execution = true`
 - 断言它与现有 `RiskDenied` 路径保持同样的 `suppress_execution` 语义，不引入第二套阻断规则
 
-- [ ] **Step 2: 写 failing test，`reduce_only` 路径仍然允许**
+- [x] **Step 2: 写 failing test，`reduce_only` 路径仍然允许**
 
 构造当前仓位 `5.0`，目标 `2.0`，guard 激活：
 - 断言 reconcile 不会被 margin guard 拦截
 
-- [ ] **Step 3: 运行单测，确认当前失败**
+- [x] **Step 3: 运行单测，确认当前失败**
 
 Run: `cargo test -p poise-engine margin_guard_reconcile -- --nocapture`
 Expected: FAIL
 
-- [ ] **Step 4: 扩展 risk/reconcile 输入**
+- [x] **Step 4: 扩展 risk/reconcile 输入**
 
 把账号容量限制建模为明确输入，例如：
 
@@ -283,26 +283,30 @@ pub struct AccountCapacityConstraint {
 
 不要让 reconcile 直接依赖 server 的完整 `AccountMarginGuard`。reconcile 只消费 `AccountCapacityConstraint`，保持 engine/server 边界单向清晰。
 
-- [ ] **Step 5: 把 `RiskDenied` 原因投影到 read model**
+- [x] **Step 5: 把 `RiskDenied` 原因投影到 read model**
 
 让 UI/活动流能看到明确原因，例如 `risk denied: insufficient account margin`。
 
-- [ ] **Step 6: 运行单测，确认通过**
+- [x] **Step 6: 运行单测，确认通过**
 
 Run: `cargo test -p poise-engine margin_guard_reconcile -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 7: 运行 server 回归测试**
+- [x] **Step 7: 运行 server 回归测试**
 
 Run: `cargo test -p poise-server insufficient_margin_guard -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add core/src/risk.rs engine/src/reconciler.rs engine/src/manager.rs server/src/projector.rs server/src/runtime.rs
 git commit -m "feat: deny risk-increasing orders when account margin is blocked"
 ```
+
+Task 5 code commit: `fd23ccf`
+
+注：实现时没有把这条规则下沉到 `core/src/risk.rs`，而是放在 `engine/src/reconciler.rs`。原因是它消费的是 engine 侧的 `AccountCapacityConstraint` 投影，不是 core 层独立可用的纯风控输入；这样可以避免把 server-side guard 语义继续往 core 泄漏。
 
 ## Task 6: 全量验证
 
