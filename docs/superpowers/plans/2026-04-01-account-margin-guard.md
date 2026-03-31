@@ -144,19 +144,19 @@ Task 2 code commit: `f6b7bab`
 - Modify: `server/src/runtime.rs` — 初始化账号级 margin guard 状态
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 写 failing test，账号容量小于配置最大仓位时启动失败**
+- [x] **Step 1: 写 failing test，账号容量小于配置最大仓位时启动失败**
 
 在 `server/src/assembly.rs` 增加测试：
 - mock exchange 返回 `max_increase_notional = 5000`
 - track `budget.max_notional = 20000`
 - 断言 assembly/start 返回错误，错误信息包含 `insufficient account margin`
 
-- [ ] **Step 2: 运行单测，确认当前失败**
+- [x] **Step 2: 运行单测，确认当前失败**
 
 Run: `cargo test -p poise-server startup_margin_preflight -- --nocapture`
 Expected: FAIL，因为启动阶段还没有做这个检查。
 
-- [ ] **Step 3: 在 assembly 加预检**
+- [x] **Step 3: 在 assembly 加预检**
 
 按账号读取一次容量快照，并对每个 track 做：
 
@@ -168,23 +168,25 @@ if track.budget().max_notional > snapshot.max_increase_notional {
 
 第一版直接失败，不做自动降级。
 
-- [ ] **Step 4: 初始化 runtime 的账号级 guard**
+- [x] **Step 4: 初始化 runtime 的账号级 guard**
 
 把启动时读取到的快照放进 runtime 的账号 guard 存储，供后续 reconcile 和 `-2019` 恢复使用。
 
 同时明确一条实现约束：server 内保存完整 `AccountMarginGuard`，传给 engine 的是按当前 guard 派生出的 `AccountCapacityConstraint`，不要把完整 guard 直接塞进 track snapshot。
 
-- [ ] **Step 5: 运行单测，确认通过**
+- [x] **Step 5: 运行单测，确认通过**
 
 Run: `cargo test -p poise-server startup_margin_preflight -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add server/src/assembly.rs server/src/runtime.rs
 git commit -m "feat: validate account margin on startup"
 ```
+
+Task 3 code commit: `23de335`
 
 ## Task 4: `-2019` 触发账号级风险增加熔断
 
