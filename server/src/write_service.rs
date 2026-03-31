@@ -305,11 +305,11 @@ impl TrackWriteService {
             .collect::<Vec<_>>();
         let (previous_snapshot, transition, next_snapshot) = {
             let mut manager = self.manager.write().await;
-            self.sync_account_capacity_constraint(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
             let transition = if mode.allows_follow_up_reconcile() {
                 manager
                     .sync_exchange_state(
@@ -318,7 +318,12 @@ impl TrackWriteService {
                         open_orders,
                         pending_submit_hints,
                     )
-                    .map_err(TrackMutationError::Mutation)?
+                    .map_err(|error| {
+                        manager
+                            .restore_track_state(&previous_snapshot)
+                            .expect("failed to restore previous snapshot after sync_exchange_state mutation error");
+                        TrackMutationError::Mutation(error)
+                    })?
             } else {
                 manager
                     .sync_exchange_state_without_reconcile(
@@ -327,7 +332,12 @@ impl TrackWriteService {
                         open_orders,
                         pending_submit_hints,
                     )
-                    .map_err(TrackMutationError::Mutation)?
+                    .map_err(|error| {
+                        manager
+                            .restore_track_state(&previous_snapshot)
+                            .expect("failed to restore previous snapshot after sync_exchange_state_without_reconcile mutation error");
+                        TrackMutationError::Mutation(error)
+                    })?
             };
             let next_snapshot = manager
                 .snapshot(id)
@@ -517,11 +527,11 @@ impl TrackWriteService {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, plan, next_snapshot) = {
             let mut manager = self.manager.write().await;
-            self.sync_account_capacity_constraint(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
             let plan = manager
                 .recover_submit_effect(
                     &TrackId::new(id),
@@ -529,7 +539,12 @@ impl TrackWriteService {
                     target_exposure.clone(),
                     live_order,
                 )
-                .map_err(TrackMutationError::Mutation)?;
+                .map_err(|error| {
+                    manager
+                        .restore_track_state(&previous_snapshot)
+                        .expect("failed to restore previous snapshot after recover_submit_effect mutation error");
+                    TrackMutationError::Mutation(error)
+                })?;
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
@@ -574,12 +589,17 @@ impl TrackWriteService {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
-            self.sync_account_capacity_constraint(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            let result = mutate(&mut manager).map_err(TrackMutationError::Mutation)?;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
+            let result = mutate(&mut manager).map_err(|error| {
+                manager
+                    .restore_track_state(&previous_snapshot)
+                    .expect("failed to restore previous snapshot after mutation error");
+                TrackMutationError::Mutation(error)
+            })?;
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
@@ -635,12 +655,17 @@ impl TrackWriteService {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_snapshot, result, next_snapshot) = {
             let mut manager = self.manager.write().await;
-            self.sync_account_capacity_constraint(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            let result = mutate(&mut manager).map_err(TrackMutationError::Mutation)?;
+            self.sync_account_capacity_constraint(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
+            let result = mutate(&mut manager).map_err(|error| {
+                manager
+                    .restore_track_state(&previous_snapshot)
+                    .expect("failed to restore previous snapshot after mutation error");
+                TrackMutationError::Mutation(error)
+            })?;
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;

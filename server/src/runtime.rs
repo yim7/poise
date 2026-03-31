@@ -1135,6 +1135,17 @@ mod tests {
 
         let instance = current_instance(&state).await;
         assert!(instance.risk.account_capacity_constraint.increase_blocked);
+        let source = state
+            .query_service
+            .load_track_detail_source(&TrackId::new("BTCUSDT"))
+            .await
+            .unwrap()
+            .unwrap();
+        let detail = state.projector.project_detail(&source);
+        assert_eq!(
+            detail.execution.execution_status,
+            poise_protocol::ExecutionStatusView::AttentionRequired
+        );
 
         shutdown(handles).await;
     }
