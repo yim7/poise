@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{ExchangePort, OrderRequest, PersistedTrackEffect};
+use poise_engine::track::Instrument;
 use poise_engine::transition::TrackEffect;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -171,6 +173,14 @@ impl EffectWorker {
                     )
                     .await
                 {
+                    if is_unmatched_submit_receipt_error(&error) {
+                        self
+                            .resync_exchange_state_after_unmatched_submit_receipt(
+                                persisted.track_id.as_str(),
+                                &request.instrument,
+                            )
+                            .await?;
+                    }
                     self.state
                         .write_service
                         .complete_effect_failed(
@@ -302,6 +312,44 @@ impl EffectWorker {
             }
         }
     }
+
+    async fn resync_exchange_state_after_unmatched_submit_receipt(
+        &self,
+        track_id: &str,
+        instrument: &Instrument,
+    ) -> Result<()> {
+        let position = self.exchange.get_position(instrument).await?;
+        let open_orders = self.exchange.get_open_orders(instrument).await?;
+        self.state
+            .write_service
+            .sync_exchange_state(
+                track_id,
+                PositionObservation {
+                    qty: position.qty,
+                    unrealized_pnl: position.unrealized_pnl,
+                },
+                open_orders
+                    .iter()
+                    .map(|order| OrderObservation {
+                        order_id: order.order_id.clone(),
+                        client_order_id: order.client_order_id.clone(),
+                        side: order.side,
+                        price: order.price,
+                        quantity: order.qty,
+                        realized_pnl: order.realized_pnl,
+                        status: order.status,
+                    })
+                    .collect(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+fn is_unmatched_submit_receipt_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("submit receipt did not match executor slot")
 }
 
 enum Cancellation {
@@ -318,6 +366,7 @@ enum Cancellation {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
@@ -721,6 +770,76 @@ mod tests {
         assert_eq!(no_op.status, EffectStatus::Pending);
     }
 
+    #[tokio::test]
+    async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_failed() {
+        let repository = Arc::new(MemoryRepository::default());
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        exchange.set_position_qty(15.0).await;
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        let task = tokio::spawn(async move { worker.run_once().await });
+
+        submit_started.notified().await;
+
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot.executor_state.slots = vec![poise_engine::runtime::ExecutionSlot {
+                slot: poise_engine::executor::OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }];
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+
+        release_submit.notify_waiters();
+        task.await.unwrap().unwrap();
+
+        let manager_handle = state.write_service.manager();
+        let manager = manager_handle.read().await;
+        let snapshot = manager.snapshot("btc-core").unwrap();
+        assert_eq!(snapshot.current_exposure, Exposure(4.0));
+        assert_eq!(snapshot.target_exposure, Some(Exposure(4.0)));
+        assert!(snapshot.executor_state.recovery_anomaly.is_none());
+
+        let effect = repository
+            .list_all_effects()
+            .await
+            .into_iter()
+            .next()
+            .expect("submit effect should remain persisted");
+        assert_eq!(effect.status, EffectStatus::Failed);
+        assert!(
+            effect
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("submit receipt did not match executor slot"))
+        );
+        assert_eq!(exchange.get_position_calls(), 1);
+        assert_eq!(exchange.get_open_orders_calls(), 2);
+    }
+
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
@@ -940,20 +1059,59 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct FakeExchange {
         effects: AsyncMutex<Vec<OrderRequest>>,
         submit_started: Option<Arc<Notify>>,
         release_submit: Option<Arc<Notify>>,
+        position: AsyncMutex<Position>,
+        open_orders: AsyncMutex<Vec<ExchangeOrder>>,
+        get_position_calls: AtomicUsize,
+        get_open_orders_calls: AtomicUsize,
     }
 
     impl FakeExchange {
-        fn with_blocked_submit(submit_started: Arc<Notify>, release_submit: Arc<Notify>) -> Self {
+        fn default_with_state() -> Self {
             Self {
                 effects: AsyncMutex::default(),
+                submit_started: None,
+                release_submit: None,
+                position: AsyncMutex::new(Position {
+                    instrument: btc_instrument(),
+                    qty: 0.0,
+                    avg_price: 100.0,
+                    unrealized_pnl: 0.0,
+                }),
+                open_orders: AsyncMutex::new(Vec::new()),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_blocked_submit(submit_started: Arc<Notify>, release_submit: Arc<Notify>) -> Self {
+            Self {
                 submit_started: Some(submit_started),
                 release_submit: Some(release_submit),
+                ..Self::default()
             }
+        }
+
+        async fn set_position_qty(&self, qty: f64) {
+            let mut position = self.position.lock().await;
+            position.qty = qty;
+        }
+
+        fn get_position_calls(&self) -> usize {
+            self.get_position_calls.load(Ordering::SeqCst)
+        }
+
+        fn get_open_orders_calls(&self) -> usize {
+            self.get_open_orders_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Default for FakeExchange {
+        fn default() -> Self {
+            Self::default_with_state()
         }
     }
 
@@ -983,16 +1141,13 @@ mod tests {
         }
 
         async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
-            Ok(Position {
-                instrument: btc_instrument(),
-                qty: 0.0,
-                avg_price: 100.0,
-                unrealized_pnl: 0.0,
-            })
+            self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.position.lock().await.clone())
         }
 
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-            Ok(Vec::new())
+            self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.open_orders.lock().await.clone())
         }
 
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
