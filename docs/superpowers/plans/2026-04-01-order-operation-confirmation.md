@@ -173,7 +173,7 @@ Commit: `87852c6`
 - Modify: `server/src/runtime.rs`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 写失败测试，锁住“未知挂单不重启也能被发现”**
+- [x] **Step 1: 写失败测试，锁住“未知挂单不重启也能被发现”**
 
 在 `server/src/runtime.rs` 增加测试：
 
@@ -187,13 +187,13 @@ async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_wi
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p poise-server runtime::tests::normal_track_low_frequency_reconcile_discovers_untracked_live_orders_without_restart -- --exact --nocapture`
 
 Expected: FAIL，原因是当前 recovery task 只轮询已进入 anomaly 的 track。
 
-- [ ] **Step 3: 最小实现，把 recovery task 改成“正常轨道低频巡检 + 异常轨道快速重试”**
+- [x] **Step 3: 最小实现，把 recovery task 改成“正常轨道低频巡检 + 异常轨道快速重试”**
 
 在 `server/src/runtime.rs`：
 
@@ -207,7 +207,7 @@ Expected: FAIL，原因是当前 recovery task 只轮询已进入 anomaly 的 tr
   - 合并执行后的 `ReconcileExecution` 仍能区分“紧急”与“巡检”
 - 不新增新的 executor 接口；仍由 executor 产出 `Rebuilt / Anomaly`
 
-- [ ] **Step 4: 运行 runtime 回归**
+- [x] **Step 4: 运行 runtime 回归**
 
 Run:
 
@@ -217,12 +217,14 @@ Run:
 
 Expected: 全部 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/runtime.rs
 git commit -m "feat(server): add low-frequency exchange reconcile for normal tracks"
 ```
+
+Commit: `8c6263e`
 
 ### Task 4: 锁住“旧单已成交、后续小单继续出现”的完整竞态
 
