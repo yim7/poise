@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use tokio::time::{Duration, sleep};
 use crate::config::Config;
 use crate::projector::TrackProjector;
 use crate::query_service::TrackQueryService;
-use crate::runtime::{RuntimeHandles, ServerRuntime};
+use crate::runtime::{AccountMarginGuardStore, RuntimeHandles, ServerRuntime};
 use crate::write_service::TrackWriteService;
 #[derive(Clone)]
 pub struct ServerState {
@@ -28,6 +28,7 @@ pub struct ServerState {
     pub query_service: Arc<TrackQueryService>,
     #[allow(dead_code)]
     pub projector: Arc<TrackProjector>,
+    pub account_margin_guard: Arc<AccountMarginGuardStore>,
 }
 
 pub struct ServerPlatform {
@@ -184,9 +185,21 @@ where
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
 
     let mut manager = TrackManager::new(clock);
+    let mut account_margin_snapshots = HashMap::new();
     for track in &config.tracks {
         let track_id = track.track_id();
         let info = load_exchange_info_with_retry(exchange.as_ref(), &track.instrument()).await?;
+        let account_margin_snapshot =
+            load_account_margin_snapshot_with_retry(exchange.as_ref(), &track.instrument()).await?;
+        if track.budget().max_notional > account_margin_snapshot.max_increase_notional {
+            return Err(anyhow!(
+                "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
+                track_id.as_str(),
+                track.budget().max_notional,
+                account_margin_snapshot.max_increase_notional
+            ));
+        }
+        account_margin_snapshots.insert(track.instrument(), account_margin_snapshot);
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             track.instrument(),
@@ -215,7 +228,13 @@ where
 
     Ok(ServerPlatform {
         state: server_state.clone(),
-        runtime: ServerRuntime::new(server_state, exchange, market_data),
+        runtime: ServerRuntime::with_account_margin_snapshots(
+            server_state,
+            exchange,
+            market_data,
+            account_margin_snapshots,
+            Duration::from_secs(1),
+        ),
     })
 }
 
@@ -246,6 +265,35 @@ async fn load_exchange_info_with_retry(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("failed to load exchange info")))
+}
+
+async fn load_account_margin_snapshot_with_retry(
+    exchange: &dyn ExchangePort,
+    instrument: &Instrument,
+) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+    let mut last_error = None;
+
+    for attempt in 0..STARTUP_RETRY_ATTEMPTS {
+        match exchange.get_account_margin_snapshot(instrument).await {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) => {
+                if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    instrument = %instrument.symbol,
+                    attempt = attempt + 1,
+                    max_attempts = STARTUP_RETRY_ATTEMPTS,
+                    "startup account margin probe failed: {error}"
+                );
+                last_error = Some(error);
+            }
+        }
+
+        sleep(STARTUP_RETRY_DELAY).await;
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to load account margin snapshot")))
 }
 
 impl ServerPlatform {
@@ -281,11 +329,14 @@ pub(crate) fn build_server_state(
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
 ) -> ServerState {
+    let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
+    write_service.set_account_margin_guard(account_margin_guard.clone());
     ServerState {
         write_service,
         state_repository,
         query_service,
         projector,
+        account_margin_guard,
     }
 }
 
@@ -592,6 +643,52 @@ mod tests {
         assert_eq!(manager.read().await.list_tracks().len(), 1);
     }
 
+    #[tokio::test]
+    async fn startup_margin_preflight_fails_when_configured_max_notional_exceeds_account_capacity()
+    {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let exchange = Arc::new(LimitedMarginExchange {
+            max_increase_notional: 500.0,
+        });
+        let config = Config {
+            environment: unique_test_environment(),
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
+                venue: Venue::Binance,
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                max_notional: Some(20_000.0),
+                daily_loss_limit: None,
+                stop_loss_pct: None,
+                tick_timeout_secs: None,
+            }],
+            exchange: ExchangeConfig::default(),
+        };
+
+        let result = super::assemble_with_components(
+            &config,
+            exchange,
+            Arc::new(FakeMarketData::empty()),
+            repository,
+            Arc::new(SystemClock),
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("assemble_with_components should reject insufficient account margin"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("insufficient account margin"));
+    }
+
     #[test]
     fn test_runtime_reads_endpoints_from_env_lookup() {
         let (rest_base_url, ws_base_url) =
@@ -873,6 +970,10 @@ mod tests {
 
     struct FakeExchange;
 
+    struct LimitedMarginExchange {
+        max_increase_notional: f64,
+    }
+
     struct FlakyExchangeInfoExchange {
         remaining_failures: AtomicUsize,
         get_exchange_info_calls: AtomicUsize,
@@ -921,6 +1022,19 @@ mod tests {
             })
         }
 
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
         }
@@ -959,6 +1073,66 @@ mod tests {
             Ok(ExchangeInfo {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: test_exchange_rules(),
+            })
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+            Err(anyhow!("not used in tests"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangePort for LimitedMarginExchange {
+        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+            Ok(ExchangeInfo {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                rules: test_exchange_rules(),
+            })
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: self.max_increase_notional,
+                total_wallet_balance: self.max_increase_notional,
+                max_increase_notional: self.max_increase_notional,
+                observed_at: chrono::Utc::now(),
             })
         }
 

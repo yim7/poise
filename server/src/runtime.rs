@@ -1,14 +1,18 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
+    AccountMarginSnapshot, ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent,
+    UserDataPayload,
 };
-use poise_engine::track::TrackId;
+use poise_engine::runtime::AccountCapacityConstraint;
+use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, sleep};
@@ -29,6 +33,77 @@ pub struct ServerRuntime {
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AccountMarginGuard {
+    pub snapshot: Option<AccountMarginSnapshot>,
+    pub increase_blocked: bool,
+    pub blocked_reason: Option<String>,
+    pub blocked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Default)]
+pub(crate) struct AccountMarginGuardStore {
+    inner: std::sync::Mutex<HashMap<Instrument, AccountMarginGuard>>,
+}
+
+impl AccountMarginGuardStore {
+    pub(crate) fn replace_snapshots(&self, snapshots: HashMap<Instrument, AccountMarginSnapshot>) {
+        let mut guards = self.inner.lock().unwrap();
+        for (instrument, snapshot) in snapshots {
+            guards.entry(instrument).or_default().snapshot = Some(snapshot);
+        }
+    }
+
+    pub(crate) fn update_snapshot(&self, instrument: Instrument, snapshot: AccountMarginSnapshot) {
+        self.inner.lock().unwrap().entry(instrument).or_default().snapshot = Some(snapshot);
+    }
+
+    pub(crate) fn activate_insufficient_margin(
+        &self,
+        instrument: &Instrument,
+        reason: impl Into<String>,
+        blocked_at: DateTime<Utc>,
+    ) {
+        let reason = reason.into();
+        let mut guards = self.inner.lock().unwrap();
+        let mut matched = false;
+        for (tracked_instrument, guard) in guards.iter_mut() {
+            if tracked_instrument.venue != instrument.venue {
+                continue;
+            }
+            guard.increase_blocked = true;
+            guard.blocked_reason = Some(reason.clone());
+            guard.blocked_at = Some(blocked_at);
+            matched = true;
+        }
+
+        if !matched {
+            guards.insert(
+                instrument.clone(),
+                AccountMarginGuard {
+                    snapshot: None,
+                    increase_blocked: true,
+                    blocked_reason: Some(reason),
+                    blocked_at: Some(blocked_at),
+                },
+            );
+        }
+    }
+
+    pub(crate) fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(instrument)
+            .map(|guard| AccountCapacityConstraint {
+                increase_blocked: guard.increase_blocked,
+                blocked_reason: guard.blocked_reason.clone(),
+                max_increase_notional: guard.snapshot.as_ref().map(|snapshot| snapshot.max_increase_notional),
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -61,11 +136,29 @@ impl ServerRuntime {
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
-        Self::with_reconcile_intervals(
+        Self::with_reconcile_intervals_and_account_margin_snapshots(
             state,
             exchange,
             market_data,
+            HashMap::new(),
             Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+    }
+
+    pub(crate) fn with_account_margin_snapshots(
+        state: ServerState,
+        exchange: Arc<dyn ExchangePort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account_margin_snapshots: HashMap<Instrument, AccountMarginSnapshot>,
+        recovery_retry_interval: Duration,
+    ) -> Self {
+        Self::with_reconcile_intervals_and_account_margin_snapshots(
+            state,
+            exchange,
+            market_data,
+            account_margin_snapshots,
+            recovery_retry_interval,
             Duration::from_secs(5),
         )
     }
@@ -77,7 +170,28 @@ impl ServerRuntime {
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
+        Self::with_reconcile_intervals_and_account_margin_snapshots(
+            state,
+            exchange,
+            market_data,
+            HashMap::new(),
+            recovery_retry_interval,
+            audit_interval,
+        )
+    }
+
+    fn with_reconcile_intervals_and_account_margin_snapshots(
+        state: ServerState,
+        exchange: Arc<dyn ExchangePort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account_margin_snapshots: HashMap<Instrument, AccountMarginSnapshot>,
+        recovery_retry_interval: Duration,
+        audit_interval: Duration,
+    ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        state
+            .account_margin_guard
+            .replace_snapshots(account_margin_snapshots);
         Self {
             state,
             exchange,
@@ -742,6 +856,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
+    use poise_core::events::DomainEvent;
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
@@ -1041,6 +1156,138 @@ mod tests {
         let instance = current_instance(&state).await;
         assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
         assert!(inventory_core_order(&instance).is_none());
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
+        let exchange = Arc::new(FakeExchange::with_submit_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            r#"request POST /fapi/v1/order failed with status 400 Bad Request: {"code":-2019,"msg":"Margin is insufficient."}"#,
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+
+        let handles = runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = Arc::clone(&persistence);
+            async move {
+                persistence
+                    .list_dispatchable_effects()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            }
+        })
+        .await;
+
+        let constraint = state.account_margin_guard.constraint_for(&btc_instrument());
+        assert!(constraint.increase_blocked);
+        assert_eq!(
+            constraint.blocked_reason.as_deref(),
+            Some("insufficient_margin")
+        );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
+        let exchange = Arc::new(FakeExchange::with_submit_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            r#"request POST /fapi/v1/order failed with status 400 Bad Request: {"code":-2019,"msg":"Margin is insufficient."}"#,
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+        );
+
+        state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+
+        let handles = runtime.start().await.unwrap();
+
+        wait_until(|| {
+            state
+                .account_margin_guard
+                .constraint_for(&btc_instrument())
+                .increase_blocked
+        })
+        .await;
+
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+
+        assert!(
+            transition
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::RiskDenied { .. }))
+        );
+        assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
+
+        let instance = current_instance(&state).await;
+        assert!(instance.risk.account_capacity_constraint.increase_blocked);
+        let source = state
+            .query_service
+            .load_track_detail_source(&TrackId::new("BTCUSDT"))
+            .await
+            .unwrap()
+            .unwrap();
+        let detail = state.projector.project_detail(&source);
+        assert_eq!(
+            detail.execution.execution_status,
+            poise_protocol::ExecutionStatusView::AttentionRequired
+        );
 
         shutdown(handles).await;
     }
@@ -4358,6 +4605,19 @@ mod tests {
                 return Err(anyhow!("temporary get_open_orders timeout"));
             }
             Ok(self.open_orders.lock().unwrap().clone())
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: Utc::now(),
+            })
         }
 
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {

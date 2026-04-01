@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use poise_engine::ports::{ExchangePort, OrderRequest, PersistedTrackEffect};
 use poise_engine::track::Instrument;
 use poise_engine::transition::TrackEffect;
@@ -207,6 +208,18 @@ impl EffectWorker {
             }
             Err(error) => {
                 let failure_message = error.to_string();
+                if is_insufficient_margin_failure(&failure_message) {
+                    self.state.account_margin_guard.activate_insufficient_margin(
+                        &request.instrument,
+                        "insufficient_margin",
+                        Utc::now(),
+                    );
+                    if let Ok(snapshot) = self.exchange.get_account_margin_snapshot(&request.instrument).await {
+                        self.state
+                            .account_margin_guard
+                            .update_snapshot(request.instrument.clone(), snapshot);
+                    }
+                }
                 match self
                     .state
                     .write_service
@@ -351,6 +364,10 @@ impl EffectWorker {
         }
     }
 
+}
+
+fn is_insufficient_margin_failure(message: &str) -> bool {
+    message.contains(r#""code":-2019"#) || message.contains("Margin is insufficient")
 }
 
 enum Cancellation {
@@ -1222,6 +1239,19 @@ mod tests {
                     maker_fee_rate: 0.0,
                     taker_fee_rate: 0.0,
                 },
+            })
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+            Ok(poise_engine::ports::AccountMarginSnapshot {
+                venue: instrument.venue,
+                available_balance: 1_000_000.0,
+                total_wallet_balance: 1_000_000.0,
+                max_increase_notional: 1_000_000.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
             })
         }
 

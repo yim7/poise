@@ -200,7 +200,10 @@ fn project_execution_state(source: &TrackReadModel) -> ExecutionStateView {
 }
 
 fn project_execution_status(source: &TrackReadModel) -> ExecutionStatusView {
-    if source.has_recovery_anomaly || source.has_stale_market_data {
+    if source.has_recovery_anomaly
+        || source.has_account_margin_guard
+        || source.has_stale_market_data
+    {
         ExecutionStatusView::AttentionRequired
     } else {
         ExecutionStatusView::Normal
@@ -647,6 +650,7 @@ mod tests {
             stats_started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
             recovery_anomaly: None,
             has_recovery_anomaly: false,
+            has_account_margin_guard: false,
             has_stale_market_data: false,
             replacement_gate_reason: None,
             slots: vec![ReadModelSlot {

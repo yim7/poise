@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_engine::ports::{
-    ExchangeInfo, ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest,
-    Position, PriceTick, UserDataEvent,
+    AccountMarginSnapshot, ExchangeInfo, ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt,
+    OrderRequest, Position, PriceTick, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
@@ -59,6 +59,13 @@ impl ExchangePort for BinanceAdapter {
 
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
         self.rest.get_exchange_info(&instrument.symbol).await
+    }
+
+    async fn get_account_margin_snapshot(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<AccountMarginSnapshot> {
+        self.rest.get_account_margin_snapshot(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
@@ -262,6 +269,41 @@ mod tests {
         assert_eq!(position.instrument.symbol, "BTCUSDT");
         assert_eq!(position.qty, 0.25);
         assert_eq!(position.avg_price, 65000.5);
+    }
+
+    #[tokio::test]
+    async fn account_margin_snapshot_calls_rest_and_converts_payload() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{
+                "availableBalance": "100.5",
+                "totalWalletBalance": "120.75",
+                "positions": [
+                    { "symbol": "ETHUSDT", "leverage": "5" },
+                    { "symbol": "BTCUSDT", "leverage": "20" }
+                ]
+            }"#,
+        )])
+        .await;
+        let adapter = BinanceAdapter::new(
+            "api-key",
+            "secret-key",
+            server.base_url(),
+            "ws://127.0.0.1:1",
+        );
+
+        let snapshot = adapter
+            .get_account_margin_snapshot(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(snapshot.venue, Venue::Binance);
+        assert_eq!(snapshot.available_balance, 100.5);
+        assert_eq!(snapshot.total_wallet_balance, 120.75);
+        assert!((snapshot.max_increase_notional - 2010.0).abs() < f64::EPSILON);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].path.starts_with("/fapi/v2/account?"));
     }
 
     #[tokio::test]

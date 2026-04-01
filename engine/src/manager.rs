@@ -1167,6 +1167,7 @@ mod tests {
             realized_pnl_today: 12.5,
             realized_pnl_cumulative: 17.5,
             unrealized_pnl: -3.0,
+            ..RiskState::default()
         };
         track.reference_price = Some(95.0);
         track.out_of_band_since = Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap());
@@ -2946,6 +2947,7 @@ mod tests {
             realized_pnl_today: 20.0,
             realized_pnl_cumulative: 20.0,
             unrealized_pnl: 0.0,
+            ..RiskState::default()
         };
 
         manager
@@ -3488,6 +3490,7 @@ mod tests {
             realized_pnl_today: 20.0,
             realized_pnl_cumulative: 20.0,
             unrealized_pnl: 0.0,
+            ..RiskState::default()
         };
 
         manager
@@ -3537,6 +3540,7 @@ mod tests {
             realized_pnl_today: 20.0,
             realized_pnl_cumulative: 20.0,
             unrealized_pnl: 0.0,
+            ..RiskState::default()
         };
 
         manager

@@ -3,7 +3,7 @@ use poise_core::risk::{self, ExposureIntent, RiskDecision};
 use poise_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use poise_core::types::Exposure;
 
-use crate::runtime::{TrackRuntime, TrackStatus};
+use crate::runtime::{AccountCapacityConstraint, TrackRuntime, TrackStatus};
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
@@ -100,6 +100,20 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
         };
     }
 
+    if let Some(reason) = account_capacity_denial_reason(
+        &grid.current_exposure,
+        &approved_target,
+        grid.config.notional_per_unit,
+        &grid.risk_state.account_capacity_constraint,
+    ) {
+        return TargetReconcileResult {
+            events: vec![DomainEvent::RiskDenied { reason }],
+            target_exposure: grid.current_exposure.clone(),
+            new_status: None,
+            suppress_execution: true,
+        };
+    }
+
     let delta = grid.current_exposure.delta(&approved_target);
     if delta.is_zero() {
         return TargetReconcileResult {
@@ -148,9 +162,58 @@ fn apply_out_of_band(
     }
 }
 
+fn account_capacity_denial_reason(
+    current: &Exposure,
+    target: &Exposure,
+    unit_notional: f64,
+    constraint: &AccountCapacityConstraint,
+) -> Option<String> {
+    let required_increase_notional =
+        additional_increase_notional_required(current, target, unit_notional);
+    if required_increase_notional <= f64::EPSILON {
+        return None;
+    }
+
+    if constraint.increase_blocked {
+        return Some(
+            constraint
+                .blocked_reason
+                .clone()
+                .unwrap_or_else(|| "insufficient account margin".to_string()),
+        );
+    }
+
+    if let Some(max_increase_notional) = constraint.max_increase_notional {
+        if required_increase_notional > max_increase_notional + f64::EPSILON {
+            return Some("insufficient account margin".to_string());
+        }
+    }
+
+    None
+}
+
+fn additional_increase_notional_required(
+    current: &Exposure,
+    target: &Exposure,
+    unit_notional: f64,
+) -> f64 {
+    if !unit_notional.is_finite() || unit_notional <= 0.0 {
+        return 0.0;
+    }
+
+    let current_abs = current.0.abs();
+    let target_abs = target.0.abs();
+    if target_abs <= current_abs {
+        return 0.0;
+    }
+
+    (target_abs - current_abs) * unit_notional
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::AccountCapacityConstraint;
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::*;
@@ -376,5 +439,75 @@ mod tests {
             DomainEvent::RiskCapApplied { intended, capped }
                 if *intended == Exposure(8.0) && *capped == Exposure(4.0)
         )));
+    }
+
+    #[test]
+    fn margin_guard_reconcile_denies_risk_increase_when_guard_is_active() {
+        let mut grid = test_runtime();
+        grid.status = TrackStatus::Active;
+        grid.current_exposure = Exposure(1.0);
+        grid.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+            increase_blocked: true,
+            blocked_reason: Some("insufficient_margin".into()),
+            max_increase_notional: Some(1_000.0),
+        };
+
+        let result = reconcile_target(&grid, 90.0);
+
+        assert!(result.suppress_execution);
+        assert_eq!(result.target_exposure, grid.current_exposure);
+        assert_eq!(
+            result.events,
+            vec![DomainEvent::RiskDenied {
+                reason: "insufficient_margin".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn margin_guard_reconcile_denies_when_required_notional_exceeds_available_capacity() {
+        let mut grid = test_runtime();
+        grid.status = TrackStatus::Active;
+        grid.current_exposure = Exposure(1.0);
+        grid.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+            increase_blocked: false,
+            blocked_reason: None,
+            max_increase_notional: Some(500.0),
+        };
+
+        let result = reconcile_target(&grid, 90.0);
+
+        assert!(result.suppress_execution);
+        assert_eq!(result.target_exposure, grid.current_exposure);
+        assert_eq!(
+            result.events,
+            vec![DomainEvent::RiskDenied {
+                reason: "insufficient account margin".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn margin_guard_reconcile_allows_reduce_only_target() {
+        let mut grid = test_runtime();
+        grid.status = TrackStatus::Active;
+        grid.current_exposure = Exposure(5.0);
+        grid.manual_target_override = Some(Exposure(2.0));
+        grid.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+            increase_blocked: true,
+            blocked_reason: Some("insufficient_margin".into()),
+            max_increase_notional: Some(0.0),
+        };
+
+        let result = reconcile_target(&grid, 100.0);
+
+        assert!(!result.suppress_execution);
+        assert_eq!(result.target_exposure, Exposure(2.0));
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        );
     }
 }

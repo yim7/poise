@@ -1,7 +1,11 @@
+use chrono::Utc;
+
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use poise_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position};
+use poise_engine::ports::{
+    AccountMarginSnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position,
+};
 use poise_engine::track::{Instrument, Venue};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +26,21 @@ pub struct BinancePositionRisk {
     pub entry_price: String,
     #[serde(rename = "unRealizedProfit")]
     pub unrealized_profit: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinanceAccountInformation {
+    #[serde(rename = "availableBalance")]
+    pub available_balance: String,
+    #[serde(rename = "totalWalletBalance")]
+    pub total_wallet_balance: String,
+    pub positions: Vec<BinanceAccountPosition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinanceAccountPosition {
+    pub symbol: String,
+    pub leverage: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +102,28 @@ impl TryFrom<BinancePositionRisk> for Position {
             qty: parse_decimal("positionAmt", &value.position_amt)?,
             avg_price: parse_decimal("entryPrice", &value.entry_price)?,
             unrealized_pnl: parse_decimal("unRealizedProfit", &value.unrealized_profit)?,
+        })
+    }
+}
+
+impl BinanceAccountInformation {
+    pub fn into_margin_snapshot(self, symbol: &str) -> Result<AccountMarginSnapshot> {
+        let position = self
+            .positions
+            .into_iter()
+            .find(|item| item.symbol == symbol)
+            .with_context(|| format!("account position not found for symbol: {symbol}"))?;
+        let available_balance = parse_decimal("availableBalance", &self.available_balance)?;
+        let total_wallet_balance =
+            parse_decimal("totalWalletBalance", &self.total_wallet_balance)?;
+        let leverage = parse_decimal("leverage", &position.leverage)?;
+
+        Ok(AccountMarginSnapshot {
+            venue: Venue::Binance,
+            available_balance,
+            total_wallet_balance,
+            max_increase_notional: available_balance * leverage,
+            observed_at: Utc::now(),
         })
     }
 }

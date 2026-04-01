@@ -61,7 +61,11 @@ async fn health(
         .map_err(map_query_error)?;
     let attention_required_count = sources
         .iter()
-        .filter(|source| source.has_recovery_anomaly || source.has_stale_market_data)
+        .filter(|source| {
+            source.has_recovery_anomaly
+                || source.has_account_margin_guard
+                || source.has_stale_market_data
+        })
         .count();
     let status = if attention_required_count == 0 {
         StatusCode::OK

@@ -13,10 +13,13 @@ use sha2::Sha256;
 use tokio::time::{Duration, sleep};
 use url::{Host, Url, form_urlencoded::Serializer};
 
-use poise_engine::ports::{ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position};
+use poise_engine::ports::{
+    AccountMarginSnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position,
+};
 
 use crate::types::{
-    BinanceExchangeInfoResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
+    BinanceAccountInformation, BinanceExchangeInfoResponse, BinanceOpenOrder,
+    BinanceOrderResponse, BinancePositionRisk,
 };
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
@@ -155,6 +158,14 @@ impl BinanceRestClient {
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub async fn get_account_margin_snapshot(&self, symbol: &str) -> Result<AccountMarginSnapshot> {
+        let account: BinanceAccountInformation = self
+            .send_request(Method::GET, "/fapi/v2/account", Vec::new(), AuthMode::Signed)
+            .await?;
+
+        account.into_margin_snapshot(symbol)
     }
 
     pub async fn new_order(&self, req: &OrderRequest) -> Result<OrderReceipt> {
@@ -764,6 +775,41 @@ mod tests {
         assert!(requests[0].path.contains("quantity=0.024"));
         assert!(!requests[0].path.contains("price=0.30000000000000004"));
         assert!(!requests[0].path.contains("quantity=0.024000000000000004"));
+    }
+
+    #[tokio::test]
+    async fn account_margin_snapshot_reads_account_endpoint_and_maps_capacity() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{
+                "availableBalance": "100.5",
+                "totalWalletBalance": "120.75",
+                "positions": [
+                    { "symbol": "ETHUSDT", "leverage": "5" },
+                    { "symbol": "BTCUSDT", "leverage": "20" }
+                ]
+            }"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let snapshot = client.get_account_margin_snapshot("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(snapshot.available_balance, 100.5);
+        assert_eq!(snapshot.total_wallet_balance, 120.75);
+        assert!((snapshot.max_increase_notional - 2010.0).abs() < f64::EPSILON);
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].path.starts_with("/fapi/v2/account?timestamp="));
+        assert_eq!(
+            requests[0].headers.get("x-mbx-apikey"),
+            Some(&"api-key".to_string())
+        );
     }
 
     #[tokio::test]

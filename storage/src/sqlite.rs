@@ -487,6 +487,7 @@ impl SqliteStorage {
                 realized_pnl_today: row.get(11)?,
                 realized_pnl_cumulative: row.get(12)?,
                 unrealized_pnl: row.get(13)?,
+                ..RiskState::default()
             },
             observed: ObservedState {
                 reference_price: row.get(14)?,
@@ -927,6 +928,7 @@ mod tests {
                 realized_pnl_today: 12.5,
                 realized_pnl_cumulative: 17.5,
                 unrealized_pnl: -3.0,
+                ..RiskState::default()
             },
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
