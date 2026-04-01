@@ -79,7 +79,7 @@ Expected:
 - `cargo test -p poise-server runtime::tests:: -- --nocapture`
 - `cargo test -p poise-server effect_worker::tests:: -- --nocapture`
 
-- [ ] **Step 3: 更新任务清单并提交 Task 2**
+- [x] **Step 3: 更新任务清单并提交 Task 2**
 
 在本文件里回写：
 - 每个 task 的完成状态
