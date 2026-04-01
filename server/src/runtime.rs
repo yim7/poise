@@ -2,12 +2,13 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
     ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent, UserDataPayload,
 };
+use poise_engine::track::TrackId;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, sleep};
@@ -26,6 +27,7 @@ pub struct ServerRuntime {
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
     recovery_retry_interval: Duration,
+    audit_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -59,14 +61,21 @@ impl ServerRuntime {
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
-        Self::with_recovery_retry_interval(state, exchange, market_data, Duration::from_secs(1))
+        Self::with_reconcile_intervals(
+            state,
+            exchange,
+            market_data,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
     }
 
-    fn with_recovery_retry_interval(
+    fn with_reconcile_intervals(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
+        audit_interval: Duration,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
@@ -74,6 +83,7 @@ impl ServerRuntime {
             exchange,
             market_data,
             recovery_retry_interval,
+            audit_interval,
             shutdown_tx,
         }
     }
@@ -285,10 +295,15 @@ impl ServerRuntime {
         let state = self.state.clone();
         let exchange = Arc::clone(&self.exchange);
         let retry_interval = self.recovery_retry_interval;
+        let audit_interval = self.audit_interval;
 
         tokio::spawn(async move {
             let instruments = state.write_service.track_instruments().await;
             let mut tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
+            let mut next_audit_at = instruments
+                .iter()
+                .map(|track| (track.id.clone(), Instant::now() + audit_interval))
+                .collect::<std::collections::HashMap<_, _>>();
             let mut notifications = state.write_service.subscribe_notifications();
             let mut ticker = tokio::time::interval(Duration::from_millis(50));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -321,16 +336,33 @@ impl ServerRuntime {
                         }
 
                         let now = Instant::now();
-                        let due_tracks: Vec<(String, poise_engine::track::Instrument)> = tracked
+                        let due_anomaly_tracks: Vec<(String, poise_engine::track::Instrument)> = tracked
                             .iter()
                             .filter(|(_, tracked_track)| tracked_track.next_retry_at <= now)
                             .map(|(track_id, tracked_track)| (track_id.clone(), tracked_track.instrument.clone()))
                             .collect();
+                        let due_audit_tracks: Vec<(String, poise_engine::track::Instrument)> = instruments
+                            .iter()
+                            .filter(|track| {
+                                next_audit_at
+                                    .get(&track.id)
+                                    .is_some_and(|next_audit| *next_audit <= now)
+                            })
+                            .map(|track| (track.id.clone(), track.instrument.clone()))
+                            .collect();
+
+                        let mut due_tracks = due_audit_tracks
+                            .into_iter()
+                            .collect::<std::collections::HashMap<_, _>>();
+                        for (track_id, instrument) in due_anomaly_tracks {
+                            due_tracks.insert(track_id, instrument);
+                        }
 
                         for (track_id, instrument) in due_tracks {
                             if let Some(tracked_track) = tracked.get_mut(&track_id) {
                                 tracked_track.next_retry_at = Instant::now() + retry_interval;
                             }
+                            next_audit_at.insert(track_id.clone(), Instant::now() + audit_interval);
                             if let Err(error) = sync_exchange_state_from_exchange(
                                 &state,
                                 &exchange,
@@ -528,14 +560,44 @@ async fn sync_exchange_state_from_exchange(
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
-    let position = exchange
+    let snapshot = state
+        .state_repository
+        .load_track_state(track_id)
+        .await
+        .map_err(TrackMutationError::Persistence)?;
+    let mut position = exchange
         .get_position(instrument)
         .await
         .map_err(TrackMutationError::Persistence)?;
-    let open_orders = exchange
+    let mut open_orders = exchange
         .get_open_orders(instrument)
         .await
         .map_err(TrackMutationError::Persistence)?;
+
+    if should_cancel_unknown_live_orders(snapshot.as_ref(), &open_orders)
+        && pending_submit_hints_are_empty(state, track_id).await?
+    {
+        for order in &open_orders {
+            exchange
+                .cancel_order(instrument, &order.order_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to cancel unknown live order `{}` for {}",
+                        order.order_id, instrument.symbol
+                    )
+                })
+                .map_err(TrackMutationError::Persistence)?;
+        }
+        position = exchange
+            .get_position(instrument)
+            .await
+            .map_err(TrackMutationError::Persistence)?;
+        open_orders = exchange
+            .get_open_orders(instrument)
+            .await
+            .map_err(TrackMutationError::Persistence)?;
+    }
 
     if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
         let _ = state
@@ -559,6 +621,34 @@ async fn sync_exchange_state_from_exchange(
             .map_err(preserve_track_mutation_error)?;
     }
     Ok(())
+}
+
+fn should_cancel_unknown_live_orders(
+    snapshot: Option<&poise_engine::snapshot::TrackRuntimeSnapshot>,
+    open_orders: &[ExchangeOrder],
+) -> bool {
+    !open_orders.is_empty()
+        && snapshot.is_some_and(|snapshot| {
+            snapshot.executor_state.recovery_anomaly
+                == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+                && snapshot
+                    .executor_state
+                    .slots
+                    .iter()
+                    .all(|slot| slot.working_order.is_none())
+        })
+}
+
+async fn pending_submit_hints_are_empty(
+    state: &ServerState,
+    track_id: &str,
+) -> std::result::Result<bool, TrackMutationError> {
+    let pending_submit_hints = state
+        .state_repository
+        .list_pending_submit_effects_for_track(&TrackId::new(track_id))
+        .await
+        .map_err(TrackMutationError::Persistence)?;
+    Ok(pending_submit_hints.is_empty())
 }
 
 fn update_recovery_tracking(
@@ -3022,6 +3112,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_task_cancels_unknown_live_orders_automatically() {
+        let mut snapshot = test_snapshot();
+        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_recovery_retry_interval(
+            Some(snapshot),
+            btc_position(0.0, 0.0),
+            vec![
+                btc_exchange_order(
+                    "live-1",
+                    "unexpected-live-1",
+                    Side::Buy,
+                    94.5,
+                    0.25,
+                    0.0,
+                    OrderStatus::New,
+                ),
+                btc_exchange_order(
+                    "live-2",
+                    "unexpected-live-2",
+                    Side::Buy,
+                    94.6,
+                    0.25,
+                    0.0,
+                    OrderStatus::New,
+                ),
+            ],
+            test_budget(),
+            Duration::from_millis(50),
+        )
+        .await;
+
+        let RuntimeHandles {
+            market_task,
+            user_task,
+            effect_task,
+            recovery_task,
+        } = fixture.runtime.start().await.unwrap();
+        market_task.abort();
+        let _ = market_task.await;
+        effect_task.abort();
+        let _ = effect_task.await;
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.executor_state.recovery_anomaly.as_ref()
+                == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+        })
+        .await;
+
+        wait_until(|| fixture.exchange.canceled_order_ids.lock().unwrap().len() >= 2).await;
+        assert_eq!(
+            fixture.exchange.canceled_order_ids.lock().unwrap().as_slice(),
+            ["live-1", "live-2"]
+        );
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.executor_state.recovery_anomaly.as_ref().is_none()
+        })
+        .await;
+        assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
+
+        recovery_task.abort();
+        let _ = recovery_task.await;
+        user_task.abort();
+        let _ = user_task.await;
+    }
+
+    #[tokio::test]
     async fn background_health_check_marks_market_data_stale_without_follow_up_events() {
         let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
         let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
@@ -3035,6 +3193,7 @@ mod tests {
             vec![],
             test_budget(),
             Duration::from_millis(50),
+            Duration::from_secs(5),
             clock.clone() as Arc<dyn ClockPort>,
         )
         .await;
@@ -3309,6 +3468,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_without_restart() {
+        let fixture = runtime_fixture_with_intervals(
+            None,
+            btc_position(0.0, 0.0),
+            vec![],
+            test_budget(),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+        )
+        .await;
+        let handles = fixture.runtime.start().await.unwrap();
+
+        fixture.exchange.set_open_orders(vec![btc_exchange_order(
+            "live-1",
+            "unexpected-live-1",
+            Side::Buy,
+            94.5,
+            0.25,
+            0.0,
+            OrderStatus::New,
+        )]);
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.executor_state.recovery_anomaly.as_ref()
+                == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+        })
+        .await;
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
@@ -3370,12 +3561,13 @@ mod tests {
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
     ) -> RuntimeFixture {
-        runtime_fixture_with_recovery_retry_interval(
+        runtime_fixture_with_intervals(
             restored_snapshot,
             position,
             open_orders,
             budget,
             Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .await
     }
@@ -3387,12 +3579,32 @@ mod tests {
         budget: CapacityBudget,
         recovery_retry_interval: Duration,
     ) -> RuntimeFixture {
+        runtime_fixture_with_intervals(
+            restored_snapshot,
+            position,
+            open_orders,
+            budget,
+            recovery_retry_interval,
+            Duration::from_secs(5),
+        )
+        .await
+    }
+
+    async fn runtime_fixture_with_intervals(
+        restored_snapshot: Option<TrackSnapshot>,
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        budget: CapacityBudget,
+        recovery_retry_interval: Duration,
+        audit_interval: Duration,
+    ) -> RuntimeFixture {
         runtime_fixture_with_clock_and_recovery_retry_interval(
             restored_snapshot,
             position,
             open_orders,
             budget,
             recovery_retry_interval,
+            audit_interval,
             Arc::new(FixedClock(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
             )),
@@ -3406,6 +3618,7 @@ mod tests {
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
         recovery_retry_interval: Duration,
+        audit_interval: Duration,
         clock: Arc<dyn ClockPort>,
     ) -> RuntimeFixture {
         let exchange = Arc::new(FakeExchange::new(position, open_orders));
@@ -3449,11 +3662,12 @@ mod tests {
         );
 
         RuntimeFixture {
-            runtime: ServerRuntime::with_recovery_retry_interval(
+            runtime: ServerRuntime::with_reconcile_intervals(
                 state.clone(),
                 exchange.clone() as Arc<dyn ExchangePort>,
                 market_data as Arc<dyn MarketDataPort>,
                 recovery_retry_interval,
+                audit_interval,
             ),
             state,
             exchange,
@@ -3963,6 +4177,10 @@ mod tests {
             self.open_orders_failures_remaining
                 .store(count, Ordering::SeqCst);
         }
+
+        fn set_open_orders(&self, open_orders: Vec<ExchangeOrder>) {
+            *self.open_orders.lock().unwrap() = open_orders;
+        }
     }
 
     #[async_trait::async_trait]
@@ -3994,6 +4212,10 @@ mod tests {
             if let Some(error) = self.cancel_order_error.lock().unwrap().clone() {
                 return Err(anyhow!(error));
             }
+            self.open_orders
+                .lock()
+                .unwrap()
+                .retain(|order| order.order_id != order_id);
             Ok(())
         }
 
