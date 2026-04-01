@@ -57,13 +57,13 @@ git commit -m "fix(binance): harden signed request time sync"
 - Modify: `exchanges/binance/src/rest.rs`
 - Modify: `docs/superpowers/plans/2026-04-01-binance-signed-time-sync-hardening.md`
 
-- [ ] **Step 1: 补充日志与错误上下文**
+- [x] **Step 1: 补充日志与错误上下文**
 
 要求：
 - `request GET ... failed` 需要保留足够上下文，能区分 `-1021`、网络错误、反序列化错误
 - 不泄露 API key / secret / signature
 
-- [ ] **Step 2: 运行完整验证**
+- [x] **Step 2: 运行完整验证**
 
 Run:
 - `cargo test -p poise-binance -- --nocapture`
@@ -73,6 +73,11 @@ Run:
 Expected:
 - Binance crate 全绿
 - server 相关恢复路径测试不回归
+
+已完成：
+- `cargo test -p poise-binance -- --nocapture`
+- `cargo test -p poise-server runtime::tests:: -- --nocapture`
+- `cargo test -p poise-server effect_worker::tests:: -- --nocapture`
 
 - [ ] **Step 3: 更新任务清单并提交 Task 2**
 

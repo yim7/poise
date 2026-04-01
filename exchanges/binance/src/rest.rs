@@ -296,10 +296,17 @@ impl BinanceRestClient {
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    return response
-                        .json::<T>()
+                    let status = response.status();
+                    let body = response
+                        .text()
                         .await
-                        .with_context(|| format!("failed to deserialize response for {path}"));
+                        .with_context(|| format!("failed to read response body for {path}"))?;
+                    return serde_json::from_str::<T>(&body).with_context(|| {
+                        format!(
+                            "failed to deserialize response for {path} with status {status}: {}",
+                            body_preview(&body)
+                        )
+                    });
                 }
                 Ok(response) => {
                     let status = response.status();
@@ -513,6 +520,18 @@ fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 
 fn retry_delay(retry_after: Option<Duration>, attempt: usize) -> Duration {
     retry_after.unwrap_or_else(|| Duration::from_millis(50 * (1_u64 << attempt)))
+}
+
+fn body_preview(body: &str) -> String {
+    const BODY_PREVIEW_LIMIT: usize = 256;
+    if body.len() <= BODY_PREVIEW_LIMIT {
+        format!("response body `{body}`")
+    } else {
+        format!(
+            "response body `{}...`",
+            &body[..BODY_PREVIEW_LIMIT]
+        )
+    }
 }
 
 fn is_timestamp_out_of_window(status: StatusCode, body: &str) -> bool {
@@ -902,6 +921,28 @@ mod tests {
             "request should complete without external timeout"
         );
         assert!(result.unwrap().is_err(), "request should fail with timeout");
+    }
+
+    #[tokio::test]
+    async fn deserialize_failure_includes_response_body_preview() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"unexpected":"payload","detail":"not-an-open-order-array"}"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let error = client.get_open_orders("BTCUSDT").await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("failed to deserialize response for /fapi/v1/openOrders"));
+        assert!(message.contains("unexpected"));
+        assert!(message.contains("not-an-open-order-array"));
     }
 
     #[derive(Debug, Clone)]
