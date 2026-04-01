@@ -269,7 +269,7 @@ impl BinanceRestClient {
                 && matches!(auth_mode, AuthMode::Signed)
                 && self.should_refresh_time_sync_before_signed_request()
             {
-                self.sync_server_time_offset().await?;
+                let _ = self.sync_server_time_offset().await;
             }
             let mut request_params = params.clone();
             if matches!(auth_mode, AuthMode::Signed) {
@@ -527,9 +527,14 @@ fn body_preview(body: &str) -> String {
     if body.len() <= BODY_PREVIEW_LIMIT {
         format!("response body `{body}`")
     } else {
+        let preview = body
+            .char_indices()
+            .take_while(|(index, _)| *index < BODY_PREVIEW_LIMIT)
+            .map(|(_, ch)| ch)
+            .collect::<String>();
         format!(
             "response body `{}...`",
-            &body[..BODY_PREVIEW_LIMIT]
+            preview
         )
     }
 }
@@ -822,6 +827,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continues_signed_request_when_stale_time_refresh_fails() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#"{"serverTime":1700000005000}"#),
+            MockResponse::json(500, r#"{"code":-1000,"msg":"temporary"}"#),
+            MockResponse::json(500, r#"{"code":-1000,"msg":"temporary"}"#),
+            MockResponse::json(500, r#"{"code":-1000,"msg":"temporary"}"#),
+            MockResponse::json(
+                200,
+                r#"[{
+                    "symbol": "BTCUSDT",
+                    "orderId": 1008,
+                    "clientOrderId": "grid-open-010",
+                    "side": "SELL",
+                    "price": "64040.1",
+                    "origQty": "0.055",
+                    "status": "NEW"
+                }]"#,
+            ),
+        ])
+        .await;
+        let next_timestamp = Arc::new(AtomicI64::new(1_700_000_000_000));
+        let timestamp_provider = {
+            let next_timestamp = Arc::clone(&next_timestamp);
+            Arc::new(move || next_timestamp.load(Ordering::SeqCst))
+        };
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            timestamp_provider,
+        );
+
+        let _ = client.get_server_time().await.unwrap();
+        next_timestamp.store(1_700_000_070_000, Ordering::SeqCst);
+
+        let orders = client.get_open_orders("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(orders.len(), 1);
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].path, "/fapi/v1/time");
+        assert_eq!(requests[1].path, "/fapi/v1/time");
+        assert_eq!(requests[2].path, "/fapi/v1/time");
+        assert_eq!(requests[3].path, "/fapi/v1/time");
+        assert!(requests[4].path.starts_with("/fapi/v1/openOrders?symbol=BTCUSDT"));
+        assert!(requests[4].path.contains("timestamp=1700000075000"));
+    }
+
+    #[tokio::test]
     async fn new_order_serializes_price_and_quantity_without_float_noise() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
@@ -943,6 +997,16 @@ mod tests {
         assert!(message.contains("failed to deserialize response for /fapi/v1/openOrders"));
         assert!(message.contains("unexpected"));
         assert!(message.contains("not-an-open-order-array"));
+    }
+
+    #[test]
+    fn body_preview_truncates_on_valid_utf8_boundary() {
+        let body = format!("{}中payload", "a".repeat(255));
+
+        let preview = body_preview(&body);
+
+        assert!(preview.starts_with("response body `"));
+        assert!(preview.ends_with("...`"));
     }
 
     #[derive(Debug, Clone)]
