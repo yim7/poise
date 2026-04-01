@@ -3,6 +3,7 @@ mod config;
 mod effect_worker;
 mod http;
 mod notifications;
+mod order_outcome;
 #[allow(dead_code)]
 mod projector;
 #[allow(dead_code)]

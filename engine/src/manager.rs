@@ -112,6 +112,10 @@ impl TrackManager {
         id: &TrackId,
         observation: TrackObservation,
     ) -> Result<TrackTransition> {
+        if let TrackObservation::Order(observation) = observation {
+            return self.observe_order_update(id, observation).map(|(transition, _)| transition);
+        }
+
         let (events, effects) = match observation {
             TrackObservation::Market(observation) => self.observe_market(id, observation)?,
             TrackObservation::Position(observation) => {
@@ -121,17 +125,25 @@ impl TrackManager {
                     None => (vec![], vec![]),
                 }
             }
-            TrackObservation::Order(observation) => {
-                let should_reconcile = observation.status.should_reconcile_after_order_update();
-                self.observe_order(id, observation)?;
-                match (should_reconcile, self.cached_reference_price(id)?) {
-                    (true, Some(reference_price)) => self.reconcile_track(id, reference_price)?,
-                    _ => (vec![], vec![]),
-                }
-            }
+            TrackObservation::Order(_) => unreachable!("order observation handled above"),
         };
 
         self.transition_for(id, events, effects)
+    }
+
+    pub fn observe_order_update(
+        &mut self,
+        id: &TrackId,
+        observation: OrderObservation,
+    ) -> Result<(TrackTransition, executor::OrderUpdateAbsorbResult)> {
+        let should_reconcile = observation.status.should_reconcile_after_order_update();
+        let absorb_result = self.observe_order(id, observation)?;
+        let (events, effects) = match (should_reconcile, self.cached_reference_price(id)?) {
+            (true, Some(reference_price)) => self.reconcile_track(id, reference_price)?,
+            _ => (vec![], vec![]),
+        };
+
+        Ok((self.transition_for(id, events, effects)?, absorb_result))
     }
 
     pub fn sync_exchange_state(
@@ -579,7 +591,11 @@ impl TrackManager {
         Ok(())
     }
 
-    fn observe_order(&mut self, id: &TrackId, observation: OrderObservation) -> Result<()> {
+    fn observe_order(
+        &mut self,
+        id: &TrackId,
+        observation: OrderObservation,
+    ) -> Result<executor::OrderUpdateAbsorbResult> {
         let today = self.clock.now().date_naive();
         let track = self
             .tracks
@@ -596,16 +612,17 @@ impl TrackManager {
         }
 
         if track.executor_state.recovery_anomaly.is_some() {
-            return Ok(());
+            return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
         }
 
-        let next_state = executor::apply_order_observation(&track.executor_state, &observation);
-        if next_state != track.executor_state {
-            track.executor_state = next_state;
+        let applied =
+            executor::apply_order_observation_with_result(&track.executor_state, &observation);
+        if applied.state != track.executor_state {
+            track.executor_state = applied.state;
             track.replacement_gate_reason = None;
         }
 
-        Ok(())
+        Ok(applied.absorb_result)
     }
 
     fn apply_exchange_state_sync(

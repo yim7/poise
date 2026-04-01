@@ -10,6 +10,19 @@ pub enum SubmitReceiptResolution {
     Unmatched,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderUpdateAbsorbResult {
+    Applied,
+    DuplicateReplay,
+    Unabsorbed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderObservationApplication {
+    pub state: ExecutorState,
+    pub absorb_result: OrderUpdateAbsorbResult,
+}
+
 pub fn record_submit_request(
     previous_state: &ExecutorState,
     request: &OrderRequest,
@@ -105,18 +118,39 @@ pub fn apply_order_observation(
     previous_state: &ExecutorState,
     observation: &OrderObservation,
 ) -> ExecutorState {
+    apply_order_observation_with_result(previous_state, observation).state
+}
+
+pub fn apply_order_observation_with_result(
+    previous_state: &ExecutorState,
+    observation: &OrderObservation,
+) -> OrderObservationApplication {
     if observation.status.keeps_working_order() {
-        let Some(slot) = previous_state.slots.iter().find(|slot| {
-            slots::slot_matches_order(
-                slot,
-                &observation.client_order_id,
-                Some(observation.order_id.as_str()),
-            )
-        }) else {
-            return previous_state.clone();
+        let matching_indexes = previous_state
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slots::slot_matches_order(
+                    slot,
+                    &observation.client_order_id,
+                    Some(observation.order_id.as_str()),
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [slot_index] = matching_indexes.as_slice() else {
+            return OrderObservationApplication {
+                state: previous_state.clone(),
+                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
+            };
         };
+        let slot = &previous_state.slots[*slot_index];
         let Some(existing_order) = slot.working_order.as_ref() else {
-            return previous_state.clone();
+            return OrderObservationApplication {
+                state: previous_state.clone(),
+                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
+            };
         };
 
         let mut state = previous_state.clone();
@@ -145,10 +179,37 @@ pub fn apply_order_observation(
             },
         )
         .unwrap_or_else(|| previous_state.slots.clone());
-        return state;
+        let absorb_result = if state == *previous_state {
+            OrderUpdateAbsorbResult::DuplicateReplay
+        } else {
+            OrderUpdateAbsorbResult::Applied
+        };
+        return OrderObservationApplication {
+            state,
+            absorb_result,
+        };
     }
 
     if observation.status.clears_working_order() {
+        let matching_indexes = previous_state
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slots::slot_matches_order(
+                    slot,
+                    &observation.client_order_id,
+                    Some(observation.order_id.as_str()),
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if matching_indexes.len() != 1 {
+            return OrderObservationApplication {
+                state: previous_state.clone(),
+                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
+            };
+        }
         let Some(slots) = slots::clear_matching_slots(&previous_state.slots, |slot| {
             slots::slot_matches_order(
                 slot,
@@ -156,14 +217,23 @@ pub fn apply_order_observation(
                 Some(observation.order_id.as_str()),
             )
         }) else {
-            return previous_state.clone();
+            return OrderObservationApplication {
+                state: previous_state.clone(),
+                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
+            };
         };
         let mut state = previous_state.clone();
         state.slots = slots;
-        return state;
+        return OrderObservationApplication {
+            state,
+            absorb_result: OrderUpdateAbsorbResult::Applied,
+        };
     }
 
-    previous_state.clone()
+    OrderObservationApplication {
+        state: previous_state.clone(),
+        absorb_result: OrderUpdateAbsorbResult::DuplicateReplay,
+    }
 }
 
 pub fn clear_pending_submit(
@@ -203,6 +273,86 @@ pub fn clear_all_working_orders(previous_state: &ExecutorState) -> ExecutorState
     let mut state = previous_state.clone();
     state.slots = slots;
     state
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use chrono::Utc;
+    use poise_core::types::{Exposure, Side};
+
+    use super::*;
+    use crate::executor::{OrderRole, OrderSlot};
+    use crate::runtime::{ExecutionStats, SlotState};
+
+    fn working_state() -> ExecutorState {
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        ExecutorState {
+            mode: crate::executor::ExecutionMode::Passive,
+            inventory_gap: Exposure(4.0),
+            gap_started_at: Some(now),
+            last_reprice_at: Some(now),
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    target_exposure: Exposure(4.0),
+                    status: OrderStatus::New,
+                    role: OrderRole::IncreaseInventory,
+                }),
+            }],
+            last_execution_reason: None,
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(now),
+        }
+    }
+
+    #[test]
+    fn keeps_working_update_without_matching_slot_is_unabsorbed() {
+        let previous_state = working_state();
+
+        let applied = apply_order_observation_with_result(
+            &previous_state,
+            &OrderObservation {
+                order_id: "unknown-order".into(),
+                client_order_id: "unknown-client".into(),
+                side: Side::Buy,
+                price: 95.0,
+                quantity: 15.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            },
+        );
+
+        assert_eq!(applied.state, previous_state);
+        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Unabsorbed);
+    }
+
+    #[test]
+    fn identical_working_update_is_duplicate_replay() {
+        let previous_state = working_state();
+
+        let applied = apply_order_observation_with_result(
+            &previous_state,
+            &OrderObservation {
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 95.0,
+                quantity: 15.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            },
+        );
+
+        assert_eq!(applied.state, previous_state);
+        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::DuplicateReplay);
+    }
 }
 
 pub(super) fn submit_pending_slot(

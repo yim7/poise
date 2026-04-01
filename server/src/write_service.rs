@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
 use poise_engine::command::TrackCommand;
-use poise_engine::executor::{OrderSlot, SubmitRecoveryPlan, SubmitRecoveryResolution};
+use poise_engine::executor::{
+    OrderSlot, OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution,
+};
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
@@ -127,6 +129,16 @@ impl TransitionResult for TrackTransition {
     }
 }
 
+impl TransitionResult for (TrackTransition, OrderUpdateAbsorbResult) {
+    fn domain_events(&self) -> &[DomainEvent] {
+        self.0.domain_events()
+    }
+
+    fn effects(&self) -> &[TrackEffect] {
+        self.0.effects()
+    }
+}
+
 impl TransitionResult for SubmitRecoveryPlan {
     fn domain_events(&self) -> &[DomainEvent] {
         &[]
@@ -230,16 +242,13 @@ impl TrackWriteService {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn observe_order(
+    pub async fn observe_order_with_absorb_result(
         &self,
         id: &str,
         observation: OrderObservation,
-    ) -> Result<TrackTransition> {
+    ) -> Result<(TrackTransition, OrderUpdateAbsorbResult)> {
         self.mutate_track(id, |manager| {
-            manager.observe(
-                &TrackId::new(id),
-                TrackObservation::Order(observation.clone()),
-            )
+            manager.observe_order_update(&TrackId::new(id), observation.clone())
         })
         .await
         .map_err(anyhow::Error::new)

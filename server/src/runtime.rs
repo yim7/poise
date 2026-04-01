@@ -15,6 +15,9 @@ use tokio::time::{Instant, MissedTickBehavior, sleep};
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
 use crate::notifications::TrackInternalNotification;
+use crate::order_outcome::{
+    ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
+};
 use crate::write_service::TrackMutationError;
 
 #[derive(Clone)]
@@ -187,7 +190,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                apply_user_data_event(&self.state, &track_id, event)
+                apply_user_data_event(&self.state, &self.exchange, &track_id, event)
                     .await
                     .map_err(mutate_error)?;
             }
@@ -380,6 +383,7 @@ impl ServerRuntime {
         mut shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
         let state = self.state.clone();
+        let exchange = Arc::clone(&self.exchange);
 
         tokio::spawn(async move {
             loop {
@@ -415,7 +419,9 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                if let Err(error) = apply_user_data_event(&state, &track_id, event).await {
+                if let Err(error) =
+                    apply_user_data_event(&state, &exchange, &track_id, event).await
+                {
                     tracing::warn!(
                         "failed to apply user data update for {}: {}",
                         instrument.symbol,
@@ -460,9 +466,11 @@ where
 
 async fn apply_user_data_event(
     state: &ServerState,
+    exchange: &Arc<dyn ExchangePort>,
     track_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), TrackMutationError> {
+    let instrument = event.instrument().clone();
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
@@ -472,15 +480,45 @@ async fn apply_user_data_event(
                 .map_err(preserve_track_mutation_error)?;
         }
         UserDataPayload::OrderUpdate(order) => {
-            let _ = state
+            let (_, absorb_result): (_, poise_engine::executor::OrderUpdateAbsorbResult) = state
                 .write_service
-                .observe_order(track_id, order_observation(&order))
+                .observe_order_with_absorb_result(track_id, order_observation(&order))
                 .await
                 .map_err(preserve_track_mutation_error)?;
+            if absorb_result == poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed {
+                enqueue_reconcile_request(
+                    state,
+                    exchange,
+                    ReconcileRequest {
+                        track_id: track_id.to_string(),
+                        reason: ReconcileReason::UnabsorbedOrderUpdate,
+                    },
+                    &instrument,
+                )
+                .await?;
+            }
         }
     }
 
     Ok(())
+}
+
+pub(crate) async fn enqueue_reconcile_request(
+    state: &ServerState,
+    exchange: &Arc<dyn ExchangePort>,
+    request: ReconcileRequest,
+    instrument: &poise_engine::track::Instrument,
+) -> std::result::Result<ReconcileExecution, TrackMutationError> {
+    let execution = reconcile_execution(&request.track_id, vec![request.reason]);
+    sync_exchange_state_from_exchange(
+        state,
+        exchange,
+        &request.track_id,
+        instrument,
+        ExchangeSyncMode::RecoverAndReconcile,
+    )
+    .await?;
+    Ok(execution)
 }
 
 async fn sync_exchange_state_from_exchange(
@@ -498,6 +536,7 @@ async fn sync_exchange_state_from_exchange(
         .get_open_orders(instrument)
         .await
         .map_err(TrackMutationError::Persistence)?;
+
     if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
         let _ = state
             .write_service
@@ -3144,6 +3183,7 @@ mod tests {
 
         let error = super::apply_user_data_event(
             &state,
+            &(Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![])) as Arc<dyn ExchangePort>),
             "missing-track",
             position_event_at(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 1).unwrap(),
@@ -3230,6 +3270,40 @@ mod tests {
             current_instance(&fixture.state).await.target_exposure,
             Some(Exposure(0.0))
         );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn unabsorbed_order_update_triggers_immediate_reconcile() {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+        let handles = fixture.runtime.start().await.unwrap();
+        let position_calls_before = fixture.exchange.get_position_calls.load(Ordering::SeqCst);
+        let open_orders_calls_before = fixture.exchange.get_open_orders_calls.load(Ordering::SeqCst);
+
+        fixture
+            .user_sender
+            .send(order_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                btc_exchange_order(
+                    "untracked-live-order",
+                    "untracked-live-order",
+                    Side::Buy,
+                    95.0,
+                    1.0,
+                    0.0,
+                    OrderStatus::New,
+                ),
+            ))
+            .await
+            .unwrap();
+
+        wait_until(|| {
+            fixture.exchange.get_position_calls.load(Ordering::SeqCst) > position_calls_before
+                && fixture.exchange.get_open_orders_calls.load(Ordering::SeqCst)
+                    > open_orders_calls_before
+        })
+        .await;
 
         shutdown(handles).await;
     }

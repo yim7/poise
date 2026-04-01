@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{ExchangePort, OrderRequest, PersistedTrackEffect};
 use poise_engine::track::Instrument;
 use poise_engine::transition::TrackEffect;
@@ -12,6 +11,11 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::assembly::ServerState;
+use crate::order_outcome::{
+    OutcomeClass, ReconcileRequest, classify_cancel_error,
+    classify_submit_receipt_writeback_error,
+};
+use crate::runtime;
 
 #[derive(Clone)]
 pub struct EffectWorker {
@@ -173,13 +177,19 @@ impl EffectWorker {
                     )
                     .await
                 {
-                    if is_unmatched_submit_receipt_error(&error) {
-                        self
-                            .resync_exchange_state_after_unmatched_submit_receipt(
-                                persisted.track_id.as_str(),
-                                &request.instrument,
-                            )
-                            .await?;
+                    if let OutcomeClass::OutcomeUnknown(reason) =
+                        classify_submit_receipt_writeback_error(&error)
+                    {
+                        runtime::enqueue_reconcile_request(
+                            &self.state,
+                            &self.exchange,
+                            ReconcileRequest {
+                                track_id: persisted.track_id.as_str().to_string(),
+                                reason,
+                            },
+                            &request.instrument,
+                        )
+                        .await?;
                     }
                     self.state
                         .write_service
@@ -253,6 +263,7 @@ impl EffectWorker {
         persisted: &PersistedTrackEffect,
         cancellation: Cancellation,
     ) -> Result<()> {
+        let instrument = cancellation.instrument().clone();
         let result = match cancellation {
             Cancellation::One {
                 ref instrument,
@@ -300,6 +311,18 @@ impl EffectWorker {
                 Ok(())
             }
             Err(error) => {
+                if let OutcomeClass::OutcomeUnknown(reason) = classify_cancel_error(&error) {
+                    runtime::enqueue_reconcile_request(
+                        &self.state,
+                        &self.exchange,
+                        ReconcileRequest {
+                            track_id: persisted.track_id.as_str().to_string(),
+                            reason,
+                        },
+                        &instrument,
+                    )
+                    .await?;
+                }
                 self.state
                     .write_service
                     .complete_effect_failed(
@@ -313,43 +336,6 @@ impl EffectWorker {
         }
     }
 
-    async fn resync_exchange_state_after_unmatched_submit_receipt(
-        &self,
-        track_id: &str,
-        instrument: &Instrument,
-    ) -> Result<()> {
-        let position = self.exchange.get_position(instrument).await?;
-        let open_orders = self.exchange.get_open_orders(instrument).await?;
-        self.state
-            .write_service
-            .sync_exchange_state(
-                track_id,
-                PositionObservation {
-                    qty: position.qty,
-                    unrealized_pnl: position.unrealized_pnl,
-                },
-                open_orders
-                    .iter()
-                    .map(|order| OrderObservation {
-                        order_id: order.order_id.clone(),
-                        client_order_id: order.client_order_id.clone(),
-                        side: order.side,
-                        price: order.price,
-                        quantity: order.qty,
-                        realized_pnl: order.realized_pnl,
-                        status: order.status,
-                    })
-                    .collect(),
-            )
-            .await?;
-        Ok(())
-    }
-}
-
-fn is_unmatched_submit_receipt_error(error: &anyhow::Error) -> bool {
-    error
-        .to_string()
-        .contains("submit receipt did not match executor slot")
 }
 
 enum Cancellation {
@@ -360,6 +346,14 @@ enum Cancellation {
     All {
         instrument: poise_engine::track::Instrument,
     },
+}
+
+impl Cancellation {
+    fn instrument(&self) -> &Instrument {
+        match self {
+            Self::One { instrument, .. } | Self::All { instrument } => instrument,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +592,58 @@ mod tests {
             .next()
             .expect("cancel effect should remain persisted");
         assert_eq!(effect.status, EffectStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_failed() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+            "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
+        ));
+        exchange.set_position_qty(15.0).await;
+        let state = test_state(repository.clone(), exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "btc-core:batch:0".into(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: TrackEffect::CancelOrder {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        let effect = repository
+            .list_all_effects()
+            .await
+            .into_iter()
+            .next()
+            .expect("cancel effect should remain persisted");
+        assert_eq!(effect.status, EffectStatus::Failed);
+        assert_eq!(exchange.get_position_calls(), 1);
+        assert_eq!(exchange.get_open_orders_calls(), 1);
     }
 
     #[tokio::test]
@@ -1063,6 +1109,7 @@ mod tests {
         effects: AsyncMutex<Vec<OrderRequest>>,
         submit_started: Option<Arc<Notify>>,
         release_submit: Option<Arc<Notify>>,
+        cancel_order_error: Option<String>,
         position: AsyncMutex<Position>,
         open_orders: AsyncMutex<Vec<ExchangeOrder>>,
         get_position_calls: AtomicUsize,
@@ -1075,6 +1122,7 @@ mod tests {
                 effects: AsyncMutex::default(),
                 submit_started: None,
                 release_submit: None,
+                cancel_order_error: None,
                 position: AsyncMutex::new(Position {
                     instrument: btc_instrument(),
                     qty: 0.0,
@@ -1091,6 +1139,13 @@ mod tests {
             Self {
                 submit_started: Some(submit_started),
                 release_submit: Some(release_submit),
+                ..Self::default()
+            }
+        }
+
+        fn with_cancel_order_error(message: &str) -> Self {
+            Self {
+                cancel_order_error: Some(message.to_string()),
                 ..Self::default()
             }
         }
@@ -1133,6 +1188,9 @@ mod tests {
         }
 
         async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+            if let Some(message) = &self.cancel_order_error {
+                return Err(anyhow!(message.clone()));
+            }
             Ok(())
         }
 
