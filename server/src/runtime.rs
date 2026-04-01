@@ -13,7 +13,7 @@ use poise_engine::ports::{
 };
 use poise_engine::runtime::AccountCapacityConstraint;
 use poise_engine::track::{Instrument, TrackId};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, sleep};
 
@@ -128,6 +128,26 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 struct RecoveryTrackedGrid {
     instrument: poise_engine::track::Instrument,
     next_retry_at: Instant,
+}
+
+#[derive(Default)]
+pub struct TrackReconcileGuards {
+    locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl TrackReconcileGuards {
+    pub async fn lock(&self, track_id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(track_id.to_string())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+
+        lock.lock_owned().await
+    }
 }
 
 impl ServerRuntime {
@@ -674,6 +694,7 @@ async fn sync_exchange_state_from_exchange(
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
+    let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
     let snapshot = state
         .state_repository
         .load_track_state(track_id)
@@ -848,8 +869,6 @@ fn order_observation(order: &ExchangeOrder) -> OrderObservation {
 mod tests {
     use std::collections::HashMap;
     use std::future::Future;
-    use std::io;
-    use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -866,10 +885,10 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus,
-        PersistedTrackEffect, Position, PriceTick, StateRepositoryPort, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort, TrackSnapshot, UserDataEvent,
-        UserDataPayload,
+        ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort, OrderReceipt,
+        OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
+        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
+        TrackSnapshot, UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -879,7 +898,6 @@ mod tests {
     use poise_engine::transition::TrackEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
-    use tracing_subscriber::fmt::MakeWriter;
 
     use crate::assembly::{ServerState, build_server_state};
     use crate::effect_worker::EffectWorker;
@@ -2268,32 +2286,8 @@ mod tests {
         task.await.unwrap().unwrap();
     }
 
-    #[derive(Clone, Default)]
-    struct SharedLogBuffer(StdArc<Mutex<Vec<u8>>>);
-
-    struct SharedLogWriter(StdArc<Mutex<Vec<u8>>>);
-
-    impl<'a> MakeWriter<'a> for SharedLogBuffer {
-        type Writer = SharedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriter(StdArc::clone(&self.0))
-        }
-    }
-
-    impl io::Write for SharedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
-    async fn effect_worker_reports_missing_loaded_track_for_effect_writeback() {
+    async fn effect_worker_keeps_effect_pending_when_loaded_track_is_missing_for_writeback() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
         persistence
@@ -2320,7 +2314,7 @@ mod tests {
         let manager = TrackManager::new(clock);
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence.clone();
         let state = build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
@@ -2336,19 +2330,13 @@ mod tests {
             exchange as Arc<dyn ExchangePort>,
             Duration::from_millis(10),
         );
-        let logs = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(logs.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
 
         worker.run_once().await.unwrap();
 
-        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-        assert!(captured.contains("loaded-track invariant violated"));
-        assert!(!captured.contains("submit order failed"));
+        let persisted = persistence.all_effects().await;
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, EffectStatus::Pending);
+        assert_eq!(persisted[0].last_error, None);
     }
 
     #[tokio::test]
@@ -3824,6 +3812,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immediate_reconcile_requests_are_single_flight_per_track() {
+        let get_position_started = Arc::new(Notify::new());
+        let release_get_position = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_get_position(
+            btc_position(0.0, 0.0),
+            vec![],
+            get_position_started.clone(),
+            release_get_position.clone(),
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence,
+            None,
+            test_budget(),
+        )
+        .await;
+        let instrument = btc_instrument();
+
+        let first = tokio::spawn({
+            let state = state.clone();
+            let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+            let instrument = instrument.clone();
+            async move {
+                super::enqueue_reconcile_request(
+                    &state,
+                    &exchange,
+                    crate::order_outcome::ReconcileRequest {
+                        track_id: "BTCUSDT".into(),
+                        reason: crate::order_outcome::ReconcileReason::SubmitOutcomeUnknown,
+                    },
+                    &instrument,
+                )
+                .await
+            }
+        });
+
+        get_position_started.notified().await;
+
+        let second = tokio::spawn({
+            let state = state.clone();
+            let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+            let instrument = instrument.clone();
+            async move {
+                super::enqueue_reconcile_request(
+                    &state,
+                    &exchange,
+                    crate::order_outcome::ReconcileRequest {
+                        track_id: "BTCUSDT".into(),
+                        reason: crate::order_outcome::ReconcileReason::CancelOutcomeUnknown,
+                    },
+                    &instrument,
+                )
+                .await
+            }
+        });
+
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
+
+        release_get_position.notify_waiters();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_without_restart() {
         let fixture = runtime_fixture_with_intervals(
             None,
@@ -4357,6 +4411,7 @@ mod tests {
                 state,
                 working_order: Some(order),
             }],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: None,
             recovery_anomaly: None,
             stats: ExecutionStats {
@@ -4455,6 +4510,8 @@ mod tests {
         sequence: AtomicUsize,
         submit_started: Option<Arc<Notify>>,
         release_submit: Option<Arc<Notify>>,
+        get_position_started: Option<Arc<Notify>>,
+        release_get_position: Mutex<Option<Arc<Notify>>>,
     }
 
     impl FakeExchange {
@@ -4489,6 +4546,8 @@ mod tests {
                 sequence: AtomicUsize::new(1),
                 submit_started: None,
                 release_submit: None,
+                get_position_started: None,
+                release_get_position: Mutex::new(None),
             }
         }
 
@@ -4521,6 +4580,18 @@ mod tests {
             let mut exchange = Self::new(position, open_orders);
             exchange.submit_started = Some(submit_started);
             exchange.release_submit = Some(release_submit);
+            exchange
+        }
+
+        fn with_blocked_get_position(
+            position: Position,
+            open_orders: Vec<ExchangeOrder>,
+            get_position_started: Arc<Notify>,
+            release_get_position: Arc<Notify>,
+        ) -> Self {
+            let mut exchange = Self::new(position, open_orders);
+            exchange.get_position_started = Some(get_position_started);
+            *exchange.release_get_position.lock().unwrap() = Some(release_get_position);
             exchange
         }
 
@@ -4589,6 +4660,13 @@ mod tests {
 
         async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(notify) = &self.get_position_started {
+                notify.notify_waiters();
+            }
+            let release_notify = { self.release_get_position.lock().unwrap().take() };
+            if let Some(notify) = release_notify {
+                notify.notified().await;
+            }
             if self.position_failures_remaining.load(Ordering::SeqCst) > 0 {
                 self.position_failures_remaining
                     .fetch_sub(1, Ordering::SeqCst);
@@ -4639,6 +4717,7 @@ mod tests {
     struct MemoryPersistence {
         snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
+        follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AtomicUsize,
         save_transition_count: AtomicUsize,
     }
@@ -4734,6 +4813,47 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            let entry = stored.entry(track_id.clone()).or_default();
+            if !entry.contains(request) {
+                entry.push(request.clone());
+            }
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
+            Ok(self
+                .follow_up_retirements
+                .lock()
+                .await
+                .get(track_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            if let Some(existing) = stored.get_mut(track_id) {
+                existing.retain(|candidate| candidate != request);
+                if existing.is_empty() {
+                    stored.remove(track_id);
+                }
+            }
+            Ok(())
+        }
     }
 
     impl MemoryPersistence {
@@ -4810,6 +4930,7 @@ mod tests {
     struct FailOnReceiptPersistence {
         snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
+        follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AtomicUsize,
     }
 
@@ -4914,6 +5035,47 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            let entry = stored.entry(track_id.clone()).or_default();
+            if !entry.contains(request) {
+                entry.push(request.clone());
+            }
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
+            Ok(self
+                .follow_up_retirements
+                .lock()
+                .await
+                .get(track_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            if let Some(existing) = stored.get_mut(track_id) {
+                existing.retain(|candidate| candidate != request);
+                if existing.is_empty() {
+                    stored.remove(track_id);
+                }
+            }
+            Ok(())
+        }
     }
 
     impl FailOnReceiptPersistence {
@@ -4981,6 +5143,7 @@ mod tests {
     struct FailOnSavePersistence {
         snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
+        follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AtomicUsize,
         save_count: AtomicUsize,
         fail_on: usize,
@@ -4991,6 +5154,7 @@ mod tests {
             Self {
                 snapshots: AsyncMutex::new(HashMap::new()),
                 effects: AsyncMutex::new(Vec::new()),
+                follow_up_retirements: AsyncMutex::new(HashMap::new()),
                 next_effect_batch: AtomicUsize::new(0),
                 save_count: AtomicUsize::new(0),
                 fail_on,
@@ -5096,6 +5260,47 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
+        }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            let entry = stored.entry(track_id.clone()).or_default();
+            if !entry.contains(request) {
+                entry.push(request.clone());
+            }
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
+            Ok(self
+                .follow_up_retirements
+                .lock()
+                .await
+                .get(track_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            if let Some(existing) = stored.get_mut(track_id) {
+                existing.retain(|candidate| candidate != request);
+                if existing.is_empty() {
+                    stored.remove(track_id);
+                }
+            }
+            Ok(())
         }
     }
 

@@ -36,7 +36,10 @@ pub enum OutcomeClass {
 }
 
 pub fn classify_cancel_error(error: &Error) -> OutcomeClass {
-    let message = error.to_string();
+    classify_cancel_error_message(&error.to_string())
+}
+
+pub fn classify_cancel_error_message(message: &str) -> OutcomeClass {
     if message.contains("\"code\":-2011") && message.contains("Unknown order sent.") {
         return OutcomeClass::OutcomeUnknown(ReconcileReason::CancelOutcomeUnknown);
     }
@@ -86,6 +89,16 @@ mod tests {
 
         assert_eq!(
             classify_cancel_error(&error),
+            OutcomeClass::OutcomeUnknown(ReconcileReason::CancelOutcomeUnknown)
+        );
+    }
+
+    #[test]
+    fn classify_unknown_order_sent_message_as_cancel_outcome_unknown() {
+        assert_eq!(
+            classify_cancel_error_message(
+                "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}"
+            ),
             OutcomeClass::OutcomeUnknown(ReconcileReason::CancelOutcomeUnknown)
         );
     }

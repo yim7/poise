@@ -99,16 +99,15 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         };
     }
 
-    let receipt_backed = input
+    let receipt_backed_order_id = input
         .previous_state
         .slots
         .iter()
         .find(|slot| slots::slot_matches_order(slot, &input.request.client_order_id, None))
         .and_then(|slot| slot.working_order.as_ref())
-        .and_then(|order| order.order_id.as_ref())
-        .is_some();
+        .and_then(|order| order.order_id.clone());
 
-    if receipt_backed {
+    if let Some(receipt_backed_order_id) = receipt_backed_order_id {
         if let Some(live_order) = input.live_order {
             return SubmitRecoveryPlan {
                 resolution: SubmitRecoveryResolution::Recovered {
@@ -121,9 +120,9 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         if recording::target_exposure_reached(input.current_exposure, input.target_exposure) {
             return SubmitRecoveryPlan {
                 resolution: SubmitRecoveryResolution::Recovered {
-                    state: recording::clear_pending_submit(
+                    state: recording::clear_working_order_by_order_id(
                         input.previous_state,
-                        &input.request.client_order_id,
+                        &receipt_backed_order_id,
                     ),
                 },
                 effects: vec![],
@@ -224,6 +223,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
             gap_started_at: None,
             last_reprice_at: None,
             slots: vec![slots::empty_inventory_core_slot()],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: None,
             recovery_anomaly: None,
             stats: ExecutionStats {

@@ -18,7 +18,9 @@ use tokio::time::{Duration, sleep};
 use crate::config::Config;
 use crate::projector::TrackProjector;
 use crate::query_service::TrackQueryService;
-use crate::runtime::{AccountMarginGuardStore, RuntimeHandles, ServerRuntime};
+use crate::runtime::{
+    AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
+};
 use crate::write_service::TrackWriteService;
 #[derive(Clone)]
 pub struct ServerState {
@@ -29,6 +31,7 @@ pub struct ServerState {
     #[allow(dead_code)]
     pub projector: Arc<TrackProjector>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
+    pub reconcile_guards: Arc<TrackReconcileGuards>,
 }
 
 pub struct ServerPlatform {
@@ -337,6 +340,7 @@ pub(crate) fn build_server_state(
         query_service,
         projector,
         account_margin_guard,
+        reconcile_guards: Arc::new(TrackReconcileGuards::default()),
     }
 }
 
@@ -1230,6 +1234,29 @@ mod tests {
             _batch_id: &str,
         ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
+        }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            _track_id: &TrackId,
+            _request: &poise_engine::ports::FollowUpRetirementRequest,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            _track_id: &TrackId,
+            _request: &poise_engine::ports::FollowUpRetirementRequest,
+        ) -> Result<()> {
+            Ok(())
         }
     }
 

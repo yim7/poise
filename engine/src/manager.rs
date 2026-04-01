@@ -1195,6 +1195,7 @@ mod tests {
                     role: OrderRole::IncreaseInventory,
                 }),
             }],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
             recovery_anomaly: None,
             stats: ExecutionStats {
@@ -3196,6 +3197,7 @@ mod tests {
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
             slots: vec![empty_inventory_core_slot()],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
             recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
@@ -3243,6 +3245,7 @@ mod tests {
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
             last_reprice_at: None,
             slots: vec![empty_inventory_core_slot()],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
             recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {

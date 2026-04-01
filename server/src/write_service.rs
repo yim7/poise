@@ -12,8 +12,8 @@ use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use poise_engine::ports::{
-    EffectStatusUpdate, ExchangeOrder, OrderReceipt, OrderRequest, PersistedTrackEffect,
-    StateRepositoryPort,
+    EffectStatusUpdate, ExchangeOrder, FollowUpRetirementRequest, OrderReceipt, OrderRequest,
+    PersistedTrackEffect, StateRepositoryPort,
 };
 use poise_engine::runtime::AccountCapacityConstraint;
 use poise_engine::track::{Instrument, TrackId};
@@ -63,13 +63,6 @@ pub struct TrackInstrument {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedSubmitExecution {
     pub target_exposure: poise_core::types::Exposure,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FollowUpRetirementRequest {
-    pub batch_id: String,
-    pub blocked_sequence: u32,
-    pub closed_order_id: String,
 }
 
 #[derive(Debug)]
@@ -262,11 +255,24 @@ impl TrackWriteService {
         id: &str,
         observation: OrderObservation,
     ) -> Result<(TrackTransition, OrderUpdateAbsorbResult)> {
-        self.mutate_track(id, |manager| {
+        let result = self
+            .mutate_track(id, |manager| {
             manager.observe_order_update(&TrackId::new(id), observation.clone())
         })
         .await
-        .map_err(anyhow::Error::new)
+        .map_err(anyhow::Error::new)?;
+
+        if observation.status.clears_working_order()
+            && result.1 != OrderUpdateAbsorbResult::Unabsorbed
+        {
+            self.retry_pending_follow_up_retirements_best_effort(
+                id,
+                "terminal order observation writeback",
+            )
+            .await;
+        }
+
+        Ok(result)
     }
 
     pub async fn sync_exchange_state(
@@ -372,6 +378,13 @@ impl TrackWriteService {
         .await
         .map_err(anyhow::Error::new)?;
 
+        drop(_mutation_guard);
+        self.retry_pending_follow_up_retirements_best_effort(
+            id,
+            "exchange state sync writeback",
+        )
+        .await;
+
         Ok(transition)
     }
 
@@ -465,6 +478,13 @@ impl TrackWriteService {
         .await
         .map_err(anyhow::Error::new)?;
 
+        drop(_mutation_guard);
+        self.retry_pending_follow_up_retirements_best_effort(
+            id,
+            "cancel success writeback",
+        )
+        .await;
+
         Ok(())
     }
 
@@ -523,7 +543,7 @@ impl TrackWriteService {
                 select_replacement_submit_effect(&effects, request.blocked_sequence)
             })?;
         let Some(replacement_submit) = replacement_submit else {
-            return Ok(false);
+            return Ok(true);
         };
 
         let TrackEffect::SubmitOrder {
@@ -578,6 +598,47 @@ impl TrackWriteService {
         .map_err(anyhow::Error::new)?;
 
         Ok(true)
+    }
+
+    pub async fn request_follow_up_retirement(
+        &self,
+        id: &str,
+        request: FollowUpRetirementRequest,
+    ) -> Result<()> {
+        self.repository
+            .save_follow_up_retirement_request(&TrackId::new(id), &request)
+            .await?;
+        self.retry_pending_follow_up_retirements(id).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn retry_pending_follow_up_retirements_best_effort(
+        &self,
+        id: &str,
+        context: &str,
+    ) {
+        if let Err(error) = self.retry_pending_follow_up_retirements(id).await {
+            tracing::warn!(
+                track_id = %id,
+                "failed to retry pending follow-up retirements after {context}: {error}"
+            );
+        }
+    }
+
+    async fn retry_pending_follow_up_retirements(&self, id: &str) -> Result<()> {
+        for request in self
+            .repository
+            .list_follow_up_retirement_requests(&TrackId::new(id))
+            .await?
+        {
+            if self.retire_stale_follow_up_submit(id, &request).await? {
+                self.repository
+                    .delete_follow_up_retirement_request(&TrackId::new(id), &request)
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn prepare_submit_execution(
@@ -940,7 +1001,9 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::command::TrackCommand;
-    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, SubmitRecoveryResolution};
+    use poise_engine::executor::{
+        ExecutionMode, OrderRole, OrderSlot, OrderUpdateAbsorbResult, SubmitRecoveryResolution,
+    };
     use poise_engine::manager::{ExchangeSyncMode, TrackManager};
     use poise_engine::observation::{
         MarketObservation, OrderObservation, PositionObservation, TrackObservation,
@@ -957,6 +1020,8 @@ mod tests {
     use poise_engine::transition::TrackEffect;
     use tokio::sync::Notify;
     use tokio::time::timeout;
+
+    use crate::write_service::FollowUpRetirementRequest;
 
     use crate::notifications::TrackInternalNotification;
 
@@ -1612,6 +1677,7 @@ mod tests {
                 state,
                 working_order: Some(order),
             }],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: None,
             recovery_anomaly: None,
             stats: ExecutionStats {
@@ -2118,6 +2184,553 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_follow_up_retirement_retries_after_terminal_order_update() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        snapshot.observed.reference_price = None;
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "btc-core-replacement".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        service
+            .request_follow_up_retirement(
+                "btc-core",
+                FollowUpRetirementRequest {
+                    batch_id: "replacement".into(),
+                    blocked_sequence: 0,
+                    closed_order_id: old_order_id.into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let (_, absorb_result) = service
+            .observe_order_with_absorb_result(
+                "btc-core",
+                OrderObservation {
+                    order_id: old_order_id.into(),
+                    client_order_id: "old-client-order".into(),
+                    side: Side::Buy,
+                    price: 94.0,
+                    quantity: 0.6,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::Filled,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(absorb_result, OrderUpdateAbsorbResult::Applied);
+        assert_eq!(
+            repository
+                .all_effects()
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:replacement:1")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_follow_up_retirement_survives_service_restart_and_retries_on_sync() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        snapshot.observed.reference_price = None;
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot.clone());
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "btc-core-replacement".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        service
+            .request_follow_up_retirement(
+                "btc-core",
+                FollowUpRetirementRequest {
+                    batch_id: "replacement".into(),
+                    blocked_sequence: 0,
+                    closed_order_id: old_order_id.into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let restarted = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        {
+            let manager_handle = restarted.manager();
+            let mut manager = manager_handle.write().await;
+            let mut closed_snapshot = snapshot;
+            closed_snapshot.executor_state =
+                ExecutorState::empty(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap());
+            manager.restore_track_state(&closed_snapshot).unwrap();
+            repository.seed_snapshot("btc-core", closed_snapshot);
+        }
+
+        restarted
+            .sync_exchange_state_without_reconcile(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .all_effects()
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:replacement:1")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+    }
+
+    #[tokio::test]
+    async fn requested_follow_up_retirement_retires_immediately_when_lifecycle_already_closed() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        snapshot.observed.reference_price = None;
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "btc-core-replacement".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        let (_, absorb_result) = service
+            .observe_order_with_absorb_result(
+                "btc-core",
+                OrderObservation {
+                    order_id: old_order_id.into(),
+                    client_order_id: "old-client-order".into(),
+                    side: Side::Buy,
+                    price: 94.0,
+                    quantity: stale_quantity,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::Filled,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(absorb_result, OrderUpdateAbsorbResult::Applied);
+
+        service
+            .request_follow_up_retirement(
+                "btc-core",
+                FollowUpRetirementRequest {
+                    batch_id: "replacement".into(),
+                    blocked_sequence: 0,
+                    closed_order_id: old_order_id.into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .all_effects()
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:replacement:1")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_follow_up_retirement_surfaces_immediate_retry_errors() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "replacement-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:replacement:2".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "replacement".into(),
+            sequence: 2,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "replacement-2".into(),
+                    side: Side::Buy,
+                    price: 96.0,
+                    quantity: 0.5,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(3.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        let request = FollowUpRetirementRequest {
+            batch_id: "replacement".into(),
+            blocked_sequence: 0,
+            closed_order_id: "old-order-1".into(),
+        };
+        let error = service
+            .request_follow_up_retirement("btc-core", request)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple replacement submit effects found after sequence 0"));
+    }
+
+    #[tokio::test]
+    async fn retry_pending_follow_up_retirements_surfaces_selection_errors() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:broken:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "broken".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "broken-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:broken:2".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "broken".into(),
+            sequence: 2,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "broken-2".into(),
+                    side: Side::Buy,
+                    price: 96.0,
+                    quantity: 0.5,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(3.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        repository
+            .save_follow_up_retirement_request(
+                &TrackId::new("btc-core"),
+                &FollowUpRetirementRequest {
+                    batch_id: "broken".into(),
+                    blocked_sequence: 0,
+                    closed_order_id: "order-1".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let error = service
+            .retry_pending_follow_up_retirements("btc-core")
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple replacement submit effects found after sequence 0"));
+    }
+
+    #[tokio::test]
+    async fn record_cancel_order_success_keeps_main_writeback_succeeded_when_follow_up_retry_errors()
+    {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let manager_handle = service.manager();
+        let mut snapshot = {
+            let manager = manager_handle.read().await;
+            manager.snapshot("btc-core").unwrap()
+        };
+        let old_order_id = "old-order-1";
+        let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some(old_order_id),
+                "old-client-order",
+                Side::Buy,
+                94.0,
+                stale_quantity,
+                Exposure(6.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        {
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository.seed_snapshot("btc-core", snapshot);
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:batch:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "batch".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: old_order_id.into(),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:broken:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "broken".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: old_order_id.into(),
+            },
+            status: EffectStatus::Failed,
+            attempt_count: 1,
+            last_error: Some(
+                "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}"
+                    .into(),
+            ),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:broken:1".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "broken".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "broken-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.4,
+                    reduce_only: false,
+                },
+                target_exposure: Exposure(4.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        repository.seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:broken:2".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "broken".into(),
+            sequence: 2,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    client_order_id: "broken-2".into(),
+                    side: Side::Buy,
+                    price: 96.0,
+                    quantity: 0.5,
+                    reduce_only: false,
+                },
+            target_exposure: Exposure(3.0),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        service
+            .record_cancel_order_success("btc-core", "btc-core:batch:0", "batch", 0, old_order_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .all_effects()
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:batch:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Succeeded)
+        );
+        assert_eq!(
+            repository
+                .all_effects()
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:broken:1")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Pending)
+        );
+    }
+
+    #[tokio::test]
     async fn resolves_track_id_from_instrument() {
         let service =
             test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
@@ -2178,6 +2791,7 @@ mod tests {
         snapshots: Mutex<HashMap<String, TrackRuntimeSnapshot>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
+        follow_up_retirements: Mutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_seq: Mutex<u64>,
         global_pending_effect_queries: AtomicUsize,
         pending_submit_hint_queries: Mutex<Vec<String>>,
@@ -2398,11 +3012,53 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().unwrap();
+            let entry = stored.entry(track_id.clone()).or_default();
+            if !entry.contains(request) {
+                entry.push(request.clone());
+            }
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
+            Ok(self
+                .follow_up_retirements
+                .lock()
+                .unwrap()
+                .get(track_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().unwrap();
+            if let Some(existing) = stored.get_mut(track_id) {
+                existing.retain(|candidate| candidate != request);
+                if existing.is_empty() {
+                    stored.remove(track_id);
+                }
+            }
+            Ok(())
+        }
     }
 
     #[derive(Default)]
     struct FailOnSaveRepository {
         effects: Mutex<Vec<PersistedTrackEffect>>,
+        follow_up_retirements: Mutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
     }
 
     impl FailOnSaveRepository {
@@ -2459,6 +3115,47 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
+        }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().unwrap();
+            let entry = stored.entry(track_id.clone()).or_default();
+            if !entry.contains(request) {
+                entry.push(request.clone());
+            }
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
+            Ok(self
+                .follow_up_retirements
+                .lock()
+                .unwrap()
+                .get(track_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().unwrap();
+            if let Some(existing) = stored.get_mut(track_id) {
+                existing.retain(|candidate| candidate != request);
+                if existing.is_empty() {
+                    stored.remove(track_id);
+                }
+            }
+            Ok(())
         }
     }
 

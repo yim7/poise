@@ -43,6 +43,16 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             last_error TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS follow_up_retirements (
+            track_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            blocked_sequence INTEGER NOT NULL,
+            closed_order_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (track_id, batch_id, blocked_sequence, closed_order_id)
         );",
     )?;
 
@@ -105,6 +115,18 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "updated_at",
         ],
     )?;
+    ensure_columns_present(
+        &conn,
+        "follow_up_retirements",
+        &[
+            "track_id",
+            "batch_id",
+            "blocked_sequence",
+            "closed_order_id",
+            "created_at",
+            "updated_at",
+        ],
+    )?;
 
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_track_events_created_at
@@ -114,7 +136,10 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          ON track_effects(status, created_at, batch_id, sequence, effect_id);
 
          CREATE INDEX IF NOT EXISTS idx_track_effects_batch_sequence
-         ON track_effects(track_id, batch_id, sequence, status);",
+         ON track_effects(track_id, batch_id, sequence, status);
+
+         CREATE INDEX IF NOT EXISTS idx_follow_up_retirements_track
+         ON follow_up_retirements(track_id, updated_at, batch_id, blocked_sequence, closed_order_id);",
     )?;
     Ok(())
 }
@@ -194,6 +219,15 @@ mod tests {
             .unwrap();
         assert_eq!(effects_count, 1);
 
+        let follow_up_retirements_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='follow_up_retirements'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(follow_up_retirements_count, 1);
+
         let index_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_events_created_at'",
@@ -220,6 +254,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(effects_batch_index_count, 1);
+
+        let follow_up_retirements_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_follow_up_retirements_track'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(follow_up_retirements_index_count, 1);
 
         let mut stmt = conn.prepare("PRAGMA table_info(track_snapshots)").unwrap();
         let columns: Vec<String> = stmt

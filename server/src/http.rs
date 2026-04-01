@@ -767,6 +767,29 @@ mod tests {
         ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
         }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            _track_id: &TrackId,
+            _request: &poise_engine::ports::FollowUpRetirementRequest,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            _track_id: &TrackId,
+        ) -> anyhow::Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            _track_id: &TrackId,
+            _request: &poise_engine::ports::FollowUpRetirementRequest,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]

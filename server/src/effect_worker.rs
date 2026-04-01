@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use poise_engine::ports::{ExchangePort, OrderRequest, PersistedTrackEffect};
+use poise_engine::ports::{
+    ExchangePort, FollowUpRetirementRequest, OrderRequest, PersistedTrackEffect,
+};
 use poise_engine::track::Instrument;
 use poise_engine::transition::TrackEffect;
 use tokio::sync::watch;
@@ -17,8 +19,6 @@ use crate::order_outcome::{
     classify_submit_receipt_writeback_error,
 };
 use crate::runtime;
-use crate::write_service::FollowUpRetirementRequest;
-
 #[derive(Clone)]
 pub struct EffectWorker {
     state: ServerState,
@@ -337,18 +337,25 @@ impl EffectWorker {
                     )
                     .await?;
                     if let Cancellation::One { order_id, .. } = &cancellation {
-                        let _ = self
-                            .state
-                            .write_service
-                            .retire_stale_follow_up_submit(
-                                persisted.track_id.as_str(),
-                                &FollowUpRetirementRequest {
-                                    batch_id: persisted.batch_id.clone(),
-                                    blocked_sequence: persisted.sequence,
+                        if let Err(retirement_error) = self
+                                .state
+                                .write_service
+                                .request_follow_up_retirement(
+                                    persisted.track_id.as_str(),
+                                    FollowUpRetirementRequest {
+                                        batch_id: persisted.batch_id.clone(),
+                                        blocked_sequence: persisted.sequence,
                                     closed_order_id: order_id.clone(),
                                 },
                             )
-                            .await?;
+                            .await
+                        {
+                            tracing::warn!(
+                                track_id = %persisted.track_id.as_str(),
+                                order_id = %order_id,
+                                "failed to request follow-up retirement after unknown cancel outcome: {retirement_error}"
+                            );
+                        }
                     }
                 }
                 self.state
@@ -400,13 +407,14 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_engine::observation::OrderObservation;
     use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect,
-        Position, StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot,
-        TrackReadRepositoryPort,
+        ExchangeOrder, ExchangePort, FollowUpRetirementRequest, OrderReceipt, OrderRequest,
+        OrderStatus, PersistedTrackEffect, Position, StateRepositoryPort, StoredTrackEvent,
+        StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::runtime::{
         ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,
@@ -422,7 +430,7 @@ mod tests {
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
 
-    use super::EffectWorker;
+    use super::{Cancellation, EffectWorker};
 
     #[tokio::test]
     async fn submit_success_updates_working_order_via_receipt_writeback() {
@@ -664,6 +672,231 @@ mod tests {
         assert_eq!(effect.status, EffectStatus::Failed);
         assert_eq!(exchange.get_position_calls(), 1);
         assert_eq!(exchange.get_open_orders_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arrives() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+            "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
+        ));
+        exchange.set_position_qty(15.0).await;
+        exchange
+            .open_orders
+            .lock()
+            .await
+            .push(ExchangeOrder {
+                instrument: btc_instrument(),
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 95.0,
+                qty: 15.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            });
+        let state = test_state(repository.clone(), exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        let cancel_effect = PersistedTrackEffect {
+            effect_id: "btc-core:batch:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "batch".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: btc_instrument(),
+                order_id: "order-1".into(),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        repository.seed_effect(cancel_effect.clone()).await;
+        repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "btc-core:batch:1".into(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 1,
+                effect: TrackEffect::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        client_order_id: "btc-core-replacement".into(),
+                        side: Side::Buy,
+                        price: 95.0,
+                        quantity: 0.4,
+                        reduce_only: false,
+                    },
+                    target_exposure: Exposure(4.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        let error = worker
+            .execute_cancellation(
+                &cancel_effect,
+                Cancellation::One {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Unknown order sent."));
+        assert_eq!(
+            repository
+                .list_all_effects()
+                .await
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:batch:1")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Pending)
+        );
+
+        state
+            .write_service
+            .observe_order_with_absorb_result(
+                "btc-core",
+                OrderObservation {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::Filled,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .list_all_effects()
+                .await
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:batch:1")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Superseded)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_up_retry_errors() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+            "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
+        ));
+        exchange.set_position_qty(15.0).await;
+        exchange
+            .open_orders
+            .lock()
+            .await
+            .push(ExchangeOrder {
+                instrument: btc_instrument(),
+                order_id: "order-1".into(),
+                client_order_id: "client-1".into(),
+                side: Side::Buy,
+                price: 95.0,
+                qty: 15.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            });
+        let state = test_state(repository.clone(), exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        let cancel_effect = PersistedTrackEffect {
+            effect_id: "btc-core:broken:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "broken".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: btc_instrument(),
+                order_id: "order-1".into(),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        repository.seed_effect(cancel_effect.clone()).await;
+        repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "btc-core:broken:1".into(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "broken".into(),
+                sequence: 1,
+                effect: TrackEffect::CancelOrder {
+                    instrument: btc_instrument(),
+                    order_id: "unexpected-cancel".into(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        let error = worker
+            .execute_cancellation(
+                &cancel_effect,
+                Cancellation::One {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Unknown order sent."));
+        assert_eq!(
+            repository
+                .list_all_effects()
+                .await
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:broken:0")
+                .map(|effect| effect.status),
+            Some(EffectStatus::Failed)
+        );
+        assert!(
+            repository
+                .list_all_effects()
+                .await
+                .iter()
+                .find(|effect| effect.effect_id == "btc-core:broken:0")
+                .and_then(|effect| effect.last_error.as_deref())
+                .is_some_and(|error| error.contains("Unknown order sent."))
+        );
     }
 
     #[tokio::test]
@@ -986,6 +1219,7 @@ mod tests {
                     state: SlotState::Empty,
                     working_order: None,
                 }],
+                recent_terminal_orders: Vec::new(),
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
                 recovery_anomaly: Some(RecoveryAnomaly::UnknownLiveOrder),
                 stats: ExecutionStats {
@@ -1033,6 +1267,7 @@ mod tests {
                         role: poise_engine::executor::OrderRole::IncreaseInventory,
                     }),
                 }],
+                recent_terminal_orders: Vec::new(),
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
                 recovery_anomaly: None,
                 stats: ExecutionStats {
@@ -1078,6 +1313,7 @@ mod tests {
                     state: SlotState::SubmitPending,
                     working_order: Some(order),
                 }],
+                recent_terminal_orders: Vec::new(),
                 last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
                 recovery_anomaly: None,
                 stats: ExecutionStats {
@@ -1264,6 +1500,7 @@ mod tests {
     struct MemoryRepository {
         snapshots: AsyncMutex<HashMap<String, poise_engine::snapshot::TrackRuntimeSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
+        follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AsyncMutex<u64>,
     }
 
@@ -1403,6 +1640,47 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
+        }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            let entry = stored.entry(track_id.clone()).or_default();
+            if !entry.contains(request) {
+                entry.push(request.clone());
+            }
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
+            Ok(self
+                .follow_up_retirements
+                .lock()
+                .await
+                .get(track_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            track_id: &TrackId,
+            request: &FollowUpRetirementRequest,
+        ) -> Result<()> {
+            let mut stored = self.follow_up_retirements.lock().await;
+            if let Some(existing) = stored.get_mut(track_id) {
+                existing.retain(|candidate| candidate != request);
+                if existing.is_empty() {
+                    stored.remove(track_id);
+                }
+            }
+            Ok(())
         }
     }
 

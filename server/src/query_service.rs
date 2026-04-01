@@ -320,6 +320,7 @@ mod tests {
                         role: OrderRole::IncreaseInventory,
                     }),
                 }],
+                recent_terminal_orders: Vec::new(),
                 last_execution_reason: None,
                 recovery_anomaly: None,
                 stats: ExecutionStats {

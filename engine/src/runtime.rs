@@ -88,6 +88,12 @@ pub struct ExecutionSlot {
     pub working_order: Option<WorkingOrder>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentTerminalOrder {
+    pub client_order_id: String,
+    pub order_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutorState {
     pub mode: ExecutionMode,
@@ -95,6 +101,8 @@ pub struct ExecutorState {
     pub gap_started_at: Option<DateTime<Utc>>,
     pub last_reprice_at: Option<DateTime<Utc>>,
     pub slots: Vec<ExecutionSlot>,
+    #[serde(default)]
+    pub recent_terminal_orders: Vec<RecentTerminalOrder>,
     pub last_execution_reason: Option<ExecutionReason>,
     #[serde(default)]
     pub recovery_anomaly: Option<RecoveryAnomaly>,
@@ -113,6 +121,7 @@ impl ExecutorState {
                 state: SlotState::Empty,
                 working_order: None,
             }],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: None,
             recovery_anomaly: None,
             stats: ExecutionStats::new(started_at),
@@ -366,6 +375,7 @@ mod tests {
                     .with_timezone(&Utc),
             ),
             slots: vec![slot],
+            recent_terminal_orders: Vec::new(),
             last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
             recovery_anomaly: None,
             stats: ExecutionStats {

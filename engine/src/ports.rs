@@ -187,6 +187,23 @@ pub trait StateRepositoryPort: Send + Sync {
         track_id: &TrackId,
         batch_id: &str,
     ) -> Result<Vec<PersistedTrackEffect>>;
+
+    async fn save_follow_up_retirement_request(
+        &self,
+        track_id: &TrackId,
+        request: &FollowUpRetirementRequest,
+    ) -> Result<()>;
+
+    async fn list_follow_up_retirement_requests(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<FollowUpRetirementRequest>>;
+
+    async fn delete_follow_up_retirement_request(
+        &self,
+        track_id: &TrackId,
+        request: &FollowUpRetirementRequest,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -271,6 +288,13 @@ pub struct PersistedTrackEffect {
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUpRetirementRequest {
+    pub batch_id: String,
+    pub blocked_sequence: u32,
+    pub closed_order_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

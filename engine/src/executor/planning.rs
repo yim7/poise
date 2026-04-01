@@ -104,6 +104,10 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
                 input.executor_state.and_then(|state| state.last_reprice_at)
             },
             slots,
+            recent_terminal_orders: input
+                .executor_state
+                .map(|state| state.recent_terminal_orders.clone())
+                .unwrap_or_default(),
             last_execution_reason,
             recovery_anomaly: None,
             stats,
@@ -156,6 +160,7 @@ pub fn refresh_state(
         gap_started_at,
         last_reprice_at: previous_state.last_reprice_at,
         slots: previous_state.slots.clone(),
+        recent_terminal_orders: previous_state.recent_terminal_orders.clone(),
         last_execution_reason,
         recovery_anomaly: previous_state.recovery_anomaly.clone(),
         stats,

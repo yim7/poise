@@ -645,6 +645,29 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        async fn save_follow_up_retirement_request(
+            &self,
+            _track_id: &TrackId,
+            _request: &poise_engine::ports::FollowUpRetirementRequest,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_follow_up_retirement_requests(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_follow_up_retirement_request(
+            &self,
+            _track_id: &TrackId,
+            _request: &poise_engine::ports::FollowUpRetirementRequest,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
