@@ -136,6 +136,18 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         };
     }
 
+    let foreign_receipt_backed_order_exists = input.previous_state.slots.iter().any(|slot| {
+        slot.working_order.as_ref().is_some_and(|order| {
+            order.order_id.is_some() && order.client_order_id != input.request.client_order_id
+        })
+    });
+    if foreign_receipt_backed_order_exists {
+        return SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            effects: vec![],
+        };
+    }
+
     let current_plan_submit = input.current_plan.as_ref().and_then(|current_plan| {
         current_submit_hint(ExecutorInput {
             track_id: current_plan.track_id,

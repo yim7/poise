@@ -1127,6 +1127,128 @@ mod tests {
     }
 
     #[test]
+    fn submit_recovery_does_not_supersede_receipt_backed_working_order_when_plan_changes() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Sell,
+            price: 100.0,
+            quantity: 16.9,
+            client_order_id: "client-large-sell".into(),
+            reduce_only: false,
+        };
+        let SubmitReceiptResolution::Recorded {
+            state: previous_state,
+        } = record_submit_receipt(
+            &record_submit_request(&ExecutorState::empty(now), &request, Exposure(-10.0)),
+            &request,
+            Exposure(-10.0),
+            &OrderReceipt {
+                order_id: "order-large-sell".into(),
+                client_order_id: "client-large-sell".into(),
+                status: OrderStatus::New,
+            },
+        )
+        else {
+            panic!("expected receipt-backed working order");
+        };
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(-10.0),
+            current_exposure: &Exposure(-9.6),
+            live_order: None,
+            current_plan: Some(SubmitRecoveryPlanContext {
+                track_id: &track_id,
+                instrument: &instrument,
+                base_qty_per_unit: 0.0169,
+                target_exposure: Exposure(-9.2),
+                reference_price: 95.0,
+                observed_at: now,
+            }),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            effects,
+        } = recovery
+        else {
+            panic!("receipt-backed working order should wait for exchange state");
+        };
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn submit_recovery_does_not_overwrite_receipt_backed_large_order_with_current_small_submit() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let previous_state = ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(0.4),
+            gap_started_at: Some(now),
+            last_reprice_at: Some(now),
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-large-sell".into()),
+                    client_order_id: "client-large-sell".into(),
+                    side: Side::Sell,
+                    price: 100.0,
+                    quantity: 16.9,
+                    target_exposure: Exposure(-10.0),
+                    status: OrderStatus::New,
+                    role: OrderRole::IncreaseInventory,
+                }),
+            }],
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(now),
+        };
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 0.8,
+            client_order_id: "client-small-buy".into(),
+            reduce_only: true,
+        };
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(-9.2),
+            current_exposure: &Exposure(-10.0),
+            live_order: None,
+            current_plan: Some(SubmitRecoveryPlanContext {
+                track_id: &track_id,
+                instrument: &instrument,
+                base_qty_per_unit: 1.0,
+                target_exposure: Exposure(-9.2),
+                reference_price: 95.0,
+                observed_at: now,
+            }),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            effects,
+        } = recovery
+        else {
+            panic!("foreign receipt-backed working order should block small follow-up submit");
+        };
+        assert!(effects.is_empty());
+    }
+
+    #[test]
     fn submit_requests_match_rejects_different_reduce_only_semantics() {
         let rules = test_exchange_rules();
         let left = OrderRequest {
