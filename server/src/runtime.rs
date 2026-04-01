@@ -12,7 +12,7 @@ use poise_engine::ports::{
     UserDataPayload,
 };
 use poise_engine::runtime::AccountCapacityConstraint;
-use poise_engine::track::{Instrument, TrackId};
+use poise_engine::track::Instrument;
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, sleep};
@@ -709,9 +709,7 @@ async fn sync_exchange_state_from_exchange(
         .await
         .map_err(TrackMutationError::Persistence)?;
 
-    if should_cancel_unknown_live_orders(snapshot.as_ref(), &open_orders)
-        && pending_submit_hints_are_empty(state, track_id).await?
-    {
+    if should_cancel_unknown_live_orders(snapshot.as_ref(), &open_orders) {
         for order in &open_orders {
             exchange
                 .cancel_order(instrument, &order.order_id)
@@ -772,18 +770,6 @@ fn should_cancel_unknown_live_orders(
                     .iter()
                     .all(|slot| slot.working_order.is_none())
         })
-}
-
-async fn pending_submit_hints_are_empty(
-    state: &ServerState,
-    track_id: &str,
-) -> std::result::Result<bool, TrackMutationError> {
-    let pending_submit_hints = state
-        .state_repository
-        .list_pending_submit_effects_for_track(&TrackId::new(track_id))
-        .await
-        .map_err(TrackMutationError::Persistence)?;
-    Ok(pending_submit_hints.is_empty())
 }
 
 fn update_recovery_tracking(
@@ -3516,6 +3502,96 @@ mod tests {
         })
         .await;
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
+
+        recovery_task.abort();
+        let _ = recovery_task.await;
+        user_task.abort();
+        let _ = user_task.await;
+    }
+
+    #[tokio::test]
+    async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_effect_exists() {
+        let mut snapshot = test_snapshot();
+        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_recovery_retry_interval(
+            Some(snapshot),
+            btc_position(0.0, 0.0),
+            vec![btc_exchange_order(
+                "live-1",
+                "unexpected-live",
+                Side::Buy,
+                94.5,
+                0.25,
+                0.0,
+                OrderStatus::New,
+            )],
+            test_budget(),
+            Duration::from_millis(200),
+        )
+        .await;
+
+        let RuntimeHandles {
+            market_task,
+            user_task,
+            effect_task,
+            recovery_task,
+        } = fixture.runtime.start().await.unwrap();
+        market_task.abort();
+        let _ = market_task.await;
+        effect_task.abort();
+        let _ = effect_task.await;
+
+        wait_until_instance(&fixture.state, |instance| {
+            instance.executor_state.recovery_anomaly.as_ref()
+                == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+        })
+        .await;
+
+        fixture
+            .persistence
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                track_id: TrackId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.5,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        timeout(Duration::from_millis(800), async {
+            wait_until(|| fixture.exchange.canceled_order_ids.lock().unwrap().len() >= 1).await;
+        })
+        .await
+        .expect("unknown live order should still be auto-canceled with pending submit effect");
+        assert_eq!(
+            fixture.exchange.canceled_order_ids.lock().unwrap().as_slice(),
+            ["live-1"]
+        );
+
+        timeout(Duration::from_millis(800), async {
+            wait_until_instance(&fixture.state, |instance| {
+                instance.executor_state.recovery_anomaly.as_ref().is_none()
+            })
+            .await;
+        })
+        .await
+        .expect("recovery anomaly should clear after auto-cancel");
 
         recovery_task.abort();
         let _ = recovery_task.await;
