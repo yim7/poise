@@ -22,9 +22,10 @@ use crate::types::{
     BinanceOrderResponse, BinancePositionRisk,
 };
 
-const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
+const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
 const MAX_RETRIES: usize = 3;
 const MAX_DECIMAL_SCALE: u32 = 16;
+const SIGNED_TIME_SYNC_REFRESH_INTERVAL_MS: i64 = 60_000;
 
 #[derive(Debug, Clone, Copy)]
 enum AuthMode {
@@ -40,6 +41,7 @@ pub struct BinanceRestClient {
     base_url: String,
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     timestamp_offset_ms: AtomicI64,
+    last_time_sync_at_ms: AtomicI64,
 }
 
 impl BinanceRestClient {
@@ -56,6 +58,7 @@ impl BinanceRestClient {
             base_url,
             timestamp_provider: Arc::new(|| chrono::Utc::now().timestamp_millis()),
             timestamp_offset_ms: AtomicI64::new(0),
+            last_time_sync_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -74,6 +77,7 @@ impl BinanceRestClient {
             base_url,
             timestamp_provider,
             timestamp_offset_ms: AtomicI64::new(0),
+            last_time_sync_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -93,6 +97,7 @@ impl BinanceRestClient {
             base_url,
             timestamp_provider,
             timestamp_offset_ms: AtomicI64::new(0),
+            last_time_sync_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -260,6 +265,12 @@ impl BinanceRestClient {
         let mut last_error = None;
 
         for attempt in 0..MAX_RETRIES {
+            if attempt == 0
+                && matches!(auth_mode, AuthMode::Signed)
+                && self.should_refresh_time_sync_before_signed_request()
+            {
+                self.sync_server_time_offset().await?;
+            }
             let mut request_params = params.clone();
             if matches!(auth_mode, AuthMode::Signed) {
                 request_params.push(("timestamp", self.signed_timestamp_ms().to_string()));
@@ -345,10 +356,18 @@ impl BinanceRestClient {
         let midpoint = requested_at + ((received_at - requested_at) / 2);
         self.timestamp_offset_ms
             .store(response.server_time - midpoint, Ordering::Relaxed);
+        self.last_time_sync_at_ms
+            .store(received_at, Ordering::Relaxed);
 
         Utc.timestamp_millis_opt(response.server_time)
             .single()
             .context("invalid server time timestamp")
+    }
+
+    fn should_refresh_time_sync_before_signed_request(&self) -> bool {
+        let last_time_sync_at_ms = self.last_time_sync_at_ms.load(Ordering::Relaxed);
+        last_time_sync_at_ms > 0
+            && (self.timestamp_provider)() - last_time_sync_at_ms >= SIGNED_TIME_SYNC_REFRESH_INTERVAL_MS
     }
 
     async fn send_server_time_request(&self) -> Result<ServerTimeResponse> {
@@ -531,11 +550,12 @@ mod tests {
             Arc::new(|| 1_700_000_000_000),
         );
 
-        let signature = client.sign_query("symbol=BTCUSDT&timestamp=1700000000000&recvWindow=5000");
+        let signature =
+            client.sign_query("symbol=BTCUSDT&timestamp=1700000000000&recvWindow=10000");
 
         assert_eq!(
             signature,
-            "8060b5a3659c282a31f2af0a1f52a97899704f79df4ef332ad3ba05390884195"
+            "1b0ee80735fdeea45d65fdf993862fcae44ad51d623a7c00bc0f5ceaa3052a05"
         );
     }
 
@@ -580,7 +600,7 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert_eq!(
             requests[0].path,
-            "/fapi/v1/openOrders?symbol=BTCUSDT&timestamp=1700000000000&recvWindow=5000&signature=8060b5a3659c282a31f2af0a1f52a97899704f79df4ef332ad3ba05390884195"
+            "/fapi/v1/openOrders?symbol=BTCUSDT&timestamp=1700000000000&recvWindow=10000&signature=1b0ee80735fdeea45d65fdf993862fcae44ad51d623a7c00bc0f5ceaa3052a05"
         );
         assert_eq!(
             requests[0].headers.get("x-mbx-apikey"),
@@ -736,6 +756,50 @@ mod tests {
         assert!(requests[0].path.contains("timestamp=1700000000000"));
         assert_eq!(requests[1].path, "/fapi/v1/time");
         assert!(requests[2].path.contains("timestamp=1700000005000"));
+    }
+
+    #[tokio::test]
+    async fn refreshes_server_time_before_signed_request_when_prior_sync_is_stale() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#"{"serverTime":1700000005000}"#),
+            MockResponse::json(200, r#"{"serverTime":1700000025000}"#),
+            MockResponse::json(
+                200,
+                r#"[{
+                    "symbol": "BTCUSDT",
+                    "orderId": 1007,
+                    "clientOrderId": "grid-open-009",
+                    "side": "SELL",
+                    "price": "64030.1",
+                    "origQty": "0.045",
+                    "status": "NEW"
+                }]"#,
+            ),
+        ])
+        .await;
+        let next_timestamp = Arc::new(AtomicI64::new(1_700_000_000_000));
+        let timestamp_provider = {
+            let next_timestamp = Arc::clone(&next_timestamp);
+            Arc::new(move || next_timestamp.load(Ordering::SeqCst))
+        };
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            timestamp_provider,
+        );
+
+        let _ = client.get_server_time().await.unwrap();
+        next_timestamp.store(1_700_000_070_000, Ordering::SeqCst);
+
+        let orders = client.get_open_orders("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(orders.len(), 1);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/fapi/v1/time");
+        assert_eq!(requests[1].path, "/fapi/v1/time");
+        assert!(requests[2].path.contains("timestamp=1700000025000"));
     }
 
     #[tokio::test]
