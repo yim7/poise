@@ -89,3 +89,5 @@ Expected:
 git add exchanges/binance/src/rest.rs docs/superpowers/plans/2026-04-01-binance-signed-time-sync-hardening.md
 git commit -m "chore(binance): improve signed request diagnostics"
 ```
+
+已完成：`60c6ff4`
