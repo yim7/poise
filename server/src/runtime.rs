@@ -1688,6 +1688,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_blocking_new_lifecycle()
+     {
+        let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+            btc_position(-22.5, 0.0),
+            vec![],
+            "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(-6.0);
+        snapshot.target_exposure = Some(Exposure(-10.0));
+        snapshot.observed.reference_price = Some(105.0);
+        set_executor_state(
+            &mut snapshot,
+            WorkingOrder {
+                order_id: Some("order-large-sell".into()),
+                client_order_id: "order-large-sell".into(),
+                side: Side::Sell,
+                price: 106.0,
+                quantity: 15.0,
+                target_exposure: Exposure(-10.0),
+                status: OrderStatus::New,
+                role: OrderRole::IncreaseInventory,
+            },
+            SlotState::Working,
+        );
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot),
+            test_budget(),
+        )
+        .await;
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let transition = state
+            .write_service
+            .observe_position(
+                "BTCUSDT",
+                super::position_observation(&btc_position(-22.5, 0.0)),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder { request, .. }
+            ] if order_id == "order-large-sell"
+                && request.reduce_only
+                && request.side == Side::Buy
+        ));
+
+        worker.run_once().await.unwrap();
+
+        let effects = persistence.all_effects().await;
+        assert!(
+            effects
+                .iter()
+                .all(|effect| {
+                    !(effect.status == EffectStatus::Pending
+                        && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
+                }),
+            "old lifecycle should not leave a pending submit behind after new lifecycle executes"
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Superseded)
+                .count(),
+            1,
+            "stale follow-up submit should be retired instead of staying pending"
+        );
+        assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
+
+        state
+            .write_service
+            .observe_order_with_absorb_result(
+                "BTCUSDT",
+                super::order_observation(&btc_exchange_order(
+                    "order-large-sell",
+                    "order-large-sell",
+                    Side::Sell,
+                    106.0,
+                    15.0,
+                    0.0,
+                    OrderStatus::Filled,
+                )),
+            )
+            .await
+            .unwrap();
+
+        let effects_after_terminal_update = persistence.all_effects().await;
+        assert!(
+            effects_after_terminal_update
+                .iter()
+                .all(|effect| {
+                    !(effect.status == EffectStatus::Pending
+                        && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
+                }),
+            "terminal update should not resurrect stale follow-up submits"
+        );
+    }
+
+    #[tokio::test]
     async fn effect_worker_keeps_effect_pending_when_submit_cleanup_persistence_fails() {
         let exchange = Arc::new(FakeExchange::with_submit_error(
             btc_position(0.0, 0.0),

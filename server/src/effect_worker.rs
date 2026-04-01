@@ -16,6 +16,7 @@ use crate::order_outcome::{
     classify_submit_receipt_writeback_error,
 };
 use crate::runtime;
+use crate::write_service::FollowUpRetirementRequest;
 
 #[derive(Clone)]
 pub struct EffectWorker {
@@ -322,6 +323,20 @@ impl EffectWorker {
                         &instrument,
                     )
                     .await?;
+                    if let Cancellation::One { order_id, .. } = &cancellation {
+                        let _ = self
+                            .state
+                            .write_service
+                            .retire_stale_follow_up_submit(
+                                persisted.track_id.as_str(),
+                                &FollowUpRetirementRequest {
+                                    batch_id: persisted.batch_id.clone(),
+                                    blocked_sequence: persisted.sequence,
+                                    closed_order_id: order_id.clone(),
+                                },
+                            )
+                            .await?;
+                    }
                 }
                 self.state
                     .write_service

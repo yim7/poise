@@ -62,6 +62,13 @@ pub struct PreparedSubmitExecution {
     pub target_exposure: poise_core::types::Exposure,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowUpRetirementRequest {
+    pub batch_id: String,
+    pub blocked_sequence: u32,
+    pub closed_order_id: String,
+}
+
 #[derive(Debug)]
 pub enum TrackMutationError {
     LoadedTrackInvariant { track_id: String },
@@ -480,6 +487,77 @@ impl TrackWriteService {
         .await
         .map(|_| ())
         .map_err(anyhow::Error::new)
+    }
+
+    pub async fn retire_stale_follow_up_submit(
+        &self,
+        id: &str,
+        request: &FollowUpRetirementRequest,
+    ) -> Result<bool> {
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let replacement_submit = self
+            .pending_submit_effects_for_track_batch(id, &request.batch_id)
+            .await
+            .map_err(anyhow::Error::new)
+            .and_then(|effects| {
+                select_replacement_submit_effect(&effects, request.blocked_sequence)
+            })?;
+        let Some(replacement_submit) = replacement_submit else {
+            return Ok(false);
+        };
+
+        let TrackEffect::SubmitOrder {
+            request: submit_request,
+            ..
+        } = &replacement_submit.effect
+        else {
+            return Err(anyhow!(
+                "replacement effect `{}` is not submit order",
+                replacement_submit.effect_id
+            ));
+        };
+
+        let (previous_snapshot, next_snapshot) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            let lifecycle_closed = previous_snapshot
+                .executor_state
+                .slots
+                .iter()
+                .all(|slot| {
+                    slot.working_order
+                        .as_ref()
+                        .and_then(|order| order.order_id.as_deref())
+                        != Some(request.closed_order_id.as_str())
+                });
+            if !lifecycle_closed {
+                return Ok(false);
+            }
+            manager
+                .record_submit_failure(&TrackId::new(id), &submit_request.client_order_id)
+                .map_err(TrackMutationError::Mutation)?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            (previous_snapshot, next_snapshot)
+        };
+
+        self.commit_track_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &(),
+            Some(&EffectStatusUpdate::superseded(
+                replacement_submit.effect_id.clone(),
+            )),
+            false,
+        )
+        .await
+        .map_err(anyhow::Error::new)?;
+
+        Ok(true)
     }
 
     pub async fn prepare_submit_execution(
