@@ -284,7 +284,7 @@ Commit: `91a794d`
 - Modify: `docs/superpowers/specs/2026-04-01-order-operation-confirmation-design.md`
 - Modify: `docs/superpowers/plans/2026-04-01-order-operation-confirmation.md`
 
-- [ ] **Step 1: 回写最终行为到 spec**
+- [x] **Step 1: 回写最终行为到 spec**
 
 更新 `docs/superpowers/specs/2026-04-01-order-operation-confirmation-design.md`：
 
@@ -300,7 +300,7 @@ Commit: `91a794d`
 - 记录 `FollowUpRetirementRequest` 或等价输入的最终形状
 - 记录 stale follow-up submit 的清理规则
 
-- [ ] **Step 2: 运行重点验收**
+- [x] **Step 2: 运行重点验收**
 
 Run:
 
@@ -310,12 +310,14 @@ Run:
 
 Expected: 全部 PASS。
 
-- [ ] **Step 3: 更新计划勾选与提交记录**
+- [x] **Step 3: 更新计划勾选与提交记录**
 
 在本计划文件中：
 
 - 勾选已完成步骤
 - 在每个 Task 末尾记录对应 commit SHA
+
+Acceptance fix during verification: `06175b2`
 
 - [ ] **Step 4: Commit**
 
