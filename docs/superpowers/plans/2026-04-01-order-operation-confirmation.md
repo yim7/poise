@@ -95,7 +95,7 @@ Commit: `fe0dff7`
 - Test: `server/src/effect_worker.rs`
 - Test: `engine/src/executor/recording.rs`
 
-- [ ] **Step 1: 写失败测试，锁住 `OutcomeUnknown -> ReconcileRequest`**
+- [x] **Step 1: 写失败测试，锁住 `OutcomeUnknown -> ReconcileRequest`**
 
 在 `server/src/order_outcome.rs` 增加测试：
 
@@ -107,13 +107,13 @@ fn classify_unknown_order_sent_as_cancel_outcome_unknown() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test -p poise-server order_outcome::tests::classify_unknown_order_sent_as_cancel_outcome_unknown -- --exact --nocapture`
 
 Expected: FAIL，原因是当前还没有统一 outcome classifier。
 
-- [ ] **Step 3: 最小实现，新增 `OutcomeClass` / `ReconcileReason`**
+- [x] **Step 3: 最小实现，新增 `OutcomeClass` / `ReconcileReason`**
 
 在 `server/src/order_outcome.rs`：
 
@@ -148,7 +148,7 @@ Expected: FAIL，原因是当前还没有统一 outcome classifier。
 - 先由 `engine/src/executor/recording.rs::apply_order_observation(...)` 或紧邻它的唯一 helper 返回 `OrderUpdateAbsorbResult`
 - 再由 `runtime` 把 `Unabsorbed` 映射成 `ReconcileRequest::UnabsorbedOrderUpdate`
 
-- [ ] **Step 4: 运行相关回归**
+- [x] **Step 4: 运行相关回归**
 
 Run:
 
@@ -158,12 +158,14 @@ Run:
 
 Expected: 全部 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/order_outcome.rs server/src/effect_worker.rs server/src/runtime.rs
 git commit -m "refactor(server): unify reconcile trigger classification"
 ```
+
+Commit: `87852c6`
 
 ### Task 3: 给正常 track 增加低频对账巡检
 
