@@ -319,9 +319,11 @@ Expected: 全部 PASS。
 
 Acceptance fix during verification: `06175b2`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-01-order-operation-confirmation-design.md docs/superpowers/plans/2026-04-01-order-operation-confirmation.md
 git commit -m "docs: sync order operation confirmation plan and spec"
 ```
+
+Commit: `341b662`
