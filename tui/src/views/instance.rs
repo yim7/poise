@@ -11,18 +11,6 @@ use crate::protocol::{
 };
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(6),
-            Constraint::Length(5),
-            Constraint::Length(6),
-            Constraint::Length(9),
-            Constraint::Length(6),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
     let Some(detail) = app
         .current_track_detail()
         .or_else(|| app.current_track.as_ref())
@@ -32,6 +20,27 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(empty, area);
         return;
     };
+
+    let execution_height = if matches!(
+        detail.execution.execution_status,
+        ExecutionStatusView::AttentionRequired
+    ) {
+        11
+    } else {
+        9
+    };
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Length(execution_height),
+            Constraint::Length(6),
+            Constraint::Min(0),
+        ])
+        .split(area);
 
     let summary_lines = vec![
         Line::from(format!(
@@ -190,7 +199,24 @@ fn execution_lines(
         .map(format_replacement_gate)
         .unwrap_or_else(|| "-".to_string());
 
-    vec![
+    let mut lines = Vec::new();
+
+    if matches!(
+        execution.execution_status,
+        ExecutionStatusView::AttentionRequired
+    ) {
+        lines.push(Line::from("ATTENTION REQUIRED"));
+        if execution.attention_reasons.is_empty() {
+            lines.push(Line::from("alerts: unresolved execution anomaly"));
+        } else {
+            lines.push(Line::from(format!(
+                "alerts: {}",
+                execution.attention_reasons.join(" | ")
+            )));
+        }
+    }
+
+    lines.extend([
         Line::from(format!("state: {state}")),
         Line::from(format!("execution status: {execution_status}")),
         Line::from(format!(
@@ -205,7 +231,9 @@ fn execution_lines(
         Line::from(format!("active slots: {}", execution.active_slot_count)),
         Line::from(format!("slots: {slots}")),
         Line::from(format!("replacement gate: {replacement_gate}")),
-    ]
+    ]);
+
+    lines
 }
 
 fn format_slot_phase(value: ExecutionSlotPhaseView) -> &'static str {
@@ -275,7 +303,9 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::{GridCommandType, GridCommandView, TrackDetailView};
+    use crate::protocol::{
+        ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView,
+    };
 
     use super::render;
 
@@ -402,5 +432,20 @@ mod tests {
         let text = render_text(detail);
 
         assert!(text.contains("not-a-timestamp"));
+    }
+
+    #[test]
+    fn renders_attention_required_block_with_reason() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons =
+            vec!["recovery anomaly: unknown_live_order".to_string()];
+
+        let text = render_text(detail);
+
+        assert!(text.contains("ATTENTION REQUIRED"));
+        assert!(text.contains("recovery anomaly: unknown_live_order"));
     }
 }

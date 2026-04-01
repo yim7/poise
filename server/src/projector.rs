@@ -1,5 +1,5 @@
 use poise_core::events::DomainEvent;
-use poise_engine::executor::OrderRole;
+use poise_engine::executor::{OrderRole, RecoveryAnomaly};
 use poise_engine::ports::EffectStatus;
 use poise_engine::runtime::TrackStatus as EngineGridStatus;
 use poise_engine::transition::TrackEffect;
@@ -80,6 +80,7 @@ impl TrackProjector {
             execution: GridExecutionView {
                 state: project_execution_state(source),
                 execution_status: project_execution_status(source),
+                attention_reasons: project_attention_reasons(source),
                 inventory_gap: source.inventory_gap,
                 gap_age_ms: source
                     .gap_started_at
@@ -203,6 +204,31 @@ fn project_execution_status(source: &TrackReadModel) -> ExecutionStatusView {
         ExecutionStatusView::AttentionRequired
     } else {
         ExecutionStatusView::Normal
+    }
+}
+
+fn project_attention_reasons(source: &TrackReadModel) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    if let Some(anomaly) = source.recovery_anomaly.as_ref() {
+        reasons.push(format!(
+            "recovery anomaly: {}",
+            project_recovery_anomaly(anomaly)
+        ));
+    }
+
+    if source.has_stale_market_data {
+        reasons.push("market data stale".to_string());
+    }
+
+    reasons
+}
+
+fn project_recovery_anomaly(anomaly: &RecoveryAnomaly) -> &'static str {
+    match anomaly {
+        RecoveryAnomaly::UnknownLiveOrder => "unknown_live_order",
+        RecoveryAnomaly::DuplicateLiveOrders => "duplicate_live_orders",
+        RecoveryAnomaly::AmbiguousLiveOrder => "ambiguous_live_order",
     }
 }
 
@@ -427,6 +453,7 @@ mod tests {
                 .get("client_order_id")
                 .is_none()
         );
+        assert!(detail.execution.attention_reasons.is_empty());
     }
 
     #[test]
@@ -470,6 +497,24 @@ mod tests {
         assert_eq!(
             detail.execution.execution_status,
             ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            detail.execution.attention_reasons,
+            vec!["market data stale".to_string()]
+        );
+    }
+
+    #[test]
+    fn recovery_anomaly_projects_attention_reason() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.has_recovery_anomaly = true;
+        source.recovery_anomaly = Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.attention_reasons,
+            vec!["recovery anomaly: unknown_live_order".to_string()]
         );
     }
 
@@ -600,6 +645,7 @@ mod tests {
             max_inventory_gap_abs: 1.5,
             max_gap_age_ms: 120_000,
             stats_started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+            recovery_anomaly: None,
             has_recovery_anomaly: false,
             has_stale_market_data: false,
             replacement_gate_reason: None,

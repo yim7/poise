@@ -75,7 +75,7 @@ fn format_execution_badge(
 
     let mut badge = state.to_string();
     if matches!(execution_status, ExecutionStatusView::AttentionRequired) {
-        badge.push_str(" !");
+        badge.push_str(" ATTN");
     }
     if active_slot_count > 0 {
         format!("{badge} ({active_slot_count})")
@@ -90,6 +90,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::App;
+    use crate::protocol::ExecutionStatusView;
 
     use super::render;
 
@@ -123,5 +124,24 @@ mod tests {
         assert!(text.contains("3.5000"));
         assert!(text.contains("Execution"));
         assert!(text.contains("open (1)"));
+    }
+
+    #[test]
+    fn renders_attention_badge_for_anomalous_track() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        response.items[0].execution.execution_status = ExecutionStatusView::AttentionRequired;
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("open ATTN (1)"));
     }
 }

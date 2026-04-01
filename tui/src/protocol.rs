@@ -43,6 +43,7 @@ mod tests {
             detail.execution.execution_status,
             ExecutionStatusView::Normal
         );
+        assert!(detail.execution.attention_reasons.is_empty());
         assert_eq!(detail.execution.active_slot_count, 1);
         assert_eq!(detail.execution.slots.len(), 1);
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);

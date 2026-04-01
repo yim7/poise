@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
-use poise_engine::executor::{ExecutionMode, OrderRole};
+use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
 use poise_engine::ports::{PersistedTrackEffect, StoredTrackEvent};
 use poise_engine::runtime::{SlotState, TrackStatus};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
@@ -29,6 +29,7 @@ pub struct TrackReadModel {
     pub max_inventory_gap_abs: f64,
     pub max_gap_age_ms: i64,
     pub stats_started_at: DateTime<Utc>,
+    pub recovery_anomaly: Option<RecoveryAnomaly>,
     pub has_recovery_anomaly: bool,
     pub has_stale_market_data: bool,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
@@ -107,6 +108,7 @@ impl TrackReadModel {
             max_inventory_gap_abs: executor_state.stats.max_inventory_gap_abs.0,
             max_gap_age_ms: executor_state.stats.max_gap_age_ms,
             stats_started_at: executor_state.stats.started_at,
+            recovery_anomaly: executor_state.recovery_anomaly.clone(),
             has_recovery_anomaly: executor_state.recovery_anomaly.is_some(),
             has_stale_market_data: observed.market_data_stale_since.is_some(),
             replacement_gate_reason,

@@ -120,6 +120,8 @@ pub struct GridExecutionView {
     #[serde(default)]
     pub execution_status: ExecutionStatusView,
     #[serde(default)]
+    pub attention_reasons: Vec<String>,
+    #[serde(default)]
     pub inventory_gap: f64,
     #[serde(default)]
     pub gap_age_ms: i64,
