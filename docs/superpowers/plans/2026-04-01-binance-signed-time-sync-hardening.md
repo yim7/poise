@@ -42,12 +42,14 @@ Run: `cargo test -p poise-binance rest::tests:: -- --nocapture`
 
 Expected: PASS
 
-- [ ] **Step 4: 提交 Task 1**
+- [x] **Step 4: 提交 Task 1**
 
 ```bash
 git add exchanges/binance/src/rest.rs docs/superpowers/plans/2026-04-01-binance-signed-time-sync-hardening.md
 git commit -m "fix(binance): harden signed request time sync"
 ```
+
+已完成：`c712e7b`
 
 ### Task 2: 补全 signed 请求失败诊断并做整体验证
 
