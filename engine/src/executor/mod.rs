@@ -7,8 +7,11 @@ mod slots;
 
 pub(crate) use planning::{DesiredOrder, ExecutorInput, current_submit_hint, plan, refresh_state};
 pub use planning::{OrderRole, OrderSlot, PendingSubmitHint};
+pub use recording::OrderUpdateAbsorbResult;
+#[cfg(test)]
+pub(crate) use recording::apply_order_observation;
 pub(crate) use recording::{
-    SubmitReceiptResolution, apply_order_observation, clear_all_working_orders,
+    SubmitReceiptResolution, apply_order_observation_with_result, clear_all_working_orders,
     clear_working_order_by_order_id, record_submit_failure, record_submit_receipt,
     record_submit_request,
 };

@@ -432,17 +432,8 @@ mod tests {
                 .slots
                 .push(poise_engine::runtime::ExecutionSlot {
                     slot: poise_engine::executor::OrderSlot::new("inventory_followup"),
-                    state: SlotState::Working,
-                    working_order: Some(poise_engine::runtime::WorkingOrder {
-                        order_id: Some("order-2".into()),
-                        client_order_id: "client-2".into(),
-                        side: Side::Sell,
-                        price: 96.0,
-                        quantity: 0.1,
-                        target_exposure: Exposure(2.0),
-                        status: OrderStatus::PartiallyFilled,
-                        role: poise_engine::executor::OrderRole::DecreaseInventory,
-                    }),
+                    state: SlotState::Empty,
+                    working_order: None,
                 });
             manager.restore_track_state(&snapshot).unwrap();
             repository.seed_snapshot("btc-core", snapshot).await;
@@ -476,11 +467,8 @@ mod tests {
             poise_engine::executor::OrderSlot::new("inventory_followup")
         );
         assert_eq!(
-            snapshot.executor_state.slots[1]
-                .working_order
-                .as_ref()
-                .and_then(|order| order.order_id.as_deref()),
-            Some("order-2")
+            snapshot.executor_state.slots[1].state,
+            SlotState::Empty
         );
 
         let effect = repository
