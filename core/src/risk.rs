@@ -25,6 +25,22 @@ pub enum RiskDecision {
     Deny { reason: String },
 }
 
+pub fn validate_capacity_budget(budget: &CapacityBudget) -> Result<(), String> {
+    if !budget.max_notional.is_finite() || budget.max_notional <= 0.0 {
+        return Err("max_notional must be finite and > 0".to_string());
+    }
+
+    if !budget.daily_loss_limit.is_finite() || budget.daily_loss_limit >= 0.0 {
+        return Err("daily_loss_limit must be finite and < 0".to_string());
+    }
+
+    if !budget.stop_loss_pct.is_finite() || budget.stop_loss_pct <= 0.0 {
+        return Err("stop_loss_pct must be finite and > 0".to_string());
+    }
+
+    Ok(())
+}
+
 /// 纯函数：评估风控。
 pub fn evaluate_risk(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskDecision {
     let total_pnl = intent.realized_pnl_today + intent.unrealized_pnl;
@@ -147,5 +163,43 @@ mod tests {
         let decision = evaluate_risk(&intent, &budget);
 
         assert_eq!(decision, RiskDecision::Cap(Exposure(0.0)));
+    }
+
+    #[test]
+    fn validate_capacity_budget_rejects_non_positive_max_notional() {
+        let error = validate_capacity_budget(&CapacityBudget {
+            max_notional: 0.0,
+            ..budget()
+        })
+        .unwrap_err();
+
+        assert!(error.contains("max_notional"));
+    }
+
+    #[test]
+    fn validate_capacity_budget_rejects_non_negative_daily_loss_limit() {
+        let error = validate_capacity_budget(&CapacityBudget {
+            daily_loss_limit: 0.0,
+            ..budget()
+        })
+        .unwrap_err();
+
+        assert!(error.contains("daily_loss_limit"));
+    }
+
+    #[test]
+    fn validate_capacity_budget_rejects_non_positive_stop_loss_pct() {
+        let error = validate_capacity_budget(&CapacityBudget {
+            stop_loss_pct: 0.0,
+            ..budget()
+        })
+        .unwrap_err();
+
+        assert!(error.contains("stop_loss_pct"));
+    }
+
+    #[test]
+    fn validate_capacity_budget_accepts_valid_budget() {
+        assert!(validate_capacity_budget(&budget()).is_ok());
     }
 }

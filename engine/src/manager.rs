@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use poise_core::events::DomainEvent;
-use poise_core::risk::CapacityBudget;
+use poise_core::risk::{CapacityBudget, validate_capacity_budget};
 use poise_core::strategy::TrackConfig;
 use poise_core::types::ExchangeRules;
 use poise_core::types::Exposure;
@@ -88,6 +88,7 @@ impl TrackManager {
         }
 
         poise_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
+        validate_capacity_budget(&budget).map_err(|e| anyhow::anyhow!(e))?;
         let track = TrackRuntime::new(
             id.clone(),
             instrument.clone(),
@@ -1236,6 +1237,63 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn add_track_rejects_non_positive_max_notional() {
+        let mut manager = test_manager();
+        let error = manager
+            .add_track(
+                TrackId::new("test"),
+                test_instrument("BTCUSDT"),
+                test_config(),
+                CapacityBudget {
+                    max_notional: 0.0,
+                    ..test_budget()
+                },
+                test_exchange_rules(),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("max_notional"));
+    }
+
+    #[test]
+    fn add_track_rejects_non_negative_daily_loss_limit() {
+        let mut manager = test_manager();
+        let error = manager
+            .add_track(
+                TrackId::new("test"),
+                test_instrument("BTCUSDT"),
+                test_config(),
+                CapacityBudget {
+                    daily_loss_limit: 0.0,
+                    ..test_budget()
+                },
+                test_exchange_rules(),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("daily_loss_limit"));
+    }
+
+    #[test]
+    fn add_track_rejects_non_positive_stop_loss_pct() {
+        let mut manager = test_manager();
+        let error = manager
+            .add_track(
+                TrackId::new("test"),
+                test_instrument("BTCUSDT"),
+                test_config(),
+                CapacityBudget {
+                    stop_loss_pct: 0.0,
+                    ..test_budget()
+                },
+                test_exchange_rules(),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("stop_loss_pct"));
     }
 
     #[test]

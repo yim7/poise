@@ -68,6 +68,7 @@ notional_per_unit = 375.0
 - `environment = "test"` 只保留给仓库内自动化测试，不用于真实运行
 - 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
+- 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit < 0`、`stop_loss_pct > 0`
 - 示例里的 `btc-core` 区间总带宽是 `2000 USD`，在线性模式下等效每格约 `100 USD`
 - 联调前要按当前测试网价格手动平移这个区间
 
@@ -167,6 +168,7 @@ cargo test
 仓库内置了 3 个运行资产：
 
 - [`scripts/start-paper-zellij.sh`](scripts/start-paper-zellij.sh)：创建或附着到 `zellij` session
+- [`scripts/run-paper-tui.sh`](scripts/run-paper-tui.sh)：启动 `poise-tui`
 - [`scripts/run-paper-server.sh`](scripts/run-paper-server.sh)：启动 `poise-server` 并把日志落到本地
 - [`scripts/probe-health.sh`](scripts/probe-health.sh)：循环探测 `GET /health`
 
@@ -190,9 +192,9 @@ cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
 
 默认会创建或附着到名为 `poise-paper` 的 session。布局里有 3 个 pane：
 
-- 上方：`poise-server`
-- 左下：`/health` 巡检
-- 右下：空白 shell，方便你手工执行 `curl`、启动 `poise-tui` 或查日志
+- 左侧主 pane：`poise-tui`
+- 右上：`poise-server`
+- 右下：`/health` 巡检
 
 ### 3. 常用环境变量
 
@@ -202,14 +204,23 @@ cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
 export POISE_CONFIG_PATH=configs/binance-testnet.local.toml
 export POISE_HEALTH_BASE_URL=http://127.0.0.1:8000
 export POISE_LOG_DIR=.logs/paper
+export POISE_HEALTH_FAILURE_THRESHOLD=3
+export POISE_TUI_LOG=.logs/paper/poise-tui.log
 export POISE_ZELLIJ_SESSION_NAME=poise-paper
 ./scripts/start-paper-zellij.sh
+```
+
+如果你想在连续失败达到阈值时触发外部通知，还可以额外设置：
+
+```bash
+export POISE_HEALTH_ALERT_HOOK='printf "alert:%s:%s\n" "$POISE_HEALTH_FAILURE_COUNT" "$POISE_HEALTH_LAST_STATUS"'
 ```
 
 ### 4. 日志位置
 
 默认日志目录是 `.logs/paper/`，主要看这两个文件：
 
+- `.logs/paper/poise-tui.log`
 - `.logs/paper/poise-server.log`
 - `.logs/paper/health-probe.log`
 

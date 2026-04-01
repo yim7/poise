@@ -87,10 +87,15 @@ fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::routing::get;
     use chrono::Utc;
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
@@ -131,6 +136,120 @@ mod tests {
     fn parse_config_path_rejects_unknown_arguments() {
         let error = parse_config_path(vec!["--bogus".to_string()].into_iter()).unwrap_err();
         assert!(error.to_string().contains("unknown argument"));
+    }
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn probe_health_script_path() -> PathBuf {
+        workspace_root().join("scripts").join("probe-health.sh")
+    }
+
+    fn run_paper_tui_script_path() -> PathBuf {
+        workspace_root().join("scripts").join("run-paper-tui.sh")
+    }
+
+    fn paper_layout_path() -> PathBuf {
+        workspace_root()
+            .join("ops")
+            .join("zellij")
+            .join("poise-paper.kdl")
+    }
+
+    #[test]
+    fn paper_layout_prefers_tui_in_primary_left_pane() {
+        let layout = fs::read_to_string(paper_layout_path()).unwrap();
+
+        assert!(layout.contains("pane size=\"72%\" command=\"bash\""));
+        assert!(layout.contains("./scripts/run-paper-tui.sh"));
+        assert!(layout.contains("pane size=\"68%\" command=\"bash\""));
+        assert!(layout.contains("./scripts/run-paper-server.sh"));
+        assert!(layout.contains("pane size=\"32%\" command=\"bash\""));
+        assert!(layout.contains("./scripts/probe-health.sh"));
+    }
+
+    #[test]
+    fn run_paper_tui_script_supports_dry_run() {
+        let output = Command::new("bash")
+            .arg(run_paper_tui_script_path())
+            .arg("--dry-run")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("base_url="));
+        assert!(stdout.contains("command=cargo run -p poise-tui"));
+    }
+
+    async fn wait_for_child_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+        for _ in 0..80 {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("child process did not exit within timeout");
+    }
+
+    #[tokio::test]
+    async fn probe_health_exits_after_failure_threshold_and_runs_alert_hook() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/health",
+            get(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    r#"{"status":"attention_required","track_count":1,"attention_required_count":1}"#,
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_dir = temp_dir.path().join("logs");
+        let hook_output_path = temp_dir.path().join("hook.log");
+        let hook_command = format!(
+            "printf 'alert:%s:%s\\n' \"$POISE_HEALTH_FAILURE_COUNT\" \"$POISE_HEALTH_LAST_STATUS\" >> {}",
+            hook_output_path.display()
+        );
+
+        let mut child = Command::new("bash")
+            .arg(probe_health_script_path())
+            .env("POISE_HEALTH_BASE_URL", format!("http://{bind_address}"))
+            .env("POISE_HEALTH_INTERVAL_SECS", "1")
+            .env("POISE_HEALTH_FAILURE_THRESHOLD", "2")
+            .env("POISE_HEALTH_LOG_DIR", &log_dir)
+            .env("POISE_LOG_DIR", &log_dir)
+            .env("POISE_HEALTH_LOG", log_dir.join("health-probe.log"))
+            .env("POISE_HEALTH_ALERT_HOOK", hook_command)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let status = wait_for_child_exit(&mut child).await;
+        assert_eq!(status.code(), Some(3));
+
+        let hook_output = fs::read_to_string(&hook_output_path).unwrap();
+        assert_eq!(hook_output.trim(), "alert:2:503");
+
+        let log_output = fs::read_to_string(log_dir.join("health-probe.log")).unwrap();
+        assert!(log_output.contains("http_status=503"));
+        assert!(log_output.contains("ALERT"));
+
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
