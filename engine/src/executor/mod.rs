@@ -1241,6 +1241,7 @@ mod tests {
                 track_id: &track_id,
                 instrument: &instrument,
                 base_qty_per_unit: 3.75,
+                min_rebalance_units: 0.0,
                 target_exposure: Exposure(4.0),
                 reference_price: 95.0,
                 observed_at: now,
@@ -1328,6 +1329,7 @@ mod tests {
                 track_id: &track_id,
                 instrument: &instrument,
                 base_qty_per_unit: 0.0169,
+                min_rebalance_units: 0.0,
                 target_exposure: Exposure(-9.2),
                 reference_price: 95.0,
                 observed_at: now,
@@ -1459,6 +1461,7 @@ mod tests {
                 track_id: &track_id,
                 instrument: &instrument,
                 base_qty_per_unit: 1.0,
+                min_rebalance_units: 0.0,
                 target_exposure: Exposure(-9.2),
                 reference_price: 95.0,
                 observed_at: now,
@@ -1597,6 +1600,7 @@ mod tests {
                 track_id: &track_id,
                 instrument: &instrument,
                 base_qty_per_unit: 1.0,
+                min_rebalance_units: 0.0,
                 target_exposure: Exposure(4.0),
                 reference_price: 90.0,
                 observed_at: now,
@@ -1623,6 +1627,102 @@ mod tests {
                 .map(|order| order.target_exposure.clone()),
             Some(Exposure(4.0))
         );
+    }
+
+    #[test]
+    fn submit_recovery_keeps_pending_submit_when_current_plan_is_below_min_rebalance_units() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 90.0,
+            quantity: 0.8,
+            client_order_id: "track-1-small-reconcile".into(),
+            reduce_only: false,
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(0.8));
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(0.8),
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+            current_plan: Some(SubmitRecoveryPlanContext {
+                track_id: &track_id,
+                instrument: &instrument,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 0.5,
+                target_exposure: Exposure(0.4),
+                reference_price: 90.0,
+                observed_at: now,
+            }),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            effects,
+        } = recovery
+        else {
+            panic!(
+                "small pending submit should be preserved when current plan is below min rebalance units"
+            );
+        };
+
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn submit_recovery_supersedes_when_pending_slot_is_already_cleared_below_min_rebalance_units()
+    {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 90.0,
+            quantity: 0.8,
+            client_order_id: "track-1-small-reconcile".into(),
+            reduce_only: false,
+        };
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &ExecutorState::empty(now),
+            request: &request,
+            target_exposure: &Exposure(0.8),
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+            current_plan: Some(SubmitRecoveryPlanContext {
+                track_id: &track_id,
+                instrument: &instrument,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 0.5,
+                target_exposure: Exposure(0.4),
+                reference_price: 90.0,
+                observed_at: now,
+            }),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { state },
+            effects,
+        } = recovery
+        else {
+            panic!(
+                "cleared pending submit should be superseded when current plan is below min rebalance units"
+            );
+        };
+
+        assert!(effects.is_empty());
+        assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
     }
 
     #[test]

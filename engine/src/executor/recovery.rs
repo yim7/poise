@@ -3,7 +3,7 @@ use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::observation::OrderObservation;
 use crate::ports::OrderRequest;
-use crate::runtime::{ExecutionStats, ExecutorState};
+use crate::runtime::{ExecutionStats, ExecutorState, SlotState};
 use crate::track::{Instrument, TrackId};
 use crate::transition::TrackEffect;
 
@@ -54,6 +54,7 @@ pub struct SubmitRecoveryPlanContext<'a> {
     pub track_id: &'a TrackId,
     pub instrument: &'a Instrument,
     pub base_qty_per_unit: f64,
+    pub min_rebalance_units: f64,
     pub target_exposure: Exposure,
     pub reference_price: f64,
     pub observed_at: DateTime<Utc>,
@@ -153,7 +154,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
             instrument: current_plan.instrument,
             exchange_rules: input.exchange_rules,
             base_qty_per_unit: current_plan.base_qty_per_unit,
-            min_rebalance_units: 0.0,
+            min_rebalance_units: current_plan.min_rebalance_units,
             current_exposure: input.current_exposure.clone(),
             target_exposure: current_plan.target_exposure.clone(),
             reference_price: current_plan.reference_price,
@@ -167,6 +168,19 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         current_plan_submit.as_ref(),
         input.exchange_rules,
     ) {
+        if current_plan_submit.is_none() {
+            let has_matching_pending_submit_slot = input.previous_state.slots.iter().any(|slot| {
+                slot.state == SlotState::SubmitPending
+                    && slots::slot_matches_order(slot, &input.request.client_order_id, None)
+            });
+            if input.current_plan.is_some() && has_matching_pending_submit_slot {
+                return SubmitRecoveryPlan {
+                    resolution: SubmitRecoveryResolution::AwaitExchangeState,
+                    effects: vec![],
+                };
+            }
+        }
+
         let cleared_state =
             recording::clear_pending_submit(input.previous_state, &input.request.client_order_id);
         if let Some(next_submit) = current_plan_submit {

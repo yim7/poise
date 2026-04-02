@@ -833,6 +833,7 @@ impl TrackManager {
             track_id: &track.id,
             instrument: &track.instrument,
             base_qty_per_unit: track.config.base_qty_per_unit(),
+            min_rebalance_units: track.config.min_rebalance_units,
             target_exposure: target.target_exposure,
             reference_price,
             observed_at,
@@ -878,7 +879,7 @@ impl TrackManager {
             instrument: &track.instrument,
             exchange_rules: &track.exchange_rules,
             base_qty_per_unit: track.config.base_qty_per_unit(),
-            min_rebalance_units: 0.0,
+            min_rebalance_units: track.config.min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             target_exposure: target.target_exposure.clone(),
             reference_price,
@@ -1731,6 +1732,145 @@ mod tests {
     }
 
     #[test]
+    fn observe_market_keeps_strategy_target_while_suppressing_small_rebalance() {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        track.status = TrackStatus::Active;
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+
+        let transition = manager
+            .observe(
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
+                    reference_price: 97.0,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
+        assert!(
+            transition
+                .snapshot
+                .target_exposure
+                .as_ref()
+                .is_some_and(|target| (target.0 - 2.4).abs() < 0.001)
+        );
+        assert!(
+            transition
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn observe_market_cancels_existing_working_order_when_small_rebalance_is_below_min_rebalance_units()
+     {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        track.status = TrackStatus::Active;
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+        seed_executor_slot(
+            track,
+            working_order(
+                Some("order-1"),
+                "client-1",
+                poise_core::types::Side::Sell,
+                99.9,
+                1.5,
+                poise_core::types::Exposure(0.5),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+
+        let transition = manager
+            .observe(
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
+                    reference_price: 97.0,
+                }),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::CancelOrder { order_id, .. }] if order_id == "order-1"
+        ));
+        assert!(
+            transition
+                .snapshot
+                .target_exposure
+                .as_ref()
+                .is_some_and(|target| (target.0 - 2.4).abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn observe_market_keeps_submit_pending_slot_when_small_rebalance_is_below_min_rebalance_units()
+     {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        track.status = TrackStatus::Active;
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+        seed_executor_slot(
+            track,
+            working_order(
+                None,
+                "recover-1",
+                poise_core::types::Side::Buy,
+                95.0,
+                1.5,
+                poise_core::types::Exposure(3.5),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+
+        let transition = manager
+            .observe(
+                &TrackId::new("btc1"),
+                TrackObservation::Market(MarketObservation {
+                    reference_price: 97.0,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
+        assert!(
+            transition
+                .snapshot
+                .target_exposure
+                .as_ref()
+                .is_some_and(|target| (target.0 - 2.4).abs() < 0.001)
+        );
+        assert_eq!(
+            inventory_core_order_from_snapshot(&transition.snapshot),
+            Some(&working_order(
+                None,
+                "recover-1",
+                poise_core::types::Side::Buy,
+                95.0,
+                1.5,
+                poise_core::types::Exposure(3.5),
+                OrderStatus::Submitting,
+            ))
+        );
+    }
+
+    #[test]
     fn observe_market_records_submit_pending_slot_for_new_submit_effect() {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
@@ -1772,6 +1912,7 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Active;
         track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.min_rebalance_units = 0.0;
         track.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.5,
@@ -1822,6 +1963,7 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Active;
         track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.min_rebalance_units = 0.0;
         track.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.5,
@@ -1886,6 +2028,7 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Active;
         track.current_exposure = poise_core::types::Exposure(0.0);
+        track.config.min_rebalance_units = 0.0;
         track.exchange_rules.maker_fee_rate = 0.0002;
         track.exchange_rules.taker_fee_rate = 0.0004;
         seed_executor_slot(
@@ -2590,6 +2733,67 @@ mod tests {
                 && (*price - 90.0).abs() < f64::EPSILON
                 && (*quantity - 4.0).abs() < f64::EPSILON
                 && *target_exposure == expected_target
+        ));
+    }
+
+    #[test]
+    fn recover_submit_effect_keeps_pending_submit_when_current_plan_is_below_min_rebalance_units()
+    {
+        let mut manager = test_manager_with_cached_price(97.0);
+        let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+        seed_executor_slot(
+            track,
+            working_order(
+                None,
+                "btc-core-reconcile",
+                poise_core::types::Side::Buy,
+                97.0,
+                0.8,
+                poise_core::types::Exposure(2.8),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+
+        let recovery = manager
+            .recover_submit_effect(
+                &TrackId::new("btc-core"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "btc-core-reconcile".into(),
+                    side: poise_core::types::Side::Buy,
+                    price: 97.0,
+                    quantity: 0.8,
+                    reduce_only: false,
+                },
+                poise_core::types::Exposure(2.8),
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            recovery.resolution,
+            executor::SubmitRecoveryResolution::AwaitExchangeState
+        ));
+        assert!(recovery.effects.is_empty());
+        assert!(matches!(
+            inventory_core_order(manager.get_track("btc-core").unwrap()),
+            Some(WorkingOrder {
+                order_id: None,
+                client_order_id,
+                side: poise_core::types::Side::Buy,
+                price,
+                quantity,
+                target_exposure,
+                status: OrderStatus::Submitting,
+                role: _,
+            }) if client_order_id == "btc-core-reconcile"
+                && (*price - 97.0).abs() < f64::EPSILON
+                && (*quantity - 0.8).abs() < f64::EPSILON
+                && *target_exposure == poise_core::types::Exposure(2.8)
         ));
     }
 
