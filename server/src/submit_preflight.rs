@@ -8,13 +8,6 @@ pub enum SubmitPreflightDecision {
     NeedsLiveOrderLookup { client_order_id: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitPreflightHint {
-    DirectSafe,
-    #[allow(dead_code)]
-    NeedsExchangeStateLookup,
-}
-
 #[derive(Default)]
 pub struct SubmitPreflight {
     attempted_submit_effects: Mutex<HashSet<String>>,
@@ -26,18 +19,7 @@ impl SubmitPreflight {
         Self::default()
     }
 
-    pub async fn decide(
-        &self,
-        effect_id: &str,
-        client_order_id: &str,
-        hint: SubmitPreflightHint,
-    ) -> SubmitPreflightDecision {
-        if matches!(hint, SubmitPreflightHint::NeedsExchangeStateLookup) {
-            return SubmitPreflightDecision::NeedsLiveOrderLookup {
-                client_order_id: client_order_id.to_string(),
-            };
-        }
-
+    pub async fn decide(&self, effect_id: &str, client_order_id: &str) -> SubmitPreflightDecision {
         if self
             .startup_pending_submit_effects
             .lock()
@@ -103,15 +85,13 @@ impl SubmitPreflight {
 
 #[cfg(test)]
 mod tests {
-    use super::{SubmitPreflight, SubmitPreflightDecision, SubmitPreflightHint};
+    use super::{SubmitPreflight, SubmitPreflightDecision};
 
     #[tokio::test]
     async fn submit_preflight_decides_direct_for_fresh_effect() {
         let preflight = SubmitPreflight::new();
 
-        let decision = preflight
-            .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)
-            .await;
+        let decision = preflight.decide("effect-1", "client-1").await;
 
         assert_eq!(decision, SubmitPreflightDecision::Direct);
     }
@@ -121,9 +101,7 @@ mod tests {
         let preflight = SubmitPreflight::new();
         preflight.mark_submit_started("effect-1").await;
 
-        let decision = preflight
-            .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)
-            .await;
+        let decision = preflight.decide("effect-1", "client-1").await;
 
         assert_eq!(
             decision,
@@ -140,9 +118,7 @@ mod tests {
             .seed_startup_pending_submit_effects(["effect-1".to_string()])
             .await;
 
-        let decision = preflight
-            .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)
-            .await;
+        let decision = preflight.decide("effect-1", "client-1").await;
 
         assert_eq!(
             decision,

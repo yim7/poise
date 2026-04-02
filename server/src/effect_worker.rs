@@ -158,20 +158,10 @@ impl EffectWorker {
         request: OrderRequest,
         target_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
-        let hint = self
-            .state
-            .write_service
-            .submit_preflight_hint(
-                persisted.track_id.as_str(),
-                &persisted.effect_id,
-                &request,
-                target_exposure.clone(),
-            )
-            .await?;
         let preflight_decision = self
             .state
             .submit_preflight
-            .decide(&persisted.effect_id, &request.client_order_id, hint)
+            .decide(&persisted.effect_id, &request.client_order_id)
             .await;
         let Some(prepared_submit) = self
             .prepare_submit_execution(
@@ -463,7 +453,7 @@ mod tests {
     use crate::assembly::build_server_state;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
-    use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision, SubmitPreflightHint};
+    use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision};
     use crate::write_service::TrackWriteService;
 
     use super::{Cancellation, EffectWorker};
@@ -664,10 +654,10 @@ mod tests {
         preflight.mark_submit_started("effect-1").await;
 
         let started_decision = preflight
-            .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)
+            .decide("effect-1", "client-1")
             .await;
         let fresh_decision = preflight
-            .decide("effect-2", "client-2", SubmitPreflightHint::DirectSafe)
+            .decide("effect-2", "client-2")
             .await;
 
         assert_eq!(

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让新鲜的正常 submit 默认不再调用 `openOrders` 预检查，同时保留启动恢复、同进程重复 submit，以及 write side 要求先看交易所事实时的 live order 保护。
+**Goal:** 让新鲜的正常 submit 默认不再调用 `openOrders` 预检查，同时保留启动恢复和同进程重复 submit 的 live order 保护。
 
 **Architecture:** 新增一个 `submit_preflight` 协调模块，集中决定某条 pending submit effect 是走 `Direct` 还是 `NeedsLiveOrderLookup`。启动恢复的判断不再依赖时间比较，而是由 runtime 在启动阶段显式采样所有 pending submit；同进程内已尝试 submit 的跟踪也集中到同一模块，避免在 `effect_worker` 里散落条件判断。
 
@@ -64,25 +64,16 @@ Expected:
     - `startup_pending_submit_effects`
     - `attempted_submit_effects`
   - 协调接口，至少包含：
-    - `decide(effect_id, client_order_id, hint) -> SubmitPreflightDecision`
+    - `decide(effect_id, client_order_id) -> SubmitPreflightDecision`
     - `reconcile_pending_submit_effects(current_pending_submit_effect_ids)`
-- 在 write side 增加一个窄提示接口，例如：
-  - `submit_preflight_hint(effect_id, request, target_exposure) -> SubmitPreflightHint`
-  - 例如：
-    - `DirectSafe`
-    - `NeedsExchangeStateLookup`
-  - 只表达“当前 executor 状态是否已经要求先看交易所事实”
-  - 这个最小实现必须在本 task 打通，不延后到后续 task
 - 在 `ServerState` 挂入这份共享状态
 - 明确保留当前单 worker 顺序执行不变量，不在本 task 引入并发 worker 语义
 - 在 `effect_worker.execute_submit(...)` 中改为：
-  1. 先通过 write side 的只读路径获取 `SubmitPreflightHint`
-  2. 把 hint 传给 `submit_preflight.decide(effect_id, client_order_id, hint)`
-  3. `Direct` 时直接走 `prepare_submit_execution(..., None)`
-  4. `NeedsLiveOrderLookup` 时才调用 `exchange.get_open_orders(...)`
-  5. 只有 `prepare_submit_execution(...)` 返回 `Some(prepared_submit)` 后，才 `mark_submit_started(effect_id)`
-  6. 再执行 `submit_order(...)`
-  7. 这里新增的是本地读，不是额外的交易所调用；本 task 不把 hint 读取和 `prepare_submit_execution(...)` 合并
+  1. 先调用 `submit_preflight.decide(effect_id, client_order_id)`
+  2. `Direct` 时直接走 `prepare_submit_execution(..., None)`
+  3. `NeedsLiveOrderLookup` 时才调用 `exchange.get_open_orders(...)`
+  4. 只有 `prepare_submit_execution(...)` 返回 `Some(prepared_submit)` 后，才 `mark_submit_started(effect_id)`
+  5. 再执行 `submit_order(...)`
 
 - [x] **Step 4: 运行定向测试确认通过**
 

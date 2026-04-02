@@ -22,7 +22,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 use crate::notifications::TrackInternalNotification;
 use crate::runtime::AccountMarginGuardStore;
-use crate::submit_preflight::SubmitPreflightHint;
 
 pub type SharedManager = Arc<RwLock<TrackManager>>;
 
@@ -601,16 +600,6 @@ impl TrackWriteService {
             .await?;
         self.retry_pending_follow_up_retirements(id).await?;
         Ok(())
-    }
-
-    pub async fn submit_preflight_hint(
-        &self,
-        _id: &str,
-        _effect_id: &str,
-        _request: &OrderRequest,
-        _target_exposure: poise_core::types::Exposure,
-    ) -> Result<SubmitPreflightHint> {
-        Ok(SubmitPreflightHint::DirectSafe)
     }
 
     pub(crate) async fn retry_pending_follow_up_retirements_best_effort(

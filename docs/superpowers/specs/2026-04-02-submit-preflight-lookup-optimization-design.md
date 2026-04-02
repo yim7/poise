@@ -114,7 +114,6 @@
 - 根据 persisted submit effect 元数据
 - 再结合 runtime 启动时显式采样到的 pending submit 集合
 - 以及当前进程内“这条 effect 是否已经尝试过 submit”
-- 再结合 write side 提供的“当前是否已经需要 exchange-state 保护”提示
 - 决定这次 submit 是否需要交易所 `openOrders` 保护
 
 ### 模块边界
@@ -131,7 +130,6 @@
 
 - `write_service`
   - 继续接受 `Option<&ExchangeOrder>` 作为可选 live order 证据
-  - 通过语义化提示告诉 preflight“当前本地状态是否已经需要 exchange-state 保护”
   - 不直接维护 preflight 缓存的删除
 
 - `executor`
@@ -149,7 +147,7 @@
 
 ## 决策规则
 
-第一版只保留两种决策结果，风险来源有三类：
+第一版只保留两种决策结果，风险来源有两类：
 
 ### `NeedsLiveOrderLookup`
 
@@ -162,10 +160,6 @@
 2. 这条 `effect_id` 已经在当前进程里执行过一次 `submit_order(...)`
    - 但 effect 仍然保持 `Pending`
    - 属于“同进程内可重复 submit”的危险场景
-
-3. write side 明确给出 `SubmitPreflightHint::NeedsExchangeStateLookup`
-   - 表示当前 executor 状态已经要求先看交易所事实，不能把这条 submit 当成纯 fresh submit 直接推进
-   - 例如当前 submit recovery 在没有 live order 证据时会落入 `AwaitExchangeState`
 
 ### `Direct`
 
@@ -195,37 +189,6 @@
   - “这条 pending submit 是 runtime 启动前就已经存在的恢复对象”
 - `attempted_submit_effects`
   - “这个 effect 在当前进程内，是否已经真的开始过一次 submit 执行”
-
-### write-side 的 preflight 提示
-
-为了避免把 executor 恢复风险重新实现一遍，`submit_preflight` 不直接阅读全部 executor 细节，而是消费一个来自 write side 的窄提示，例如：
-
-- `SubmitPreflightHint`
-  - `DirectSafe`
-  - `NeedsExchangeStateLookup`
-
-这个提示只表达一件事：
-
-- “如果这次 submit 不带 live order 证据继续往下走，当前本地状态是否已经需要 exchange-state 保护”
-
-这样：
-
-- executor / write side 继续拥有恢复语义
-- `submit_preflight` 只负责把多个风险来源合并成一次 `Direct / NeedsLiveOrderLookup` 决策
-
-### `SubmitPreflightHint` 的获取顺序
-
-`effect_worker.execute_submit(...)` 必须按下面的顺序执行：
-
-1. 先通过 write side 的只读接口拿到 `SubmitPreflightHint`
-2. 再调用 `submit_preflight.decide(effect_id, client_order_id, hint)`
-3. 如果结果是 `Direct`，才继续 `prepare_submit_execution(..., None)`
-4. 如果结果是 `NeedsLiveOrderLookup`，先查 `openOrders`，再继续 `prepare_submit_execution(..., Some(live_order))`
-
-这里要明确两点：
-
-- `SubmitPreflightHint` 的获取点在 `decide(...)` 之前，不允许把 hint 的来源留成隐式约定。
-- 这次只增加一次本地读路径，不增加额外的交易所往返；它不能和 `prepare_submit_execution(...)` 合并，因为 preflight 决策本身决定了是否需要先拿 live order 证据。
 
 ### `startup_pending_submit_effects` 的来源
 
@@ -381,10 +344,9 @@
 但相比当前“每次 submit 都查”，它有两个明显好处：
 
 - 把大多数新鲜 submit 的签名 GET 去掉
-- 同时保住来自三类来源的高风险 submit：
+- 同时保住来自两类来源的高风险 submit：
   - 重启恢复
   - 同进程已尝试但仍 pending
-  - write side 明确要求先看交易所事实
 
 如果后面还要继续演进，下一步应该是：
 
