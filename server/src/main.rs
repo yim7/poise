@@ -11,21 +11,31 @@ mod query_service;
 #[allow(dead_code)]
 mod read_model;
 mod runtime;
+mod state_bootstrap;
 mod websocket;
 mod write_service;
 
 use std::env;
 
 use anyhow::Result;
+use state_bootstrap::StateBootstrapMode;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupOptions {
+    config_path: String,
+    bootstrap_mode: StateBootstrapMode,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     tracing::info!("Poise server starting");
 
-    let config_path = parse_config_path(env::args().skip(1))?;
-    let config = config::load_config(&config_path)?;
-    let platform = assembly::assemble(&config).await?;
+    let options = parse_startup_options(env::args().skip(1))?;
+    let config = config::load_config(&options.config_path)?;
+    let repository =
+        state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await?;
+    let platform = assembly::assemble(&config, repository).await?;
     let runtime_handles = platform.runtime.start().await?;
 
     let app = http::router(platform.state());
@@ -63,8 +73,9 @@ async fn shutdown_signal() {
     }
 }
 
-fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
+fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
     let mut config_path = None;
+    let mut bootstrap_mode = StateBootstrapMode::Strict;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -74,13 +85,20 @@ fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
                     .ok_or_else(|| anyhow::anyhow!("missing value for --config"))?;
                 config_path = Some(value);
             }
+            "--rebuild-state" => {
+                bootstrap_mode = StateBootstrapMode::Rebuild;
+            }
             other => {
                 return Err(anyhow::anyhow!("unknown argument: {other}"));
             }
         }
     }
 
-    config_path.ok_or_else(|| anyhow::anyhow!("missing required --config <path>"))
+    Ok(StartupOptions {
+        config_path: config_path
+            .ok_or_else(|| anyhow::anyhow!("missing required --config <path>"))?,
+        bootstrap_mode,
+    })
 }
 
 #[cfg(test)]
@@ -106,7 +124,9 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
-    use super::parse_config_path;
+    use crate::state_bootstrap::StateBootstrapMode;
+
+    use super::{StartupOptions, parse_startup_options};
 
     fn unique_test_environment() -> String {
         static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -119,22 +139,49 @@ mod tests {
 
     #[test]
     fn parse_config_path_requires_config_flag() {
-        let error = parse_config_path(Vec::<String>::new().into_iter()).unwrap_err();
+        let error = parse_startup_options(Vec::<String>::new().into_iter()).unwrap_err();
         assert!(error.to_string().contains("--config"));
     }
 
     #[test]
     fn parse_config_path_reads_flag_value() {
-        let path = parse_config_path(
+        let options = parse_startup_options(
             vec!["--config".to_string(), "configs/test.demo.toml".to_string()].into_iter(),
         )
         .unwrap();
-        assert_eq!(path, "configs/test.demo.toml");
+        assert_eq!(
+            options,
+            StartupOptions {
+                config_path: "configs/test.demo.toml".to_string(),
+                bootstrap_mode: StateBootstrapMode::Strict,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_config_path_accepts_rebuild_state_flag() {
+        let options = parse_startup_options(
+            vec![
+                "--rebuild-state".to_string(),
+                "--config".to_string(),
+                "configs/test.demo.toml".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options,
+            StartupOptions {
+                config_path: "configs/test.demo.toml".to_string(),
+                bootstrap_mode: StateBootstrapMode::Rebuild,
+            }
+        );
     }
 
     #[test]
     fn parse_config_path_rejects_unknown_arguments() {
-        let error = parse_config_path(vec!["--bogus".to_string()].into_iter()).unwrap_err();
+        let error = parse_startup_options(vec!["--bogus".to_string()].into_iter()).unwrap_err();
         assert!(error.to_string().contains("unknown argument"));
     }
 

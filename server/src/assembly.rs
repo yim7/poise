@@ -8,10 +8,9 @@ use chrono::Utc;
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{
-    ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort, TrackReadRepositoryPort,
+    ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort, StateStore,
 };
 use poise_engine::track::{Instrument, TrackId};
-use poise_storage::sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
@@ -138,7 +137,7 @@ fn resolve_binance_endpoints_with_lookup(
     ))
 }
 
-pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
+pub async fn assemble(config: &Config, repository: Arc<dyn StateStore>) -> Result<ServerPlatform> {
     validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
     let exchange_config = validate_exchange_runtime_config(config)?;
@@ -152,12 +151,9 @@ pub async fn assemble(config: &Config) -> Result<ServerPlatform> {
     let exchange: Arc<dyn ExchangePort> = adapter.clone();
     let market_data: Arc<dyn MarketDataPort> = adapter;
 
-    let db_path = config.default_db_path();
-    ensure_parent_dir(&db_path)?;
-    let storage = Arc::new(SqliteStorage::new(&db_path)?);
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_components_with_repository(config, exchange, market_data, storage, clock).await
+    assemble_with_state_store(config, exchange, market_data, repository, clock).await
 }
 
 #[cfg(test)]
@@ -169,21 +165,19 @@ pub(crate) async fn assemble_with_components<R>(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
-    R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+    R: StateStore + 'static,
 {
-    assemble_with_components_with_repository(config, exchange, market_data, repository, clock).await
+    let repository: Arc<dyn StateStore> = repository;
+    assemble_with_state_store(config, exchange, market_data, repository, clock).await
 }
 
-async fn assemble_with_components_with_repository<R>(
+async fn assemble_with_state_store(
     config: &Config,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
-    repository: Arc<R>,
+    repository: Arc<dyn StateStore>,
     clock: Arc<dyn ClockPort>,
-) -> Result<ServerPlatform>
-where
-    R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
-{
+) -> Result<ServerPlatform> {
     validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
 
@@ -217,8 +211,8 @@ where
     }
 
     let (notifications, _) = broadcast::channel(256);
-    let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-    let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+    let state_repository = Arc::clone(&repository).into_state_repository();
+    let read_repository = repository.into_track_read_repository();
     let write_service = Arc::new(TrackWriteService::new(
         manager,
         state_repository.clone(),
@@ -400,6 +394,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assemble_accepts_prepared_state_store_instead_of_bootstrap_flag() {
+        let config = Config {
+            environment: unique_test_environment(),
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![],
+            exchange: ExchangeConfig::default(),
+        };
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        let _ = assemble(&config, repository).await;
+    }
+
+    #[tokio::test]
     async fn assembles_platform_with_all_instances_registered() {
         let suffix = unique_test_environment();
 
@@ -529,7 +536,8 @@ mod tests {
             },
         };
 
-        let error = assemble(&config).await.err().unwrap();
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let error = assemble(&config, repository).await.err().unwrap();
         assert!(error.to_string().contains("duplicate instrument"));
     }
 
@@ -561,7 +569,8 @@ mod tests {
             },
         };
 
-        let error = assemble(&config).await.err().unwrap();
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let error = assemble(&config, repository).await.err().unwrap();
         assert!(
             error
                 .to_string()

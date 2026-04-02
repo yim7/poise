@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use poise_core::events::DomainEvent;
@@ -236,6 +237,24 @@ pub trait TrackReadRepositoryPort: Send + Sync {
         track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<PersistedTrackEffect>>;
+}
+
+pub trait StateStore: StateRepositoryPort + TrackReadRepositoryPort {
+    fn into_state_repository(self: Arc<Self>) -> Arc<dyn StateRepositoryPort>;
+    fn into_track_read_repository(self: Arc<Self>) -> Arc<dyn TrackReadRepositoryPort>;
+}
+
+impl<T> StateStore for T
+where
+    T: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+{
+    fn into_state_repository(self: Arc<Self>) -> Arc<dyn StateRepositoryPort> {
+        self
+    }
+
+    fn into_track_read_repository(self: Arc<Self>) -> Arc<dyn TrackReadRepositoryPort> {
+        self
+    }
 }
 
 pub trait ClockPort: Send + Sync {
