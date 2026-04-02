@@ -1067,6 +1067,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_within_min_rebalance_units(
+    ) {
+        let exchange = Arc::new(FakeExchange::new(btc_position(2.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let first = state
+            .write_service
+            .observe_market("BTCUSDT", 96.5)
+            .await
+            .unwrap();
+        let (first_request, first_target_exposure) = match first.effects.as_slice() {
+            [
+                ExecutionAction::SubmitOrder {
+                    request,
+                    target_exposure,
+                },
+            ] => (request.clone(), target_exposure.clone()),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+
+        let second = state
+            .write_service
+            .observe_market("BTCUSDT", 96.125)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.effects,
+            vec![ExecutionAction::NoOp],
+            "small drift should not supersede the active submit intent"
+        );
+
+        worker.run_once().await.unwrap();
+
+        let submitted = exchange.submitted_orders.lock().unwrap().clone();
+        assert_eq!(submitted, vec![first_request.clone()]);
+        assert!(exchange.canceled_order_ids.lock().unwrap().is_empty());
+
+        let effects = persistence.all_effects().await;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Succeeded);
+
+        let instance = current_instance(&state).await;
+        assert!(instance
+            .target_exposure
+            .as_ref()
+            .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9));
+        let order = inventory_core_order(&instance).expect("submit should become working");
+        assert_eq!(order.client_order_id, first_request.client_order_id);
+        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(order.order_id.as_deref(), Some("order-1"));
+    }
+
+    #[tokio::test]
+    async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(2.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let first = state
+            .write_service
+            .observe_market("BTCUSDT", 96.5)
+            .await
+            .unwrap();
+        let first_target_exposure = match first.effects.as_slice() {
+            [
+                ExecutionAction::SubmitOrder {
+                    target_exposure, ..
+                },
+            ] => target_exposure.clone(),
+            other => panic!("expected one submit effect, got {other:?}"),
+        };
+
+        worker.run_once().await.unwrap();
+
+        let second = state
+            .write_service
+            .observe_market("BTCUSDT", 96.125)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.effects,
+            vec![ExecutionAction::NoOp],
+            "small drift should keep the active working order"
+        );
+
+        assert_eq!(
+            exchange.submitted_orders.lock().unwrap().len(),
+            1,
+            "small drift should not create a replacement submit"
+        );
+        assert!(
+            exchange.canceled_order_ids.lock().unwrap().is_empty(),
+            "small drift should not cancel the active working order"
+        );
+
+        let instance = current_instance(&state).await;
+        assert!(instance
+            .target_exposure
+            .as_ref()
+            .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9));
+        let order = inventory_core_order(&instance).expect("working order should remain active");
+        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(order.order_id.as_deref(), Some("order-1"));
+    }
+
+    #[tokio::test]
     async fn effect_worker_restores_pending_effect_after_restart() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 

@@ -155,6 +155,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn current_submit_hint(input: SubmitIntentInput<'_>) -> Option<PendingSubmitHint> {
     current_submit_hint_with_slot(input, None)
 }

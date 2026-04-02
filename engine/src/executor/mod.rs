@@ -6,9 +6,9 @@ mod recording;
 mod recovery;
 mod slots;
 
-pub(crate) use planning::{
-    DesiredOrder, ExecutorInput, SubmitIntentInput, current_submit_hint, plan, refresh_state,
-};
+pub(crate) use planning::{DesiredOrder, ExecutorInput, SubmitIntentInput, plan, refresh_state};
+#[cfg(test)]
+pub(crate) use planning::current_submit_hint;
 pub use planning::{OrderRole, OrderSlot, PendingSubmitHint};
 pub use recording::OrderUpdateAbsorbResult;
 #[cfg(test)]
@@ -1802,7 +1802,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_recovery_keeps_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
+    fn submit_recovery_proceeds_with_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
     {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
@@ -1840,16 +1840,28 @@ mod tests {
         });
 
         let SubmitRecoveryPlan {
-            resolution: SubmitRecoveryResolution::AwaitExchangeState,
+            resolution:
+                SubmitRecoveryResolution::Proceed {
+                    state,
+                    target_exposure,
+                },
             effects,
         } = recovery
         else {
             panic!(
-                "pending submit should be preserved when latest target drift is within min rebalance units of the active anchor"
+                "pending submit should keep proceeding when latest target drift is within min rebalance units of the active anchor"
             );
         };
 
         assert!(effects.is_empty());
+        assert_eq!(target_exposure, Exposure(2.8));
+        assert_eq!(
+            state.slots[0]
+                .working_order
+                .as_ref()
+                .map(|order| order.target_exposure.clone()),
+            Some(Exposure(2.8))
+        );
     }
 
     #[test]

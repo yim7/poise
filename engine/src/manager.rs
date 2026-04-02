@@ -2697,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_awaits_when_current_plan_keeps_same_rounded_order_request_within_anchor_threshold()
+    fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request_within_anchor_threshold()
     {
         let mut manager = test_manager_with_cached_price(94.99);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
@@ -2743,11 +2743,13 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            recovery.resolution,
-            executor::SubmitRecoveryResolution::AwaitExchangeState
-        ));
+        let executor::SubmitRecoveryResolution::Proceed { target_exposure, .. } =
+            recovery.resolution
+        else {
+            panic!("matching rounded request should keep the pending submit proceeding");
+        };
         assert!(recovery.effects.is_empty());
+        assert_eq!(target_exposure, poise_core::types::Exposure(4.0));
         assert!(matches!(
             inventory_core_order(manager.get_track("btc-core").unwrap()),
             Some(WorkingOrder {
@@ -2767,7 +2769,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_keeps_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
+    fn recover_submit_effect_proceeds_with_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
     {
         let mut manager = test_manager_with_cached_price(96.125);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
@@ -2804,11 +2806,13 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            recovery.resolution,
-            executor::SubmitRecoveryResolution::AwaitExchangeState
-        ));
+        let executor::SubmitRecoveryResolution::Proceed { target_exposure, .. } =
+            recovery.resolution
+        else {
+            panic!("pending submit should continue when drift stays within the active anchor threshold");
+        };
         assert!(recovery.effects.is_empty());
+        assert_eq!(target_exposure, poise_core::types::Exposure(2.8));
         assert!(matches!(
             inventory_core_order(manager.get_track("btc-core").unwrap()),
             Some(WorkingOrder {

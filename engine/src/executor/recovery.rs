@@ -159,6 +159,27 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
             current_submit_hint_with_slot(current_plan.clone(), matching_pending_submit_slot)
         });
 
+    let matching_pending_submit_can_proceed = matching_pending_submit_slot.is_some_and(|slot| {
+        current_plan_trigger_decision
+            .as_ref()
+            .is_some_and(|decision| !decision.should_trigger_next_action)
+            && pending_submit_matches_request(slot, input.request, input.exchange_rules)
+    });
+
+    if matching_pending_submit_can_proceed {
+        let target_exposure = matching_pending_submit_slot
+            .and_then(|slot| slot.working_order.as_ref())
+            .map(|order| order.target_exposure.clone())
+            .unwrap_or_else(|| input.target_exposure.clone());
+        return SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Proceed {
+                state: input.previous_state.clone(),
+                target_exposure,
+            },
+            effects: vec![],
+        };
+    }
+
     if !submit_recovery_matches_current_plan(
         input.request,
         current_plan_submit.as_ref(),
@@ -345,6 +366,22 @@ fn submit_recovery_matches_current_plan(
     current_plan_submit
         .map(|submit| submit_requests_match(request, &submit.request, exchange_rules))
         .unwrap_or(false)
+}
+
+fn pending_submit_matches_request(
+    slot: &crate::runtime::ExecutionSlot,
+    request: &OrderRequest,
+    exchange_rules: &ExchangeRules,
+) -> bool {
+    let Some(order) = slot.working_order.as_ref() else {
+        return false;
+    };
+    slot.state == SlotState::SubmitPending
+        && order.client_order_id == request.client_order_id
+        && order.side == request.side
+        && slots::role_for_reduce_only(request.reduce_only) == order.role
+        && values_match_with_step(order.price, request.price, exchange_rules.price_tick)
+        && values_match_with_step(order.quantity, request.quantity, exchange_rules.quantity_step)
 }
 
 fn values_match_with_step(left: f64, right: f64, step: f64) -> bool {
