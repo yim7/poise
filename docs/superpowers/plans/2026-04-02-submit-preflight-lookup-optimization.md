@@ -191,7 +191,7 @@ Task 2 commit: `5cd97af`
 - Modify: `server/src/runtime.rs`
 - Modify: `docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md`
 
-- [ ] **Step 1: 写 failing tests**
+- [x] **Step 1: 写 failing tests**
 
 补四条红测：
 
@@ -202,7 +202,6 @@ Task 2 commit: `5cd97af`
 
 测试位置：
 - `server/src/runtime.rs`
-- `server/src/effect_worker.rs`
 
 测试要求：
 - 启动恢复场景下，如果交易所已有 matching live order，不会再次 `submit_order(...)`
@@ -211,17 +210,17 @@ Task 2 commit: `5cd97af`
 - `TrackEffectStateChanged` 到来后，runtime 会重算并清掉不再属于 pending submit 集合的 `startup_pending_submit_effects`
 - `TrackEffectStateChanged` 到来后，runtime 会通过同一个重算入口清理 `attempted_submit_effects`
 
-- [ ] **Step 2: 运行定向测试确认红灯**
+- [x] **Step 2: 运行定向测试确认红灯**
 
 Run:
 - `cargo test -p poise-server runtime::tests::restarted_pending_submit_with_matching_live_order_is_recovered_without_duplicate_submit -- --nocapture`
-- `cargo test -p poise-server effect_worker::tests::attempted_submit_tracking_is_cleared_after_submit_success -- --nocapture`
-- `cargo test -p poise-server effect_worker::tests::attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede -- --nocapture`
+- `cargo test -p poise-server runtime::tests::attempted_submit_tracking_is_cleared_after_submit_success -- --nocapture`
+- `cargo test -p poise-server runtime::tests::attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede -- --nocapture`
 - `cargo test -p poise-server runtime::tests::startup_pending_tracking_is_cleared_on_track_effect_state_changed_notification -- --nocapture`
 
 Expected: FAIL
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 实现范围：
 
@@ -240,17 +239,17 @@ Expected: FAIL
 - 保持“真实 submit 已开始但 effect 仍 Pending”的场景不清理
 - 启动恢复命中 matching live order 时，走恢复分支，不再重复 submit
 
-- [ ] **Step 4: 运行定向测试确认通过**
+- [x] **Step 4: 运行定向测试确认通过**
 
 Run:
 - `cargo test -p poise-server runtime::tests::restarted_pending_submit_with_matching_live_order_is_recovered_without_duplicate_submit -- --nocapture`
-- `cargo test -p poise-server effect_worker::tests::attempted_submit_tracking_is_cleared_after_submit_success -- --nocapture`
-- `cargo test -p poise-server effect_worker::tests::attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede -- --nocapture`
+- `cargo test -p poise-server runtime::tests::attempted_submit_tracking_is_cleared_after_submit_success -- --nocapture`
+- `cargo test -p poise-server runtime::tests::attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede -- --nocapture`
 - `cargo test -p poise-server runtime::tests::startup_pending_tracking_is_cleared_on_track_effect_state_changed_notification -- --nocapture`
 
 Expected: PASS
 
-- [ ] **Step 5: 运行完整验证**
+- [x] **Step 5: 运行完整验证**
 
 Run:
 - `cargo test -p poise-server effect_worker::tests:: -- --nocapture`
@@ -261,13 +260,15 @@ Expected:
 - submit preflight 相关回归通过
 - runtime 启动恢复与 effect worker 回归不受影响
 
-- [ ] **Step 6: 更新任务清单并提交 Task 3**
+- [x] **Step 6: 更新任务清单并提交 Task 3**
 
 在本文件里回写：
 - 每个 task 的完成状态
 - 对应 commit SHA
 
 ```bash
-git add server/src/submit_preflight.rs server/src/write_service.rs server/src/effect_worker.rs server/src/runtime.rs docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md
-git commit -m "fix(server): avoid redundant open orders lookup for fresh submits"
+git add docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md
+git commit -m "docs(plan): record task 3 completion"
 ```
+
+Task 3 commit: `c28ddd2`
