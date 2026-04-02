@@ -11,6 +11,7 @@ pub enum SubmitPreflightDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitPreflightHint {
     DirectSafe,
+    #[allow(dead_code)]
     NeedsExchangeStateLookup,
 }
 
@@ -78,10 +79,6 @@ impl SubmitPreflight {
             .lock()
             .await
             .retain(|effect_id| current.contains(effect_id));
-    }
-
-    pub async fn submit_started_effects(&self) -> HashSet<String> {
-        self.attempted_submit_effects.lock().await.clone()
     }
 
     pub async fn seed_startup_pending_submit_effects(

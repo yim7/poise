@@ -1304,7 +1304,7 @@ mod tests {
                 .is_some_and(|error| error.contains("submit receipt did not match executor slot"))
         );
         assert_eq!(exchange.get_position_calls(), 1);
-        assert_eq!(exchange.get_open_orders_calls(), 2);
+        assert_eq!(exchange.get_open_orders_calls(), 1);
     }
 
     async fn test_state(
