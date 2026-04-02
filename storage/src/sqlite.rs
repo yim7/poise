@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::{DomainEvent, ReplacementGateReason};
-use poise_core::strategy::TrackConfig;
+use poise_core::strategy::{TrackConfig, validate_config};
 use poise_core::types::Exposure;
 use poise_engine::ports::{
     CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
@@ -49,9 +49,17 @@ impl SqliteStorage {
     }
 
     fn deserialize_track_config(config_json: &str) -> rusqlite::Result<TrackConfig> {
-        serde_json::from_str(config_json).map_err(|err| {
+        let config: TrackConfig = serde_json::from_str(config_json).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
-        })
+        })?;
+        validate_config(&config).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
+            )
+        })?;
+        Ok(config)
     }
 
     fn deserialize_track_status(status_json: &str) -> rusqlite::Result<TrackStatus> {
@@ -2083,6 +2091,43 @@ mod tests {
             loaded.config.min_rebalance_units,
             DEFAULT_MIN_REBALANCE_UNITS
         );
+    }
+
+    #[tokio::test]
+    async fn load_track_state_rejects_invalid_min_rebalance_units_in_stored_config_json() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        storage
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE track_snapshots SET config_json = ?1 WHERE track_id = ?2",
+                params![
+                    serde_json::json!({
+                        "lower_price": 90.0,
+                        "upper_price": 110.0,
+                        "long_exposure_units": 8.0,
+                        "short_exposure_units": 8.0,
+                        "notional_per_unit": 375.0,
+                        "min_rebalance_units": -0.1,
+                        "shape_family": "linear",
+                        "out_of_band_policy": "freeze"
+                    })
+                    .to_string(),
+                    "test-1"
+                ],
+            )
+            .unwrap();
+
+        let result = storage.load_track_state("test-1").await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
