@@ -148,7 +148,7 @@ Commit: `49eb9f6`（Task 1 主提交，误落到本地 `main`） / `8b4978f`（r
 - Modify: `engine/src/executor/mod.rs`
 - Test: `engine/src/executor/mod.rs`
 
-- [ ] **Step 1: 写 executor 级失败测试，锁住三种 slot 语义**
+- [x] **Step 1: 写 executor 级失败测试，锁住三种 slot 语义**
 
 在 `engine/src/executor/mod.rs` 增加三条测试：
 
@@ -165,7 +165,7 @@ fn small_target_change_below_min_rebalance_units_keeps_submit_pending_slot() { /
 
 同时保留并扩展现有 `plan_uses_rounded_order_values_when_checking_exchange_floor`，确认交易所 floor 仍基于 round 后订单语义。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -175,7 +175,7 @@ Run:
 
 Expected: FAIL，原因是 planning 还没有策略级门槛判断。
 
-- [ ] **Step 3: 最小实现，新增策略门槛 helper**
+- [x] **Step 3: 最小实现，新增策略门槛 helper**
 
 在 `engine/src/executor/planning.rs`：
 
@@ -203,7 +203,7 @@ if inventory_gap.0.abs() < min_rebalance_units {
 - `Working(order_id=Some)` 继续按现有 `CancelOrder` 语义处理
 - `Empty` 继续 `NoOp`
 
-- [ ] **Step 4: 运行 executor 回归**
+- [x] **Step 4: 运行 executor 回归**
 
 Run:
 
@@ -211,14 +211,14 @@ Run:
 
 Expected: 全部 PASS，尤其是新加的 `below_min_rebalance_units` 三条和现有 `plan_uses_rounded_order_values_when_checking_exchange_floor` 同时为绿。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/planning.rs engine/src/executor/mod.rs
 git commit -m "feat(engine): add strategy-level min rebalance gate"
 ```
 
-Commit: `<fill during execution>`
+Commit: `8b785ad`
 
 ### Task 3: 在 manager 锁住目标与事件语义
 
