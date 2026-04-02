@@ -42,6 +42,7 @@ pub struct ExecutorInput<'a> {
     pub instrument: &'a Instrument,
     pub exchange_rules: &'a ExchangeRules,
     pub base_qty_per_unit: f64,
+    pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
     pub target_exposure: Exposure,
     pub reference_price: f64,
@@ -240,6 +241,7 @@ fn plan_desired_orders(input: &ExecutorInput<'_>, _inventory_gap: &Exposure) -> 
     desired_inventory_order(
         input.exchange_rules,
         input.base_qty_per_unit,
+        input.min_rebalance_units,
         &input.current_exposure,
         &input.target_exposure,
         input.reference_price,
@@ -251,17 +253,24 @@ fn plan_desired_orders(input: &ExecutorInput<'_>, _inventory_gap: &Exposure) -> 
 fn desired_inventory_order(
     exchange_rules: &ExchangeRules,
     base_qty_per_unit: f64,
+    min_rebalance_units: f64,
     current_exposure: &Exposure,
     target_exposure: &Exposure,
     reference_price: f64,
 ) -> Option<DesiredOrder> {
     let inventory_gap = current_exposure.delta(target_exposure);
+    if inventory_gap.0.abs() < min_rebalance_units {
+        return None;
+    }
     let side = Side::from_exposure(&inventory_gap)?;
     let price = round_to_step(reference_price, exchange_rules.price_tick);
     let quantity = round_to_step(
         inventory_gap.0.abs() * base_qty_per_unit,
         exchange_rules.quantity_step,
     );
+    if quantity <= f64::EPSILON {
+        return None;
+    }
     if !is_meetable_minimum(price, quantity, exchange_rules) {
         return None;
     }
@@ -289,6 +298,13 @@ fn diff_desired_orders(
 
     match desired_order {
         None => {
+            if current_slot.state == SlotState::SubmitPending {
+                return (
+                    vec![ExecutionAction::NoOp],
+                    slots::with_inventory_core_slot(sibling_slots, current_slot),
+                    None,
+                );
+            }
             if let Some(order_id) = current_slot
                 .working_order
                 .as_ref()

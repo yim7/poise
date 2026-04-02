@@ -878,6 +878,7 @@ impl TrackManager {
             instrument: &track.instrument,
             exchange_rules: &track.exchange_rules,
             base_qty_per_unit: track.config.base_qty_per_unit(),
+            min_rebalance_units: 0.0,
             current_exposure: track.current_exposure.clone(),
             target_exposure: target.target_exposure.clone(),
             reference_price,

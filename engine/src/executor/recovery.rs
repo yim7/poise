@@ -153,6 +153,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
             instrument: current_plan.instrument,
             exchange_rules: input.exchange_rules,
             base_qty_per_unit: current_plan.base_qty_per_unit,
+            min_rebalance_units: 0.0,
             current_exposure: input.current_exposure.clone(),
             target_exposure: current_plan.target_exposure.clone(),
             reference_price: current_plan.reference_price,

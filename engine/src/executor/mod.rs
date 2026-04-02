@@ -133,6 +133,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(1.0),
             reference_price: 99.9,
@@ -150,6 +151,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(3.0),
             reference_price: 99.9,
@@ -170,6 +172,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(6.0),
             reference_price: 99.9,
@@ -204,6 +207,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(4.0),
             target_exposure: Exposure(4.0),
             reference_price: 95.0,
@@ -219,6 +223,149 @@ mod tests {
     }
 
     #[test]
+    fn small_target_change_below_min_rebalance_units_does_not_submit_new_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.5,
+            current_exposure: Exposure(2.0),
+            target_exposure: Exposure(2.4),
+            reference_price: 97.0,
+            executor_state: None,
+            observed_at: now,
+        });
+
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(
+            plan.state.slots,
+            vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn small_target_change_below_min_rebalance_units_cancels_existing_working_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+
+        let plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.5,
+            current_exposure: Exposure(2.0),
+            target_exposure: Exposure(2.4),
+            reference_price: 97.0,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::CancelOrder { order_id, .. }] if order_id == "order-1"
+        ));
+    }
+
+    #[test]
+    fn small_target_change_below_min_rebalance_units_keeps_submit_pending_slot() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "client-pending".into(),
+            reduce_only: false,
+        };
+        let existing_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+
+        let plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &rules,
+            base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.5,
+            current_exposure: Exposure(2.0),
+            target_exposure: Exposure(2.4),
+            reference_price: 97.0,
+            executor_state: Some(&existing_state),
+            observed_at: now,
+        });
+
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn plan_uses_rounded_order_values_when_checking_exchange_floor() {
+        let instrument = test_instrument();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let min_qty_rules = ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.3,
+            min_qty: 0.5,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let min_qty_plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &min_qty_rules,
+            base_qty_per_unit: 1.0,
+            min_rebalance_units: 0.0,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(0.55),
+            reference_price: 97.0,
+            executor_state: None,
+            observed_at: now,
+        });
+        assert_eq!(min_qty_plan.effects, vec![ExecutionAction::NoOp]);
+
+        let min_notional_rules = ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.1,
+            min_qty: 0.0,
+            min_notional: 10.5,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let min_notional_plan = plan(ExecutorInput {
+            track_id: &track_id,
+            instrument: &instrument,
+            exchange_rules: &min_notional_rules,
+            base_qty_per_unit: 1.0,
+            min_rebalance_units: 0.0,
+            current_exposure: Exposure(0.0),
+            target_exposure: Exposure(10.0),
+            reference_price: 1.09,
+            executor_state: None,
+            observed_at: now,
+        });
+        assert_eq!(min_notional_plan.effects, vec![ExecutionAction::NoOp]);
+    }
+
+    #[test]
     fn replace_plan_keeps_live_slot_until_cancel_effect_completes() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
@@ -231,6 +378,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 90.0,
@@ -260,6 +408,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 95.0,
@@ -293,6 +442,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 90.0,
@@ -315,6 +465,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(6.0),
             target_exposure: Exposure(2.0),
             reference_price: 95.0,
@@ -342,6 +493,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 95.0,
@@ -369,6 +521,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(-0.5),
             target_exposure: Exposure(-2.0),
             reference_price: 95.0,
@@ -401,6 +554,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(-2.0),
             target_exposure: Exposure(-0.5),
             reference_price: 95.0,
@@ -433,6 +587,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(-2.0),
             target_exposure: Exposure(1.0),
             reference_price: 95.0,
@@ -506,6 +661,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &low_fee_rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 94.9,
@@ -521,6 +677,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &high_fee_rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 94.9,
@@ -1377,6 +1534,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 95.0,
@@ -1388,6 +1546,7 @@ mod tests {
             instrument: &instrument,
             exchange_rules: &rules,
             base_qty_per_unit: 3.75,
+            min_rebalance_units: 0.0,
             current_exposure: Exposure(0.0),
             target_exposure: Exposure(4.0),
             reference_price: 95.0,
