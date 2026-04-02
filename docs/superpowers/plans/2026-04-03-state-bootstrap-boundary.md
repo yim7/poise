@@ -106,7 +106,7 @@ Task 1 code commit:
 - Test: `cargo test -p poise-server state_bootstrap::tests::strict_mode_rejects_persisted_config_mismatch -- --nocapture`
 - Test: `cargo test -p poise-server state_bootstrap::tests::rebuild_mode_recreates_repository_after_mismatch -- --nocapture`
 
-- [ ] **Step 1: 先把状态检查 / 重建行为改写成围绕新接口的测试**
+- [x] **Step 1: 先把状态检查 / 重建行为改写成围绕新接口的测试**
 
 要求：
 - 新增或调整测试，固定以下行为：
@@ -115,7 +115,7 @@ Task 1 code commit:
 - 测试入口直接指向 `state_bootstrap::prepare_state_repository(...)`
 - 不再沿用 `assemble_with_fake_ports_*` 作为核心行为名
 
-- [ ] **Step 2: 运行定向测试，确认它们在当前结构下失败**
+- [x] **Step 2: 运行定向测试，确认它们在当前结构下失败**
 
 Run:
 `cargo test -p poise-server state_bootstrap::tests::strict_mode_rejects_persisted_config_mismatch -- --nocapture`
@@ -124,14 +124,14 @@ Run:
 Expected:
 测试失败，说明状态准备行为还没有完全收敛到 `state_bootstrap` 新接口。
 
-- [ ] **Step 3: 实现 `state_bootstrap` 模块**
+- [x] **Step 3: 实现 `state_bootstrap` 模块**
 
 要求：
 - 将 mismatch 检查、备份旧库、删除 `-wal` / `-shm`、重建 repository 迁入 `server/src/state_bootstrap.rs`
 - 由 `main` 调用 `state_bootstrap::prepare_state_repository(...)`
 - `assembly` 删除 SQLite 生命周期与 mismatch 处理逻辑
 
-- [ ] **Step 4: 运行定向测试，确认状态准备职责完成迁移**
+- [x] **Step 4: 运行定向测试，确认状态准备职责完成迁移**
 
 Run:
 `cargo test -p poise-server state_bootstrap::tests::strict_mode_rejects_persisted_config_mismatch -- --nocapture`
@@ -140,7 +140,7 @@ Run:
 Expected:
 状态启动模块测试通过；`assembly` 中不再包含状态重建逻辑。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/state_bootstrap.rs server/src/main.rs server/src/assembly.rs
@@ -148,7 +148,7 @@ git commit -m "refactor(server): move state rebuild logic into bootstrap module"
 ```
 
 Task 2 code commit:
-`<to-fill>`
+`adef4cd736c5f615b2430cf962732a7c68bc57d7`
 
 ---
 
