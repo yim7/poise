@@ -32,7 +32,7 @@
 
 ### 1. 准备配置
 
-服务端只接受 `--config <path>` 方式启动。
+服务端启动时必须传 `--config <path>`，并可选追加 `--rebuild-state`。
 
 - 手工联调 Binance USDⓈ-M Futures 测试网时，先复制 [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 为本地未跟踪文件，例如 `configs/binance-testnet.local.toml`
 - [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，里面是本地假地址，不能直接拿来连 Binance
@@ -80,11 +80,24 @@ notional_per_unit = 375.0
 cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
 ```
 
-把 `configs/binance-testnet.local.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后启动：
+把 `configs/binance-testnet.local.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后按默认严格模式启动：
 
 ```bash
 cargo run -p poise-server -- --config configs/binance-testnet.local.toml
 ```
+
+如果当前本地 SQLite 快照和新的配置不一致，默认会拒绝启动。这时如果你确认要丢弃旧本地快照，并按交易所真实仓位和挂单重建本地状态，再加 `--rebuild-state`：
+
+```bash
+cargo run -p poise-server -- --config configs/binance-testnet.local.toml --rebuild-state
+```
+
+`--rebuild-state` 的语义是：
+
+- 先备份当前 `.data/<environment>/poise-server.sqlite`
+- 删除旧本地快照对应的 SQLite sidecar 文件
+- 用当前配置重新初始化本地状态
+- 启动后再按交易所真实仓位和挂单继续接管
 
 服务端启动后会：
 
