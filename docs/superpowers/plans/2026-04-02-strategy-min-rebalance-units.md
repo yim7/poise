@@ -139,7 +139,7 @@ git add core/src/strategy.rs server/src/config.rs engine/src/manager.rs engine/s
 git commit -m "feat(core): add min_rebalance_units to track config"
 ```
 
-Commit: `49eb9f6`（Task 1 主提交，误落到本地 `main`） / `8b4978f`（review：统一默认值来源） / `<fill current branch closure sha>`
+Commit: `49eb9f6`（Task 1 主提交，误落到本地 `main`） / `8b4978f`（review：统一默认值来源） / `e4572c2`（当前分支收尾：TOML 边界校验、storage 兼容回归、plan/spec 恢复）
 
 ### Task 2: 在 executor planning 引入策略级最小调仓门槛
 
