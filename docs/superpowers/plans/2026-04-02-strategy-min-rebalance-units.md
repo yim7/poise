@@ -224,9 +224,12 @@ Commit: `8b785ad`
 
 **Files:**
 - Modify: `engine/src/manager.rs`
+- Modify: `engine/src/executor/recovery.rs`
+- Modify: `engine/src/executor/mod.rs`
 - Test: `engine/src/manager.rs`
+- Test: `engine/src/executor/mod.rs`
 
-- [ ] **Step 1: 写 manager 级失败测试，锁住目标不被改写**
+- [x] **Step 1: 写 manager 级失败测试，锁住目标不被改写**
 
 在 `engine/src/manager.rs` 增加测试：
 
@@ -248,7 +251,7 @@ fn observe_market_keeps_submit_pending_slot_when_small_rebalance_is_below_min_re
 - `Working` 下会 cancel
 - `SubmitPending` 不丢 slot
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -258,7 +261,7 @@ Run:
 
 Expected: FAIL，原因是 `manager` 还没把 `min_rebalance_units` 传进 executor。
 
-- [ ] **Step 3: 最小实现，把配置传进 executor**
+- [x] **Step 3: 最小实现，把配置传进 executor**
 
 在 `engine/src/manager.rs` 的 `plan_inventory_execution_for_track(...)` 和任何构造 `ExecutorInput` 的路径里补传：
 
@@ -271,23 +274,26 @@ min_rebalance_units: track.config.min_rebalance_units,
 - `reconciler::reconcile_target(...)` 不新增 deadband
 - `target_exposure` 和 `ExposureTargetChanged` 的语义保持不变
 - 不在 `manager` 新增执行状态机旁路判断
+- review follow-up：`submit recovery` 也必须使用同一份 `min_rebalance_units` 语义，但不能因为 below-threshold 把仍存在的 `SubmitPending` slot 清掉；当 slot 已被 sync 清掉时，pending effect 应正常 `Superseded`
 
-- [ ] **Step 4: 跑 manager 回归**
+- [x] **Step 4: 跑 manager 回归**
 
 Run:
 
 - `cargo test -p poise-engine manager::tests::observe_market_ -- --nocapture`
+- `cargo test -p poise-engine manager::tests::recover_submit_effect_ -- --nocapture`
+- `cargo test -p poise-engine executor::tests::submit_recovery_ -- --nocapture`
 
-Expected: 全部 PASS，包括现有 replacement gate、submit pending、gap stats 和新加的策略门槛测试。
+Expected: 全部 PASS，包括现有 replacement gate、submit pending、gap stats、新加的策略门槛测试，以及 review follow-up 的 submit recovery 回归。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add engine/src/manager.rs
+git add engine/src/manager.rs engine/src/executor/recovery.rs engine/src/executor/mod.rs
 git commit -m "feat(engine): preserve target semantics under min rebalance gate"
 ```
 
-Commit: `<fill during execution>`
+Commit: `93b7ac2`
 
 ### Task 4: 全量回归与文档同步
 
