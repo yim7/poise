@@ -10,6 +10,7 @@ SESSION_NAME="${POISE_ZELLIJ_SESSION_NAME:-poise-paper}"
 CONFIG_PATH="${POISE_CONFIG_PATH:-configs/binance-testnet.local.toml}"
 BASE_URL="${POISE_HEALTH_BASE_URL:-http://127.0.0.1:8000}"
 LOG_DIR="${POISE_LOG_DIR:-.logs/paper}"
+REBUILD_STATE="${POISE_REBUILD_STATE:-0}"
 DRY_RUN=0
 
 usage() {
@@ -22,6 +23,7 @@ usage() {
   POISE_CONFIG_PATH          服务端配置文件，默认 configs/binance-testnet.local.toml
   POISE_HEALTH_BASE_URL      健康巡检基地址，默认 http://127.0.0.1:8000
   POISE_LOG_DIR              日志目录，默认 .logs/paper
+  POISE_REBUILD_STATE        设为 1 时，server pane 启动时追加 --rebuild-state
 EOF
 }
 
@@ -52,9 +54,15 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
+if [[ "$REBUILD_STATE" != "0" && "$REBUILD_STATE" != "1" ]]; then
+  echo "POISE_REBUILD_STATE must be 0 or 1" >&2
+  exit 1
+fi
+
 export POISE_CONFIG_PATH="$CONFIG_PATH"
 export POISE_HEALTH_BASE_URL="$BASE_URL"
 export POISE_LOG_DIR="$LOG_DIR"
+export POISE_REBUILD_STATE="$REBUILD_STATE"
 export POISE_SERVER_LOG="${POISE_SERVER_LOG:-${LOG_DIR}/poise-server.log}"
 export POISE_HEALTH_LOG="${POISE_HEALTH_LOG:-${LOG_DIR}/health-probe.log}"
 
@@ -66,6 +74,7 @@ session_name=$SESSION_NAME
 config_path=$POISE_CONFIG_PATH
 health_base_url=$POISE_HEALTH_BASE_URL
 log_dir=$POISE_LOG_DIR
+rebuild_state=$POISE_REBUILD_STATE
 create_command=zellij attach --create-background $SESSION_NAME options --default-layout $LAYOUT_PATH
 attach_command=zellij attach $SESSION_NAME
 EOF

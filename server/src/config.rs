@@ -435,4 +435,30 @@ notional_per_unit = 375.0
         assert_eq!(grid.upper_price - grid.lower_price, 5500.0);
         assert!((equivalent_grid_step - 137.5).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn binance_testnet_example_config_explicitly_lists_complete_track_parameters() {
+        let raw = include_str!("../../configs/binance-testnet.demo.toml");
+
+        assert!(raw.contains("min_rebalance_units ="));
+        assert!(raw.contains("shape_family ="));
+        assert!(raw.contains("out_of_band_policy ="));
+        assert!(raw.contains("tick_timeout_secs ="));
+        assert!(raw.contains("max_notional ="));
+        assert!(raw.contains("daily_loss_limit ="));
+        assert!(raw.contains("stop_loss_pct ="));
+    }
+
+    #[test]
+    fn test_demo_config_explicitly_lists_complete_track_parameters() {
+        let raw = include_str!("../../configs/test.demo.toml");
+
+        assert!(raw.contains("min_rebalance_units ="));
+        assert!(raw.contains("shape_family ="));
+        assert!(raw.contains("out_of_band_policy ="));
+        assert!(raw.contains("tick_timeout_secs ="));
+        assert!(raw.contains("max_notional ="));
+        assert!(raw.contains("daily_loss_limit ="));
+        assert!(raw.contains("stop_loss_pct ="));
+    }
 }

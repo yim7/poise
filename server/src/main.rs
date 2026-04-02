@@ -334,6 +334,14 @@ mod tests {
         workspace_root().join("scripts").join("run-paper-tui.sh")
     }
 
+    fn run_paper_server_script_path() -> PathBuf {
+        workspace_root().join("scripts").join("run-paper-server.sh")
+    }
+
+    fn start_paper_zellij_script_path() -> PathBuf {
+        workspace_root().join("scripts").join("start-paper-zellij.sh")
+    }
+
     fn paper_layout_path() -> PathBuf {
         workspace_root()
             .join("ops")
@@ -365,6 +373,37 @@ mod tests {
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("base_url="));
         assert!(stdout.contains("command=cargo run -p poise-tui"));
+    }
+
+    #[test]
+    fn run_paper_server_script_supports_rebuild_state_dry_run() {
+        let output = Command::new("bash")
+            .arg(run_paper_server_script_path())
+            .arg("--dry-run")
+            .env("POISE_REBUILD_STATE", "1")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("rebuild_state=1"));
+        assert!(stdout.contains(
+            "command=cargo run -p poise-server -- --config configs/binance-testnet.local.toml --rebuild-state"
+        ));
+    }
+
+    #[test]
+    fn start_paper_zellij_script_exports_rebuild_state_in_dry_run() {
+        let output = Command::new("bash")
+            .arg(start_paper_zellij_script_path())
+            .arg("--dry-run")
+            .env("POISE_REBUILD_STATE", "1")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("rebuild_state=1"));
     }
 
     async fn wait_for_child_exit(child: &mut std::process::Child) -> std::process::ExitStatus {

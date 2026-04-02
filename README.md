@@ -38,7 +38,7 @@
 - [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，里面是本地假地址，不能直接拿来连 Binance
 - 仓库默认忽略 `configs/*.local.toml`
 
-测试网最小示例如下：
+下面给的是一份字段完整的 `track` 示例，当前支持的参数都显式写出来：
 
 ```toml
 environment = "testnet"
@@ -57,6 +57,13 @@ upper_price = 67500.0
 long_exposure_units = 10.0
 short_exposure_units = 10.0
 notional_per_unit = 375.0
+min_rebalance_units = 0.5
+shape_family = "linear"
+out_of_band_policy = "freeze"
+max_notional = 3750.0
+daily_loss_limit = -375.0
+stop_loss_pct = 10.0
+tick_timeout_secs = 30
 ```
 
 补充说明：
@@ -217,10 +224,19 @@ cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
 export POISE_CONFIG_PATH=configs/binance-testnet.local.toml
 export POISE_HEALTH_BASE_URL=http://127.0.0.1:8000
 export POISE_LOG_DIR=.logs/paper
+export POISE_REBUILD_STATE=0
 export POISE_HEALTH_FAILURE_THRESHOLD=3
 export POISE_TUI_LOG=.logs/paper/poise-tui.log
 export POISE_ZELLIJ_SESSION_NAME=poise-paper
 ./scripts/start-paper-zellij.sh
+```
+
+如果你要通过脚本方式重建本地状态，可以把 `POISE_REBUILD_STATE=1`，这样 `run-paper-server.sh` 会自动在 `poise-server` 启动命令后追加 `--rebuild-state`：
+
+```bash
+export POISE_CONFIG_PATH=configs/binance-testnet.local.toml
+export POISE_REBUILD_STATE=1
+./scripts/run-paper-server.sh
 ```
 
 如果你想在连续失败达到阈值时触发外部通知，还可以额外设置：
