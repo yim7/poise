@@ -42,7 +42,7 @@
 - Test: `engine/src/executor/mod.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: 先写失败测试，覆盖 planning 和 submit recovery 的统一 trigger 语义**
+- [x] **Step 1: 先写失败测试，覆盖 planning 和 submit recovery 的统一 trigger 语义**
 
 在 `engine/src/executor/mod.rs` 和 `engine/src/manager.rs` 增加至少这几条测试：
 
@@ -78,7 +78,7 @@ fn observe_market_keeps_latest_strategy_target_while_preserving_active_execution
 - recovery 也必须使用同一份 trigger 决策，而不是继续比较“旧请求是否匹配最新计划请求”
 - 锚点选择和门槛比较最终必须由单一 trigger 抽象拥有，而不是 planning / recovery 各自再写一套 helper
 
-- [ ] **Step 2: 运行定向测试，确认当前 planning 和 recovery 都会失败**
+- [x] **Step 2: 运行定向测试，确认当前 planning 和 recovery 都会失败**
 
 Run:
 
@@ -95,7 +95,7 @@ Expected:
   - planning 仍直接使用 `current_exposure -> latest_target` 判断，并把 active lifecycle 的小幅漂移当成需要重规划
   - recovery 仍主要按“旧请求是否匹配最新计划请求”来决定 supersede
 
-- [ ] **Step 3: 做最小实现，把共享 trigger 模块和两个 consumer 一起切换**
+- [x] **Step 3: 做最小实现，把共享 trigger 模块和两个 consumer 一起切换**
 
 先创建 `engine/src/executor/rebalance_trigger.rs`，定义单一入口，例如：
 
@@ -137,7 +137,7 @@ Expected:
 - 保持 `track.target_exposure` 写入最新原始策略目标
 - 不新增 manager 侧旁路逻辑
 
-- [ ] **Step 4: 跑 engine 回归**
+- [x] **Step 4: 跑 engine 回归**
 
 Run:
 
@@ -152,12 +152,14 @@ Expected:
 - `target_exposure` 和 `ExposureTargetChanged` 语义保持不变
 - 现有交易所 floor、replacement gate、submit pending 相关测试保持为绿
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/rebalance_trigger.rs engine/src/executor/planning.rs engine/src/executor/recovery.rs engine/src/executor/mod.rs engine/src/manager.rs
 git commit -m "feat(engine): anchor execution drift decisions to shared trigger semantics"
 ```
+
+Commit: `3071a21`
 
 ### Task 2: 补 server/runtime 回归，锁住真实场景中的 supersede storm 不再出现
 
