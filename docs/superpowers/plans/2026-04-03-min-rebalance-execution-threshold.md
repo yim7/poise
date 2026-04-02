@@ -235,7 +235,7 @@ Commit: `55b2f00`
 - Modify: `README.md`
 - Modify: `docs/superpowers/plans/2026-04-03-min-rebalance-execution-threshold.md`
 
-- [ ] **Step 1: 跑最终回归**
+- [x] **Step 1: 跑最终回归**
 
 Run:
 
@@ -249,7 +249,7 @@ Expected:
 - engine / server 相关回归全部通过
 - workspace 构建保持通过
 
-- [ ] **Step 2: 同步文档**
+- [x] **Step 2: 同步文档**
 
 要求：
 
@@ -265,9 +265,16 @@ Expected:
   - `min_rebalance_units` 表示“是否触发下一次执行动作”，不再只是停手阈值
 - 在本计划中回写 commit SHA，并勾选完成步骤
 
-- [ ] **Step 3: Commit**
+补充：
+
+- 最终回归中，`resume_track_recomputes_replacement_gate_reason_from_last_price` 的旧预期已经不再符合第二版语义
+- 现在 `resume_track` 在 drift 仍位于 active anchor 门槛内时，会继续当前生命周期，因此该测试同步改为断言 `replacement_gate_reason == None`
+
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-02-strategy-min-rebalance-units-design.md README.md docs/superpowers/plans/2026-04-03-min-rebalance-execution-threshold.md
 git commit -m "docs: align min rebalance execution threshold plan and spec"
 ```
+
+Commit: `7914b6b`
