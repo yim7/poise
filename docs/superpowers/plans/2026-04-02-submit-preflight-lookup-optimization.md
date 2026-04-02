@@ -115,7 +115,7 @@ Task 1 commit: `3687715`
 - Modify: 所有实现 `StateRepositoryPort` 的测试 fake/mock repository
 - Modify: `docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md`
 
-- [ ] **Step 1: 写 failing tests**
+- [x] **Step 1: 写 failing tests**
 
 补四条红测（含 storage 一条）：
 
@@ -133,7 +133,7 @@ Task 1 commit: `3687715`
 - 采样时机在 `startup_sync` 和 `replay_startup_user_data` 之后、任何长生命周期后台任务启动之前
 - 启动采样到的 `effect_id` 送进 `submit_preflight.decide(...)` 时，会直接返回 `NeedsLiveOrderLookup`
 
-- [ ] **Step 2: 运行定向测试确认红灯**
+- [x] **Step 2: 运行定向测试确认红灯**
 
 Run:
 - `cargo test -p poise-storage sqlite::tests::list_all_pending_submit_effects_returns_non_dispatchable_pending_submits -- --nocapture`
@@ -145,7 +145,7 @@ Expected:
 - 至少一条因缺少新仓储接口失败
 - 至少一条因启动阶段没有显式采样失败
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 实现范围：
 
@@ -163,7 +163,7 @@ Expected:
   4. 用结果初始化 `startup_pending_submit_effects`
   5. 再启动 `recovery task`、`effect worker`、`user task`、`market task`
 
-- [ ] **Step 4: 运行定向测试确认通过**
+- [x] **Step 4: 运行定向测试确认通过**
 
 Run:
 - `cargo test -p poise-storage sqlite::tests::list_all_pending_submit_effects_returns_non_dispatchable_pending_submits -- --nocapture`
@@ -173,12 +173,14 @@ Run:
 
 Expected: PASS
 
-- [ ] **Step 5: 提交 Task 2**
+- [x] **Step 5: 提交 Task 2**
 
 ```bash
 git add engine/src/ports.rs storage/src/sqlite.rs server/src/runtime.rs server/src/assembly.rs server/src/submit_preflight.rs server/src/http.rs server/src/websocket.rs server/src/effect_worker.rs server/src/write_service.rs docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md
 git commit -m "feat(server): seed startup submit preflight snapshot"
 ```
+
+Task 2 commit: `5cd97af`
 
 ### Task 3: 补齐清理路径与恢复行为验收
 
