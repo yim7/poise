@@ -24,6 +24,8 @@ pub struct TrackDefinition {
     pub long_exposure_units: f64,
     pub short_exposure_units: f64,
     pub notional_per_unit: f64,
+    #[serde(default = "default_min_rebalance_units")]
+    pub min_rebalance_units: f64,
     #[serde(default = "default_shape_family")]
     pub shape_family: ShapeFamily,
     #[serde(default = "default_out_of_band_policy")]
@@ -78,6 +80,7 @@ impl TrackDefinition {
             long_exposure_units: self.long_exposure_units,
             short_exposure_units: self.short_exposure_units,
             notional_per_unit: self.notional_per_unit,
+            min_rebalance_units: self.min_rebalance_units,
             shape_family: self.shape_family,
             out_of_band_policy: self.out_of_band_policy,
         }
@@ -104,6 +107,10 @@ fn default_shape_family() -> ShapeFamily {
 
 fn default_out_of_band_policy() -> OutOfBandPolicy {
     OutOfBandPolicy::Freeze
+}
+
+fn default_min_rebalance_units() -> f64 {
+    0.5
 }
 
 #[cfg(test)]
@@ -194,6 +201,33 @@ notional_per_unit = 375.0
         assert_eq!(
             config.tracks[0].track_config().out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Freeze
+        );
+        assert!(
+            (config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn defaults_min_rebalance_units_to_point_five() {
+        let config = parse_config(
+            r#"
+environment = "paper"
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+
+        assert!(
+            (config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON
         );
     }
 

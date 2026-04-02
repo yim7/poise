@@ -9,6 +9,8 @@ pub struct TrackConfig {
     pub long_exposure_units: f64,
     pub short_exposure_units: f64,
     pub notional_per_unit: f64,
+    #[serde(default = "default_min_rebalance_units")]
+    pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: OutOfBandPolicy,
 }
@@ -61,7 +63,17 @@ pub fn validate_config(config: &TrackConfig) -> Result<(), String> {
     if config.notional_per_unit <= 0.0 {
         return Err("notional_per_unit must be positive".into());
     }
+    if !config.min_rebalance_units.is_finite() {
+        return Err("min_rebalance_units must be finite".into());
+    }
+    if config.min_rebalance_units < 0.0 {
+        return Err("min_rebalance_units must not be negative".into());
+    }
     Ok(())
+}
+
+fn default_min_rebalance_units() -> f64 {
+    0.5
 }
 
 /// 纯函数：给定价格和配置，返回目标占用。
@@ -130,6 +142,7 @@ mod tests {
             long_exposure_units: 8.0,
             short_exposure_units: 8.0,
             notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
         }
@@ -176,6 +189,24 @@ mod tests {
     fn validate_accepts_valid_config() {
         assert!(validate_config(&neutral_config()).is_ok());
         assert!(validate_config(&long_only_config()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_negative_min_rebalance_units() {
+        let config = TrackConfig {
+            min_rebalance_units: -0.1,
+            ..neutral_config()
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_min_rebalance_units() {
+        let config = TrackConfig {
+            min_rebalance_units: f64::NAN,
+            ..neutral_config()
+        };
+        assert!(validate_config(&config).is_err());
     }
 
     #[test]

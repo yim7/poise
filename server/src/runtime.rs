@@ -4358,6 +4358,7 @@ mod tests {
             long_exposure_units: 8.0,
             short_exposure_units: 8.0,
             notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
         }
@@ -4370,6 +4371,7 @@ mod tests {
             long_exposure_units: 6.0,
             short_exposure_units: 6.0,
             notional_per_unit: 333.0,
+            min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
         }
