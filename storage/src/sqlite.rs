@@ -1012,7 +1012,9 @@ mod tests {
 
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
-    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{
+        DEFAULT_MIN_REBALANCE_UNITS, OutOfBandPolicy, ShapeFamily, TrackConfig,
+    };
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use poise_engine::ports::{
@@ -1038,6 +1040,7 @@ mod tests {
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
+                min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: OutOfBandPolicy::Freeze,
             },
@@ -2041,6 +2044,45 @@ mod tests {
         let storage = SqliteStorage::from_connection(conn).unwrap();
         let result = storage.load_track_state("legacy-grid").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_track_state_defaults_missing_min_rebalance_units_from_stored_config_json() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        storage
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE track_snapshots SET config_json = ?1 WHERE track_id = ?2",
+                params![
+                    serde_json::json!({
+                        "lower_price": 90.0,
+                        "upper_price": 110.0,
+                        "long_exposure_units": 8.0,
+                        "short_exposure_units": 8.0,
+                        "notional_per_unit": 375.0,
+                        "shape_family": "linear",
+                        "out_of_band_policy": "freeze"
+                    })
+                    .to_string(),
+                    "test-1"
+                ],
+            )
+            .unwrap();
+
+        let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
+        assert_eq!(
+            loaded.config.min_rebalance_units,
+            DEFAULT_MIN_REBALANCE_UNITS
+        );
     }
 
     #[tokio::test]

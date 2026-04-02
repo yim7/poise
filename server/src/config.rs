@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
 use poise_engine::track::{Instrument, TrackId, Venue};
 use serde::Deserialize;
 
@@ -49,7 +49,13 @@ pub fn load_config(path: &str) -> Result<Config> {
 }
 
 pub fn parse_config(input: &str) -> Result<Config> {
-    toml_edit::de::from_str(input).context("failed to parse TOML config")
+    let config: Config =
+        toml_edit::de::from_str(input).context("failed to parse TOML config")?;
+    for track in &config.tracks {
+        validate_config(&track.track_config())
+            .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
+    }
+    Ok(config)
 }
 
 impl Config {
@@ -229,6 +235,52 @@ notional_per_unit = 375.0
         assert!(
             (config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn rejects_negative_min_rebalance_units_at_config_boundary() {
+        let error = parse_config(
+            r#"
+environment = "paper"
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+min_rebalance_units = -0.1
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("min_rebalance_units"));
+    }
+
+    #[test]
+    fn rejects_non_finite_min_rebalance_units_at_config_boundary() {
+        let error = parse_config(
+            r#"
+environment = "paper"
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+min_rebalance_units = nan
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("min_rebalance_units"));
     }
 
     #[test]
