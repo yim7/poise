@@ -323,11 +323,11 @@ Expected: 全部 PASS；workspace 中所有依赖 `TrackConfig` 的 crate 都能
 
 然后在本 plan 中勾选已完成步骤，并把每个 task 的 commit SHA 回写到对应位置。
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-02-strategy-min-rebalance-units-design.md docs/superpowers/plans/2026-04-02-strategy-min-rebalance-units.md
 git commit -m "docs: sync strategy min rebalance units plan and spec"
 ```
 
-Commit: `<fill during execution>`
+Commit: `dff4f40`
