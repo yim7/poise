@@ -18,7 +18,7 @@ mod write_service;
 use std::env;
 
 use anyhow::Result;
-use state_bootstrap::StateBootstrapMode;
+use state_bootstrap::{StateBootstrapError, StateBootstrapMode, SuggestedAction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupOptions {
@@ -33,8 +33,11 @@ async fn main() -> Result<()> {
 
     let options = parse_startup_options(env::args().skip(1))?;
     let config = config::load_config(&options.config_path)?;
-    let repository =
-        state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await?;
+    let repository = match state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await {
+        Ok(repository) => repository,
+        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
+        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
+    };
     let platform = assembly::assemble(&config, repository).await?;
     let runtime_handles = platform.runtime.start().await?;
 
@@ -101,6 +104,56 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     })
 }
 
+fn render_startup_error(error: &StateBootstrapError) -> String {
+    match error {
+        StateBootstrapError::PersistedStateMismatch {
+            db_path,
+            mismatches,
+            suggested_action,
+        } => {
+            let mut rendered = format!(
+                "persisted state does not match current config in `{}`.",
+                db_path.display()
+            );
+
+            for mismatch in mismatches {
+                let instrument_line =
+                    if mismatch.expected_instrument != mismatch.actual_instrument {
+                        format!(
+                            "\n  instrument: expected `{}:{}`, persisted `{}:{}`",
+                            mismatch.expected_instrument.venue.as_str(),
+                            mismatch.expected_instrument.symbol,
+                            mismatch.actual_instrument.venue.as_str(),
+                            mismatch.actual_instrument.symbol
+                        )
+                    } else {
+                        String::new()
+                    };
+
+                rendered.push_str(&format!(
+                    "\ntrack `{}`:{}\n  expected config: {}\n  persisted config: {}",
+                    mismatch.track_id,
+                    instrument_line,
+                    mismatch.expected_config_json,
+                    mismatch.actual_config_json
+                ));
+            }
+
+            match suggested_action {
+                SuggestedAction::RebuildState => {
+                    rendered.push_str(
+                        "\nuse `--rebuild-state` to back up the old database, discard local snapshots, and rebuild state from the exchange's live positions and orders.\n\
+suggested command: cargo run -p poise-server -- --config <path> --rebuild-state",
+                    );
+                }
+            }
+
+            rendered
+        }
+        StateBootstrapError::Unexpected(error) => error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -124,7 +177,7 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
-    use crate::state_bootstrap::StateBootstrapMode;
+    use crate::state_bootstrap::{StateBootstrapError, StateBootstrapMode, SuggestedAction};
 
     use super::{StartupOptions, parse_startup_options};
 
@@ -183,6 +236,25 @@ mod tests {
     fn parse_config_path_rejects_unknown_arguments() {
         let error = parse_startup_options(vec!["--bogus".to_string()].into_iter()).unwrap_err();
         assert!(error.to_string().contains("unknown argument"));
+    }
+
+    #[test]
+    fn render_startup_error_formats_structured_mismatch_for_cli() {
+        let rendered = super::render_startup_error(&StateBootstrapError::PersistedStateMismatch {
+            db_path: std::path::PathBuf::from(".data/testnet/poise-server.sqlite"),
+            mismatches: vec![crate::state_bootstrap::PersistedStateMismatch {
+                track_id: "btc-core".into(),
+                expected_instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                actual_instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                expected_config_json: r#"{"lower_price":90.0}"#.into(),
+                actual_config_json: r#"{"lower_price":80.0}"#.into(),
+            }],
+            suggested_action: SuggestedAction::RebuildState,
+        });
+
+        assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
+        assert!(rendered.contains("btc-core"));
+        assert!(rendered.contains("--rebuild-state"));
     }
 
     fn workspace_root() -> PathBuf {

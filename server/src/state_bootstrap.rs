@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -15,36 +16,73 @@ pub enum StateBootstrapMode {
     Rebuild,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuggestedAction {
+    RebuildState,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-struct PersistedStateMismatch {
-    track_id: String,
-    expected_instrument: Instrument,
-    actual_instrument: Instrument,
-    expected_config_json: String,
-    actual_config_json: String,
+pub struct PersistedStateMismatch {
+    pub track_id: String,
+    pub expected_instrument: Instrument,
+    pub actual_instrument: Instrument,
+    pub expected_config_json: String,
+    pub actual_config_json: String,
+}
+
+#[derive(Debug)]
+pub enum StateBootstrapError {
+    PersistedStateMismatch {
+        db_path: PathBuf,
+        mismatches: Vec<PersistedStateMismatch>,
+        suggested_action: SuggestedAction,
+    },
+    Unexpected(anyhow::Error),
+}
+
+impl std::fmt::Display for StateBootstrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PersistedStateMismatch { db_path, .. } => {
+                write!(f, "persisted state does not match current config in `{}`", db_path.display())
+            }
+            Self::Unexpected(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for StateBootstrapError {}
+
+type BootstrapResult<T> = std::result::Result<T, StateBootstrapError>;
+
+fn unexpected(error: anyhow::Error) -> StateBootstrapError {
+    StateBootstrapError::Unexpected(error)
 }
 
 pub async fn prepare_state_repository(
     config: &Config,
     mode: StateBootstrapMode,
-) -> Result<Arc<dyn StateStore>> {
+) -> BootstrapResult<Arc<dyn StateStore>> {
     let db_path = config.default_db_path();
-    ensure_parent_dir(&db_path)?;
-    let repository = SqliteStorage::new(&db_path)?;
-    let mismatches = detect_persisted_state_mismatches(config, &repository).await?;
+    ensure_parent_dir(&db_path).map_err(unexpected)?;
+    let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
+    let mismatches = detect_persisted_state_mismatches(config, &repository)
+        .await
+        .map_err(unexpected)?;
     if mismatches.is_empty() {
         return Ok(Arc::new(repository));
     }
 
     match mode {
-        StateBootstrapMode::Strict => Err(anyhow!(format_state_mismatch_error(
-            &db_path,
-            &mismatches
-        ))),
+        StateBootstrapMode::Strict => Err(StateBootstrapError::PersistedStateMismatch {
+            db_path,
+            mismatches,
+            suggested_action: SuggestedAction::RebuildState,
+        }),
         StateBootstrapMode::Rebuild => {
             drop(repository);
-            backup_and_reset_state_db(&db_path)?;
-            Ok(Arc::new(SqliteStorage::new(&db_path)?))
+            backup_and_reset_state_db(&db_path).map_err(unexpected)?;
+            Ok(Arc::new(SqliteStorage::new(&db_path).map_err(unexpected)?))
         }
     }
 }
@@ -123,42 +161,6 @@ fn backup_and_reset_state_db(db_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn format_state_mismatch_error(
-    db_path: &std::path::Path,
-    mismatches: &[PersistedStateMismatch],
-) -> String {
-    let mut message = format!(
-        "persisted state does not match current config in `{}`.\n\
-use `--rebuild-state` to back up the old database, discard local snapshots, and rebuild state from the exchange's live positions and orders.\n\
-suggested command: cargo run -p poise-server -- --config <path> --rebuild-state",
-        db_path.display()
-    );
-
-    for mismatch in mismatches {
-        let instrument_line = if mismatch.expected_instrument != mismatch.actual_instrument {
-            format!(
-                "\n  instrument: expected `{}:{}`, persisted `{}:{}`",
-                mismatch.expected_instrument.venue.as_str(),
-                mismatch.expected_instrument.symbol,
-                mismatch.actual_instrument.venue.as_str(),
-                mismatch.actual_instrument.symbol
-            )
-        } else {
-            String::new()
-        };
-
-        message.push_str(&format!(
-            "\ntrack `{}`:{}\n  expected config: {}\n  persisted config: {}",
-            mismatch.track_id,
-            instrument_line,
-            mismatch.expected_config_json,
-            mismatch.actual_config_json
-        ));
-    }
-
-    message
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -232,6 +234,37 @@ mod tests {
                     .unwrap_or(false)
             });
         assert!(backup_exists);
+        cleanup_environment(&environment);
+    }
+
+    #[tokio::test]
+    async fn strict_mode_returns_structured_mismatch() {
+        let environment = unique_test_environment();
+        let config = test_config(environment.clone(), 90.0);
+        let db_path = config.default_db_path();
+        persist_snapshot_with_lower_price(&config, 80.0).await;
+
+        let error = prepare_state_repository(&config, StateBootstrapMode::Strict)
+            .await
+            .err()
+            .unwrap();
+
+        match error {
+            super::StateBootstrapError::PersistedStateMismatch {
+                db_path: actual_db_path,
+                mismatches,
+                suggested_action,
+            } => {
+                assert_eq!(actual_db_path, db_path);
+                assert_eq!(mismatches.len(), 1);
+                assert_eq!(
+                    suggested_action,
+                    super::SuggestedAction::RebuildState
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
         cleanup_environment(&environment);
     }
 
