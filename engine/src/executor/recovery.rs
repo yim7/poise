@@ -6,8 +6,10 @@ use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionStats, ExecutorState, SlotState};
 use crate::transition::TrackEffect;
 
+use super::planning::current_submit_hint_with_slot;
+use super::rebalance_trigger::{RebalanceTriggerInput, evaluate_rebalance_trigger};
 use super::{
-    ExecutionMode, PendingSubmitHint, SubmitIntentInput, current_submit_hint, recording, slots,
+    ExecutionMode, PendingSubmitHint, SubmitIntentInput, recording, slots,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -136,27 +138,41 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         };
     }
 
+    let matching_pending_submit_slot = input.previous_state.slots.iter().find(|slot| {
+        slot.state == SlotState::SubmitPending
+            && slots::slot_matches_order(slot, &input.request.client_order_id, None)
+    });
+
+    let current_plan_trigger_decision = input.current_plan.as_ref().map(|current_plan| {
+        evaluate_rebalance_trigger(RebalanceTriggerInput {
+            current_exposure: &current_plan.current_exposure,
+            latest_target_exposure: &current_plan.target_exposure,
+            min_rebalance_units: current_plan.min_rebalance_units,
+            active_slot: matching_pending_submit_slot,
+        })
+    });
+
     let current_plan_submit = input
         .current_plan
         .as_ref()
-        .and_then(|current_plan| current_submit_hint(current_plan.clone()));
+        .and_then(|current_plan| {
+            current_submit_hint_with_slot(current_plan.clone(), matching_pending_submit_slot)
+        });
 
     if !submit_recovery_matches_current_plan(
         input.request,
         current_plan_submit.as_ref(),
         input.exchange_rules,
     ) {
-        if current_plan_submit.is_none() {
-            let has_matching_pending_submit_slot = input.previous_state.slots.iter().any(|slot| {
-                slot.state == SlotState::SubmitPending
-                    && slots::slot_matches_order(slot, &input.request.client_order_id, None)
-            });
-            if input.current_plan.is_some() && has_matching_pending_submit_slot {
-                return SubmitRecoveryPlan {
-                    resolution: SubmitRecoveryResolution::AwaitExchangeState,
-                    effects: vec![],
-                };
-            }
+        if current_plan_trigger_decision
+            .as_ref()
+            .is_some_and(|decision| !decision.should_trigger_next_action)
+            && matching_pending_submit_slot.is_some()
+        {
+            return SubmitRecoveryPlan {
+                resolution: SubmitRecoveryResolution::AwaitExchangeState,
+                effects: vec![],
+            };
         }
 
         let cleared_state =

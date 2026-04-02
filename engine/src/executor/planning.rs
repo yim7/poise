@@ -9,6 +9,9 @@ use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
 use crate::track::{Instrument, TrackId};
 
+use super::rebalance_trigger::{
+    RebalanceTriggerDecision, RebalanceTriggerInput, evaluate_rebalance_trigger,
+};
 use super::{ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, recording, slots};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,8 +78,6 @@ const REBALANCE_AGE_MS: i64 = 60_000;
 const CATCH_UP_AGE_MS: i64 = 180_000;
 const REPLACEMENT_SAFETY_BUFFER_BPS: f64 = 5.0;
 const BPS_DENOMINATOR: f64 = 10_000.0;
-const MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR: f64 = 16.0;
-
 impl<'a> ExecutorInput<'a> {
     pub fn new(
         submit_intent: SubmitIntentInput<'a>,
@@ -94,6 +95,13 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         submit_intent,
         executor_state,
     } = input;
+    let (current_slot, _) = slots::split_inventory_core_slot(executor_state);
+    let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
+        current_exposure: &submit_intent.current_exposure,
+        latest_target_exposure: &submit_intent.target_exposure,
+        min_rebalance_units: submit_intent.min_rebalance_units,
+        active_slot: Some(&current_slot),
+    });
     let inventory_gap = submit_intent
         .current_exposure
         .delta(&submit_intent.target_exposure);
@@ -114,9 +122,9 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         &inventory_gap,
         gap_age_ms,
     );
-    let desired_orders = plan_desired_orders(&submit_intent);
+    let desired_orders = plan_desired_orders(&submit_intent, &trigger_decision);
     let (effects, slots, replacement_gate_reason) =
-        diff_desired_orders(&submit_intent, executor_state, &desired_orders);
+        diff_desired_orders(&submit_intent, executor_state, &desired_orders, &trigger_decision);
 
     ExecutorPlan {
         state: ExecutorState {
@@ -148,7 +156,20 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
 }
 
 pub fn current_submit_hint(input: SubmitIntentInput<'_>) -> Option<PendingSubmitHint> {
-    let desired_order = desired_inventory_order_for_submit_intent(&input)?;
+    current_submit_hint_with_slot(input, None)
+}
+
+pub(super) fn current_submit_hint_with_slot(
+    input: SubmitIntentInput<'_>,
+    active_slot: Option<&ExecutionSlot>,
+) -> Option<PendingSubmitHint> {
+    let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
+        current_exposure: &input.current_exposure,
+        latest_target_exposure: &input.target_exposure,
+        min_rebalance_units: input.min_rebalance_units,
+        active_slot,
+    });
+    let desired_order = desired_inventory_order_for_submit_intent(&input, &trigger_decision)?;
     let request = desired_order_to_request(&input, &desired_order);
     Some(PendingSubmitHint {
         request,
@@ -258,19 +279,23 @@ fn update_stats(
     }
 }
 
-fn plan_desired_orders(input: &SubmitIntentInput<'_>) -> Vec<DesiredOrder> {
-    desired_inventory_order_for_submit_intent(input)
+fn plan_desired_orders(
+    input: &SubmitIntentInput<'_>,
+    trigger_decision: &RebalanceTriggerDecision,
+) -> Vec<DesiredOrder> {
+    desired_inventory_order_for_submit_intent(input, trigger_decision)
         .into_iter()
         .collect()
 }
 
 fn desired_inventory_order_for_submit_intent(
     input: &SubmitIntentInput<'_>,
+    trigger_decision: &RebalanceTriggerDecision,
 ) -> Option<DesiredOrder> {
-    let inventory_gap = input.current_exposure.delta(&input.target_exposure);
-    if inventory_gap_below_min_rebalance_units(&inventory_gap, input.min_rebalance_units) {
+    if !trigger_decision.should_trigger_next_action {
         return None;
     }
+    let inventory_gap = input.current_exposure.delta(&input.target_exposure);
     let side = Side::from_exposure(&inventory_gap)?;
     let price = round_to_step(input.reference_price, input.exchange_rules.price_tick);
     let quantity = round_to_step(
@@ -294,25 +319,11 @@ fn desired_inventory_order_for_submit_intent(
     })
 }
 
-fn inventory_gap_below_min_rebalance_units(
-    inventory_gap: &Exposure,
-    min_rebalance_units: f64,
-) -> bool {
-    if min_rebalance_units <= f64::EPSILON {
-        return false;
-    }
-
-    let abs_gap = inventory_gap.0.abs();
-    let tolerance = f64::EPSILON
-        * MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR
-        * abs_gap.max(min_rebalance_units).max(1.0);
-    abs_gap + tolerance < min_rebalance_units
-}
-
 fn diff_desired_orders(
     input: &SubmitIntentInput<'_>,
     executor_state: Option<&ExecutorState>,
     desired_orders: &[DesiredOrder],
+    trigger_decision: &RebalanceTriggerDecision,
 ) -> (
     Vec<ExecutionAction>,
     Vec<ExecutionSlot>,
@@ -323,6 +334,15 @@ fn diff_desired_orders(
 
     match desired_order {
         None => {
+            if !trigger_decision.should_trigger_next_action
+                && matches!(current_slot.state, SlotState::SubmitPending | SlotState::Working)
+            {
+                return (
+                    vec![ExecutionAction::NoOp],
+                    slots::with_inventory_core_slot(sibling_slots, current_slot),
+                    None,
+                );
+            }
             if current_slot.state == SlotState::SubmitPending {
                 return (
                     vec![ExecutionAction::NoOp],

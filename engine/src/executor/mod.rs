@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 mod planning;
+mod rebalance_trigger;
 mod recording;
 mod recovery;
 mod slots;
@@ -52,6 +53,7 @@ mod tests {
     use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
     use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
     use crate::track::{Instrument, TrackId, Venue};
+    use crate::transition::TrackEffect;
 
     fn test_track_id() -> TrackId {
         TrackId::new("btc-core")
@@ -277,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn small_target_change_below_min_rebalance_units_does_not_submit_new_order() {
+    fn empty_slot_below_min_rebalance_units_does_not_start_new_round() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
         let track_id = test_track_id();
@@ -308,34 +310,56 @@ mod tests {
     }
 
     #[test]
-    fn small_target_change_below_min_rebalance_units_cancels_existing_working_order() {
+    fn working_order_target_drift_within_min_rebalance_units_is_kept() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
+        let existing_state = ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(0.8),
+            gap_started_at: Some(now),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.8,
+                    target_exposure: Exposure(2.8),
+                    status: OrderStatus::New,
+                    role: OrderRole::IncreaseInventory,
+                }),
+            }],
+            recent_terminal_orders: Vec::new(),
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(now),
+        };
 
         let plan = plan(executor_input(
             &track_id,
             &instrument,
             &rules,
-            3.75,
+            1.0,
             0.5,
             Exposure(2.0),
-            Exposure(2.4),
-            97.0,
+            Exposure(3.1),
+            95.0,
             Some(&existing_state),
             now,
         ));
 
-        assert!(matches!(
-            plan.effects.as_slice(),
-            [ExecutionAction::CancelOrder { order_id, .. }] if order_id == "order-1"
-        ));
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert!(plan.desired_orders.is_empty());
+        assert_eq!(plan.state.slots, existing_state.slots);
     }
 
     #[test]
-    fn small_target_change_below_min_rebalance_units_keeps_submit_pending_slot() {
+    fn submit_pending_target_drift_within_min_rebalance_units_is_kept() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
         let track_id = test_track_id();
@@ -344,28 +368,82 @@ mod tests {
             instrument: instrument.clone(),
             side: Side::Buy,
             price: 95.0,
-            quantity: 15.0,
+            quantity: 0.8,
             client_order_id: "client-pending".into(),
             reduce_only: false,
         };
         let existing_state =
-            record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(2.8));
 
         let plan = plan(executor_input(
             &track_id,
             &instrument,
             &rules,
-            3.75,
+            1.0,
             0.5,
             Exposure(2.0),
-            Exposure(2.4),
-            97.0,
+            Exposure(3.1),
+            95.0,
             Some(&existing_state),
             now,
         ));
 
         assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert!(plan.desired_orders.is_empty());
         assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn working_order_target_drift_crossing_min_rebalance_units_replans() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(0.8),
+            gap_started_at: Some(now),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.8,
+                    target_exposure: Exposure(2.8),
+                    status: OrderStatus::New,
+                    role: OrderRole::IncreaseInventory,
+                }),
+            }],
+            recent_terminal_orders: Vec::new(),
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(now),
+        };
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            1.0,
+            0.5,
+            Exposure(2.0),
+            Exposure(3.4),
+            95.0,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder { target_exposure, .. }
+            ] if order_id == "order-1" && *target_exposure == Exposure(3.4)
+        ));
     }
 
     #[test]
@@ -1724,7 +1802,8 @@ mod tests {
     }
 
     #[test]
-    fn submit_recovery_keeps_pending_submit_when_current_plan_is_below_min_rebalance_units() {
+    fn submit_recovery_keeps_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
+    {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let track_id = TrackId::new("track-1");
@@ -1738,14 +1817,14 @@ mod tests {
             reduce_only: false,
         };
         let previous_state =
-            record_submit_request(&ExecutorState::empty(now), &request, Exposure(0.8));
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(2.8));
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(0.8),
-            current_exposure: &Exposure(0.0),
+            target_exposure: &Exposure(2.8),
+            current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
                 &track_id,
@@ -1753,8 +1832,8 @@ mod tests {
                 &rules,
                 1.0,
                 0.5,
-                Exposure(0.0),
-                Exposure(0.4),
+                Exposure(2.0),
+                Exposure(3.1),
                 90.0,
                 now,
             )),
@@ -1766,11 +1845,65 @@ mod tests {
         } = recovery
         else {
             panic!(
-                "small pending submit should be preserved when current plan is below min rebalance units"
+                "pending submit should be preserved when latest target drift is within min rebalance units of the active anchor"
             );
         };
 
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn submit_recovery_supersedes_pending_submit_when_target_drift_crosses_min_rebalance_units() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 90.0,
+            quantity: 0.8,
+            client_order_id: "track-1-small-reconcile".into(),
+            reduce_only: false,
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(2.8));
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(2.8),
+            current_exposure: &Exposure(2.0),
+            live_order: None,
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.5,
+                Exposure(2.0),
+                Exposure(3.4),
+                90.0,
+                now,
+            )),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { .. },
+            effects,
+        } = recovery
+        else {
+            panic!("pending submit should be superseded once target drift crosses the threshold");
+        };
+
+        assert!(matches!(
+            effects.as_slice(),
+            [TrackEffect::SubmitOrder {
+                target_exposure,
+                ..
+            }] if *target_exposure == Exposure(3.4)
+        ));
     }
 
     #[test]
