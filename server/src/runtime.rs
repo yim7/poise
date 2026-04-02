@@ -239,6 +239,19 @@ impl ServerRuntime {
         retry_startup_step("startup_sync", || self.startup_sync()).await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
+        let startup_pending_submit_effects = self
+            .state
+            .state_repository
+            .list_all_pending_submit_effects()
+            .await?;
+        self.state
+            .submit_preflight
+            .seed_startup_pending_submit_effects(
+                startup_pending_submit_effects
+                    .into_iter()
+                    .map(|effect| effect.effect_id),
+            )
+            .await;
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task =
@@ -950,6 +963,112 @@ mod tests {
             2
         );
 
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn startup_preflight_marks_all_pending_submit_effects_not_only_dispatchable_ones() {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+        let snapshot = fixture
+            .state
+            .write_service
+            .manager()
+            .read()
+            .await
+            .snapshot("BTCUSDT")
+            .unwrap();
+        let persisted = fixture
+            .persistence
+            .save_transition(
+                "BTCUSDT",
+                &snapshot,
+                &[],
+                &[
+                    TrackEffect::CancelAll {
+                        instrument: btc_instrument(),
+                    },
+                    TrackEffect::SubmitOrder {
+                        request: OrderRequest {
+                            instrument: btc_instrument(),
+                            side: Side::Buy,
+                            price: 95.0,
+                            quantity: test_config().base_qty_per_unit() * 4.0,
+                            client_order_id: "startup-pending".into(),
+                            reduce_only: false,
+                        },
+                        target_exposure: Exposure(4.0),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let handles = fixture.runtime.start().await.unwrap();
+        let startup_effects = fixture
+            .state
+            .submit_preflight
+            .startup_pending_effect_ids()
+            .await;
+        assert!(startup_effects.contains(&persisted.effects[1].effect_id));
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs() {
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            btc_position(0.0, 0.0),
+            vec![],
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::with_reconcile_intervals(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        let effect_id = persistence
+            .list_dispatchable_effects()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending submit effect should exist before start")
+            .effect_id;
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+
+        let handles = runtime.start().await.unwrap();
+        submit_started.notified().await;
+        let startup_effects = state.submit_preflight.startup_pending_effect_ids().await;
+        release_submit.notify_waiters();
+
+        assert!(startup_effects.contains(&effect_id));
+        drop(price_sender);
+        drop(user_sender);
         shutdown(handles).await;
     }
 
@@ -4886,6 +5005,18 @@ mod tests {
             Ok(ready_pending_effects(&effects))
         }
 
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
@@ -5106,6 +5237,18 @@ mod tests {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
         }
 
         async fn list_pending_submit_effects_for_track(
@@ -5332,6 +5475,18 @@ mod tests {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
         }
 
         async fn list_pending_submit_effects_for_track(

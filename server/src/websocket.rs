@@ -613,6 +613,18 @@ mod tests {
                 .collect())
         }
 
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,

@@ -716,6 +716,34 @@ impl SqliteStorage {
             .collect())
     }
 
+    fn list_all_pending_submit_effects_blocking(
+        conn: Arc<Mutex<Connection>>,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects
+                 WHERE status = ?1
+                 ORDER BY created_at ASC, batch_id ASC, sequence ASC, effect_id ASC",
+            )
+            .context("failed to prepare all pending submit effect query")?;
+
+        let effects = stmt
+            .query_map(
+                params![EffectStatus::Pending.as_str()],
+                Self::persisted_effect_from_row,
+            )
+            .context("failed to query all pending submit effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize all pending submit effects")?;
+
+        Ok(effects
+            .into_iter()
+            .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+            .collect())
+    }
+
     fn list_pending_submit_effects_for_track_batch_blocking(
         conn: Arc<Mutex<Connection>>,
         track_id: TrackId,
@@ -878,6 +906,14 @@ impl StateRepositoryPort for SqliteStorage {
         tokio::task::spawn_blocking(move || Self::list_dispatchable_effects_blocking(conn))
             .await
             .context("failed to join list_dispatchable_effects blocking task")?
+    }
+
+    async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Arc::clone(&self.conn);
+
+        tokio::task::spawn_blocking(move || Self::list_all_pending_submit_effects_blocking(conn))
+            .await
+            .context("failed to join list_all_pending_submit_effects blocking task")?
     }
 
     async fn list_pending_submit_effects_for_track(
@@ -1648,6 +1684,32 @@ mod tests {
             btc_submit_hints[0].effect,
             TrackEffect::SubmitOrder { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn list_all_pending_submit_effects_returns_non_dispatchable_pending_submits() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+        let effects = vec![
+            TrackEffect::CancelAll {
+                instrument: snapshot.instrument.clone(),
+            },
+            TrackEffect::SubmitOrder {
+                request: test_order_request_for_symbol("BTCUSDT"),
+                target_exposure: Exposure(6.0),
+            },
+        ];
+
+        let persisted = storage
+            .save_transition("btc-core", &snapshot, &[], &effects)
+            .await
+            .unwrap();
+
+        let pending = storage.list_all_pending_submit_effects().await.unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
+        assert!(matches!(pending[0].effect, TrackEffect::SubmitOrder { .. }));
     }
 
     #[tokio::test]

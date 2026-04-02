@@ -84,6 +84,20 @@ impl SubmitPreflight {
         self.attempted_submit_effects.lock().await.clone()
     }
 
+    pub async fn seed_startup_pending_submit_effects(
+        &self,
+        effect_ids: impl IntoIterator<Item = String>,
+    ) {
+        let mut startup_pending = self.startup_pending_submit_effects.lock().await;
+        startup_pending.clear();
+        startup_pending.extend(effect_ids);
+    }
+
+    #[cfg(test)]
+    pub async fn startup_pending_effect_ids(&self) -> HashSet<String> {
+        self.startup_pending_submit_effects.lock().await.clone()
+    }
+
     #[cfg(test)]
     pub async fn is_attempted(&self, effect_id: &str) -> bool {
         self.attempted_submit_effects.lock().await.contains(effect_id)
@@ -109,6 +123,25 @@ mod tests {
     async fn submit_preflight_decides_lookup_for_started_effect() {
         let preflight = SubmitPreflight::new();
         preflight.mark_submit_started("effect-1").await;
+
+        let decision = preflight
+            .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)
+            .await;
+
+        assert_eq!(
+            decision,
+            SubmitPreflightDecision::NeedsLiveOrderLookup {
+                client_order_id: "client-1".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_preflight_decides_lookup_for_startup_pending_effect() {
+        let preflight = SubmitPreflight::new();
+        preflight
+            .seed_startup_pending_submit_effects(["effect-1".to_string()])
+            .await;
 
         let decision = preflight
             .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)

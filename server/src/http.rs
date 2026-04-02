@@ -754,6 +754,12 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn list_all_pending_submit_effects(
+            &self,
+        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             _track_id: &TrackId,
