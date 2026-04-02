@@ -1,364 +1,459 @@
-# Strategy Min Rebalance Units Design
+# Strategy Min Rebalance Units 设计
 
-**背景**
+## 背景
 
-当前系统已经在执行域补上了一层交易所最小下单门槛：
+第一版 `min_rebalance_units` 已经落地，但当前语义是：
 
-- `quantity_step`
-- `min_qty`
-- `min_notional`
+- 当 `abs(target_exposure - current_exposure) < min_rebalance_units` 时，不再开始新的调仓
+- 一旦已经进入执行生命周期，执行器仍然会继续追逐每次最新的 `target_exposure`
 
-这解决了“交易所根本不会接受的碎单”问题，但还没有解决另一层问题：
+这会带来一个明显副作用：
 
-- 某些调仓虽然满足交易所门槛
-- 但从策略角度看仍然过小、过碎
-- 在连续 tick 下会产生很多小幅调仓意图
+- 刚启动或大 gap 阶段，系统会先进入调仓
+- 调仓进行中，如果价格连续变化，最新目标会持续轻微漂移
+- `SubmitPending` 会被不断 supersede
+- `Working` 会被不断 cancel / replace
+- 最后只是碰巧在 gap 收敛到阈值以内时停下
 
-当前策略目标是连续函数，见 [../../../core/src/strategy.rs](../../../core/src/strategy.rs)。  
-只要 `target_exposure` 和 `current_exposure` 存在细小差异，系统就可能继续尝试进入执行路径。
+也就是说，第一版实现的是“停手阈值”，没有实现“执行中防抖”。
 
 ## 目标
 
-- 为策略增加一层独立于交易所限制的“最小调仓单位”。
-- 减少满足交易所门槛、但从策略角度仍然过碎的小调仓。
-- 保持 `target_exposure` 继续表达原始策略目标，不把策略目标和执行抑制混在一起。
-- 不破坏现有 `Working / SubmitPending / Empty` 的执行状态机语义。
+- 避免执行过程中为了追求绝对精准调仓而频繁撤单重挂
+- 保持系统仍然逐步逼近最新策略目标，而不是永久停在旧目标
+- 保持 `target_exposure` 继续表达最新原始策略目标
+- 保持 `reconciler`、`manager`、`executor` 的知识边界清晰
+- 让“执行锚点 + 门槛比较”成为 executor 内的单一事实来源
 
 ## 非目标
 
-- 不把这次设计扩展成按绝对金额配置的门槛。
-- 不在本次引入按总容量比例的门槛。
-- 不改变现有 `replacement gate` 的价格改善语义。
-- 不改动 `submit recovery` 的主语义。
-- 不新增时间窗口防抖。
+- 不新增第二个独立门槛参数
+- 不把这次设计扩展成按绝对金额或总容量比例配置
+- 不引入基于时间窗口的防抖
+- 不改变现有交易所 floor 语义
+- 不改变现有 replacement gate 的“价格改善是否值得改挂”语义
 
 ## 问题定义
 
-现在有两层不同的“是否值得下单”判断：
+当前系统把 `min_rebalance_units` 解释成：
 
-1. **交易所门槛**
-   - 订单是否可被交易所接受
-2. **策略门槛**
-   - 这次调仓是否足够大，值得策略实际执行
+- 当前仓位与最新策略目标之间，是否还值得继续调仓
 
-当前代码只有第一层，没有第二层。  
-因此会出现：
+但用户真正需要的是：
 
-- 订单虽然“可下”
-- 但仓位变化仍然过小
-- 导致策略在连续价格变化下产生很多细碎调仓
+- 最新策略目标是否已经变化到值得触发**下一次执行动作**
 
-## 候选方向
+这里的“下一次执行动作”包括：
 
-### 方向 A：按绝对金额设置最小调仓门槛
+- 在没有活动单时，开始一轮新的调仓
+- 在存在 `SubmitPending` 时，是否 supersede 当前 pending submit
+- 在存在 `Working` 时，是否 cancel / replace 当前工作单
 
-做法：
+如果仍然把门槛只绑定在 `current_exposure -> latest_target` 上，就会继续出现：
 
-- 配置一个最小调仓金额，例如低于 `50 USDT` 不调。
+- 调仓已经开始
+- 最新目标只变了一点
+- 但执行器仍然不断打断当前生命周期去追最新 target
 
-优点：
+问题不在于“系统会不会停”，而在于“系统在停之前太频繁地改执行计划”。
 
-- 直观。
-- 和“订单金额太小”这个感受接近。
+## 备选方向
 
-缺点：
-
-- 用户反馈这种口径不方便。
-- 与现有 `exposure` 语义不统一。
-- 不同价格区间和不同策略下解释成本更高。
-
-### 方向 B：按总容量比例设置最小调仓门槛
+### 方向 A：保持现有语义，只调大 `min_rebalance_units`
 
 做法：
 
-- 配置一个比例，例如低于总容量 `5%` 不调。
+- 继续把门槛定义为 `abs(target_exposure - current_exposure)`
+- 通过更大的固定阈值减少频繁调仓
 
 优点：
 
-- 大策略自然门槛更大。
-- 容易压住大仓位下的小碎单。
+- 改动最小
 
 缺点：
 
-- 同样的 `inventory_gap` 在不同配置下行为会变化，理解成本更高。
-- 与现有 `current_exposure / target_exposure / inventory_gap` 的统一口径不完全一致。
+- 不能解决“已经开始执行后仍频繁 supersede / cancel-replace”这个核心问题
+- 只是把第一笔调仓推迟，不能改变执行中的追逐语义
 
-### 方向 C：按固定 `exposure unit` 设置最小调仓门槛
+### 方向 B：新增第二个参数，专门控制执行中的改单门槛
 
 做法：
 
-- 配置 `min_rebalance_units`
-- 当 `abs(target_exposure - current_exposure) < min_rebalance_units` 时，不生成新的策略调仓目标单
+- 保留当前 `min_rebalance_units`
+- 再增加一个类似 `min_reprice_units` / `min_retarget_units`
 
 优点：
 
-- 与现有 `exposure` 语义完全统一。
-- 最容易解释和测试。
-- 不会因为策略总容量变化而让门槛语义漂移。
+- 语义最细
 
 缺点：
 
-- 对非常大容量的策略，固定 `0.5 unit` 可能仍偏小。
+- 新增一套用户心智模型
+- 配置和测试成本上升
+- 第一版需求还不足以支撑第二个门槛参数
+
+### 方向 C：重定义 `min_rebalance_units`，让它表示“触发下一次执行动作的最小目标变化”
+
+做法：
+
+- 不再只看 `current_exposure -> latest_target`
+- 而是根据当前是否已有活动生命周期，选择不同的锚点来判断是否值得触发下一次执行动作
+
+优点：
+
+- 不新增接口复杂度
+- 直接解决频繁 supersede / cancel-replace 的核心问题
+- 仍与现有 `exposure` 口径统一
+
+缺点：
+
+- 相比第一版，`min_rebalance_units` 的定义发生变化
 
 ## 设计结论
 
 选择方向 C。
 
-第一版使用固定 `exposure unit` 门槛：
+`min_rebalance_units` 的新定义是：
 
-- 新增配置项：`min_rebalance_units`
-- 默认值：`0.5`
+- **触发下一次执行动作所需的最小目标变化量**
 
-理由：
+这意味着：
 
-- 它和当前系统最核心的策略语义保持一致：
-  - `current_exposure`
-  - `target_exposure`
-  - `inventory_gap`
-- 不需要重新引入另一套金额口径或容量比例口径。
-- 适合先快速稳定“细碎调仓”问题。
-
-如果后续验证发现大容量策略下 `0.5 unit` 仍然太碎，再考虑升级为：
-
-- `max(固定 unit 门槛, 容量比例门槛)`
-
-但这不属于第一版范围。
+- 没有活动单时，它决定“要不要开始新一轮调仓”
+- 有活动单时，它决定“要不要打断当前这轮并改执行计划”
 
 ## 核心设计
 
 ### 1. 配置模型
 
-在 `TrackConfig` 中新增字段：
+配置字段保持不变：
 
 ```rust
 pub min_rebalance_units: f64
 ```
 
-约束：
+默认值仍为：
 
-- 必须 `>= 0.0`
-- 必须是有限数值，拒绝 `NaN` / `inf`
-- 默认值 `0.5`
+- `0.5`
 
-语义：
+校验规则保持不变：
 
-- 仅用于策略级最小调仓判断
-- 不替代交易所门槛
+- `>= 0.0`
+- 必须是有限数值
 
-### 2. 判断落点
+变化只发生在**语义**，不是字段形状。
 
-该门槛属于策略语义，但不放在 `reconciler`，也不放在 `manager`。
+### 1.1 迁移说明
 
-落点放在 `executor planning`。
+这不是字段形状变更，而是**配置语义变更**。
 
-原因：
+旧语义更接近：
 
-- `reconciler` 负责产出原始策略目标，不应该改写或抹平 `target_exposure`
-- `manager` 不应该复制 `Working / SubmitPending / Empty` 的执行状态机知识
-- `executor planning` 已经负责把“目标 -> 真实订单 / NoOp / CancelOrder”收敛成单一执行语义
+- `current_exposure -> latest_target` 的停手阈值
 
-因此顺序变成：
+新语义改为：
 
-1. `reconciler` 继续正常计算原始 `target_exposure`
-2. `executor planning` 先检查策略门槛：
-   - `abs(target_exposure - current_exposure) < min_rebalance_units`
-3. 若未达到策略门槛，不生成新的 `desired_order`
-4. 若达到策略门槛，再继续走现有交易所门槛判断：
+- 触发下一次执行动作的最小目标变化
+
+因此，已有配置里的同一个数值，例如 `0.5`，在第二版中的效果会是：
+
+- 没有活动生命周期时，仍然决定是否开始一轮新调仓
+- 有活动生命周期时，不再要求系统持续追逐每次最新 target
+- 相比第一版，会更少触发 `Superseded` 和 `CancelReplace`
+
+调参含义也随之变化：
+
+- 如果希望更频繁跟随最新目标，应调低该值
+- 如果希望执行更稳、减少 lifecycle 抖动，应调高该值
+
+这条迁移说明必须同步体现在：
+
+- `README.md`
+- 用户可见配置示例
+
+### 2. 参考点与锚点
+
+executor planning 不再总是使用：
+
+- `current_exposure`
+- `latest target_exposure`
+
+来判断是否值得进入下一次执行动作。
+
+而是先定义一个**执行锚点**：
+
+#### 2.1 没有活动生命周期时
+
+如果 inventory core slot 当前是 `Empty`：
+
+- 执行锚点 = `current_exposure`
+
+此时语义是：
+
+- 最新策略目标相对当前仓位的变化，是否足够大，值得开始一轮新调仓
+
+#### 2.2 存在活动生命周期时
+
+如果 inventory core slot 当前是：
+
+- `SubmitPending`
+- `Working`
+
+则执行锚点 = 当前 slot 已记录的 `working_order.target_exposure`
+
+此时语义是：
+
+- 最新策略目标相对“当前这轮正在执行的目标”是否已经变化得足够大，值得打断当前生命周期并开始下一次执行动作
+
+#### 2.3 生命周期结束后
+
+当 slot 回到 `Empty`：
+
+- 执行锚点重新退回 `current_exposure`
+
+这保证系统行为是：
+
+- 一轮一轮推进
+- 每轮结束后重新对齐最新目标
+- 而不是在一轮执行中持续追逐每次最新 target
+
+### 3. 门槛判断语义
+
+定义：
+
+```text
+trigger_delta = abs(latest_target_exposure - execution_anchor)
+```
+
+规则固定为：
+
+- `trigger_delta < min_rebalance_units`
+  - 不触发下一次执行动作
+- `trigger_delta >= min_rebalance_units`
+  - 允许进入下一次执行动作判断
+
+等号语义保持：
+
+- **等于门槛时允许执行**
+
+### 3.1 单一 owner：`rebalance trigger` 策略
+
+“执行锚点是什么”和“这次 target 漂移是否已经大到值得触发下一次执行动作”必须由 executor 内的单一策略抽象拥有，不能由：
+
+- `planning`
+- `submit recovery`
+
+各自再实现一遍。
+
+建议落点：
+
+- `engine/src/executor/rebalance_trigger.rs`
+
+它拥有以下知识：
+
+- 当前 slot 是否存在活动生命周期
+- 不同 slot 状态下该使用哪种锚点
+- `trigger_delta` 的计算方式
+- `min_rebalance_units` 的统一比较语义与容差
+
+对外只暴露一个很小的结果，例如：
+
+- 当前锚点
+- 当前 `trigger_delta`
+- 是否允许触发下一次执行动作
+
+然后：
+
+- `planning` 消费该结果，决定 `NoOp / Submit / CancelReplace`
+- `submit recovery` 消费同一结果，决定 `AwaitExchangeState / Superseded / Proceed`
+
+这样做的原因是：
+
+- 后续如果门槛、锚点、浮点容差再调整，只需要改一处
+- 不会出现 planning 和 recovery 语义漂移
+- 调用方不必理解 uncommon case 的细节
+
+### 4. 对不同 slot 状态的影响
+
+#### 4.1 `Empty`
+
+如果当前没有活动 slot：
+
+- `trigger_delta < min_rebalance_units`
+  - `NoOp`
+  - 不生成新的 `SubmitOrder`
+- `trigger_delta >= min_rebalance_units`
+  - 继续按最新策略目标进入现有 planning 路径
+
+#### 4.2 `SubmitPending`
+
+如果当前 slot 是 `SubmitPending`：
+
+- `abs(latest_target - anchored_target) < min_rebalance_units`
+  - 不 supersede 当前 pending submit
+  - 保留 pending slot
+  - recovery 继续 `AwaitExchangeState` 或按当前生命周期吸收 receipt / live order
+
+- `abs(latest_target - anchored_target) >= min_rebalance_units`
+  - 允许 supersede 当前 pending submit
+  - 再按最新目标决定是否产生新的 submit
+
+也就是说：
+
+- 小幅 target 漂移不应该把 pending submit 一直打掉重来
+
+#### 4.3 `Working`
+
+如果当前 slot 是 `Working`：
+
+- `abs(latest_target - anchored_target) < min_rebalance_units`
+  - 不因为目标轻微漂移而 cancel / replace 当前工作单
+  - 当前这轮继续执行
+
+- `abs(latest_target - anchored_target) >= min_rebalance_units`
+  - 才允许进入正常的 replacement / cancel-replace 判断
+
+这条语义是这次设计最关键的变化：
+
+- 小幅目标漂移不再等同于“当前工作单已经过时”
+
+### 5. 与交易所 floor 的关系
+
+顺序调整为：
+
+1. 先用 `min_rebalance_units` 判断是否值得触发下一次执行动作
+2. 只有值得触发时，才继续走真实订单计算
+3. 然后再应用交易所 floor：
    - `quantity_step`
    - `min_qty`
    - `min_notional`
 
-这意味着系统最终有两层门槛：
+这意味着：
 
-1. **策略门槛**：`min_rebalance_units`
-2. **交易所门槛**：真实订单 floor
+- 在活动生命周期内，如果 target 漂移还没超过策略门槛，系统不会因为最新 target 重新计算订单并触发交易所 floor 分支
+- 只有在确实值得开启下一次执行动作时，才重新生成针对最新目标的真实订单
 
-#### 2.1 门槛等号语义
+### 6. 与 `target_exposure` 的关系
 
-本方案固定采用：
+`target_exposure` 的语义不变：
 
-- `abs(target_exposure - current_exposure) < min_rebalance_units`
-  - 抑制执行
-- `abs(target_exposure - current_exposure) >= min_rebalance_units`
-  - 允许继续进入执行判断
+- 它仍然表示最新原始策略目标
 
-也就是说，**等于门槛时视为“值得调仓”**。
+不允许因为当前执行生命周期被锚定就把：
 
-#### 2.2 数值稳定性约定
+- `track.target_exposure`
+- `ExposureTargetChanged`
 
-`exposure` 和 `min_rebalance_units` 都是浮点数，实现时必须使用统一的门槛比较辅助函数，而不是在多个调用点直接裸比较。
+改写成“当前执行目标”。
 
-要求：
+系统要同时表达两个事实：
 
-- 对外语义仍以上面的 `< / >=` 为准
-- 允许实现层引入一个很小的内部容差，只用于避免浮点抖动和 flaky 测试
-- 该容差不得改变“等于门槛时允许执行”这一对外契约
+1. 最新策略目标是什么
+2. 当前执行生命周期围绕哪个目标在推进
 
-也就是说：
+第一个属于 `reconciler / manager`，第二个属于 `executor`
 
-- 容差是实现细节
-- 不是第三套新的业务门槛
+### 7. 与 `replacement gate` 的关系
 
-### 3. 对现有 slot 状态机的影响
+`min_rebalance_units` 和 `replacement gate` 的职责变成：
 
-在 `executor planning` 中，“小于策略门槛”只意味着：
-
-- 不生成新的 `desired_order`
-
-后续仍沿用现有 diff 语义，而不是新增旁路规则。
-
-这里的关键约束是：
-
-- “小于策略门槛”只决定**不生成新的 `desired_order`**
-- 不改变 `diff_desired_orders(desired_order = None, current_slot)` 已有的状态机边界
-- 如果实现里需要为 `SubmitPending` 增加保留语义，也必须明确在该分支中表达，不能通过改写 `target_exposure` 或 `manager` 侧旁路逻辑实现
-
-#### `Empty`
-
-- 返回 `NoOp`
-
-#### `Working`
-
-- 如果当前已有工作单，而新的策略目标已经低于策略门槛，则应按现有 `desired_order = None` 语义处理：
-  - 产出 `CancelOrder`
-
-原因：
-
-- 既然策略认为这次调仓已经不值得继续执行，就不应继续保留旧调仓单。
-- 这不是新的特例，而是沿用现有 `desired_order = None` 的工作单处理语义。
-
-#### `SubmitPending`
-
-- 如果当前 slot 仍是 `SubmitPending`，则必须保留 pending slot，返回 `NoOp`
-
-原因：
-
-- 不能因为门槛变化把 in-flight submit 静默抹掉
-- 后续 receipt / live order / recovery 仍需要能够吸收这张单
-
-这条语义必须继续保留。
-
-在 `submit recovery` 路径里也必须保持同样约束：
-
-- recovery 复算当前计划时，必须使用同一份 `min_rebalance_units`
-- 如果当前计划因为策略门槛或交易所 floor 不再生成新的 submit，且匹配的 `SubmitPending` slot 仍存在，则应等待 exchange state，而不是再次 submit 或清掉 pending slot
-- 如果该 slot 已经被 startup / periodic sync 清掉，则 stale pending effect 应正常 `Superseded`，避免 effect 永远停在 pending
-
-### 3.1 大于策略门槛但小于交易所 floor
-
-如果：
-
-- `abs(target_exposure - current_exposure) >= min_rebalance_units`
-- 但换算成真实订单后，仍然低于交易所门槛
-
-则仍按现有执行层交易所 floor 语义处理，而不是回退成“策略门槛未命中”。
-
-要求：
-
-- `target_exposure` 仍保留原始策略目标
-- 不生成新的 `SubmitOrder`
-- 三种 slot 继续按 `desired_order = None` 的既有分支处理：
-  - `Empty`：`NoOp`
-  - `Working`：`CancelOrder`
-  - `SubmitPending`：保留 pending slot，`NoOp`
+1. `min_rebalance_units`
+   - 决定是否值得触发下一次执行动作
+2. `replacement gate`
+   - 在已经允许开启下一次执行动作后，再决定当前工作单是否值得为了价格改善而改挂
 
 也就是说：
 
-- 策略门槛决定“这次调仓值不值得进入执行”
-- 交易所 floor 决定“这次执行在交易所侧是否可形成真实订单”
+- `min_rebalance_units` 先挡住“目标只漂了一点，不值得打断当前生命周期”
+- `replacement gate` 再处理“既然值得重新规划，这次改挂是否真的划算”
 
-两者必须按顺序叠加，不能混成同一层判断。
+## 模块边界
 
-### 4. `target_exposure` 与事件语义
+### `reconciler`
 
-该设计不改变 `target_exposure` 的语义。
+继续只负责：
 
-要求：
+- 产出最新原始策略目标
 
-- `target_exposure` 继续表示原始策略目标
-- 小于策略门槛时，不得把 `target_exposure` 改写成 `current_exposure`
-- 如果策略目标确实变化，`ExposureTargetChanged` 仍应照常发出
+不感知执行锚点。
 
-也就是说：
+### `manager`
 
-- “策略目标变化了”
-- “执行器选择暂时不下单”
+继续只负责：
 
-这两个事实要继续分开表达。
+- 保存最新 `target_exposure`
+- 把最新策略目标传给 executor
 
-### 5. 与现有 `replacement gate` 的关系
+不新增执行中防抖旁路。
 
-`min_rebalance_units` 不替代 `replacement gate`。
+### `executor`
 
-两者职责不同：
+executor 统一拥有以下知识：
 
-- `min_rebalance_units`
-  - 决定“这次策略调仓是否大到值得进入执行”
-- `replacement gate`
-  - 决定“已有同方向工作单时，是否值得为了更好价格而改挂”
+- 当前是否已有活动生命周期
+- 当前生命周期的执行锚点是什么
+- `min_rebalance_units` 该如何决定“是否触发下一次执行动作”
 
-因此顺序上：
+其中：
 
-1. 先由 `min_rebalance_units` 判断是否要进入本次调仓
-2. 若进入执行，再由 `replacement gate` 判断是否需要替换已有订单
+- `planning` 负责把 trigger 决策映射成当前轮次的执行动作
+- `submit recovery` 负责把同一 trigger 决策映射成 `AwaitExchangeState / Superseded / Proceed`
+
+但这两条路径都不重新定义锚点与门槛比较规则。
 
 ## 测试策略
 
 至少覆盖以下行为：
 
-1. `inventory_gap < min_rebalance_units` 且当前无 slot
-   - 返回 `NoOp`
-   - 不生成新 `SubmitOrder`
+1. `Empty` 且 `abs(latest_target - current_exposure) < min_rebalance_units`
+   - `NoOp`
+   - 不生成新 submit
 
-2. `inventory_gap < min_rebalance_units` 且当前有 `Working`
-   - 仍按现有语义产出 `CancelOrder`
+2. `Working` 且 `abs(latest_target - anchored_target) < min_rebalance_units`
+   - 保留 working order
+   - 不 cancel / replace
 
-3. `inventory_gap < min_rebalance_units` 且当前有 `SubmitPending`
-   - 返回 `NoOp`
+3. `SubmitPending` 且 `abs(latest_target - anchored_target) < min_rebalance_units`
+   - 不 supersede pending submit
    - 保留 pending slot
 
-4. 小于策略门槛但原始策略目标确实变化时
-   - `target_exposure` 保持原始策略目标
-   - `ExposureTargetChanged` 仍正常发出
+4. `Working` 或 `SubmitPending` 且 `abs(latest_target - anchored_target) >= min_rebalance_units`
+   - 允许进入下一次执行动作语义
 
-5. 大于策略门槛但小于交易所 floor 时
-   - `target_exposure` 保持原始策略目标
-   - 不生成新的 `SubmitOrder`
-   - `Empty / Working / SubmitPending` 分别遵循既有 `desired_order = None` 语义
-   - 不允许两层门槛混淆
+5. 生命周期结束后
+   - 如果 `abs(latest_target - current_exposure) >= min_rebalance_units`
+     - 允许开始下一轮
+   - 如果 `< min_rebalance_units`
+     - 停止继续调仓
 
-6. `min_rebalance_units = 0.0`
-   - 退化为关闭策略门槛
-   - 行为与当前仅靠交易所 floor 的版本一致
+6. `target_exposure` 仍保持最新原始策略目标
+   - 不因执行锚点而被改写
+
+7. planning 与 recovery 使用同一份 trigger 决策来源
+   - 不允许两边各自维护一套锚点与门槛比较 helper
 
 ## 风险与权衡
 
 ### 成本
 
-- 配置模型新增一个策略字段
-- executor planning 多一层判断
+- `min_rebalance_units` 的定义相比第一版发生变化
+- planning / recovery 需要共享“执行锚点”语义
 
 ### 收益
 
-- 明确抑制“策略上仍然太碎”的调仓
-- 保持 `target_exposure` 语义稳定
-- 不把执行状态机知识扩散到 `manager` 或 `reconciler`
+- 直接解决频繁 supersede / cancel-replace 的核心问题
+- 不新增第二个配置参数
+- 保持“逐步逼近目标”而不是“每一刻都追到最新目标”
 
 ### 已知限制
 
-- 固定 `0.5 unit` 对非常大容量策略可能仍偏小
-- 第一版不解决“门槛随容量变化”的问题
+- 这次仍然是固定 `0.5 unit`
+- 如果后续还需要区分“开始调仓门槛”和“执行中改单门槛”，再考虑拆成两个参数
 
-## 后续扩展
+## 外部文档要求
 
-如果第一版仍无法满足大容量策略，可以在未来扩展为：
+由于 `min_rebalance_units` 的对外语义已经从“停手阈值”变成“触发下一次执行动作的最小目标变化”，README 和用户可见配置说明必须同步更新，至少解释：
 
-```text
-effective_min_rebalance_units =
-max(min_rebalance_units, total_capacity_units * min_rebalance_ratio)
-```
-
-但扩展前提是：
-
-- 继续保持 `target_exposure` 语义不变
-- 继续把执行判断留在 `executor planning`
+- 无活动单时的参考点是 `current_exposure`
+- 有活动生命周期时的参考点是当前执行目标
+- 该参数不再表示“永远追最新 target 直到 gap 小于门槛”

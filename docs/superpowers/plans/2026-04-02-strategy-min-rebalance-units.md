@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Note:** 本计划记录的是第一版 `min_rebalance_units` 落地过程。针对“执行中频繁 supersede / cancel-replace”的后续语义调整，见 [2026-04-03-min-rebalance-execution-threshold.md](2026-04-03-min-rebalance-execution-threshold.md)。
+
 **Goal:** 为每个 track 增加策略级最小调仓单位 `min_rebalance_units`，抑制“交易所可下但策略上仍然太碎”的调仓，同时保持原始 `target_exposure`、`ExposureTargetChanged` 和现有 `Working / SubmitPending / Empty` 状态机语义不变。
 
 **Architecture:** `reconciler` 继续只表达原始策略目标，不引入 deadband；策略级门槛落在 `executor planning`，与现有交易所 floor 串联成“两层门槛”。`manager` 只负责把配置传给 executor，并用回归测试锁住“目标仍保留、事件仍发出、旧 working 可 cancel、submit pending 不丢失”这几条边界。
