@@ -11,25 +11,42 @@ mod query_service;
 #[allow(dead_code)]
 mod read_model;
 mod runtime;
+mod state_bootstrap;
 mod websocket;
 mod write_service;
 
 use std::env;
 
 use anyhow::Result;
+use state_bootstrap::{
+    PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, SuggestedAction,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupOptions {
+    config_path: String,
+    bootstrap_mode: StateBootstrapMode,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     tracing::info!("Poise server starting");
 
-    let config_path = parse_config_path(env::args().skip(1))?;
-    let config = config::load_config(&config_path)?;
-    let platform = assembly::assemble(&config).await?;
-    let runtime_handles = platform.runtime.start().await?;
-
+    let options = parse_startup_options(env::args().skip(1))?;
+    let config = config::load_config(&options.config_path)?;
+    let prepared_state = match state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await {
+        Ok(repository) => repository,
+        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
+        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
+    };
+    let (platform, runtime_handles, listener) = prepared_state
+        .run_startup(|repositories| async {
+            let platform = assembly::assemble(&config, repositories).await?;
+            start_platform(&config, platform).await
+        })
+        .await?;
     let app = http::router(platform.state());
-    let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await;
@@ -37,6 +54,19 @@ async fn main() -> Result<()> {
     serve_result?;
 
     Ok(())
+}
+
+async fn start_platform(
+    config: &config::Config,
+    platform: assembly::ServerPlatform,
+) -> Result<(
+    assembly::ServerPlatform,
+    runtime::RuntimeHandles,
+    tokio::net::TcpListener,
+)> {
+    let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
+    let runtime_handles = platform.runtime.start().await?;
+    Ok((platform, runtime_handles, listener))
 }
 
 async fn shutdown_signal() {
@@ -63,8 +93,9 @@ async fn shutdown_signal() {
     }
 }
 
-fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
+fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
     let mut config_path = None;
+    let mut bootstrap_mode = StateBootstrapMode::Strict;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -74,13 +105,92 @@ fn parse_config_path(mut args: impl Iterator<Item = String>) -> Result<String> {
                     .ok_or_else(|| anyhow::anyhow!("missing value for --config"))?;
                 config_path = Some(value);
             }
+            "--rebuild-state" => {
+                bootstrap_mode = StateBootstrapMode::Rebuild;
+            }
             other => {
                 return Err(anyhow::anyhow!("unknown argument: {other}"));
             }
         }
     }
 
-    config_path.ok_or_else(|| anyhow::anyhow!("missing required --config <path>"))
+    Ok(StartupOptions {
+        config_path: config_path
+            .ok_or_else(|| anyhow::anyhow!("missing required --config <path>"))?,
+        bootstrap_mode,
+    })
+}
+
+fn render_startup_error(error: &StateBootstrapError) -> String {
+    match error {
+        StateBootstrapError::PersistedStateMismatch {
+            db_path,
+            mismatches,
+            suggested_action,
+        } => {
+            let mut rendered = format!(
+                "persisted state does not match current config in `{}`.",
+                db_path.display()
+            );
+
+            for mismatch in mismatches {
+                match &mismatch.detail {
+                    PersistedStateMismatchDetail::DefinitionChanged {
+                        expected_instrument,
+                        actual_instrument,
+                        expected_config,
+                        actual_config,
+                    } => {
+                        let instrument_line = if expected_instrument != actual_instrument {
+                            format!(
+                                "\n  instrument: expected `{}:{}`, persisted `{}:{}`",
+                                expected_instrument.venue.as_str(),
+                                expected_instrument.symbol,
+                                actual_instrument.venue.as_str(),
+                                actual_instrument.symbol
+                            )
+                        } else {
+                            String::new()
+                        };
+                        rendered.push_str(&format!(
+                            "\ntrack `{}`:{}\n  expected config: {}\n  persisted config: {}",
+                            mismatch.track_id,
+                            instrument_line,
+                            serde_json::to_string(expected_config)
+                                .expect("track config should serialize"),
+                            serde_json::to_string(actual_config)
+                                .expect("track config should serialize"),
+                        ));
+                    }
+                    PersistedStateMismatchDetail::PersistedTrackMissingFromConfig {
+                        actual_instrument,
+                        actual_config,
+                    } => {
+                        rendered.push_str(&format!(
+                            "\ntrack `{}`:\n  persisted instrument: `{}:{}`\n  persisted config: {}\n  config status: missing from current config",
+                            mismatch.track_id,
+                            actual_instrument.venue.as_str(),
+                            actual_instrument.symbol,
+                            serde_json::to_string(actual_config)
+                                .expect("track config should serialize"),
+                        ));
+                    }
+                }
+            }
+
+            match suggested_action {
+                SuggestedAction::RebuildState => {
+                    rendered.push_str(
+                        "\nuse `--rebuild-state` to back up the old database, discard local snapshots, and rebuild state from the exchange's live positions and orders.\n\
+suggested command: cargo run -p poise-server -- --config <path> --rebuild-state",
+                    );
+                }
+            }
+
+            rendered
+        }
+        StateBootstrapError::Unexpected(error) => error.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -106,7 +216,11 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
-    use super::parse_config_path;
+    use crate::state_bootstrap::{
+        PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, SuggestedAction,
+    };
+
+    use super::{StartupOptions, parse_startup_options};
 
     fn unique_test_environment() -> String {
         static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -119,23 +233,89 @@ mod tests {
 
     #[test]
     fn parse_config_path_requires_config_flag() {
-        let error = parse_config_path(Vec::<String>::new().into_iter()).unwrap_err();
+        let error = parse_startup_options(Vec::<String>::new().into_iter()).unwrap_err();
         assert!(error.to_string().contains("--config"));
     }
 
     #[test]
     fn parse_config_path_reads_flag_value() {
-        let path = parse_config_path(
+        let options = parse_startup_options(
             vec!["--config".to_string(), "configs/test.demo.toml".to_string()].into_iter(),
         )
         .unwrap();
-        assert_eq!(path, "configs/test.demo.toml");
+        assert_eq!(
+            options,
+            StartupOptions {
+                config_path: "configs/test.demo.toml".to_string(),
+                bootstrap_mode: StateBootstrapMode::Strict,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_config_path_accepts_rebuild_state_flag() {
+        let options = parse_startup_options(
+            vec![
+                "--rebuild-state".to_string(),
+                "--config".to_string(),
+                "configs/test.demo.toml".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options,
+            StartupOptions {
+                config_path: "configs/test.demo.toml".to_string(),
+                bootstrap_mode: StateBootstrapMode::Rebuild,
+            }
+        );
     }
 
     #[test]
     fn parse_config_path_rejects_unknown_arguments() {
-        let error = parse_config_path(vec!["--bogus".to_string()].into_iter()).unwrap_err();
+        let error = parse_startup_options(vec!["--bogus".to_string()].into_iter()).unwrap_err();
         assert!(error.to_string().contains("unknown argument"));
+    }
+
+    #[test]
+    fn render_startup_error_formats_structured_mismatch_for_cli() {
+        let rendered = super::render_startup_error(&StateBootstrapError::PersistedStateMismatch {
+            db_path: std::path::PathBuf::from(".data/testnet/poise-server.sqlite"),
+            mismatches: vec![crate::state_bootstrap::PersistedStateMismatch {
+                track_id: "btc-core".into(),
+                detail: PersistedStateMismatchDetail::DefinitionChanged {
+                    expected_instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    actual_instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    expected_config: poise_core::strategy::TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: poise_core::strategy::ShapeFamily::Linear,
+                        out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                    },
+                    actual_config: poise_core::strategy::TrackConfig {
+                        lower_price: 80.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: poise_core::strategy::ShapeFamily::Linear,
+                        out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                    },
+                },
+            }],
+            suggested_action: SuggestedAction::RebuildState,
+        });
+
+        assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
+        assert!(rendered.contains("btc-core"));
+        assert!(rendered.contains("--rebuild-state"));
     }
 
     fn workspace_root() -> PathBuf {
@@ -336,6 +516,55 @@ notional_per_unit = 375.0
         let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 
+    #[tokio::test]
+    async fn start_platform_binds_listener_before_starting_runtime() {
+        let suffix = unique_test_environment();
+        let occupied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_address = occupied_listener.local_addr().unwrap();
+
+        let config = crate::config::Config {
+            environment: suffix.clone(),
+            bind_address: bind_address.to_string(),
+            tracks: vec![crate::config::TrackDefinition {
+                track_id: "btc-core".into(),
+                venue: Venue::Binance,
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                max_notional: None,
+                daily_loss_limit: None,
+                stop_loss_pct: None,
+                tick_timeout_secs: None,
+            }],
+            exchange: crate::config::ExchangeConfig {
+                api_key: Some("demo-key".into()),
+                api_secret: Some("demo-secret".into()),
+            },
+        };
+        fs::create_dir_all(config.default_db_path().parent().unwrap()).unwrap();
+        let storage = Arc::new(SqliteStorage::new(config.default_db_path()).unwrap());
+        let platform = crate::assembly::assemble_with_components(
+            &config,
+            Arc::new(FakeExchange),
+            Arc::new(FailingStartMarketData),
+            storage,
+            Arc::new(FakeClock),
+        )
+        .await
+        .unwrap();
+
+        let error = super::start_platform(&config, platform).await.err().unwrap();
+
+        assert!(!error.to_string().contains("subscribe_user_data should not run"));
+        let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
+    }
+
     struct FakeExchange;
 
     #[async_trait::async_trait]
@@ -424,6 +653,25 @@ notional_per_unit = 375.0
         ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
+        }
+    }
+
+    struct FailingStartMarketData;
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::MarketDataPort for FailingStartMarketData {
+        async fn subscribe_prices(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            Err(anyhow!("subscribe_user_data should not run"))
         }
     }
 
