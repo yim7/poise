@@ -167,7 +167,7 @@ Commit: `3071a21`
 - Modify: `server/src/runtime.rs`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 先写 runtime 级失败测试，复现连续 supersede 场景**
+- [x] **Step 1: 先写 runtime 级失败测试，复现连续 supersede 场景**
 
 新增测试，至少覆盖：
 
@@ -185,7 +185,7 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {}
 - 断言 recent effects 中不会出现一串连续 `Superseded`
 - 断言当前 lifecycle 仍保留
 
-- [ ] **Step 2: 运行定向测试，确认当前行为仍会失败**
+- [x] **Step 2: 运行定向测试，确认当前行为仍会失败**
 
 Run:
 
@@ -196,7 +196,7 @@ Expected:
 
 - 当前实现会失败，能复现 runtime 层的 supersede / cancel-replace 风暴。
 
-- [ ] **Step 3: 如有必要做最小集成修正**
+- [x] **Step 3: 如有必要做最小集成修正**
 
 原则：
 
@@ -204,7 +204,9 @@ Expected:
 - 只有在 server 层仍有额外 lifecycle 触发点时，才做最小修正
 - 不把执行锚点知识再复制到 server 层
 
-- [ ] **Step 4: 跑 server 定向回归**
+本 task 发现的真实集成问题是：fresh / replacement `SubmitPending` 在 drift 仍位于 active anchor 门槛内时，被 engine recovery 误判成 `AwaitExchangeState`，导致 effect worker 本轮根本不发单。最小修正因此落在 `engine/src/executor/recovery.rs`，并同步更新 engine / manager 测试；server 侧只补 runtime 回归。
+
+- [x] **Step 4: 跑 server 定向回归**
 
 Run:
 
@@ -217,12 +219,14 @@ Expected:
 - runtime 层不再出现 supersede storm
 - 现有 recovery anomaly 回归保持为绿
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/runtime.rs
 git commit -m "test(server): cover min rebalance execution drift behavior"
 ```
+
+Commit: `55b2f00`
 
 ### Task 3: 文档同步、迁移说明与全量回归
 
