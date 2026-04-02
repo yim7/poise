@@ -20,7 +20,7 @@
 - Modify: `server/src/write_service.rs`
 - Modify: `docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md`
 
-- [ ] **Step 1: 写 failing tests**
+- [x] **Step 1: 写 failing tests**
 
 补五条最小红测：
 
@@ -41,7 +41,7 @@
   - 新鲜 effect -> `Direct`
   - 已标记 started 的 effect -> `NeedsLiveOrderLookup`
 
-- [ ] **Step 2: 运行定向测试确认红灯**
+- [x] **Step 2: 运行定向测试确认红灯**
 
 Run:
 - `cargo test -p poise-server effect_worker::tests::fresh_submit_uses_direct_preflight_without_open_orders_lookup -- --nocapture`
@@ -54,7 +54,7 @@ Expected:
 - 这些测试失败
 - 失败原因分别指向当前每次 submit 都会查 `openOrders`、当前缺少显式的 submit started 协调，以及当前没有独立的 preflight 决策模块
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 实现范围：
 
@@ -84,7 +84,7 @@ Expected:
   6. 再执行 `submit_order(...)`
   7. 这里新增的是本地读，不是额外的交易所调用；本 task 不把 hint 读取和 `prepare_submit_execution(...)` 合并
 
-- [ ] **Step 4: 运行定向测试确认通过**
+- [x] **Step 4: 运行定向测试确认通过**
 
 Run:
 - `cargo test -p poise-server effect_worker::tests::fresh_submit_uses_direct_preflight_without_open_orders_lookup -- --nocapture`
@@ -95,12 +95,14 @@ Run:
 
 Expected: PASS
 
-- [ ] **Step 5: 提交 Task 1**
+- [x] **Step 5: 提交 Task 1**
 
 ```bash
 git add server/src/submit_preflight.rs server/src/assembly.rs server/src/effect_worker.rs server/src/runtime.rs server/src/write_service.rs docs/superpowers/plans/2026-04-02-submit-preflight-lookup-optimization.md
 git commit -m "feat(server): add submit preflight coordination"
 ```
+
+Task 1 commit: `3687715`
 
 ### Task 2: 用启动阶段显式采样替代时间代理
 
