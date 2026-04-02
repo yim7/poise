@@ -5,7 +5,9 @@ mod recording;
 mod recovery;
 mod slots;
 
-pub(crate) use planning::{DesiredOrder, ExecutorInput, current_submit_hint, plan, refresh_state};
+pub(crate) use planning::{
+    DesiredOrder, ExecutorInput, SubmitIntentInput, current_submit_hint, plan, refresh_state,
+};
 pub use planning::{OrderRole, OrderSlot, PendingSubmitHint};
 pub use recording::OrderUpdateAbsorbResult;
 #[cfg(test)]
@@ -17,8 +19,8 @@ pub(crate) use recording::{
 };
 pub use recovery::{RecoveryAnomaly, SubmitRecoveryPlan, SubmitRecoveryResolution};
 pub(crate) use recovery::{
-    RecoveryInput, RecoveryResolution, SubmitRecoveryInput, SubmitRecoveryPlanContext,
-    recover_submit_effect, recover_working_orders, submit_requests_match,
+    RecoveryInput, RecoveryResolution, SubmitRecoveryInput, recover_submit_effect,
+    recover_working_orders, submit_requests_match,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +70,58 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         }
+    }
+
+    fn submit_intent_input<'a>(
+        track_id: &'a TrackId,
+        instrument: &'a Instrument,
+        exchange_rules: &'a ExchangeRules,
+        base_qty_per_unit: f64,
+        min_rebalance_units: f64,
+        current_exposure: Exposure,
+        target_exposure: Exposure,
+        reference_price: f64,
+        observed_at: DateTime<Utc>,
+    ) -> SubmitIntentInput<'a> {
+        SubmitIntentInput {
+            track_id,
+            instrument,
+            exchange_rules,
+            base_qty_per_unit,
+            min_rebalance_units,
+            current_exposure,
+            target_exposure,
+            reference_price,
+            observed_at,
+        }
+    }
+
+    fn executor_input<'a>(
+        track_id: &'a TrackId,
+        instrument: &'a Instrument,
+        exchange_rules: &'a ExchangeRules,
+        base_qty_per_unit: f64,
+        min_rebalance_units: f64,
+        current_exposure: Exposure,
+        target_exposure: Exposure,
+        reference_price: f64,
+        executor_state: Option<&'a ExecutorState>,
+        observed_at: DateTime<Utc>,
+    ) -> ExecutorInput<'a> {
+        ExecutorInput::new(
+            submit_intent_input(
+                track_id,
+                instrument,
+                exchange_rules,
+                base_qty_per_unit,
+                min_rebalance_units,
+                current_exposure,
+                target_exposure,
+                reference_price,
+                observed_at,
+            ),
+            executor_state,
+        )
     }
 
     fn test_executor_state(
@@ -128,60 +182,60 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let passive = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(1.0),
-            reference_price: 99.9,
-            executor_state: None,
-            observed_at: now,
-        });
+        let passive = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(1.0),
+            99.9,
+            None,
+            now,
+        ));
         assert_eq!(passive.state.mode, ExecutionMode::Passive);
         assert_eq!(
             passive.state.last_execution_reason,
             Some(ExecutionReason::GapEnteredPassive)
         );
 
-        let rebalance = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(3.0),
-            reference_price: 99.9,
-            executor_state: Some(&test_executor_state(
+        let rebalance = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(3.0),
+            99.9,
+            Some(&test_executor_state(
                 ExecutionMode::Passive,
                 Some(now - Duration::seconds(90)),
             )),
-            observed_at: now,
-        });
+            now,
+        ));
         assert_eq!(rebalance.state.mode, ExecutionMode::Rebalance);
         assert_eq!(
             rebalance.state.last_execution_reason,
             Some(ExecutionReason::GapEscalatedToRebalance)
         );
 
-        let catch_up = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(6.0),
-            reference_price: 99.9,
-            executor_state: Some(&test_executor_state(
+        let catch_up = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(6.0),
+            99.9,
+            Some(&test_executor_state(
                 ExecutionMode::Rebalance,
                 Some(now - Duration::seconds(240)),
             )),
-            observed_at: now,
-        });
+            now,
+        ));
         assert_eq!(catch_up.state.mode, ExecutionMode::CatchUp);
         assert_eq!(
             catch_up.state.last_execution_reason,
@@ -202,18 +256,18 @@ mod tests {
         let mut existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
         existing_state.slots.push(sibling_slot());
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(4.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 95.0,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(4.0),
+            Exposure(4.0),
+            95.0,
+            Some(&existing_state),
+            now,
+        ));
 
         assert!(matches!(
             plan.effects.as_slice(),
@@ -229,18 +283,18 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.5,
-            current_exposure: Exposure(2.0),
-            target_exposure: Exposure(2.4),
-            reference_price: 97.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(2.0),
+            Exposure(2.4),
+            97.0,
+            None,
+            now,
+        ));
 
         assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
         assert_eq!(
@@ -261,18 +315,18 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.5,
-            current_exposure: Exposure(2.0),
-            target_exposure: Exposure(2.4),
-            reference_price: 97.0,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(2.0),
+            Exposure(2.4),
+            97.0,
+            Some(&existing_state),
+            now,
+        ));
 
         assert!(matches!(
             plan.effects.as_slice(),
@@ -297,21 +351,53 @@ mod tests {
         let existing_state =
             record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.5,
-            current_exposure: Exposure(2.0),
-            target_exposure: Exposure(2.4),
-            reference_price: 97.0,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(2.0),
+            Exposure(2.4),
+            97.0,
+            Some(&existing_state),
+            now,
+        ));
 
         assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
         assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn target_gap_within_float_tolerance_of_min_rebalance_units_is_not_suppressed() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let min_rebalance_units: f64 = 0.1;
+        let near_equal_gap = f64::from_bits(min_rebalance_units.to_bits() - 1);
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            10.0,
+            min_rebalance_units,
+            Exposure(0.0),
+            Exposure(near_equal_gap),
+            95.0,
+            None,
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::SubmitOrder {
+                request,
+                target_exposure,
+            }] if request.quantity > 0.0
+                && *target_exposure == Exposure(near_equal_gap)
+        ));
     }
 
     #[test]
@@ -328,18 +414,18 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         };
-        let min_qty_plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &min_qty_rules,
-            base_qty_per_unit: 1.0,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(0.55),
-            reference_price: 97.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let min_qty_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &min_qty_rules,
+            1.0,
+            0.0,
+            Exposure(0.0),
+            Exposure(0.55),
+            97.0,
+            None,
+            now,
+        ));
         assert_eq!(min_qty_plan.effects, vec![ExecutionAction::NoOp]);
 
         let min_notional_rules = ExchangeRules {
@@ -350,18 +436,18 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         };
-        let min_notional_plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &min_notional_rules,
-            base_qty_per_unit: 1.0,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(10.0),
-            reference_price: 1.09,
-            executor_state: None,
-            observed_at: now,
-        });
+        let min_notional_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &min_notional_rules,
+            1.0,
+            0.0,
+            Exposure(0.0),
+            Exposure(10.0),
+            1.09,
+            None,
+            now,
+        ));
         assert_eq!(min_notional_plan.effects, vec![ExecutionAction::NoOp]);
     }
 
@@ -373,18 +459,18 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 90.0,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            90.0,
+            Some(&existing_state),
+            now,
+        ));
 
         assert!(matches!(
             plan.effects.as_slice(),
@@ -403,18 +489,17 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let hint = current_submit_hint(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let hint = current_submit_hint(submit_intent_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            now,
+        ));
 
         let hint = hint.expect("expected current plan to expose a single submit hint");
         assert_eq!(hint.request.instrument, instrument);
@@ -430,25 +515,23 @@ mod tests {
     }
 
     #[test]
-    fn current_submit_hint_returns_none_when_plan_is_not_single_submit() {
+    fn current_submit_hint_returns_none_when_current_intent_needs_no_submit() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
-        let hint = current_submit_hint(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 90.0,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let hint = current_submit_hint(submit_intent_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(2.0),
+            Exposure(2.0),
+            90.0,
+            now,
+        ));
 
         assert!(hint.is_none());
     }
@@ -460,18 +543,18 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(6.0),
-            target_exposure: Exposure(2.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(6.0),
+            Exposure(2.0),
+            95.0,
+            None,
+            now,
+        ));
 
         let submit = plan.effects.iter().find_map(|effect| match effect {
             ExecutionAction::SubmitOrder { request, .. } => Some(request),
@@ -488,18 +571,18 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            now,
+        ));
 
         let submit = plan.effects.iter().find_map(|effect| match effect {
             ExecutionAction::SubmitOrder { request, .. } => Some(request),
@@ -516,18 +599,18 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(-0.5),
-            target_exposure: Exposure(-2.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(-0.5),
+            Exposure(-2.0),
+            95.0,
+            None,
+            now,
+        ));
 
         let submit = plan.effects.iter().find_map(|effect| match effect {
             ExecutionAction::SubmitOrder { request, .. } => Some(request),
@@ -549,18 +632,18 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(-2.0),
-            target_exposure: Exposure(-0.5),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(-2.0),
+            Exposure(-0.5),
+            95.0,
+            None,
+            now,
+        ));
 
         let submit = plan.effects.iter().find_map(|effect| match effect {
             ExecutionAction::SubmitOrder { request, .. } => Some(request),
@@ -582,18 +665,18 @@ mod tests {
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
-        let plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(-2.0),
-            target_exposure: Exposure(1.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: now,
-        });
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(-2.0),
+            Exposure(1.0),
+            95.0,
+            None,
+            now,
+        ));
 
         let submit = plan.effects.iter().find_map(|effect| match effect {
             ExecutionAction::SubmitOrder { request, .. } => Some(request),
@@ -656,34 +739,34 @@ mod tests {
         let existing_state = test_executor_state(ExecutionMode::Passive, Some(now));
 
         let low_fee_rules = test_exchange_rules();
-        let low_fee_plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &low_fee_rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 94.9,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let low_fee_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &low_fee_rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            94.9,
+            Some(&existing_state),
+            now,
+        ));
 
         let mut high_fee_rules = test_exchange_rules();
         high_fee_rules.maker_fee_rate = 0.0005;
         high_fee_rules.taker_fee_rate = 0.001;
-        let high_fee_plan = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &high_fee_rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 94.9,
-            executor_state: Some(&existing_state),
-            observed_at: now,
-        });
+        let high_fee_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &high_fee_rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            94.9,
+            Some(&existing_state),
+            now,
+        ));
 
         assert_eq!(low_fee_plan.replacement_gate_reason, None);
         assert!(matches!(
@@ -1237,15 +1320,17 @@ mod tests {
             target_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
             live_order: None,
-            current_plan: Some(SubmitRecoveryPlanContext {
-                track_id: &track_id,
-                instrument: &instrument,
-                base_qty_per_unit: 3.75,
-                min_rebalance_units: 0.0,
-                target_exposure: Exposure(4.0),
-                reference_price: 95.0,
-                observed_at: now,
-            }),
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                3.75,
+                0.0,
+                Exposure(0.0),
+                Exposure(4.0),
+                95.0,
+                now,
+            )),
         });
 
         let SubmitRecoveryPlan {
@@ -1325,15 +1410,17 @@ mod tests {
             target_exposure: &Exposure(-10.0),
             current_exposure: &Exposure(-9.6),
             live_order: None,
-            current_plan: Some(SubmitRecoveryPlanContext {
-                track_id: &track_id,
-                instrument: &instrument,
-                base_qty_per_unit: 0.0169,
-                min_rebalance_units: 0.0,
-                target_exposure: Exposure(-9.2),
-                reference_price: 95.0,
-                observed_at: now,
-            }),
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                0.0169,
+                0.0,
+                Exposure(-9.6),
+                Exposure(-9.2),
+                95.0,
+                now,
+            )),
         });
 
         let SubmitRecoveryPlan {
@@ -1407,7 +1494,10 @@ mod tests {
             },
         );
 
-        assert_eq!(replay.absorb_result, OrderUpdateAbsorbResult::DuplicateReplay);
+        assert_eq!(
+            replay.absorb_result,
+            OrderUpdateAbsorbResult::DuplicateReplay
+        );
         assert_eq!(replay.state, state);
     }
 
@@ -1457,15 +1547,17 @@ mod tests {
             target_exposure: &Exposure(-9.2),
             current_exposure: &Exposure(-10.0),
             live_order: None,
-            current_plan: Some(SubmitRecoveryPlanContext {
-                track_id: &track_id,
-                instrument: &instrument,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: 0.0,
-                target_exposure: Exposure(-9.2),
-                reference_price: 95.0,
-                observed_at: now,
-            }),
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.0,
+                Exposure(-10.0),
+                Exposure(-9.2),
+                95.0,
+                now,
+            )),
         });
 
         let SubmitRecoveryPlan {
@@ -1532,30 +1624,30 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let t2 = t1 + Duration::milliseconds(1);
 
-        let plan1 = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: t1,
-        });
-        let plan2 = plan(ExecutorInput {
-            track_id: &track_id,
-            instrument: &instrument,
-            exchange_rules: &rules,
-            base_qty_per_unit: 3.75,
-            min_rebalance_units: 0.0,
-            current_exposure: Exposure(0.0),
-            target_exposure: Exposure(4.0),
-            reference_price: 95.0,
-            executor_state: None,
-            observed_at: t2,
-        });
+        let plan1 = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            t1,
+        ));
+        let plan2 = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            t2,
+        ));
 
         let id1 = plan1.effects.iter().find_map(|effect| match effect {
             ExecutionAction::SubmitOrder { request, .. } => Some(request.client_order_id.clone()),
@@ -1596,15 +1688,17 @@ mod tests {
             target_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
             live_order: None,
-            current_plan: Some(SubmitRecoveryPlanContext {
-                track_id: &track_id,
-                instrument: &instrument,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: 0.0,
-                target_exposure: Exposure(4.0),
-                reference_price: 90.0,
-                observed_at: now,
-            }),
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.0,
+                Exposure(0.0),
+                Exposure(4.0),
+                90.0,
+                now,
+            )),
         });
 
         let SubmitRecoveryPlan {
@@ -1653,15 +1747,17 @@ mod tests {
             target_exposure: &Exposure(0.8),
             current_exposure: &Exposure(0.0),
             live_order: None,
-            current_plan: Some(SubmitRecoveryPlanContext {
-                track_id: &track_id,
-                instrument: &instrument,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: 0.5,
-                target_exposure: Exposure(0.4),
-                reference_price: 90.0,
-                observed_at: now,
-            }),
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.5,
+                Exposure(0.0),
+                Exposure(0.4),
+                90.0,
+                now,
+            )),
         });
 
         let SubmitRecoveryPlan {
@@ -1678,8 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_recovery_supersedes_when_pending_slot_is_already_cleared_below_min_rebalance_units()
-    {
+    fn submit_recovery_supersedes_when_pending_slot_is_already_cleared_below_min_rebalance_units() {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let track_id = TrackId::new("track-1");
@@ -1700,15 +1795,17 @@ mod tests {
             target_exposure: &Exposure(0.8),
             current_exposure: &Exposure(0.0),
             live_order: None,
-            current_plan: Some(SubmitRecoveryPlanContext {
-                track_id: &track_id,
-                instrument: &instrument,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: 0.5,
-                target_exposure: Exposure(0.4),
-                reference_price: 90.0,
-                observed_at: now,
-            }),
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.5,
+                Exposure(0.0),
+                Exposure(0.4),
+                90.0,
+                now,
+            )),
         });
 
         let SubmitRecoveryPlan {

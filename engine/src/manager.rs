@@ -114,7 +114,9 @@ impl TrackManager {
         observation: TrackObservation,
     ) -> Result<TrackTransition> {
         if let TrackObservation::Order(observation) = observation {
-            return self.observe_order_update(id, observation).map(|(transition, _)| transition);
+            return self
+                .observe_order_update(id, observation)
+                .map(|(transition, _)| transition);
         }
 
         let (events, effects) = match observation {
@@ -822,22 +824,39 @@ impl TrackManager {
         &self,
         track: &'a TrackRuntime,
         observed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Option<executor::SubmitRecoveryPlanContext<'a>> {
+    ) -> Option<executor::SubmitIntentInput<'a>> {
         let reference_price = track.reference_price?;
         if matches!(track.status, TrackStatus::Paused) {
             return None;
         }
 
         let target = reconciler::reconcile_target(track, reference_price);
-        (!target.suppress_execution).then_some(executor::SubmitRecoveryPlanContext {
-            track_id: &track.id,
-            instrument: &track.instrument,
-            base_qty_per_unit: track.config.base_qty_per_unit(),
-            min_rebalance_units: track.config.min_rebalance_units,
-            target_exposure: target.target_exposure,
+        (!target.suppress_execution).then_some(self.submit_intent_input(
+            track,
+            target.target_exposure,
             reference_price,
             observed_at,
-        })
+        ))
+    }
+
+    fn submit_intent_input<'a>(
+        &self,
+        track: &'a TrackRuntime,
+        target_exposure: poise_core::types::Exposure,
+        reference_price: f64,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> executor::SubmitIntentInput<'a> {
+        executor::SubmitIntentInput {
+            track_id: &track.id,
+            instrument: &track.instrument,
+            exchange_rules: &track.exchange_rules,
+            base_qty_per_unit: track.config.base_qty_per_unit(),
+            min_rebalance_units: track.config.min_rebalance_units,
+            current_exposure: track.current_exposure.clone(),
+            target_exposure,
+            reference_price,
+            observed_at,
+        }
     }
 
     fn plan_inventory_execution_for_track(
@@ -874,18 +893,13 @@ impl TrackManager {
             });
         }
         let executor_state = Some(&track.executor_state);
-        let plan = executor::plan(executor::ExecutorInput {
-            track_id: &track.id,
-            instrument: &track.instrument,
-            exchange_rules: &track.exchange_rules,
-            base_qty_per_unit: track.config.base_qty_per_unit(),
-            min_rebalance_units: track.config.min_rebalance_units,
-            current_exposure: track.current_exposure.clone(),
-            target_exposure: target.target_exposure.clone(),
+        let submit_intent = self.submit_intent_input(
+            track,
+            target.target_exposure.clone(),
             reference_price,
-            executor_state,
             observed_at,
-        });
+        );
+        let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
 
         Ok(PlannedInventoryExecution {
             events: target.events,
@@ -1816,7 +1830,7 @@ mod tests {
 
     #[test]
     fn observe_market_keeps_submit_pending_slot_when_small_rebalance_is_below_min_rebalance_units()
-     {
+    {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2737,8 +2751,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_keeps_pending_submit_when_current_plan_is_below_min_rebalance_units()
-    {
+    fn recover_submit_effect_keeps_pending_submit_when_current_plan_is_below_min_rebalance_units() {
         let mut manager = test_manager_with_cached_price(97.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(2.0);

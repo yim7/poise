@@ -4,11 +4,10 @@ use poise_core::types::{ExchangeRules, Exposure};
 use crate::observation::OrderObservation;
 use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionStats, ExecutorState, SlotState};
-use crate::track::{Instrument, TrackId};
 use crate::transition::TrackEffect;
 
 use super::{
-    ExecutionMode, ExecutorInput, PendingSubmitHint, current_submit_hint, recording, slots,
+    ExecutionMode, PendingSubmitHint, SubmitIntentInput, current_submit_hint, recording, slots,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,18 +45,7 @@ pub struct SubmitRecoveryInput<'a> {
     pub target_exposure: &'a Exposure,
     pub current_exposure: &'a Exposure,
     pub live_order: Option<&'a OrderObservation>,
-    pub current_plan: Option<SubmitRecoveryPlanContext<'a>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SubmitRecoveryPlanContext<'a> {
-    pub track_id: &'a TrackId,
-    pub instrument: &'a Instrument,
-    pub base_qty_per_unit: f64,
-    pub min_rebalance_units: f64,
-    pub target_exposure: Exposure,
-    pub reference_price: f64,
-    pub observed_at: DateTime<Utc>,
+    pub current_plan: Option<SubmitIntentInput<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,20 +136,10 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         };
     }
 
-    let current_plan_submit = input.current_plan.as_ref().and_then(|current_plan| {
-        current_submit_hint(ExecutorInput {
-            track_id: current_plan.track_id,
-            instrument: current_plan.instrument,
-            exchange_rules: input.exchange_rules,
-            base_qty_per_unit: current_plan.base_qty_per_unit,
-            min_rebalance_units: current_plan.min_rebalance_units,
-            current_exposure: input.current_exposure.clone(),
-            target_exposure: current_plan.target_exposure.clone(),
-            reference_price: current_plan.reference_price,
-            executor_state: None,
-            observed_at: current_plan.observed_at,
-        })
-    });
+    let current_plan_submit = input
+        .current_plan
+        .as_ref()
+        .and_then(|current_plan| current_submit_hint(current_plan.clone()));
 
     if !submit_recovery_matches_current_plan(
         input.request,

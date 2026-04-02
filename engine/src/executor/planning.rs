@@ -38,6 +38,12 @@ pub struct DesiredOrder {
 }
 
 pub struct ExecutorInput<'a> {
+    pub submit_intent: SubmitIntentInput<'a>,
+    pub executor_state: Option<&'a ExecutorState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmitIntentInput<'a> {
     pub track_id: &'a TrackId,
     pub instrument: &'a Instrument,
     pub exchange_rules: &'a ExchangeRules,
@@ -46,7 +52,6 @@ pub struct ExecutorInput<'a> {
     pub current_exposure: Exposure,
     pub target_exposure: Exposure,
     pub reference_price: f64,
-    pub executor_state: Option<&'a ExecutorState>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -70,24 +75,48 @@ const REBALANCE_AGE_MS: i64 = 60_000;
 const CATCH_UP_AGE_MS: i64 = 180_000;
 const REPLACEMENT_SAFETY_BUFFER_BPS: f64 = 5.0;
 const BPS_DENOMINATOR: f64 = 10_000.0;
+const MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR: f64 = 16.0;
+
+impl<'a> ExecutorInput<'a> {
+    pub fn new(
+        submit_intent: SubmitIntentInput<'a>,
+        executor_state: Option<&'a ExecutorState>,
+    ) -> Self {
+        Self {
+            submit_intent,
+            executor_state,
+        }
+    }
+}
 
 pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
-    let inventory_gap = input.current_exposure.delta(&input.target_exposure);
+    let ExecutorInput {
+        submit_intent,
+        executor_state,
+    } = input;
+    let inventory_gap = submit_intent
+        .current_exposure
+        .delta(&submit_intent.target_exposure);
     let gap_started_at =
-        resolve_gap_started_at(input.executor_state, &inventory_gap, input.observed_at);
+        resolve_gap_started_at(executor_state, &inventory_gap, submit_intent.observed_at);
     let gap_age_ms = gap_started_at
-        .map(|started_at| (input.observed_at - started_at).num_milliseconds().max(0))
+        .map(|started_at| {
+            (submit_intent.observed_at - started_at)
+                .num_milliseconds()
+                .max(0)
+        })
         .unwrap_or(0);
     let mode = resolve_mode(&inventory_gap, gap_age_ms);
-    let last_execution_reason = resolve_reason(input.executor_state, &mode);
+    let last_execution_reason = resolve_reason(executor_state, &mode);
     let stats = update_stats(
-        input.executor_state,
-        input.observed_at,
+        executor_state,
+        submit_intent.observed_at,
         &inventory_gap,
         gap_age_ms,
     );
-    let desired_orders = plan_desired_orders(&input, &inventory_gap);
-    let (effects, slots, replacement_gate_reason) = diff_desired_orders(&input, &desired_orders);
+    let desired_orders = plan_desired_orders(&submit_intent);
+    let (effects, slots, replacement_gate_reason) =
+        diff_desired_orders(&submit_intent, executor_state, &desired_orders);
 
     ExecutorPlan {
         state: ExecutorState {
@@ -100,13 +129,12 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
                     ExecutionAction::SubmitOrder { .. } | ExecutionAction::CancelOrder { .. }
                 )
             }) {
-                Some(input.observed_at)
+                Some(submit_intent.observed_at)
             } else {
-                input.executor_state.and_then(|state| state.last_reprice_at)
+                executor_state.and_then(|state| state.last_reprice_at)
             },
             slots,
-            recent_terminal_orders: input
-                .executor_state
+            recent_terminal_orders: executor_state
                 .map(|state| state.recent_terminal_orders.clone())
                 .unwrap_or_default(),
             last_execution_reason,
@@ -119,20 +147,13 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     }
 }
 
-pub fn current_submit_hint(input: ExecutorInput<'_>) -> Option<PendingSubmitHint> {
-    let plan = plan(input);
-    match plan.effects.as_slice() {
-        [
-            ExecutionAction::SubmitOrder {
-                request,
-                target_exposure,
-            },
-        ] => Some(PendingSubmitHint {
-            request: request.clone(),
-            target_exposure: target_exposure.clone(),
-        }),
-        _ => None,
-    }
+pub fn current_submit_hint(input: SubmitIntentInput<'_>) -> Option<PendingSubmitHint> {
+    let desired_order = desired_inventory_order_for_submit_intent(&input)?;
+    let request = desired_order_to_request(&input, &desired_order);
+    Some(PendingSubmitHint {
+        request,
+        target_exposure: desired_order.target_exposure,
+    })
 }
 
 pub fn refresh_state(
@@ -237,41 +258,29 @@ fn update_stats(
     }
 }
 
-fn plan_desired_orders(input: &ExecutorInput<'_>, _inventory_gap: &Exposure) -> Vec<DesiredOrder> {
-    desired_inventory_order(
-        input.exchange_rules,
-        input.base_qty_per_unit,
-        input.min_rebalance_units,
-        &input.current_exposure,
-        &input.target_exposure,
-        input.reference_price,
-    )
-    .into_iter()
-    .collect()
+fn plan_desired_orders(input: &SubmitIntentInput<'_>) -> Vec<DesiredOrder> {
+    desired_inventory_order_for_submit_intent(input)
+        .into_iter()
+        .collect()
 }
 
-fn desired_inventory_order(
-    exchange_rules: &ExchangeRules,
-    base_qty_per_unit: f64,
-    min_rebalance_units: f64,
-    current_exposure: &Exposure,
-    target_exposure: &Exposure,
-    reference_price: f64,
+fn desired_inventory_order_for_submit_intent(
+    input: &SubmitIntentInput<'_>,
 ) -> Option<DesiredOrder> {
-    let inventory_gap = current_exposure.delta(target_exposure);
-    if inventory_gap.0.abs() < min_rebalance_units {
+    let inventory_gap = input.current_exposure.delta(&input.target_exposure);
+    if inventory_gap_below_min_rebalance_units(&inventory_gap, input.min_rebalance_units) {
         return None;
     }
     let side = Side::from_exposure(&inventory_gap)?;
-    let price = round_to_step(reference_price, exchange_rules.price_tick);
+    let price = round_to_step(input.reference_price, input.exchange_rules.price_tick);
     let quantity = round_to_step(
-        inventory_gap.0.abs() * base_qty_per_unit,
-        exchange_rules.quantity_step,
+        inventory_gap.0.abs() * input.base_qty_per_unit,
+        input.exchange_rules.quantity_step,
     );
     if quantity <= f64::EPSILON {
         return None;
     }
-    if !is_meetable_minimum(price, quantity, exchange_rules) {
+    if !is_meetable_minimum(price, quantity, input.exchange_rules) {
         return None;
     }
 
@@ -280,20 +289,36 @@ fn desired_inventory_order(
         side,
         price,
         quantity,
-        target_exposure: target_exposure.clone(),
-        role: slots::role_for_target_change(current_exposure, target_exposure),
+        target_exposure: input.target_exposure.clone(),
+        role: slots::role_for_target_change(&input.current_exposure, &input.target_exposure),
     })
 }
 
+fn inventory_gap_below_min_rebalance_units(
+    inventory_gap: &Exposure,
+    min_rebalance_units: f64,
+) -> bool {
+    if min_rebalance_units <= f64::EPSILON {
+        return false;
+    }
+
+    let abs_gap = inventory_gap.0.abs();
+    let tolerance = f64::EPSILON
+        * MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR
+        * abs_gap.max(min_rebalance_units).max(1.0);
+    abs_gap + tolerance < min_rebalance_units
+}
+
 fn diff_desired_orders(
-    input: &ExecutorInput<'_>,
+    input: &SubmitIntentInput<'_>,
+    executor_state: Option<&ExecutorState>,
     desired_orders: &[DesiredOrder],
 ) -> (
     Vec<ExecutionAction>,
     Vec<ExecutionSlot>,
     Option<ReplacementGateReason>,
 ) {
-    let (current_slot, sibling_slots) = slots::split_inventory_core_slot(input.executor_state);
+    let (current_slot, sibling_slots) = slots::split_inventory_core_slot(executor_state);
     let desired_order = desired_orders.first();
 
     match desired_order {
@@ -393,7 +418,7 @@ fn diff_desired_orders(
 }
 
 fn desired_order_to_request(
-    input: &ExecutorInput<'_>,
+    input: &SubmitIntentInput<'_>,
     desired_order: &DesiredOrder,
 ) -> OrderRequest {
     OrderRequest {
