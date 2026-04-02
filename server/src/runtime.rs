@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -239,6 +239,19 @@ impl ServerRuntime {
         retry_startup_step("startup_sync", || self.startup_sync()).await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
+        let startup_pending_submit_effects = self
+            .state
+            .state_repository
+            .list_all_pending_submit_effects()
+            .await?;
+        self.state
+            .submit_preflight
+            .seed_startup_pending_submit_effects(
+                startup_pending_submit_effects
+                    .into_iter()
+                    .map(|effect| effect.effect_id),
+            )
+            .await;
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task =
@@ -537,12 +550,26 @@ impl ServerRuntime {
                                     retry_interval,
                                 );
                             }
-                            Ok(TrackInternalNotification::TrackEffectStateChanged { .. }) => {}
+                            Ok(TrackInternalNotification::TrackEffectStateChanged { track_id }) => {
+                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
+                                    tracing::warn!(
+                                        "failed to reconcile submit preflight state after effect state change for {}: {}",
+                                        track_id.as_str(),
+                                        error.message()
+                                    );
+                                }
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                                 tracing::warn!(
                                     "recovery notification stream lagged by {skipped} messages; reseeding recovery tracking"
                                 );
                                 tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
+                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
+                                    tracing::warn!(
+                                        "failed to reconcile submit preflight state after notification lag: {}",
+                                        error.message()
+                                    );
+                                }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
@@ -765,6 +792,24 @@ async fn sync_exchange_state_from_exchange(
     Ok(())
 }
 
+async fn reconcile_submit_preflight_state(
+    state: &ServerState,
+) -> std::result::Result<(), TrackMutationError> {
+    let current_pending_submit_effect_ids: HashSet<String> = state
+        .state_repository
+        .list_all_pending_submit_effects()
+        .await
+        .map_err(TrackMutationError::Persistence)?
+        .into_iter()
+        .map(|effect| effect.effect_id)
+        .collect();
+    state
+        .submit_preflight
+        .reconcile_pending_submit_effects(&current_pending_submit_effect_ids)
+        .await;
+    Ok(())
+}
+
 fn should_cancel_unknown_live_orders(
     snapshot: Option<&poise_engine::snapshot::TrackRuntimeSnapshot>,
     open_orders: &[ExchangeOrder],
@@ -954,6 +999,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_preflight_marks_all_pending_submit_effects_not_only_dispatchable_ones() {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+        let snapshot = fixture
+            .state
+            .write_service
+            .manager()
+            .read()
+            .await
+            .snapshot("BTCUSDT")
+            .unwrap();
+        let persisted = fixture
+            .persistence
+            .save_transition(
+                "BTCUSDT",
+                &snapshot,
+                &[],
+                &[
+                    TrackEffect::CancelAll {
+                        instrument: btc_instrument(),
+                    },
+                    TrackEffect::SubmitOrder {
+                        request: OrderRequest {
+                            instrument: btc_instrument(),
+                            side: Side::Buy,
+                            price: 95.0,
+                            quantity: test_config().base_qty_per_unit() * 4.0,
+                            client_order_id: "startup-pending".into(),
+                            reduce_only: false,
+                        },
+                        target_exposure: Exposure(4.0),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let handles = fixture.runtime.start().await.unwrap();
+        let startup_effects = fixture
+            .state
+            .submit_preflight
+            .startup_pending_effect_ids()
+            .await;
+        assert!(startup_effects.contains(&persisted.effects[1].effect_id));
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs() {
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            btc_position(0.0, 0.0),
+            vec![],
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::with_reconcile_intervals(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+
+        let transition = state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        let effect_id = persistence
+            .list_dispatchable_effects()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending submit effect should exist before start")
+            .effect_id;
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+
+        let handles = runtime.start().await.unwrap();
+        submit_started.notified().await;
+        let startup_effects = state.submit_preflight.startup_pending_effect_ids().await;
+        release_submit.notify_waiters();
+
+        assert!(startup_effects.contains(&effect_id));
+        drop(price_sender);
+        drop(user_sender);
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
     async fn effect_worker_executes_persisted_submit_order_and_marks_success() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
@@ -1108,6 +1259,395 @@ mod tests {
             }
         })
         .await;
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn restarted_pending_submit_with_matching_live_order_is_recovered_without_duplicate_submit()
+    {
+        let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+
+        fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        let persisted = fixture
+            .persistence
+            .list_dispatchable_effects()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending submit effect should exist before restart");
+        let TrackEffect::SubmitOrder { request, .. } = &persisted.effect else {
+            panic!("expected persisted submit effect");
+        };
+        fixture.exchange.set_open_orders(vec![btc_exchange_order(
+            "order-restored",
+            &request.client_order_id,
+            request.side,
+            request.price,
+            request.quantity,
+            0.0,
+            OrderStatus::New,
+        )]);
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = Arc::clone(&fixture.persistence);
+            async move {
+                persistence
+                    .list_dispatchable_effects()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            }
+        })
+        .await;
+
+        let startup_effects = fixture
+            .state
+            .submit_preflight
+            .startup_pending_effect_ids()
+            .await;
+        assert!(
+            !startup_effects.contains(&persisted.effect_id),
+            "recovered submit should be cleared from startup preflight tracking"
+        );
+        assert!(
+            fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
+            "matching live order should recover pending submit without duplicate submit"
+        );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn attempted_submit_tracking_is_cleared_after_submit_success() {
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            btc_position(0.0, 0.0),
+            vec![],
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::with_reconcile_intervals(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+
+        state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        let effect_id = persistence
+            .list_dispatchable_effects()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending submit effect should exist before start")
+            .effect_id;
+
+        let handles = runtime.start().await.unwrap();
+        submit_started.notified().await;
+        assert!(state.submit_preflight.is_attempted(&effect_id).await);
+        release_submit.notify_waiters();
+
+        wait_until_async(|| {
+            let state = state.clone();
+            let effect_id = effect_id.clone();
+            async move { !state.submit_preflight.is_attempted(&effect_id).await }
+        })
+        .await;
+
+        drop(price_sender);
+        drop(user_sender);
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede() {
+        let exchange = Arc::new(FakeExchange::with_submit_error(
+            btc_position(0.0, 0.0),
+            vec![],
+            "submit rejected",
+        ));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let (price_sender, price_receiver) = mpsc::channel(8);
+        let (user_sender, user_receiver) = mpsc::channel(8);
+        let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            None,
+            test_budget(),
+        )
+        .await;
+        let runtime = ServerRuntime::with_reconcile_intervals(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            market_data as Arc<dyn MarketDataPort>,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+
+        state
+            .write_service
+            .observe_market("BTCUSDT", 95.0)
+            .await
+            .unwrap();
+        let failed_effect_id = persistence
+            .list_dispatchable_effects()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("pending submit effect should exist before start")
+            .effect_id;
+
+        let handles = runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = Arc::clone(&persistence);
+            let failed_effect_id = failed_effect_id.clone();
+            async move {
+                persistence
+                    .all_effects()
+                    .await
+                    .into_iter()
+                    .any(|effect| {
+                        effect.effect_id == failed_effect_id && effect.status == EffectStatus::Failed
+                    })
+            }
+        })
+        .await;
+
+        assert!(
+            !state.submit_preflight.is_attempted(&failed_effect_id).await,
+            "failed submit should be cleared from attempted preflight tracking"
+        );
+
+        drop(price_sender);
+        drop(user_sender);
+        shutdown(handles).await;
+
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                test_config().base_qty_per_unit() * 6.0,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        state
+            .write_service
+            .observe_position(
+                "BTCUSDT",
+                super::position_observation(&btc_position(0.0, 0.0)),
+            )
+            .await
+            .unwrap();
+        persistence
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                track_id: TrackId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: test_config().base_qty_per_unit() * 6.0,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        state
+            .submit_preflight
+            .mark_submit_started("BTCUSDT:recovery:0")
+            .await;
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let restarted_runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Arc::new(FakeMarketData::new(price_receiver, user_receiver)) as Arc<dyn MarketDataPort>,
+        );
+
+        let handles = restarted_runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = Arc::clone(&persistence);
+            async move {
+                persistence
+                    .all_effects()
+                    .await
+                    .into_iter()
+                    .any(|effect| {
+                        effect.effect_id == "BTCUSDT:recovery:0"
+                            && effect.status == EffectStatus::Superseded
+                    })
+            }
+        })
+        .await;
+
+        assert!(
+            !state
+                .submit_preflight
+                .is_attempted("BTCUSDT:recovery:0")
+                .await,
+            "superseded submit should be cleared from attempted preflight tracking"
+        );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notification() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(0.0);
+        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                None,
+                "BTCUSDT-reconcile",
+                Side::Buy,
+                94.0,
+                test_config().base_qty_per_unit() * 6.0,
+                Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot.clone()),
+            test_budget(),
+        )
+        .await;
+        persistence
+            .save_transition("BTCUSDT", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        state
+            .write_service
+            .observe_position(
+                "BTCUSDT",
+                super::position_observation(&btc_position(0.0, 0.0)),
+            )
+            .await
+            .unwrap();
+        persistence
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "BTCUSDT:recovery:0".into(),
+                track_id: TrackId::new("BTCUSDT"),
+                batch_id: "recovery".into(),
+                sequence: 0,
+                effect: ExecutionAction::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: test_config().base_qty_per_unit() * 6.0,
+                        client_order_id: "BTCUSDT-reconcile".into(),
+                        reduce_only: false,
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        let (_price_sender, price_receiver) = mpsc::channel(8);
+        let (_user_sender, user_receiver) = mpsc::channel(8);
+        let restarted_runtime = ServerRuntime::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Arc::new(FakeMarketData::new(price_receiver, user_receiver)) as Arc<dyn MarketDataPort>,
+        );
+
+        let handles = restarted_runtime.start().await.unwrap();
+
+        wait_until_async(|| {
+            let persistence = Arc::clone(&persistence);
+            async move {
+                persistence
+                    .all_effects()
+                    .await
+                    .into_iter()
+                    .any(|effect| {
+                        effect.effect_id == "BTCUSDT:recovery:0"
+                            && effect.status == EffectStatus::Superseded
+                    })
+            }
+        })
+        .await;
+
+        let startup_effects = state.submit_preflight.startup_pending_effect_ids().await;
+        assert!(
+            !startup_effects.contains("BTCUSDT:recovery:0"),
+            "track effect state change should clear startup pending submit tracking"
+        );
 
         shutdown(handles).await;
     }
@@ -2168,6 +2708,10 @@ mod tests {
             exchange as Arc<dyn ExchangePort>,
             Duration::from_millis(10),
         );
+        state
+            .submit_preflight
+            .seed_startup_pending_submit_effects(["BTCUSDT:recovery:0".to_string()])
+            .await;
         let mut receiver = state.write_service.subscribe_notifications();
 
         worker.run_once().await.unwrap();
@@ -4886,6 +5430,18 @@ mod tests {
             Ok(ready_pending_effects(&effects))
         }
 
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
@@ -5106,6 +5662,18 @@ mod tests {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
         }
 
         async fn list_pending_submit_effects_for_track(
@@ -5332,6 +5900,18 @@ mod tests {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
+        }
+
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .await
+                .iter()
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
+                .cloned()
+                .collect())
         }
 
         async fn list_pending_submit_effects_for_track(

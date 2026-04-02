@@ -177,6 +177,7 @@ pub trait StateRepositoryPort: Send + Sync {
     async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
     async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
+    async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
     async fn list_pending_submit_effects_for_track(
         &self,
         track_id: &TrackId,

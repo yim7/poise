@@ -12,6 +12,7 @@ mod query_service;
 mod read_model;
 mod runtime;
 mod state_bootstrap;
+mod submit_preflight;
 mod websocket;
 mod write_service;
 

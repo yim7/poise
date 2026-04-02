@@ -19,6 +19,7 @@ use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
 use crate::state_bootstrap::StateRepositories;
+use crate::submit_preflight::SubmitPreflight;
 use crate::write_service::TrackWriteService;
 #[derive(Clone)]
 pub struct ServerState {
@@ -30,6 +31,7 @@ pub struct ServerState {
     pub projector: Arc<TrackProjector>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,
+    pub submit_preflight: Arc<SubmitPreflight>,
 }
 
 pub struct ServerPlatform {
@@ -336,6 +338,7 @@ pub(crate) fn build_server_state(
         projector,
         account_margin_guard,
         reconcile_guards: Arc::new(TrackReconcileGuards::default()),
+        submit_preflight: Arc::new(SubmitPreflight::new()),
     }
 }
 
@@ -1245,6 +1248,12 @@ mod tests {
         }
 
         async fn list_dispatchable_effects(
+            &self,
+        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all_pending_submit_effects(
             &self,
         ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
             Ok(Vec::new())
