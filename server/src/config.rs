@@ -110,7 +110,7 @@ fn default_out_of_band_policy() -> OutOfBandPolicy {
 }
 
 fn default_min_rebalance_units() -> f64 {
-    0.5
+    poise_core::strategy::DEFAULT_MIN_REBALANCE_UNITS
 }
 
 #[cfg(test)]

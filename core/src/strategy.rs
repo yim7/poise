@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::Exposure;
 
+pub const DEFAULT_MIN_REBALANCE_UNITS: f64 = 0.5;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackConfig {
     pub lower_price: f64,
@@ -73,7 +75,7 @@ pub fn validate_config(config: &TrackConfig) -> Result<(), String> {
 }
 
 fn default_min_rebalance_units() -> f64 {
-    0.5
+    DEFAULT_MIN_REBALANCE_UNITS
 }
 
 /// 纯函数：给定价格和配置，返回目标占用。
