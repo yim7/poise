@@ -462,7 +462,8 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::process::{Command, Stdio};
+    use std::io::Read;
+    use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -772,6 +773,17 @@ mod tests {
                 "unRealizedProfit": "0.0"
             }
         ]))
+    }
+
+    async fn account_information() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "availableBalance": "1000.0",
+            "totalWalletBalance": "1200.0",
+            "positions": [
+                { "symbol": "BTCUSDT", "leverage": "20" },
+                { "symbol": "ETHUSDT", "leverage": "10" }
+            ]
+        }))
     }
 
     async fn open_orders() -> Json<serde_json::Value> {
@@ -1303,6 +1315,7 @@ mod tests {
             .route("/ws/:stream", get(exchange_ws_handler))
             .route("/fapi/v1/time", get(server_time))
             .route("/fapi/v1/exchangeInfo", get(exchange_info))
+            .route("/fapi/v2/account", get(account_information))
             .route("/fapi/v2/positionRisk", get(position_risk))
             .route("/fapi/v1/openOrders", get(open_orders))
             .route("/fapi/v1/order", post(create_order).delete(cancel_order))
@@ -1494,7 +1507,16 @@ mod tests {
         }
     }
 
-    async fn wait_for_http_ready(base_url: &str) {
+    fn drain_child_pipe<T: Read>(pipe: &mut Option<T>) -> String {
+        let Some(mut pipe) = pipe.take() else {
+            return String::new();
+        };
+        let mut output = String::new();
+        let _ = pipe.read_to_string(&mut output);
+        output
+    }
+
+    async fn wait_for_http_ready(base_url: &str, child: &mut Child) {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(5))
@@ -1502,6 +1524,13 @@ mod tests {
             .build()
             .unwrap();
         for _ in 0..50 {
+            if let Some(status) = child.try_wait().unwrap() {
+                let stdout = drain_child_pipe(&mut child.stdout);
+                let stderr = drain_child_pipe(&mut child.stderr);
+                panic!(
+                    "server exited before becoming ready: status={status} stdout={stdout:?} stderr={stderr:?}"
+                );
+            }
             let Ok(response) = client.get(format!("{base_url}/tracks")).send().await else {
                 sleep(Duration::from_millis(100)).await;
                 continue;
@@ -1512,7 +1541,9 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
         }
 
-        panic!("server did not become ready");
+        let stdout = drain_child_pipe(&mut child.stdout);
+        let stderr = drain_child_pipe(&mut child.stderr);
+        panic!("server did not become ready; stdout={stdout:?} stderr={stderr:?}");
     }
 
     async fn wait_for_detail_price(client: &ApiClient, id: &str) {
@@ -1579,14 +1610,14 @@ out_of_band_policy = "hold"
             .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
             .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
         let base_url = format!("http://{bind_address}");
         let ws_url = format!("ws://{bind_address}/ws");
-        wait_for_http_ready(&base_url).await;
+        wait_for_http_ready(&base_url, &mut server).await;
         let mut ws_receiver = Some(connect_ws(&ws_url).await.unwrap());
 
         let client = ApiClient::new(base_url);
@@ -1686,13 +1717,13 @@ notional_per_unit = 375.0
             .env_remove("NO_PROXY")
             .env_remove("no_proxy")
             .current_dir(temp_dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
         let base_url = format!("http://{bind_address}");
-        wait_for_http_ready(&base_url).await;
+        wait_for_http_ready(&base_url, &mut server).await;
 
         let _ = server.kill();
         let _ = server.wait();
@@ -1751,14 +1782,14 @@ out_of_band_policy = "hold"
             .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
             .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
         let base_url = format!("http://{bind_address}");
         let ws_url = format!("ws://{bind_address}/ws");
-        wait_for_http_ready(&base_url).await;
+        wait_for_http_ready(&base_url, &mut server).await;
         let session = TmuxSession::start(&format!(
             "env POISE_BASE_URL={base_url} POISE_TUI_WS_URL={ws_url} {}",
             tui_binary.display()

@@ -151,6 +151,7 @@ impl TrackReconcileGuards {
 }
 
 impl ServerRuntime {
+    #[cfg(test)]
     pub fn new(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
@@ -183,6 +184,7 @@ impl ServerRuntime {
         )
     }
 
+    #[cfg(test)]
     fn with_reconcile_intervals(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
