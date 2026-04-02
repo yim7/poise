@@ -160,13 +160,13 @@ Task 2 code commit:
 - Test: `cargo test -p poise-server state_bootstrap::tests::strict_mode_returns_structured_mismatch -- --nocapture`
 - Test: `cargo test -p poise-server tests::parse_config_path_accepts_rebuild_state_flag -- --nocapture`
 
-- [ ] **Step 1: 先写失败测试，固定结构化错误与 CLI 提示的分层**
+- [x] **Step 1: 先写失败测试，固定结构化错误与 CLI 提示的分层**
 
 要求：
 - 新增测试，断言 `state_bootstrap` 返回结构化 mismatch 错误，而不是拼接完整 CLI 文案
 - 新增或调整 `main` 层测试，断言 CLI 层会把结构化错误渲染成包含数据库路径、差异详情和 `--rebuild-state` 提示的消息
 
-- [ ] **Step 2: 运行定向测试，确认当前实现仍未分层**
+- [x] **Step 2: 运行定向测试，确认当前实现仍未分层**
 
 Run:
 `cargo test -p poise-server state_bootstrap::tests::strict_mode_returns_structured_mismatch -- --nocapture`
@@ -174,14 +174,14 @@ Run:
 Expected:
 测试失败，说明错误渲染仍耦合在状态准备逻辑里。
 
-- [ ] **Step 3: 实现结构化错误与 CLI 渲染**
+- [x] **Step 3: 实现结构化错误与 CLI 渲染**
 
 要求：
 - 定义结构化 mismatch 错误类型
 - `state_bootstrap` 仅返回结构化结果
 - `main` 负责把该错误渲染为面向用户的终端提示
 
-- [ ] **Step 4: 运行 server 包复验**
+- [x] **Step 4: 运行 server 包复验**
 
 Run:
 `cargo test -p poise-server`
@@ -189,7 +189,7 @@ Run:
 Expected:
 `poise-server` 全量测试通过；启动边界、状态准备和装配边界收敛完成。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/state_bootstrap.rs server/src/main.rs server/src/assembly.rs docs/superpowers/specs/2026-04-03-state-bootstrap-boundary-design.md
@@ -197,4 +197,4 @@ git commit -m "refactor(server): separate bootstrap errors from cli rendering"
 ```
 
 Task 3 code commit:
-`<to-fill>`
+`384c4fc7313b3d9db18a66f2936ebfbf3fe4d88a`
