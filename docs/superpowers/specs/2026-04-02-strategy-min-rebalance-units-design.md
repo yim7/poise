@@ -292,7 +292,8 @@ trigger_delta = abs(latest_target_exposure - execution_anchor)
 - `abs(latest_target - anchored_target) < min_rebalance_units`
   - 不 supersede 当前 pending submit
   - 保留 pending slot
-  - recovery 继续 `AwaitExchangeState` 或按当前生命周期吸收 receipt / live order
+  - 如果当前恢复的就是这张仍然有效的 pending submit，本轮继续 `Proceed`
+  - 不因为小幅 target 漂移改成 replacement submit
 
 - `abs(latest_target - anchored_target) >= min_rebalance_units`
   - 允许 supersede 当前 pending submit
@@ -301,6 +302,7 @@ trigger_delta = abs(latest_target_exposure - execution_anchor)
 也就是说：
 
 - 小幅 target 漂移不应该把 pending submit 一直打掉重来
+- 也不应该把当前仍然有效的 pending submit 错误降级成 `AwaitExchangeState`
 
 #### 4.3 `Working`
 
@@ -353,6 +355,12 @@ trigger_delta = abs(latest_target_exposure - execution_anchor)
 
 第一个属于 `reconciler / manager`，第二个属于 `executor`
 
+补充一条和运行态直接相关的结果：
+
+- `SubmitPending` 的当前 effect 在 drift 仍位于 active anchor 门槛内时，会继续执行当前请求
+- `Working` 的当前工作单在同样条件下继续挂着
+- 因此运行态看到的效果是：小幅 target 漂移不会在 effect worker 中制造连续 supersede / cancel-replace
+
 ### 7. 与 `replacement gate` 的关系
 
 `min_rebalance_units` 和 `replacement gate` 的职责变成：
@@ -366,6 +374,12 @@ trigger_delta = abs(latest_target_exposure - execution_anchor)
 
 - `min_rebalance_units` 先挡住“目标只漂了一点，不值得打断当前生命周期”
 - `replacement gate` 再处理“既然值得重新规划，这次改挂是否真的划算”
+
+这条顺序在 `resume_track` 场景里也保持一致：
+
+- 如果恢复激活后，最新策略目标相对当前活动锚点的漂移仍低于 `min_rebalance_units`
+- 系统不会重新进入 replacement gate 推导 `RoundedMatch`
+- 而是继续沿用当前活动生命周期
 
 ## 模块边界
 

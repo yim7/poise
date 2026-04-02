@@ -2217,7 +2217,8 @@ mod tests {
     }
 
     #[test]
-    fn resume_track_recomputes_replacement_gate_reason_from_last_price() {
+    fn resume_track_preserves_active_execution_anchor_when_last_price_drift_stays_within_threshold(
+    ) {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2251,10 +2252,7 @@ mod tests {
 
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(track.status, TrackStatus::Active);
-        assert_eq!(
-            track.replacement_gate_reason,
-            Some(ReplacementGateReason::RoundedMatch)
-        );
+        assert_eq!(track.replacement_gate_reason, None);
     }
 
     #[test]
