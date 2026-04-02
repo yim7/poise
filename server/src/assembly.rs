@@ -7,9 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{
-    ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort, StateStore,
-};
+use poise_engine::ports::{ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort};
 use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
@@ -20,6 +18,7 @@ use crate::query_service::TrackQueryService;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
+use crate::state_bootstrap::StateRepositories;
 use crate::write_service::TrackWriteService;
 #[derive(Clone)]
 pub struct ServerState {
@@ -137,7 +136,7 @@ fn resolve_binance_endpoints_with_lookup(
     ))
 }
 
-pub async fn assemble(config: &Config, repository: Arc<dyn StateStore>) -> Result<ServerPlatform> {
+pub async fn assemble(config: &Config, repositories: StateRepositories) -> Result<ServerPlatform> {
     validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
     let exchange_config = validate_exchange_runtime_config(config)?;
@@ -153,7 +152,7 @@ pub async fn assemble(config: &Config, repository: Arc<dyn StateStore>) -> Resul
 
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_state_store(config, exchange, market_data, repository, clock).await
+    assemble_with_state_store(config, exchange, market_data, repositories, clock).await
 }
 
 #[cfg(test)]
@@ -165,17 +164,17 @@ pub(crate) async fn assemble_with_components<R>(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
-    R: StateStore + 'static,
+    R: poise_engine::ports::StateRepositoryPort + poise_engine::ports::TrackReadRepositoryPort + 'static,
 {
-    let repository: Arc<dyn StateStore> = repository;
-    assemble_with_state_store(config, exchange, market_data, repository, clock).await
+    let repositories = StateRepositories::new(repository);
+    assemble_with_state_store(config, exchange, market_data, repositories, clock).await
 }
 
 async fn assemble_with_state_store(
     config: &Config,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
-    repository: Arc<dyn StateStore>,
+    repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
     validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
@@ -205,14 +204,14 @@ async fn assemble_with_state_store(
             info.rules,
             track.tick_timeout_secs(),
         )?;
-        if let Some(snapshot) = repository.load_track_state(track_id.as_str()).await? {
+        if let Some(snapshot) = repositories.load_track_state(track_id.as_str()).await? {
             manager.restore_track_state(&snapshot)?;
         }
     }
 
     let (notifications, _) = broadcast::channel(256);
-    let state_repository = Arc::clone(&repository).into_state_repository();
-    let read_repository = repository.into_track_read_repository();
+    let state_repository = repositories.state_repository();
+    let read_repository = repositories.read_repository();
     let write_service = Arc::new(TrackWriteService::new(
         manager,
         state_repository.clone(),
@@ -364,6 +363,7 @@ mod tests {
     use crate::config::{Config, ExchangeConfig, TrackDefinition};
     use crate::http::router;
     use crate::projector::TrackProjector;
+    use crate::state_bootstrap::StateRepositories;
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
 
@@ -402,8 +402,10 @@ mod tests {
             exchange: ExchangeConfig::default(),
         };
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let repositories = StateRepositories::new(repository);
 
-        let _ = assemble(&config, repository).await;
+        let error = assemble(&config, repositories).await.err().unwrap();
+        assert!(error.to_string().contains("missing required exchange.api_key"));
     }
 
     #[tokio::test]
@@ -537,7 +539,8 @@ mod tests {
         };
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let error = assemble(&config, repository).await.err().unwrap();
+        let repositories = StateRepositories::new(repository);
+        let error = assemble(&config, repositories).await.err().unwrap();
         assert!(error.to_string().contains("duplicate instrument"));
     }
 
@@ -570,7 +573,8 @@ mod tests {
         };
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let error = assemble(&config, repository).await.err().unwrap();
+        let repositories = StateRepositories::new(repository);
+        let error = assemble(&config, repositories).await.err().unwrap();
         assert!(
             error
                 .to_string()
