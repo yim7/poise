@@ -18,6 +18,7 @@ use crate::order_outcome::{
     OutcomeClass, ReconcileRequest, classify_cancel_error, classify_submit_receipt_writeback_error,
 };
 use crate::runtime;
+use crate::submit_preflight::SubmitPreflightDecision;
 #[derive(Clone)]
 pub struct EffectWorker {
     state: ServerState,
@@ -157,12 +158,36 @@ impl EffectWorker {
         request: OrderRequest,
         target_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
+        let hint = self
+            .state
+            .write_service
+            .submit_preflight_hint(
+                persisted.track_id.as_str(),
+                &persisted.effect_id,
+                &request,
+                target_exposure.clone(),
+            )
+            .await?;
+        let preflight_decision = self
+            .state
+            .submit_preflight
+            .decide(&persisted.effect_id, &request.client_order_id, hint)
+            .await;
         let Some(prepared_submit) = self
-            .prepare_submit_execution(persisted, &request, target_exposure.clone())
+            .prepare_submit_execution(
+                persisted,
+                &request,
+                target_exposure.clone(),
+                preflight_decision,
+            )
             .await?
         else {
             return Ok(());
         };
+        self.state
+            .submit_preflight
+            .mark_submit_started(&persisted.effect_id)
+            .await;
 
         match self.exchange.submit_order(request.clone()).await {
             Ok(receipt) => {
@@ -257,13 +282,19 @@ impl EffectWorker {
         persisted: &PersistedTrackEffect,
         request: &OrderRequest,
         target_exposure: poise_core::types::Exposure,
+        preflight_decision: SubmitPreflightDecision,
     ) -> Result<Option<crate::write_service::PreparedSubmitExecution>> {
-        let live_order = self
-            .exchange
-            .get_open_orders(&request.instrument)
-            .await?
-            .into_iter()
-            .find(|order| order.client_order_id == request.client_order_id);
+        let live_order = match preflight_decision {
+            SubmitPreflightDecision::Direct => None,
+            SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => Some(
+                self.exchange
+                    .get_open_orders(&request.instrument)
+                    .await?
+                    .into_iter()
+                    .find(|order| order.client_order_id == request.client_order_id),
+            )
+            .flatten(),
+        };
 
         self.state
             .write_service
@@ -432,6 +463,7 @@ mod tests {
     use crate::assembly::build_server_state;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
+    use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision, SubmitPreflightHint};
     use crate::write_service::TrackWriteService;
 
     use super::{Cancellation, EffectWorker};
@@ -504,6 +536,147 @@ mod tests {
             .next()
             .expect("submit effect should remain persisted");
         assert_eq!(effect.status, EffectStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository, exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+
+        let worker = EffectWorker::new(
+            state,
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        assert_eq!(exchange.get_open_orders_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn mark_submit_started_happens_only_after_prepare_returns_some() {
+        let repository = Arc::new(MemoryRepository::default());
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit(
+            submit_started.clone(),
+            release_submit.clone(),
+        ));
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+        let effect_id = repository
+            .list_all_effects()
+            .await
+            .into_iter()
+            .next()
+            .expect("submit effect should be persisted")
+            .effect_id;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        let task = tokio::spawn(async move { worker.run_once().await });
+        submit_started.notified().await;
+        let attempted_after_prepare = state.submit_preflight.is_attempted(&effect_id).await;
+        release_submit.notify_waiters();
+        task.await.unwrap().unwrap();
+
+        assert!(attempted_after_prepare);
+
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        repository
+            .seed_snapshot("btc-core", snapshot_with_recovery_anomaly())
+            .await;
+        let skipped_effect_id = "btc-core:skip:0".to_string();
+        repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: skipped_effect_id.clone(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "skip".into(),
+                sequence: 0,
+                effect: TrackEffect::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: btc_instrument(),
+                        side: Side::Buy,
+                        price: 94.0,
+                        quantity: 0.25,
+                        client_order_id: "BTCUSDT-skip".into(),
+                        reduce_only: false,
+                    },
+                    target_exposure: Exposure(6.0),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager
+                .restore_track_state(&snapshot_with_recovery_anomaly())
+                .unwrap();
+        }
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        assert!(!state
+            .submit_preflight
+            .is_attempted(&skipped_effect_id)
+            .await);
+    }
+
+    #[tokio::test]
+    async fn submit_preflight_assumes_single_effect_worker_execution_order() {
+        let preflight = SubmitPreflight::new();
+        preflight.mark_submit_started("effect-1").await;
+
+        let started_decision = preflight
+            .decide("effect-1", "client-1", SubmitPreflightHint::DirectSafe)
+            .await;
+        let fresh_decision = preflight
+            .decide("effect-2", "client-2", SubmitPreflightHint::DirectSafe)
+            .await;
+
+        assert_eq!(
+            started_decision,
+            SubmitPreflightDecision::NeedsLiveOrderLookup {
+                client_order_id: "client-1".into()
+            }
+        );
+        assert_eq!(fresh_decision, SubmitPreflightDecision::Direct);
     }
 
     #[tokio::test]
