@@ -301,7 +301,7 @@ Commit: `93b7ac2`
 - Modify: `docs/superpowers/specs/2026-04-02-strategy-min-rebalance-units-design.md`
 - Modify: `docs/superpowers/plans/2026-04-02-strategy-min-rebalance-units.md`
 
-- [ ] **Step 1: 跑最终回归**
+- [x] **Step 1: 跑最终回归**
 
 Run:
 
@@ -313,7 +313,7 @@ Run:
 
 Expected: 全部 PASS；workspace 中所有依赖 `TrackConfig` 的 crate 都能通过测试构建。
 
-- [ ] **Step 2: 同步 spec 与 plan**
+- [x] **Step 2: 同步 spec 与 plan**
 
 如果实现对以下细节有落地差异，回写到 spec：
 

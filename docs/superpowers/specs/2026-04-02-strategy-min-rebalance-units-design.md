@@ -238,6 +238,12 @@ pub min_rebalance_units: f64
 
 这条语义必须继续保留。
 
+在 `submit recovery` 路径里也必须保持同样约束：
+
+- recovery 复算当前计划时，必须使用同一份 `min_rebalance_units`
+- 如果当前计划因为策略门槛或交易所 floor 不再生成新的 submit，且匹配的 `SubmitPending` slot 仍存在，则应等待 exchange state，而不是再次 submit 或清掉 pending slot
+- 如果该 slot 已经被 startup / periodic sync 清掉，则 stale pending effect 应正常 `Superseded`，避免 effect 永远停在 pending
+
 ### 3.1 大于策略门槛但小于交易所 floor
 
 如果：
