@@ -57,7 +57,11 @@ impl std::fmt::Display for StateBootstrapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PersistedStateMismatch { db_path, .. } => {
-                write!(f, "persisted state does not match current config in `{}`", db_path.display())
+                write!(
+                    f,
+                    "persisted state does not match current config in `{}`",
+                    db_path.display()
+                )
             }
             Self::Unexpected(error) => std::fmt::Display::fmt(error, f),
         }
@@ -236,7 +240,10 @@ async fn detect_persisted_state_mismatches(
     let persisted_snapshots = repository.list_track_snapshots().await?;
     let mut persisted_by_id = std::collections::HashMap::new();
     for stored in persisted_snapshots {
-        persisted_by_id.insert(stored.snapshot.track_id.as_str().to_string(), stored.snapshot);
+        persisted_by_id.insert(
+            stored.snapshot.track_id.as_str().to_string(),
+            stored.snapshot,
+        );
     }
 
     let mut mismatches = Vec::new();
@@ -325,8 +332,12 @@ fn remove_state_files(db_path: &std::path::Path) -> Result<()> {
         if !file_path.exists() {
             continue;
         }
-        fs::remove_file(&file_path)
-            .with_context(|| format!("failed to remove sqlite state file `{}`", file_path.display()))?;
+        fs::remove_file(&file_path).with_context(|| {
+            format!(
+                "failed to remove sqlite state file `{}`",
+                file_path.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -342,9 +353,8 @@ fn next_backup_path_for_timestamp(db_path: &std::path::Path, timestamp: &str) ->
         } else {
             format!("-{attempt}")
         };
-        let candidate = db_path.with_file_name(format!(
-            "{file_name}.rebuild-{timestamp}{suffix}.bak"
-        ));
+        let candidate =
+            db_path.with_file_name(format!("{file_name}.rebuild-{timestamp}{suffix}.bak"));
         if !state_backup_exists(&candidate) {
             return Ok(candidate);
         }
@@ -377,8 +387,8 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
 
     use super::{StateBootstrapMode, prepare_state_repository};
-    use crate::config::{Config, ExchangeConfig, TrackDefinition};
     use crate::assembly::SystemClock;
+    use crate::config::{Config, ExchangeConfig, TrackDefinition};
 
     #[tokio::test]
     async fn prepare_state_repository_requires_explicit_bootstrap_mode() {
@@ -401,7 +411,11 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(error.to_string().contains("persisted state does not match current config"));
+        assert!(
+            error
+                .to_string()
+                .contains("persisted state does not match current config")
+        );
         cleanup_environment(&environment);
     }
 
@@ -448,7 +462,8 @@ mod tests {
                     .file_name()
                     .to_str()
                     .map(|name| {
-                        name.starts_with("poise-server.sqlite.rebuild-") && name.ends_with(".bak-wal")
+                        name.starts_with("poise-server.sqlite.rebuild-")
+                            && name.ends_with(".bak-wal")
                     })
                     .unwrap_or(false)
             });
@@ -461,7 +476,8 @@ mod tests {
                     .file_name()
                     .to_str()
                     .map(|name| {
-                        name.starts_with("poise-server.sqlite.rebuild-") && name.ends_with(".bak-shm")
+                        name.starts_with("poise-server.sqlite.rebuild-")
+                            && name.ends_with(".bak-shm")
                     })
                     .unwrap_or(false)
             });
@@ -559,7 +575,8 @@ mod tests {
             .join("poise-server.sqlite.rebuild-20260403T120000Z.bak");
         std::fs::write(&existing_backup, b"existing-backup").unwrap();
 
-        let backup_path = super::next_backup_path_for_timestamp(&db_path, "20260403T120000Z").unwrap();
+        let backup_path =
+            super::next_backup_path_for_timestamp(&db_path, "20260403T120000Z").unwrap();
 
         assert_eq!(
             backup_path.file_name().and_then(|name| name.to_str()),
@@ -598,10 +615,7 @@ mod tests {
                     }
                     other => panic!("unexpected mismatch detail: {other:?}"),
                 }
-                assert_eq!(
-                    suggested_action,
-                    super::SuggestedAction::RebuildState
-                );
+                assert_eq!(suggested_action, super::SuggestedAction::RebuildState);
             }
             other => panic!("unexpected error: {other:?}"),
         }

@@ -57,7 +57,12 @@ impl AccountMarginGuardStore {
     }
 
     pub(crate) fn update_snapshot(&self, instrument: Instrument, snapshot: AccountMarginSnapshot) {
-        self.inner.lock().unwrap().entry(instrument).or_default().snapshot = Some(snapshot);
+        self.inner
+            .lock()
+            .unwrap()
+            .entry(instrument)
+            .or_default()
+            .snapshot = Some(snapshot);
     }
 
     pub(crate) fn activate_insufficient_margin(
@@ -100,7 +105,10 @@ impl AccountMarginGuardStore {
             .map(|guard| AccountCapacityConstraint {
                 increase_blocked: guard.increase_blocked,
                 blocked_reason: guard.blocked_reason.clone(),
-                max_increase_notional: guard.snapshot.as_ref().map(|snapshot| snapshot.max_increase_notional),
+                max_increase_notional: guard
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.max_increase_notional),
             })
             .unwrap_or_default()
     }
@@ -587,8 +595,7 @@ impl ServerRuntime {
                     );
                     continue;
                 };
-                if let Err(error) =
-                    apply_user_data_event(&state, &exchange, &track_id, event).await
+                if let Err(error) = apply_user_data_event(&state, &exchange, &track_id, event).await
                 {
                     tracing::warn!(
                         "failed to apply user data update for {}: {}",
@@ -874,9 +881,9 @@ mod tests {
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort, OrderReceipt,
-        OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
-        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
-        TrackSnapshot, UserDataEvent, UserDataPayload,
+        OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick, StateRepositoryPort,
+        StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort, TrackSnapshot,
+        UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -2002,12 +2009,10 @@ mod tests {
 
         let effects = persistence.all_effects().await;
         assert!(
-            effects
-                .iter()
-                .all(|effect| {
-                    !(effect.status == EffectStatus::Pending
-                        && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
-                }),
+            effects.iter().all(|effect| {
+                !(effect.status == EffectStatus::Pending
+                    && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
+            }),
             "old lifecycle should not leave a pending submit behind after new lifecycle executes"
         );
         assert_eq!(
@@ -2039,12 +2044,10 @@ mod tests {
 
         let effects_after_terminal_update = persistence.all_effects().await;
         assert!(
-            effects_after_terminal_update
-                .iter()
-                .all(|effect| {
-                    !(effect.status == EffectStatus::Pending
-                        && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
-                }),
+            effects_after_terminal_update.iter().all(|effect| {
+                !(effect.status == EffectStatus::Pending
+                    && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
+            }),
             "terminal update should not resurrect stale follow-up submits"
         );
     }
@@ -3495,7 +3498,12 @@ mod tests {
 
         wait_until(|| fixture.exchange.canceled_order_ids.lock().unwrap().len() >= 2).await;
         assert_eq!(
-            fixture.exchange.canceled_order_ids.lock().unwrap().as_slice(),
+            fixture
+                .exchange
+                .canceled_order_ids
+                .lock()
+                .unwrap()
+                .as_slice(),
             ["live-1", "live-2"]
         );
 
@@ -3582,7 +3590,12 @@ mod tests {
         .await
         .expect("unknown live order should still be auto-canceled with pending submit effect");
         assert_eq!(
-            fixture.exchange.canceled_order_ids.lock().unwrap().as_slice(),
+            fixture
+                .exchange
+                .canceled_order_ids
+                .lock()
+                .unwrap()
+                .as_slice(),
             ["live-1"]
         );
 
@@ -3860,7 +3873,10 @@ mod tests {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
         let handles = fixture.runtime.start().await.unwrap();
         let position_calls_before = fixture.exchange.get_position_calls.load(Ordering::SeqCst);
-        let open_orders_calls_before = fixture.exchange.get_open_orders_calls.load(Ordering::SeqCst);
+        let open_orders_calls_before = fixture
+            .exchange
+            .get_open_orders_calls
+            .load(Ordering::SeqCst);
 
         fixture
             .user_sender
@@ -3881,7 +3897,10 @@ mod tests {
 
         wait_until(|| {
             fixture.exchange.get_position_calls.load(Ordering::SeqCst) > position_calls_before
-                && fixture.exchange.get_open_orders_calls.load(Ordering::SeqCst)
+                && fixture
+                    .exchange
+                    .get_open_orders_calls
+                    .load(Ordering::SeqCst)
                     > open_orders_calls_before
         })
         .await;
@@ -3956,7 +3975,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_without_restart() {
+    async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_without_restart()
+    {
         let fixture = runtime_fixture_with_intervals(
             None,
             btc_position(0.0, 0.0),

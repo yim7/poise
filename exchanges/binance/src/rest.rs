@@ -18,8 +18,8 @@ use poise_engine::ports::{
 };
 
 use crate::types::{
-    BinanceAccountInformation, BinanceExchangeInfoResponse, BinanceOpenOrder,
-    BinanceOrderResponse, BinancePositionRisk,
+    BinanceAccountInformation, BinanceExchangeInfoResponse, BinanceOpenOrder, BinanceOrderResponse,
+    BinancePositionRisk,
 };
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
@@ -167,7 +167,12 @@ impl BinanceRestClient {
 
     pub async fn get_account_margin_snapshot(&self, symbol: &str) -> Result<AccountMarginSnapshot> {
         let account: BinanceAccountInformation = self
-            .send_request(Method::GET, "/fapi/v2/account", Vec::new(), AuthMode::Signed)
+            .send_request(
+                Method::GET,
+                "/fapi/v2/account",
+                Vec::new(),
+                AuthMode::Signed,
+            )
             .await?;
 
         account.into_margin_snapshot(symbol)
@@ -374,7 +379,8 @@ impl BinanceRestClient {
     fn should_refresh_time_sync_before_signed_request(&self) -> bool {
         let last_time_sync_at_ms = self.last_time_sync_at_ms.load(Ordering::Relaxed);
         last_time_sync_at_ms > 0
-            && (self.timestamp_provider)() - last_time_sync_at_ms >= SIGNED_TIME_SYNC_REFRESH_INTERVAL_MS
+            && (self.timestamp_provider)() - last_time_sync_at_ms
+                >= SIGNED_TIME_SYNC_REFRESH_INTERVAL_MS
     }
 
     async fn send_server_time_request(&self) -> Result<ServerTimeResponse> {
@@ -532,10 +538,7 @@ fn body_preview(body: &str) -> String {
             .take_while(|(index, _)| *index < BODY_PREVIEW_LIMIT)
             .map(|(_, ch)| ch)
             .collect::<String>();
-        format!(
-            "response body `{}...`",
-            preview
-        )
+        format!("response body `{}...`", preview)
     }
 }
 
@@ -871,7 +874,11 @@ mod tests {
         assert_eq!(requests[1].path, "/fapi/v1/time");
         assert_eq!(requests[2].path, "/fapi/v1/time");
         assert_eq!(requests[3].path, "/fapi/v1/time");
-        assert!(requests[4].path.starts_with("/fapi/v1/openOrders?symbol=BTCUSDT"));
+        assert!(
+            requests[4]
+                .path
+                .starts_with("/fapi/v1/openOrders?symbol=BTCUSDT")
+        );
         assert!(requests[4].path.contains("timestamp=1700000075000"));
     }
 

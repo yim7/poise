@@ -922,8 +922,8 @@ impl StateRepositoryPort for SqliteStorage {
         tokio::task::spawn_blocking(move || {
             Self::save_follow_up_retirement_request_blocking(conn, track_id, request)
         })
-            .await
-            .context("failed to join save_follow_up_retirement_request blocking task")?
+        .await
+        .context("failed to join save_follow_up_retirement_request blocking task")?
     }
 
     async fn list_follow_up_retirement_requests(

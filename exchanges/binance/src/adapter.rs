@@ -65,7 +65,9 @@ impl ExchangePort for BinanceAdapter {
         &self,
         instrument: &Instrument,
     ) -> Result<AccountMarginSnapshot> {
-        self.rest.get_account_margin_snapshot(&instrument.symbol).await
+        self.rest
+            .get_account_margin_snapshot(&instrument.symbol)
+            .await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {

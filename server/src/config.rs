@@ -49,8 +49,7 @@ pub fn load_config(path: &str) -> Result<Config> {
 }
 
 pub fn parse_config(input: &str) -> Result<Config> {
-    let config: Config =
-        toml_edit::de::from_str(input).context("failed to parse TOML config")?;
+    let config: Config = toml_edit::de::from_str(input).context("failed to parse TOML config")?;
     for track in &config.tracks {
         validate_config(&track.track_config())
             .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
@@ -208,9 +207,7 @@ notional_per_unit = 375.0
             config.tracks[0].track_config().out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Freeze
         );
-        assert!(
-            (config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON
-        );
+        assert!((config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -232,9 +229,7 @@ notional_per_unit = 375.0
         )
         .unwrap();
 
-        assert!(
-            (config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON
-        );
+        assert!((config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]

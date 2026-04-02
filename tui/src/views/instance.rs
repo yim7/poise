@@ -303,9 +303,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::{
-        ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView,
-    };
+    use crate::protocol::{ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView};
 
     use super::render;
 

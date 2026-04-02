@@ -35,11 +35,12 @@ async fn main() -> Result<()> {
 
     let options = parse_startup_options(env::args().skip(1))?;
     let config = config::load_config(&options.config_path)?;
-    let prepared_state = match state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await {
-        Ok(repository) => repository,
-        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
-        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
-    };
+    let prepared_state =
+        match state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await {
+            Ok(repository) => repository,
+            Err(StateBootstrapError::Unexpected(error)) => return Err(error),
+            Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
+        };
     let (platform, runtime_handles, listener) = prepared_state
         .run_startup(|repositories| async {
             let platform = assembly::assemble(&config, repositories).await?;
@@ -559,9 +560,16 @@ notional_per_unit = 375.0
         .await
         .unwrap();
 
-        let error = super::start_platform(&config, platform).await.err().unwrap();
+        let error = super::start_platform(&config, platform)
+            .await
+            .err()
+            .unwrap();
 
-        assert!(!error.to_string().contains("subscribe_user_data should not run"));
+        assert!(
+            !error
+                .to_string()
+                .contains("subscribe_user_data should not run")
+        );
         let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 

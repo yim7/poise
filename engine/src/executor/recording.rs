@@ -62,7 +62,9 @@ fn remember_terminal_order(state: &mut ExecutorState, client_order_id: &str, ord
         client_order_id: client_order_id.to_string(),
         order_id: order_id.to_string(),
     };
-    state.recent_terminal_orders.retain(|existing| existing != &marker);
+    state
+        .recent_terminal_orders
+        .retain(|existing| existing != &marker);
     state.recent_terminal_orders.push(marker);
     if state.recent_terminal_orders.len() > RECENT_TERMINAL_ORDER_LIMIT {
         let overflow = state.recent_terminal_orders.len() - RECENT_TERMINAL_ORDER_LIMIT;
@@ -417,7 +419,10 @@ mod tests {
         );
 
         assert_eq!(applied.state, previous_state);
-        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::DuplicateReplay);
+        assert_eq!(
+            applied.absorb_result,
+            OrderUpdateAbsorbResult::DuplicateReplay
+        );
     }
 
     #[test]
@@ -452,7 +457,10 @@ mod tests {
         );
 
         assert_eq!(replay.state, cleared.state);
-        assert_eq!(replay.absorb_result, OrderUpdateAbsorbResult::DuplicateReplay);
+        assert_eq!(
+            replay.absorb_result,
+            OrderUpdateAbsorbResult::DuplicateReplay
+        );
     }
 
     #[test]
@@ -474,14 +482,16 @@ mod tests {
         );
 
         assert_eq!(replay.state, cleared);
-        assert_eq!(replay.absorb_result, OrderUpdateAbsorbResult::DuplicateReplay);
+        assert_eq!(
+            replay.absorb_result,
+            OrderUpdateAbsorbResult::DuplicateReplay
+        );
     }
 
     #[test]
     fn unknown_terminal_update_on_empty_slots_remains_unabsorbed() {
-        let previous_state = ExecutorState::empty(
-            Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap(),
-        );
+        let previous_state =
+            ExecutorState::empty(Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap());
 
         let applied = apply_order_observation_with_result(
             &previous_state,
@@ -560,7 +570,10 @@ mod tests {
             },
         );
 
-        assert_eq!(late_terminal.absorb_result, OrderUpdateAbsorbResult::Applied);
+        assert_eq!(
+            late_terminal.absorb_result,
+            OrderUpdateAbsorbResult::Applied
+        );
     }
 }
 

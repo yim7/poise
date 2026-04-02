@@ -15,8 +15,7 @@ use tokio::time::sleep;
 
 use crate::assembly::ServerState;
 use crate::order_outcome::{
-    OutcomeClass, ReconcileRequest, classify_cancel_error,
-    classify_submit_receipt_writeback_error,
+    OutcomeClass, ReconcileRequest, classify_cancel_error, classify_submit_receipt_writeback_error,
 };
 use crate::runtime;
 #[derive(Clone)]
@@ -209,12 +208,18 @@ impl EffectWorker {
             Err(error) => {
                 let failure_message = error.to_string();
                 if is_insufficient_margin_failure(&failure_message) {
-                    self.state.account_margin_guard.activate_insufficient_margin(
-                        &request.instrument,
-                        "insufficient_margin",
-                        Utc::now(),
-                    );
-                    if let Ok(snapshot) = self.exchange.get_account_margin_snapshot(&request.instrument).await {
+                    self.state
+                        .account_margin_guard
+                        .activate_insufficient_margin(
+                            &request.instrument,
+                            "insufficient_margin",
+                            Utc::now(),
+                        );
+                    if let Ok(snapshot) = self
+                        .exchange
+                        .get_account_margin_snapshot(&request.instrument)
+                        .await
+                    {
                         self.state
                             .account_margin_guard
                             .update_snapshot(request.instrument.clone(), snapshot);
@@ -338,13 +343,13 @@ impl EffectWorker {
                     .await?;
                     if let Cancellation::One { order_id, .. } = &cancellation {
                         if let Err(retirement_error) = self
-                                .state
-                                .write_service
-                                .request_follow_up_retirement(
-                                    persisted.track_id.as_str(),
-                                    FollowUpRetirementRequest {
-                                        batch_id: persisted.batch_id.clone(),
-                                        blocked_sequence: persisted.sequence,
+                            .state
+                            .write_service
+                            .request_follow_up_retirement(
+                                persisted.track_id.as_str(),
+                                FollowUpRetirementRequest {
+                                    batch_id: persisted.batch_id.clone(),
+                                    blocked_sequence: persisted.sequence,
                                     closed_order_id: order_id.clone(),
                                 },
                             )
@@ -370,7 +375,6 @@ impl EffectWorker {
             }
         }
     }
-
 }
 
 fn is_insufficient_margin_failure(message: &str) -> bool {
@@ -407,9 +411,9 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
-    use poise_engine::observation::OrderObservation;
     use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
     use poise_engine::manager::TrackManager;
+    use poise_engine::observation::OrderObservation;
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, FollowUpRetirementRequest, OrderReceipt, OrderRequest,
@@ -491,10 +495,7 @@ mod tests {
             snapshot.executor_state.slots[1].slot,
             poise_engine::executor::OrderSlot::new("inventory_followup")
         );
-        assert_eq!(
-            snapshot.executor_state.slots[1].state,
-            SlotState::Empty
-        );
+        assert_eq!(snapshot.executor_state.slots[1].state, SlotState::Empty);
 
         let effect = repository
             .list_all_effects()
@@ -681,20 +682,16 @@ mod tests {
             "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
         ));
         exchange.set_position_qty(15.0).await;
-        exchange
-            .open_orders
-            .lock()
-            .await
-            .push(ExchangeOrder {
-                instrument: btc_instrument(),
-                order_id: "order-1".into(),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 95.0,
-                qty: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::New,
-            });
+        exchange.open_orders.lock().await.push(ExchangeOrder {
+            instrument: btc_instrument(),
+            order_id: "order-1".into(),
+            client_order_id: "client-1".into(),
+            side: Side::Buy,
+            price: 95.0,
+            qty: 15.0,
+            realized_pnl: 0.0,
+            status: OrderStatus::New,
+        });
         let state = test_state(repository.clone(), exchange.clone()).await;
         let snapshot = snapshot_with_working_order();
 
@@ -800,26 +797,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_up_retry_errors() {
+    async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_up_retry_errors()
+     {
         let repository = Arc::new(MemoryRepository::default());
         let exchange = Arc::new(FakeExchange::with_cancel_order_error(
             "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
         ));
         exchange.set_position_qty(15.0).await;
-        exchange
-            .open_orders
-            .lock()
-            .await
-            .push(ExchangeOrder {
-                instrument: btc_instrument(),
-                order_id: "order-1".into(),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 95.0,
-                qty: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::New,
-            });
+        exchange.open_orders.lock().await.push(ExchangeOrder {
+            instrument: btc_instrument(),
+            order_id: "order-1".into(),
+            client_order_id: "client-1".into(),
+            side: Side::Buy,
+            price: 95.0,
+            qty: 15.0,
+            realized_pnl: 0.0,
+            status: OrderStatus::New,
+        });
         let state = test_state(repository.clone(), exchange.clone()).await;
         let snapshot = snapshot_with_working_order();
 

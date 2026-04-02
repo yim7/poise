@@ -461,8 +461,8 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
     use std::io::Read;
+    use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -257,10 +257,10 @@ impl TrackWriteService {
     ) -> Result<(TrackTransition, OrderUpdateAbsorbResult)> {
         let result = self
             .mutate_track(id, |manager| {
-            manager.observe_order_update(&TrackId::new(id), observation.clone())
-        })
-        .await
-        .map_err(anyhow::Error::new)?;
+                manager.observe_order_update(&TrackId::new(id), observation.clone())
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
 
         if observation.status.clears_working_order()
             && result.1 != OrderUpdateAbsorbResult::Unabsorbed
@@ -379,11 +379,8 @@ impl TrackWriteService {
         .map_err(anyhow::Error::new)?;
 
         drop(_mutation_guard);
-        self.retry_pending_follow_up_retirements_best_effort(
-            id,
-            "exchange state sync writeback",
-        )
-        .await;
+        self.retry_pending_follow_up_retirements_best_effort(id, "exchange state sync writeback")
+            .await;
 
         Ok(transition)
     }
@@ -479,11 +476,8 @@ impl TrackWriteService {
         .map_err(anyhow::Error::new)?;
 
         drop(_mutation_guard);
-        self.retry_pending_follow_up_retirements_best_effort(
-            id,
-            "cancel success writeback",
-        )
-        .await;
+        self.retry_pending_follow_up_retirements_best_effort(id, "cancel success writeback")
+            .await;
 
         Ok(())
     }
@@ -562,16 +556,12 @@ impl TrackWriteService {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            let lifecycle_closed = previous_snapshot
-                .executor_state
-                .slots
-                .iter()
-                .all(|slot| {
-                    slot.working_order
-                        .as_ref()
-                        .and_then(|order| order.order_id.as_deref())
-                        != Some(request.closed_order_id.as_str())
-                });
+            let lifecycle_closed = previous_snapshot.executor_state.slots.iter().all(|slot| {
+                slot.working_order
+                    .as_ref()
+                    .and_then(|order| order.order_id.as_deref())
+                    != Some(request.closed_order_id.as_str())
+            });
             if !lifecycle_closed {
                 return Ok(false);
             }
@@ -2524,9 +2514,11 @@ mod tests {
             .request_follow_up_retirement("btc-core", request)
             .await
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("multiple replacement submit effects found after sequence 0"));
+        assert!(
+            error
+                .to_string()
+                .contains("multiple replacement submit effects found after sequence 0")
+        );
     }
 
     #[tokio::test]
@@ -2594,14 +2586,16 @@ mod tests {
             .retry_pending_follow_up_retirements("btc-core")
             .await
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("multiple replacement submit effects found after sequence 0"));
+        assert!(
+            error
+                .to_string()
+                .contains("multiple replacement submit effects found after sequence 0")
+        );
     }
 
     #[tokio::test]
     async fn record_cancel_order_success_keeps_main_writeback_succeeded_when_follow_up_retry_errors()
-    {
+     {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
         let manager_handle = service.manager();
@@ -2698,7 +2692,7 @@ mod tests {
                     quantity: 0.5,
                     reduce_only: false,
                 },
-            target_exposure: Exposure(3.0),
+                target_exposure: Exposure(3.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,

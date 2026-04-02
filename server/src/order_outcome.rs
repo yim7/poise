@@ -58,7 +58,10 @@ pub fn classify_submit_receipt_writeback_error(error: &Error) -> OutcomeClass {
     OutcomeClass::FinalFailure
 }
 
-pub fn reconcile_execution(track_id: &str, merged_reasons: Vec<ReconcileReason>) -> ReconcileExecution {
+pub fn reconcile_execution(
+    track_id: &str,
+    merged_reasons: Vec<ReconcileReason>,
+) -> ReconcileExecution {
     let trigger_class = if merged_reasons
         .iter()
         .all(|reason| *reason == ReconcileReason::PeriodicAudit)

@@ -114,8 +114,7 @@ impl BinanceAccountInformation {
             .find(|item| item.symbol == symbol)
             .with_context(|| format!("account position not found for symbol: {symbol}"))?;
         let available_balance = parse_decimal("availableBalance", &self.available_balance)?;
-        let total_wallet_balance =
-            parse_decimal("totalWalletBalance", &self.total_wallet_balance)?;
+        let total_wallet_balance = parse_decimal("totalWalletBalance", &self.total_wallet_balance)?;
         let leverage = parse_decimal("leverage", &position.leverage)?;
 
         Ok(AccountMarginSnapshot {

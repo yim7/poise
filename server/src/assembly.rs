@@ -164,7 +164,9 @@ pub(crate) async fn assemble_with_components<R>(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
-    R: poise_engine::ports::StateRepositoryPort + poise_engine::ports::TrackReadRepositoryPort + 'static,
+    R: poise_engine::ports::StateRepositoryPort
+        + poise_engine::ports::TrackReadRepositoryPort
+        + 'static,
 {
     let repositories = StateRepositories::new(repository);
     assemble_with_state_store(config, exchange, market_data, repositories, clock).await
@@ -363,8 +365,8 @@ mod tests {
     use crate::config::{Config, ExchangeConfig, TrackDefinition};
     use crate::http::router;
     use crate::projector::TrackProjector;
-    use crate::state_bootstrap::StateRepositories;
     use crate::query_service::TrackQueryService;
+    use crate::state_bootstrap::StateRepositories;
     use crate::write_service::TrackWriteService;
 
     use super::{
@@ -405,7 +407,11 @@ mod tests {
         let repositories = StateRepositories::new(repository);
 
         let error = assemble(&config, repositories).await.err().unwrap();
-        assert!(error.to_string().contains("missing required exchange.api_key"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing required exchange.api_key")
+        );
     }
 
     #[tokio::test]
