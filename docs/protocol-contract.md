@@ -171,6 +171,37 @@
 - 后续不会因为价格重新进入带内而恢复策略目标
 - 已终止轨道不能再执行 `pause`、`resume`、`terminate` 或 `flatten`
 
+### 2.4 `GET /debug/tracks/:id/diagnostics` -> `TrackDiagnosticsView`
+
+这个接口属于 debug 命名空间，不是稳定产品协议的一部分。
+
+响应体：
+
+```json
+{
+  "items": [
+    {
+      "ts": "2026-04-03T02:26:47Z",
+      "message": "target exposure -3.9534 -> -3.7500",
+      "level": "info"
+    }
+  ]
+}
+```
+
+字段语义：
+
+- `items`：按时间排序的 diagnostics 时间线
+- `ts`：事件时间戳，使用 RFC3339 UTC 字符串
+- `message`：供排查使用的诊断文案
+- `level`：诊断级别，当前稳定值为 `info`、`warn`、`error`
+
+说明：
+
+- `GET /tracks/:id` 继续返回稳定用户详情，不包含 diagnostics
+- `/debug/...` 下的 diagnostics 为 debug 专用、非稳定、best-effort 接口
+- diagnostics 不作为自动化、告警或外部集成契约
+
 ## 3. WebSocket
 
 当前只暴露一个 WebSocket 入口：
