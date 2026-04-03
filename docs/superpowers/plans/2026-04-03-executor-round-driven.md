@@ -149,7 +149,7 @@ Commit:
 - Test: `engine/src/executor/mod.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 `round_policy` 与共享输入构造是唯一 round 规则入口**
+- [x] **Step 1: 先写失败测试，锁住 `round_policy` 与共享输入构造是唯一 round 规则入口**
 
 新增测试至少覆盖：
 
@@ -173,7 +173,7 @@ fn round_policy_input_from_state_is_shared_by_planning_and_recovery() {}
 - `planning` 和 `recovery` 对同一输入必须拿到同一类决策
 - `RoundPolicyInput` 必须通过唯一构造入口生成，不允许各自拼 slot 摘要
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -185,7 +185,7 @@ Expected:
 
 - 当前实现会失败，因为 `planning` 和 `recovery` 仍各自持有一部分 round 判断，也没有共享输入构造。
 
-- [ ] **Step 3: 做最小实现，先把 round 生命周期规则收进单点 owner**
+- [x] **Step 3: 做最小实现，先把 round 生命周期规则收进单点 owner**
 
 先创建 `engine/src/executor/round_policy.rs`，定义至少这些对象：
 
@@ -211,7 +211,7 @@ Expected:
 - 若这一 task 仍需要沿用现有执行锚点，只允许在 `round_policy` 内部临时读取或适配，外部不得保留第二份 round 有效性判断
 - Task 2 不得为了满足 `RoundPolicyInput` 签名，提前在 runtime 层引入未使用的 `active_round` 占位字段
 
-- [ ] **Step 4: 跑 Task 2 回归**
+- [x] **Step 4: 跑 Task 2 回归**
 
 Run:
 
@@ -225,12 +225,16 @@ Expected:
 - `planning` 和 `recovery` 对相同输入不再出现分叉行为
 - `RoundPolicyInput` 只剩一个构造入口
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/round_policy.rs engine/src/executor/mod.rs engine/src/executor/planning.rs engine/src/executor/recovery.rs engine/src/manager.rs
 git commit -m "feat(engine): centralize round lifecycle decisions"
 ```
+
+Commit:
+
+- `edfed7f` `feat(engine): centralize round lifecycle decisions`
 
 ### Task 3: 引入 `ExecutionRound` / `active_round`，并原子切换执行层 target owner
 
