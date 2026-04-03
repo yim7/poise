@@ -34,11 +34,28 @@ mod tests {
     fn deserializes_grid_detail_view() {
         let detail: TrackDetailView =
             serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
+        let detail_json = serde_json::to_value(&detail).unwrap();
 
         assert_eq!(detail.identity.id, "btc-core");
         assert_eq!(detail.identity.instrument.venue, "binance_futures");
         assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert_eq!(
+            detail_json["strategy"]["long_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["short_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["notional_per_unit"].as_f64(),
+            Some(375.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["min_rebalance_units"].as_f64(),
+            Some(0.5)
+        );
         assert_eq!(detail.execution.state, ExecutionStateView::Open);
         assert_eq!(
             detail.execution.execution_status,
@@ -72,7 +89,7 @@ mod tests {
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                 "market":{"mark_price":64123.4,"index_price":64120.1},
                 "position":{"current_exposure":0.5,"target_exposure":0.75},
                 "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
@@ -115,9 +132,26 @@ mod tests {
         assert_eq!(event.track_id, "btc-core");
         match event.payload {
             TrackStreamPayload::TrackDetailChanged { detail } => {
+                let detail_json = serde_json::to_value(&detail).unwrap();
                 assert_eq!(detail.identity.instrument.symbol, "BTCUSDT");
                 assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
                 assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+                assert_eq!(
+                    detail_json["strategy"]["long_exposure_units"].as_f64(),
+                    Some(8.0)
+                );
+                assert_eq!(
+                    detail_json["strategy"]["short_exposure_units"].as_f64(),
+                    Some(8.0)
+                );
+                assert_eq!(
+                    detail_json["strategy"]["notional_per_unit"].as_f64(),
+                    Some(375.0)
+                );
+                assert_eq!(
+                    detail_json["strategy"]["min_rebalance_units"].as_f64(),
+                    Some(0.5)
+                );
                 assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
             }
             _ => panic!("unexpected payload variant"),
@@ -134,7 +168,7 @@ mod tests {
                     "detail":{
                         "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                         "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
-                        "strategy":{"lower_price":60000.0,"upper_price":68000.0,"shape_family":"linear","out_of_band_policy":"freeze"},
+                        "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                         "market":{"mark_price":64123.4,"index_price":64120.1},
                         "position":{"current_exposure":0.5,"target_exposure":0.75},
                         "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},

@@ -53,7 +53,7 @@
 - Test: `server/src/http.rs`
 - Test: `tui/src/protocol.rs`
 
-- [ ] **Step 1: 写失败测试，锁住扩展后的 detail strategy contract**
+- [x] **Step 1: 写失败测试，锁住扩展后的 detail strategy contract**
 
 在 `tui/src/protocol.rs` 和 `protocol/src/lib.rs` 补断言，确认 detail strategy 至少包含：
 
@@ -66,15 +66,15 @@ assert_eq!(detail.strategy.min_rebalance_units, 0.5);
 
 同时更新 `tui/tests/fixtures/track_detail_view.json` 和 `tui/tests/fixtures/ws_track_detail_changed.json`，让 fixture 先表达新 contract。
 
-- [ ] **Step 2: 运行协议和 TUI 反序列化测试，确认红灯**
+- [x] **Step 2: 运行协议和 TUI 反序列化测试，确认红灯**
 
-Run: `cargo test -p poise-protocol deserializes_track_stream_detail_changed_with_track_id -- --exact`
+Run: `cargo test -p poise-protocol tests::deserializes_track_stream_detail_changed_with_track_id -- --exact`
 
-Run: `cargo test -p poise-tui deserializes_grid_detail_view -- --exact`
+Run: `cargo test -p poise-tui protocol::tests::deserializes_grid_detail_view -- --exact`
 
 Expected: FAIL，因为 `GridStrategyView` 还没有这些字段。
 
-- [ ] **Step 3: 写失败测试，锁住 read model 和 projector 会带出完整策略字段**
+- [x] **Step 3: 写失败测试，锁住 read model 和 projector 会带出完整策略字段**
 
 在 `server/src/projector.rs` 的 detail 投影测试里补断言：
 
@@ -94,15 +94,15 @@ assert_eq!(detail.strategy.min_rebalance_units, 0.5);
 async fn get_track_detail_returns_track_detail_view() { /* ... */ }
 ```
 
-- [ ] **Step 4: 运行服务端定向测试，确认红灯**
+- [x] **Step 4: 运行服务端定向测试，确认红灯**
 
-Run: `cargo test -p poise-server project_detail_includes_available_commands_and_activity -- --exact`
+Run: `cargo test -p poise-server projector::tests::project_detail_includes_available_commands_and_activity -- --exact`
 
-Run: `cargo test -p poise-server get_track_detail_returns_track_detail_view -- --exact`
+Run: `cargo test -p poise-server http::tests::get_track_detail_returns_track_detail_view -- --exact`
 
 Expected: FAIL，因为 `TrackReadModel` 和 projector 还没有补这些策略字段。
 
-- [ ] **Step 5: 写最小实现，补齐 detail contract、read model 和 projector**
+- [x] **Step 5: 写最小实现，补齐 detail contract、read model 和 projector**
 
 实现范围只限稳定原始策略事实：
 
@@ -121,19 +121,19 @@ pub struct GridStrategyView {
 
 `server/src/read_model.rs` 同步从 `snapshot.config` 提取这些字段，`server/src/projector.rs` 只做字段映射，不新增派生展示值。
 
-- [ ] **Step 6: 运行定向测试，确认转绿**
+- [x] **Step 6: 运行定向测试，确认转绿**
 
-Run: `cargo test -p poise-protocol deserializes_track_stream_detail_changed_with_track_id -- --exact`
+Run: `cargo test -p poise-protocol tests::deserializes_track_stream_detail_changed_with_track_id -- --exact`
 
-Run: `cargo test -p poise-tui deserializes_grid_detail_view -- --exact`
+Run: `cargo test -p poise-tui protocol::tests::deserializes_grid_detail_view -- --exact`
 
-Run: `cargo test -p poise-server project_detail_includes_available_commands_and_activity -- --exact`
+Run: `cargo test -p poise-server projector::tests::project_detail_includes_available_commands_and_activity -- --exact`
 
-Run: `cargo test -p poise-server get_track_detail_returns_track_detail_view -- --exact`
+Run: `cargo test -p poise-server http::tests::get_track_detail_returns_track_detail_view -- --exact`
 
 Expected: PASS
 
-- [ ] **Step 7: 运行相关回归测试**
+- [x] **Step 7: 运行相关回归测试**
 
 Run: `cargo test -p poise-protocol`
 
@@ -141,7 +141,7 @@ Run: `cargo test -p poise-server projector::tests -- --nocapture`
 
 Run: `cargo test -p poise-server http::tests::get_track_detail_returns_track_detail_view -- --exact`
 
-Run: `cargo test -p poise-tui deserializes_grid_stream_detail_changed -- --exact`
+Run: `cargo test -p poise-tui protocol::tests::deserializes_grid_stream_detail_changed -- --exact`
 
 Expected: PASS
 
@@ -155,12 +155,12 @@ git commit -m "feat: expose detail strategy facts"
 ```
 
 **Task 记录：**
-- 状态：未开始
+- 状态：已完成
 - 验收：
   - `cargo test -p poise-protocol`
   - `cargo test -p poise-server projector::tests -- --nocapture`
   - `cargo test -p poise-server http::tests::get_track_detail_returns_track_detail_view -- --exact`
-  - `cargo test -p poise-tui deserializes_grid_stream_detail_changed -- --exact`
+  - `cargo test -p poise-tui protocol::tests::deserializes_grid_stream_detail_changed -- --exact`
 - 实现 commit SHA：
 
 ### Task 2: 重画详情页并收敛布局退化规则

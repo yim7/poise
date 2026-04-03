@@ -60,6 +60,10 @@ impl TrackProjector {
             strategy: GridStrategyView {
                 lower_price: source.lower_price,
                 upper_price: source.upper_price,
+                long_exposure_units: source.long_exposure_units,
+                short_exposure_units: source.short_exposure_units,
+                notional_per_unit: source.notional_per_unit,
+                min_rebalance_units: source.min_rebalance_units,
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
             },
@@ -336,6 +340,22 @@ mod tests {
         let detail = TrackProjector::new().project_detail(&source);
         let detail_json = serde_json::to_value(&detail).unwrap();
 
+        assert_eq!(
+            detail_json["strategy"]["long_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["short_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["notional_per_unit"].as_f64(),
+            Some(375.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["min_rebalance_units"].as_f64(),
+            Some(0.5)
+        );
         assert!(!detail.available_commands.is_empty());
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
         assert_eq!(detail.available_commands.len(), 4);
@@ -559,6 +579,10 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,
             upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
             reference_price: Some(101.25),

@@ -20,6 +20,10 @@
       "strategy": {
         "lower_price": 90.0,
         "upper_price": 110.0,
+        "long_exposure_units": 8.0,
+        "short_exposure_units": 8.0,
+        "notional_per_unit": 375.0,
+        "min_rebalance_units": 0.5,
         "shape_family": "linear",
         "out_of_band_policy": "freeze"
       },
