@@ -61,7 +61,7 @@
   "activity": [
     {
       "ts": "2026-03-26T10:01:00Z",
-      "message": "target exposure 3.5000 -> 4.0000",
+      "message": "replacement gate: improvement 9.0 bps < threshold 13.0 bps",
       "level": "info"
     }
   ],

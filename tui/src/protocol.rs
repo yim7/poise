@@ -3,7 +3,8 @@ pub use poise_protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
     ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, GridStatisticsView,
     GridStatus, ReplacementGateView, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-    TrackListItemView, TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+    TrackDiagnosticsView, TrackListItemView, TrackListResponse, TrackStreamEvent,
+    TrackStreamPayload,
 };
 
 #[cfg(test)]
@@ -14,7 +15,7 @@ mod tests {
     use super::{
         ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandType,
         TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
-        TrackStreamEvent, TrackStreamPayload,
+        TrackDiagnosticsView, TrackStreamEvent, TrackStreamPayload,
     };
 
     #[test]
@@ -49,6 +50,20 @@ mod tests {
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
         assert!(!detail.available_commands.is_empty());
+    }
+
+    #[test]
+    fn deserializes_track_diagnostics_view_fixture() {
+        let diagnostics: TrackDiagnosticsView = serde_json::from_str(include_str!(
+            "../tests/fixtures/track_diagnostics_view.json"
+        ))
+        .unwrap();
+
+        assert_eq!(diagnostics.items.len(), 1);
+        assert_eq!(
+            diagnostics.items[0].message,
+            "target exposure 3.5000 -> 4.0000"
+        );
     }
 
     #[test]
