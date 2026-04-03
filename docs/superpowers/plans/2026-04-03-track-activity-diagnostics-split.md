@@ -391,7 +391,7 @@ Commit: `47fe47e`
 - Modify: `docs/superpowers/specs/2026-04-03-track-activity-diagnostics-split-design.md`
 - Modify: `docs/superpowers/plans/2026-04-03-track-activity-diagnostics-split.md`
 
-- [ ] **Step 1: 跑协议、服务端、TUI 相关验收测试**
+- [x] **Step 1: 跑协议、服务端、TUI 相关验收测试**
 
 Run: `cargo test -p poise-protocol`
 
@@ -409,16 +409,28 @@ Run: `cargo test -p poise-tui diagnostics -- --nocapture`
 
 Expected: PASS
 
-- [ ] **Step 2: 跑一次跨 crate 回归**
+- [x] **Step 2: 跑一次跨 crate 回归**
 
 Run: `cargo test -p poise-server -p poise-tui -p poise-protocol`
 
 Expected: PASS
 
-- [ ] **Step 3: 同步文档与任务清单状态**
+- [x] **Step 3: 同步文档与任务清单状态**
 
 要求：
 
 - `docs/protocol-contract.md` 记录 `/debug/tracks/:id/diagnostics` 的非稳定 debug 语义
 - spec 与实际接口、TUI debug 行为一致
 - 计划文档勾选已完成步骤，并记录实际验证命令结果
+
+Result:
+
+- `cargo test -p poise-protocol` → 通过，`5 passed`
+- `cargo test -p poise-server projector::tests::project_activity_distinguishes_superseded_submit_from_success -- --exact` → 通过，`1 passed`
+- `cargo test -p poise-server http::tests::get_track_diagnostics_returns_exposure_target_changed_events -- --exact` → 通过，`1 passed`
+- `cargo test -p poise-tui diagnostics -- --nocapture` → 通过，`6 passed`
+- `cargo test -p poise-server -p poise-tui -p poise-protocol` → 初次失败，暴露既有 dry-run 脚本在 `--dry-run` 下仍检查本地 config；调整 `scripts/run-paper-server.sh` 与 `scripts/start-paper-zellij.sh` 后通过，`poise-server 192 passed`、`poise-tui 67 passed`、`poise-protocol 5 passed`
+- `docs/protocol-contract.md` 已补充 TUI 仅在显式 debug 视角按需请求 diagnostics
+- `docs/superpowers/specs/2026-04-03-track-activity-diagnostics-split-design.md` 已同步 `d` 键切换 debug 视角的实际实现
+
+Commit: `01099ee`
