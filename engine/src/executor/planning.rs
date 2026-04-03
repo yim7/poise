@@ -6,13 +6,15 @@ use serde::{Deserialize, Serialize};
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::ports::OrderRequest;
-use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
+use crate::runtime::{ExecutionSlot, ExecutorState, SlotState, WorkingOrder};
 use crate::track::{Instrument, TrackId};
 
-use super::rebalance_trigger::{
-    ActiveLifecycle, RebalanceTriggerDecision, RebalanceTriggerInput, evaluate_rebalance_trigger,
+use super::round_policy::{
+    RoundDecision, evaluate_round_policy, round_policy_input_from_state,
+    round_policy_input_from_state_with_lifecycle,
 };
-use super::{ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, recording, slots};
+use super::rebalance_trigger::{ActiveLifecycle, RebalanceTriggerDecision};
+use super::{INVENTORY_CORE_SLOT, recording, slots};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,10 +80,6 @@ pub(super) struct SubmitIntentEvaluation {
     pub submit_hint: Option<PendingSubmitHint>,
 }
 
-const REBALANCE_GAP_THRESHOLD: f64 = 2.0;
-const CATCH_UP_GAP_THRESHOLD: f64 = 5.0;
-const REBALANCE_AGE_MS: i64 = 60_000;
-const CATCH_UP_AGE_MS: i64 = 180_000;
 const REPLACEMENT_SAFETY_BUFFER_BPS: f64 = 5.0;
 const BPS_DENOMINATOR: f64 = 10_000.0;
 impl<'a> ExecutorInput<'a> {
@@ -102,45 +100,27 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         executor_state,
     } = input;
     let active_lifecycle = ActiveLifecycle::from_executor_state(executor_state);
-    let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
-        current_exposure: &submit_intent.current_exposure,
-        latest_target_exposure: &submit_intent.target_exposure,
-        min_rebalance_units: submit_intent.min_rebalance_units,
-        active_lifecycle,
-    });
-    let inventory_gap = submit_intent
-        .current_exposure
-        .delta(&submit_intent.target_exposure);
-    let gap_started_at =
-        resolve_gap_started_at(executor_state, &inventory_gap, submit_intent.observed_at);
-    let gap_age_ms = gap_started_at
-        .map(|started_at| {
-            (submit_intent.observed_at - started_at)
-                .num_milliseconds()
-                .max(0)
-        })
-        .unwrap_or(0);
-    let mode = resolve_mode(&inventory_gap, gap_age_ms);
-    let last_execution_reason = resolve_reason(executor_state, &mode);
-    let stats = update_stats(
+    let round_decision = evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
+        &submit_intent.current_exposure,
+        &submit_intent.target_exposure,
         executor_state,
+        submit_intent.min_rebalance_units,
         submit_intent.observed_at,
-        &inventory_gap,
-        gap_age_ms,
-    );
-    let desired_orders = plan_desired_orders(&submit_intent, &trigger_decision);
+        Some(active_lifecycle),
+    ));
+    let desired_orders = plan_desired_orders(&submit_intent, &round_decision.trigger_decision);
     let (effects, slots, replacement_gate_reason) = diff_desired_orders(
         &submit_intent,
         executor_state,
         &desired_orders,
-        &trigger_decision,
+        &round_decision.trigger_decision,
     );
 
     ExecutorPlan {
         state: ExecutorState {
-            mode,
-            inventory_gap,
-            gap_started_at,
+            mode: round_decision.mode,
+            inventory_gap: round_decision.inventory_gap,
+            gap_started_at: round_decision.gap_started_at,
             last_reprice_at: if effects.iter().any(|effect| {
                 matches!(
                     effect,
@@ -155,9 +135,9 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
             recent_terminal_orders: executor_state
                 .map(|state| state.recent_terminal_orders.clone())
                 .unwrap_or_default(),
-            last_execution_reason,
+            last_execution_reason: round_decision.last_execution_reason,
             recovery_anomaly: None,
-            stats,
+            stats: round_decision.stats,
         },
         desired_orders,
         effects,
@@ -174,23 +154,27 @@ pub(super) fn evaluate_submit_intent_with_active_lifecycle(
     input: SubmitIntentInput<'_>,
     active_lifecycle: ActiveLifecycle<'_>,
 ) -> SubmitIntentEvaluation {
-    let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
-        current_exposure: &input.current_exposure,
-        latest_target_exposure: &input.target_exposure,
-        min_rebalance_units: input.min_rebalance_units,
-        active_lifecycle,
-    });
+    let round_decision = evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
+        &input.current_exposure,
+        &input.target_exposure,
+        None,
+        input.min_rebalance_units,
+        input.observed_at,
+        Some(active_lifecycle),
+    ));
     let submit_hint =
-        desired_inventory_order_for_submit_intent(&input, &trigger_decision).map(|desired_order| {
-            let request = desired_order_to_request(&input, &desired_order);
-            PendingSubmitHint {
-                request,
-                target_exposure: desired_order.target_exposure,
-            }
-        });
+        desired_inventory_order_for_submit_intent(&input, &round_decision.trigger_decision).map(
+            |desired_order| {
+                let request = desired_order_to_request(&input, &desired_order);
+                PendingSubmitHint {
+                    request,
+                    target_exposure: desired_order.target_exposure,
+                }
+            },
+        );
 
     SubmitIntentEvaluation {
-        trigger_decision,
+        trigger_decision: round_decision.trigger_decision,
         submit_hint,
     }
 }
@@ -199,102 +183,58 @@ pub fn refresh_state(
     previous_state: &ExecutorState,
     current_exposure: &Exposure,
     target_exposure: &Exposure,
+    min_rebalance_units: f64,
     observed_at: DateTime<Utc>,
 ) -> ExecutorState {
-    let inventory_gap = current_exposure.delta(target_exposure);
-    let gap_started_at = resolve_gap_started_at(Some(previous_state), &inventory_gap, observed_at);
-    let gap_age_ms = gap_started_at
-        .map(|started_at| (observed_at - started_at).num_milliseconds().max(0))
-        .unwrap_or(0);
-    let mode = resolve_mode(&inventory_gap, gap_age_ms);
-    let last_execution_reason = resolve_reason(Some(previous_state), &mode);
-    let stats = update_stats(
+    let round_decision = evaluate_round_policy(round_policy_input_from_state(
+        current_exposure,
+        target_exposure,
         Some(previous_state),
+        min_rebalance_units,
         observed_at,
-        &inventory_gap,
-        gap_age_ms,
-    );
+    ));
 
     ExecutorState {
-        mode,
-        inventory_gap,
-        gap_started_at,
+        mode: round_decision.mode,
+        inventory_gap: round_decision.inventory_gap,
+        gap_started_at: round_decision.gap_started_at,
         last_reprice_at: previous_state.last_reprice_at,
         slots: previous_state.slots.clone(),
         recent_terminal_orders: previous_state.recent_terminal_orders.clone(),
-        last_execution_reason,
+        last_execution_reason: round_decision.last_execution_reason,
         recovery_anomaly: previous_state.recovery_anomaly.clone(),
-        stats,
+        stats: round_decision.stats,
     }
 }
 
-fn resolve_gap_started_at(
-    previous_state: Option<&ExecutorState>,
-    inventory_gap: &Exposure,
+#[cfg(test)]
+pub(crate) fn round_policy_input_for_test<'a>(
+    current_exposure: &'a Exposure,
+    desired_exposure: &'a Exposure,
+    executor_state: Option<&'a ExecutorState>,
+    min_rebalance_units: f64,
     observed_at: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    if inventory_gap.is_zero() {
-        return None;
-    }
-
-    previous_state
-        .and_then(|state| {
-            (!state.inventory_gap.is_zero()
-                && state.inventory_gap.0.signum() == inventory_gap.0.signum())
-            .then_some(state.gap_started_at)
-            .flatten()
-        })
-        .or(Some(observed_at))
+) -> super::round_policy::RoundPolicyInput<'a> {
+    round_policy_input_from_state(
+        current_exposure,
+        desired_exposure,
+        executor_state,
+        min_rebalance_units,
+        observed_at,
+    )
 }
 
-fn resolve_mode(inventory_gap: &Exposure, gap_age_ms: i64) -> ExecutionMode {
-    let abs_gap = inventory_gap.0.abs();
-    if abs_gap >= CATCH_UP_GAP_THRESHOLD || gap_age_ms >= CATCH_UP_AGE_MS {
-        return ExecutionMode::CatchUp;
-    }
-    if abs_gap >= REBALANCE_GAP_THRESHOLD || gap_age_ms >= REBALANCE_AGE_MS {
-        return ExecutionMode::Rebalance;
-    }
-    ExecutionMode::Passive
-}
-
-fn resolve_reason(
-    previous_state: Option<&ExecutorState>,
-    mode: &ExecutionMode,
-) -> Option<ExecutionReason> {
-    let previous_mode = previous_state.map(|state| &state.mode);
-    if previous_mode == Some(mode) {
-        return previous_state.and_then(|state| state.last_execution_reason.clone());
-    }
-
-    Some(match mode {
-        ExecutionMode::Passive => ExecutionReason::GapEnteredPassive,
-        ExecutionMode::Rebalance => ExecutionReason::GapEscalatedToRebalance,
-        ExecutionMode::CatchUp => ExecutionReason::GapEscalatedToCatchUp,
-    })
-}
-
-fn update_stats(
-    previous_state: Option<&ExecutorState>,
-    observed_at: DateTime<Utc>,
-    inventory_gap: &Exposure,
-    gap_age_ms: i64,
-) -> ExecutionStats {
-    let started_at = previous_state
-        .map(|state| state.stats.started_at)
-        .unwrap_or(observed_at);
-    let previous_max_gap = previous_state
-        .map(|state| state.stats.max_inventory_gap_abs.0.abs())
-        .unwrap_or(0.0);
-    let previous_max_age = previous_state
-        .map(|state| state.stats.max_gap_age_ms)
-        .unwrap_or(0);
-
-    ExecutionStats {
-        started_at,
-        max_inventory_gap_abs: Exposure(previous_max_gap.max(inventory_gap.0.abs())),
-        max_gap_age_ms: previous_max_age.max(gap_age_ms),
-    }
+#[cfg(test)]
+pub(crate) fn round_decision_for_test(input: ExecutorInput<'_>) -> RoundDecision {
+    let active_lifecycle = ActiveLifecycle::from_executor_state(input.executor_state);
+    evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
+        &input.submit_intent.current_exposure,
+        &input.submit_intent.target_exposure,
+        input.executor_state,
+        input.submit_intent.min_rebalance_units,
+        input.submit_intent.observed_at,
+        Some(active_lifecycle),
+    ))
 }
 
 fn plan_desired_orders(

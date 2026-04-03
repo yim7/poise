@@ -280,6 +280,7 @@ impl TrackManager {
                         &resumed.executor_state,
                         &resumed.current_exposure,
                         &result.desired_exposure,
+                        resumed.config.min_rebalance_units,
                         resumed_at,
                     ),
                 )
@@ -647,6 +648,7 @@ impl TrackManager {
         let recovery = executor::recover_working_orders(executor::RecoveryInput {
             current_exposure: &track.current_exposure,
             target_exposure: track.desired_exposure.as_ref(),
+            min_rebalance_units: track.config.min_rebalance_units,
             previous_state: Some(&previous_state),
             live_orders: &open_orders,
             pending_submit_hints: &pending_submit_hints,
@@ -881,6 +883,7 @@ impl TrackManager {
                 &track.executor_state,
                 &track.current_exposure,
                 &target.desired_exposure,
+                track.config.min_rebalance_units,
                 observed_at,
             );
             return Ok(PlannedInventoryExecution {

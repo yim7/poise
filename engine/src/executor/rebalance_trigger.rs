@@ -6,7 +6,7 @@ use super::{INVENTORY_CORE_SLOT, slots};
 
 const MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR: f64 = 16.0;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ActiveLifecycle<'a> {
     slot: Option<&'a ExecutionSlot>,
 }

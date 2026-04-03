@@ -3,12 +3,13 @@ use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::observation::OrderObservation;
 use crate::ports::OrderRequest;
-use crate::runtime::{ExecutionStats, ExecutorState, SlotState};
+use crate::runtime::{ExecutorState, SlotState};
 use crate::transition::TrackEffect;
 
 use super::planning::evaluate_submit_intent_with_active_lifecycle;
+use super::round_policy::{RoundDecision, evaluate_round_policy, round_policy_input_from_state};
 use super::rebalance_trigger::{ActiveLifecycle, RebalanceTriggerDecision};
-use super::{ExecutionMode, PendingSubmitHint, SubmitIntentInput, recording, slots};
+use super::{PendingSubmitHint, SubmitIntentInput, recording, slots};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +22,7 @@ pub enum RecoveryAnomaly {
 pub struct RecoveryInput<'a> {
     pub current_exposure: &'a Exposure,
     pub target_exposure: Option<&'a Exposure>,
+    pub min_rebalance_units: f64,
     pub previous_state: Option<&'a ExecutorState>,
     pub live_orders: &'a [OrderObservation],
     pub pending_submit_hints: &'a [PendingSubmitHint],
@@ -219,26 +221,29 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
 }
 
 pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
+    let desired_exposure = input.target_exposure.unwrap_or(input.current_exposure);
+    let round_decision = evaluate_round_policy(round_policy_input_from_state(
+        input.current_exposure,
+        desired_exposure,
+        input.previous_state,
+        input.min_rebalance_units,
+        input.observed_at,
+    ));
     let base_state = input
         .previous_state
         .cloned()
         .unwrap_or_else(|| ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: input
-                .current_exposure
-                .delta(input.target_exposure.unwrap_or(input.current_exposure)),
-            gap_started_at: None,
+            mode: round_decision.mode.clone(),
+            inventory_gap: round_decision.inventory_gap.clone(),
+            gap_started_at: round_decision.gap_started_at,
             last_reprice_at: None,
             slots: vec![slots::empty_inventory_core_slot()],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
+            last_execution_reason: round_decision.last_execution_reason.clone(),
             recovery_anomaly: None,
-            stats: ExecutionStats {
-                started_at: input.observed_at,
-                max_inventory_gap_abs: Exposure(0.0),
-                max_gap_age_ms: 0,
-            },
+            stats: round_decision.stats.clone(),
         });
+    let base_state = apply_round_decision(base_state, &round_decision);
 
     if input.live_orders.is_empty() {
         let has_pending_receipt_backed_slot = base_state.slots.iter().any(|slot| {
@@ -316,6 +321,15 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
     RecoveryResolution::Rebuilt { state }
 }
 
+fn apply_round_decision(mut state: ExecutorState, round_decision: &RoundDecision) -> ExecutorState {
+    state.mode = round_decision.mode.clone();
+    state.inventory_gap = round_decision.inventory_gap.clone();
+    state.gap_started_at = round_decision.gap_started_at;
+    state.last_execution_reason = round_decision.last_execution_reason.clone();
+    state.stats = round_decision.stats.clone();
+    state
+}
+
 pub fn submit_requests_match(
     left: &OrderRequest,
     right: &OrderRequest,
@@ -372,4 +386,38 @@ fn values_match_with_step(left: f64, right: f64, step: f64) -> bool {
         step / 1_000_000.0
     };
     (left - right).abs() <= tolerance
+}
+
+#[cfg(test)]
+pub(crate) fn round_policy_input_for_test<'a>(
+    current_exposure: &'a Exposure,
+    desired_exposure: &'a Exposure,
+    executor_state: Option<&'a ExecutorState>,
+    min_rebalance_units: f64,
+    observed_at: DateTime<Utc>,
+) -> super::round_policy::RoundPolicyInput<'a> {
+    round_policy_input_from_state(
+        current_exposure,
+        desired_exposure,
+        executor_state,
+        min_rebalance_units,
+        observed_at,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn round_decision_for_test(
+    current_exposure: &Exposure,
+    desired_exposure: &Exposure,
+    executor_state: Option<&ExecutorState>,
+    min_rebalance_units: f64,
+    observed_at: DateTime<Utc>,
+) -> RoundDecision {
+    evaluate_round_policy(round_policy_input_from_state(
+        current_exposure,
+        desired_exposure,
+        executor_state,
+        min_rebalance_units,
+        observed_at,
+    ))
 }

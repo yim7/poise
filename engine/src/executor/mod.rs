@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 mod planning;
+mod round_policy;
 mod rebalance_trigger;
 mod recording;
 mod recovery;
@@ -10,6 +11,10 @@ mod slots;
 pub(crate) use planning::current_submit_hint;
 pub(crate) use planning::{DesiredOrder, ExecutorInput, SubmitIntentInput, plan, refresh_state};
 pub use planning::{OrderRole, OrderSlot, PendingSubmitHint};
+#[cfg(test)]
+pub(crate) use round_policy::{
+    RoundLifecycleDecision, evaluate_round_policy, round_policy_input_from_state,
+};
 pub use recording::OrderUpdateAbsorbResult;
 #[cfg(test)]
 pub(crate) use recording::apply_order_observation;
@@ -249,6 +254,102 @@ mod tests {
         assert!(
             catch_up.state.stats.max_inventory_gap_abs.0 >= catch_up.state.inventory_gap.0.abs()
         );
+    }
+
+    #[test]
+    fn round_policy_starts_execution_when_gap_requires_action() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let decision = evaluate_round_policy(round_policy_input_from_state(
+            &Exposure(0.0),
+            &Exposure(4.0),
+            None,
+            0.5,
+            now,
+        ));
+
+        assert_eq!(decision.lifecycle, RoundLifecycleDecision::StartRound);
+    }
+
+    #[test]
+    fn round_policy_continues_execution_when_drift_stays_within_tolerance() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let previous_state = test_executor_state(
+            ExecutionMode::Passive,
+            Some(now - Duration::seconds(90)),
+        );
+
+        let decision = evaluate_round_policy(round_policy_input_from_state(
+            &Exposure(0.0),
+            &Exposure(4.2),
+            Some(&previous_state),
+            0.5,
+            now,
+        ));
+
+        assert_eq!(decision.lifecycle, RoundLifecycleDecision::ContinueRound);
+    }
+
+    #[test]
+    fn planning_and_recovery_consume_the_same_round_decision() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let previous_state = test_executor_state(
+            ExecutionMode::Passive,
+            Some(now - Duration::seconds(90)),
+        );
+
+        let planning_decision = planning::round_decision_for_test(
+            executor_input(
+                &track_id,
+                &instrument,
+                &rules,
+                3.75,
+                0.5,
+                Exposure(0.0),
+                Exposure(4.2),
+                99.9,
+                Some(&previous_state),
+                now,
+            ),
+        );
+        let recovery_decision = recovery::round_decision_for_test(
+            &Exposure(0.0),
+            &Exposure(4.2),
+            Some(&previous_state),
+            0.5,
+            now,
+        );
+
+        assert_eq!(planning_decision, recovery_decision);
+    }
+
+    #[test]
+    fn round_policy_input_from_state_is_shared_by_planning_and_recovery() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let previous_state = test_executor_state(
+            ExecutionMode::Passive,
+            Some(now - Duration::seconds(90)),
+        );
+
+        let planning_input = planning::round_policy_input_for_test(
+            &Exposure(0.0),
+            &Exposure(4.2),
+            Some(&previous_state),
+            0.5,
+            now,
+        );
+        let recovery_input = recovery::round_policy_input_for_test(
+            &Exposure(0.0),
+            &Exposure(4.2),
+            Some(&previous_state),
+            0.5,
+            now,
+        );
+
+        assert_eq!(planning_input, recovery_input);
     }
 
     #[test]
@@ -1245,6 +1346,7 @@ mod tests {
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(0.0),
             target_exposure: None,
+            min_rebalance_units: 0.5,
             previous_state: Some(&ExecutorState::empty(now)),
             live_orders: &[OrderObservation {
                 order_id: "live-1".into(),
@@ -1275,6 +1377,7 @@ mod tests {
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
             target_exposure: Some(&Exposure(4.0)),
+            min_rebalance_units: 0.5,
             previous_state: Some(&ExecutorState::empty(now)),
             live_orders: &[OrderObservation {
                 order_id: "live-1".into(),
@@ -1307,6 +1410,7 @@ mod tests {
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
             target_exposure: Some(&Exposure(4.0)),
+            min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[
                 OrderObservation {
@@ -1386,6 +1490,7 @@ mod tests {
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(0.0),
             target_exposure: Some(&Exposure(4.0)),
+            min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[
                 OrderObservation {
@@ -2325,6 +2430,7 @@ mod tests {
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
             target_exposure: Some(&Exposure(4.0)),
+            min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[],
             pending_submit_hints: &[],
@@ -2372,6 +2478,7 @@ mod tests {
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
             target_exposure: Some(&Exposure(4.0)),
+            min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[],
             pending_submit_hints: &pending_submit_hints,
