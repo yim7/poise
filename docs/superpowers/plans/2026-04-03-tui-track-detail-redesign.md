@@ -306,4 +306,4 @@ git commit -m "feat: redesign tui track detail view"
 - 状态：已完成
 - 验收：
   - `cargo test -p poise-tui`
-- 实现 commit SHA：
+- 实现 commit SHA：`bd3e80c`
