@@ -144,19 +144,39 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         evaluate_submit_intent_with_active_lifecycle(
             current_plan.clone(),
             active_lifecycle,
-            input.previous_state.active_round.as_ref(),
+            Some(input.previous_state),
         )
     });
     let current_plan_submit = current_plan_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.submit_hint.as_ref());
+    let stale_effect_round_submit = input.current_plan.as_ref().and_then(|current_plan| {
+        let active_round = input.previous_state.active_round.as_ref()?;
+        if active_round.target_exposure == *input.target_exposure {
+            return None;
+        }
+        let mut round_plan = current_plan.clone();
+        round_plan.target_exposure = active_round.target_exposure.clone();
+        evaluate_submit_intent_with_active_lifecycle(
+            round_plan,
+            active_lifecycle,
+            Some(input.previous_state),
+        )
+        .submit_hint
+    });
 
     let matching_pending_submit_can_proceed = active_lifecycle
         .pending_submit_for_request(&input.request.client_order_id)
         .is_some_and(|slot| {
             current_plan_evaluation.as_ref().is_some_and(|evaluation| {
                 evaluation.trigger_decision == RebalanceTriggerDecision::PreserveActiveLifecycle
-            }) && pending_submit_matches_request(slot, input.request, input.exchange_rules)
+            }) && input
+                .previous_state
+                .active_round
+                .as_ref()
+                .is_some_and(|round| round.target_exposure == *input.target_exposure)
+                && current_plan_submit.is_none()
+                && pending_submit_matches_request(slot, input.request, input.exchange_rules)
         });
 
     if matching_pending_submit_can_proceed {
@@ -182,7 +202,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     ) {
         let cleared_state =
             recording::clear_pending_submit(input.previous_state, &input.request.client_order_id);
-        if let Some(next_submit) = current_plan_submit {
+        if let Some(next_submit) = current_plan_submit.or(stale_effect_round_submit.as_ref()) {
             return SubmitRecoveryPlan {
                 resolution: SubmitRecoveryResolution::Superseded {
                     state: recording::record_submit_request(

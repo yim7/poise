@@ -1079,12 +1079,23 @@ mod tests {
             .slots
             .retain(|slot| slot.slot != OrderSlot::new("inventory_core"));
         if track.executor_state.active_round.is_none() {
-            track.executor_state.active_round = track.desired_exposure.clone().map(|target_exposure| {
-                crate::runtime::ExecutionRound {
-                    target_exposure,
-                    mode: track.executor_state.diagnostics.mode.clone(),
-                    started_at: track.executor_state.stats.started_at,
-                }
+            let inferred_target = track.desired_exposure.clone().unwrap_or_else(|| {
+                let per_unit = track.config.base_qty_per_unit();
+                let delta = if per_unit <= f64::EPSILON {
+                    0.0
+                } else {
+                    order.quantity / per_unit
+                };
+                let signed_delta = match order.side {
+                    poise_core::types::Side::Buy => delta,
+                    poise_core::types::Side::Sell => -delta,
+                };
+                poise_core::types::Exposure(track.current_exposure.0 + signed_delta)
+            });
+            track.executor_state.active_round = Some(crate::runtime::ExecutionRound {
+                target_exposure: inferred_target,
+                mode: track.executor_state.diagnostics.mode.clone(),
+                started_at: track.executor_state.stats.started_at,
             });
         }
         track.executor_state.slots.insert(
@@ -1108,12 +1119,23 @@ mod tests {
             .slots
             .retain(|slot| slot.slot != OrderSlot::new(slot_name));
         if track.executor_state.active_round.is_none() {
-            track.executor_state.active_round = track.desired_exposure.clone().map(|target_exposure| {
-                crate::runtime::ExecutionRound {
-                    target_exposure,
-                    mode: track.executor_state.diagnostics.mode.clone(),
-                    started_at: track.executor_state.stats.started_at,
-                }
+            let inferred_target = track.desired_exposure.clone().unwrap_or_else(|| {
+                let per_unit = track.config.base_qty_per_unit();
+                let delta = if per_unit <= f64::EPSILON {
+                    0.0
+                } else {
+                    order.quantity / per_unit
+                };
+                let signed_delta = match order.side {
+                    poise_core::types::Side::Buy => delta,
+                    poise_core::types::Side::Sell => -delta,
+                };
+                poise_core::types::Exposure(track.current_exposure.0 + signed_delta)
+            });
+            track.executor_state.active_round = Some(crate::runtime::ExecutionRound {
+                target_exposure: inferred_target,
+                mode: track.executor_state.diagnostics.mode.clone(),
+                started_at: track.executor_state.stats.started_at,
             });
         }
         track.executor_state.slots.push(ExecutionSlot {
@@ -1722,7 +1744,7 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Paused;
         track.current_exposure = poise_core::types::Exposure(2.0);
-        track.desired_exposure = Some(poise_core::types::Exposure(4.0));
+        track.desired_exposure = Some(poise_core::types::Exposure(6.0));
 
         let transition = manager
             .observe(
@@ -2135,7 +2157,7 @@ mod tests {
             transition.snapshot.replacement_gate_reason,
             Some(ReplacementGateReason::ImprovementBelowThreshold {
                 improvement_bps: 10.0,
-                threshold_bps: 11.0,
+                threshold_bps: 21.0,
             })
         );
         assert!(transition.events.iter().any(|event| matches!(
@@ -2147,7 +2169,7 @@ mod tests {
                         threshold_bps,
                     },
             } if (*improvement_bps - 10.0).abs() < f64::EPSILON
-                && (*threshold_bps - 11.0).abs() < f64::EPSILON
+                && (*threshold_bps - 21.0).abs() < f64::EPSILON
         )));
     }
 
@@ -2581,7 +2603,7 @@ mod tests {
         let mut manager = test_manager_with_cached_price(95.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
-        track.desired_exposure = Some(poise_core::types::Exposure(4.0));
+        track.desired_exposure = Some(poise_core::types::Exposure(6.0));
         seed_executor_slot(
             track,
             working_order(
@@ -2760,8 +2782,7 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         };
-        let expected_target = poise_core::strategy::target_exposure(94.99, &track.config);
-        track.desired_exposure = Some(expected_target.clone());
+        track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
             track,
             working_order(
@@ -2791,7 +2812,6 @@ mod tests {
                 None,
             )
             .unwrap();
-
         let executor::SubmitRecoveryResolution::Proceed {
             target_exposure, ..
         } = recovery.resolution
@@ -2859,7 +2879,6 @@ mod tests {
                 None,
             )
             .unwrap();
-
         let executor::SubmitRecoveryResolution::Proceed {
             target_exposure, ..
         } = recovery.resolution

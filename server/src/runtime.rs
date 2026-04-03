@@ -1505,6 +1505,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active() {
+        let clock = Arc::new(MutableClock(Arc::new(Mutex::new(test_server_time()))));
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.desired_exposure = Some(Exposure(2.0));
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
+            Some(snapshot),
+            btc_position(2.0, 0.0),
+            vec![],
+            test_budget(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            clock.clone() as Arc<dyn ClockPort>,
+        )
+        .await;
+        let worker = EffectWorker::new(
+            fixture.state.clone(),
+            fixture.exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let first = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 96.5)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first.effects.as_slice(),
+            [ExecutionAction::SubmitOrder { .. }]
+        ));
+        worker.run_once().await.unwrap();
+
+        clock.set(test_server_time() + chrono::Duration::seconds(70));
+        let second = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 96.4)
+            .await
+            .unwrap();
+        assert!(matches!(
+            second.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { .. },
+                ExecutionAction::SubmitOrder { .. }
+            ]
+        ));
+        worker.run_once().await.unwrap();
+
+        clock.set(test_server_time() + chrono::Duration::seconds(71));
+        let third = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 96.35)
+            .await
+            .unwrap();
+        assert_eq!(
+            third.effects,
+            vec![ExecutionAction::NoOp],
+            "fresh replacement should not trigger another replacement on the next small drift"
+        );
+        assert_eq!(fixture.exchange.submitted_orders.lock().unwrap().len(), 2);
+        assert_eq!(fixture.exchange.canceled_order_ids.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn effect_worker_restores_pending_effect_after_restart() {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 

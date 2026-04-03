@@ -305,6 +305,159 @@ mod tests {
     }
 
     #[test]
+    fn passive_mode_keeps_current_working_order_under_small_price_drift() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let mut existing_state = inventory_core_state(
+            now,
+            Exposure(1.0),
+            Exposure(1.0),
+            Side::Buy,
+            3.75,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
+        existing_state.diagnostics.last_reprice_at = Some(now - Duration::seconds(30));
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(1.0),
+            94.9,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert_eq!(plan.state.diagnostics.mode, ExecutionMode::Passive);
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+    }
+
+    #[test]
+    fn rebalance_mode_replaces_stale_working_order_sooner_than_passive() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let mut passive_state = inventory_core_state(
+            now,
+            Exposure(1.0),
+            Exposure(1.0),
+            Side::Buy,
+            3.75,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
+        passive_state.diagnostics.gap_started_at = Some(now - Duration::seconds(30));
+        passive_state.diagnostics.last_reprice_at = Some(now - Duration::seconds(70));
+
+        let passive_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(1.0),
+            94.9,
+            Some(&passive_state),
+            now,
+        ));
+        assert_eq!(passive_plan.state.diagnostics.mode, ExecutionMode::Passive);
+        assert_eq!(passive_plan.effects, vec![ExecutionAction::NoOp]);
+
+        let mut rebalance_state = passive_state.clone();
+        rebalance_state.diagnostics.gap_started_at = Some(now - Duration::seconds(90));
+
+        let rebalance_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(1.0),
+            94.9,
+            Some(&rebalance_state),
+            now,
+        ));
+
+        assert_eq!(rebalance_plan.state.diagnostics.mode, ExecutionMode::Rebalance);
+        assert!(matches!(
+            rebalance_plan.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder { .. }
+            ] if order_id == "order-1"
+        ));
+    }
+
+    #[test]
+    fn catch_up_mode_uses_most_aggressive_limit_replacement_policy() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let mut rebalance_state = inventory_core_state(
+            now,
+            Exposure(1.0),
+            Exposure(1.0),
+            Side::Buy,
+            3.75,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
+        rebalance_state.diagnostics.gap_started_at = Some(now - Duration::seconds(90));
+        rebalance_state.diagnostics.last_reprice_at = Some(now - Duration::seconds(25));
+
+        let rebalance_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(1.0),
+            94.9,
+            Some(&rebalance_state),
+            now,
+        ));
+        assert_eq!(rebalance_plan.state.diagnostics.mode, ExecutionMode::Rebalance);
+        assert_eq!(rebalance_plan.effects, vec![ExecutionAction::NoOp]);
+
+        let mut catch_up_state = rebalance_state.clone();
+        catch_up_state.diagnostics.gap_started_at = Some(now - Duration::seconds(240));
+
+        let catch_up_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(1.0),
+            94.9,
+            Some(&catch_up_state),
+            now,
+        ));
+
+        assert_eq!(catch_up_plan.state.diagnostics.mode, ExecutionMode::CatchUp);
+        assert!(matches!(
+            catch_up_plan.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder { .. }
+            ] if order_id == "order-1"
+        ));
+    }
+
+    #[test]
     fn round_policy_starts_execution_when_gap_requires_action() {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
