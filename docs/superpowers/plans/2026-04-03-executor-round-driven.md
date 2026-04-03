@@ -429,8 +429,10 @@ Commit:
 **Files:**
 - Modify: `docs/superpowers/specs/2026-04-03-executor-round-driven-design.md`
 - Modify: `docs/superpowers/plans/2026-04-03-executor-round-driven.md`
+- Modify: `server/src/write_service.rs`
+- Modify: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 跑最终回归**
+- [x] **Step 1: 跑最终回归**
 
 Run:
 
@@ -445,7 +447,7 @@ Expected:
 - engine / server / storage / tui 相关 crate 保持通过
 - workspace 构建通过
 
-- [ ] **Step 2: 回写文档**
+- [x] **Step 2: 回写文档**
 
 要求：
 
@@ -453,9 +455,17 @@ Expected:
 - 若快照兼容或对外投影策略有实现约束，也回写到 spec
 - 在本 plan 中为已完成 task 勾选并记录 commit SHA
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-03-executor-round-driven-design.md docs/superpowers/plans/2026-04-03-executor-round-driven.md
 git commit -m "docs: finalize executor round-driven implementation plan notes"
 ```
+
+Regression fix commit:
+
+- `b1e1587` `test(server): align regression fixtures with round-driven state`
+
+Commit:
+
+- `PENDING` `docs: finalize executor round-driven implementation plan notes`
