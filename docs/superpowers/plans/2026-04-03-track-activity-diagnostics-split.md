@@ -293,7 +293,7 @@ Commit: `c7d65c7`
 - Test: `tui/src/main.rs`
 - Test: `tui/src/views/instance.rs`
 
-- [ ] **Step 1: 写失败测试，覆盖 TUI 可解析 diagnostics 响应**
+- [x] **Step 1: 写失败测试，覆盖 TUI 可解析 diagnostics 响应**
 
 在 `tui/src/protocol.rs` 或 `tui/src/api_client.rs` 新增测试：
 
@@ -309,7 +309,7 @@ fn deserializes_track_diagnostics_view_fixture() {
 }
 ```
 
-- [ ] **Step 2: 写失败测试，覆盖 instance 视图默认不显示 diagnostics，但 debug 模式显示**
+- [x] **Step 2: 写失败测试，覆盖 instance 视图默认不显示 diagnostics，但 debug 模式显示**
 
 在 `tui/src/views/instance.rs` 新增测试，要求：
 
@@ -317,20 +317,20 @@ fn deserializes_track_diagnostics_view_fixture() {
 - 打开 debug 视角后出现 `Diagnostics`
 - diagnostics 面板包含 `target exposure ...`
 
-- [ ] **Step 3: 写失败测试，覆盖切换 debug 后才触发 diagnostics HTTP 请求**
+- [x] **Step 3: 写失败测试，覆盖切换 debug 后才触发 diagnostics HTTP 请求**
 
 在 `tui/src/main.rs` 或 `tui/src/api_client.rs` 新增测试，要求：
 
 - 启动时不请求 `/debug/tracks/:id/diagnostics`
 - 触发 debug 动作后才请求该路径
 
-- [ ] **Step 4: 运行定向测试，确认当前 TUI 还没有 diagnostics 概念**
+- [x] **Step 4: 运行定向测试，确认当前 TUI 还没有 diagnostics 概念**
 
 Run: `cargo test -p poise-tui diagnostics -- --nocapture`
 
 Expected: FAIL，提示缺少 diagnostics 类型、fixture 或 UI 逻辑。
 
-- [ ] **Step 5: 在 TUI 协议与 API client 中补齐 diagnostics 请求**
+- [x] **Step 5: 在 TUI 协议与 API client 中补齐 diagnostics 请求**
 
 最小接口：
 
@@ -344,7 +344,7 @@ pub async fn get_track_diagnostics(&self, track_id: &str) -> Result<TrackDiagnos
 /debug/tracks/:id/diagnostics
 ```
 
-- [ ] **Step 6: 在 app 状态中加入显式 debug 视角与 diagnostics 缓存**
+- [x] **Step 6: 在 app 状态中加入显式 debug 视角与 diagnostics 缓存**
 
 要求：
 
@@ -352,7 +352,7 @@ pub async fn get_track_diagnostics(&self, track_id: &str) -> Result<TrackDiagnos
 - diagnostics 为空时不影响正常详情展示
 - 切换 track 时 debug 视角下重新按需拉取当前 track diagnostics
 
-- [ ] **Step 7: 在 input / main / instance view 中接入显式 debug 开关**
+- [x] **Step 7: 在 input / main / instance view 中接入显式 debug 开关**
 
 建议最小交互：
 
@@ -360,7 +360,7 @@ pub async fn get_track_diagnostics(&self, track_id: &str) -> Result<TrackDiagnos
 - 第一次打开 debug 视角时加载 diagnostics
 - `Instance` 页底部新增 `Diagnostics` 面板，仅在 debug 视角下渲染
 
-- [ ] **Step 8: 运行定向测试，确认 TUI 只在 debug 视角显示 diagnostics**
+- [x] **Step 8: 运行定向测试，确认 TUI 只在 debug 视角显示 diagnostics**
 
 Run: `cargo test -p poise-tui deserializes_track_diagnostics_view_fixture -- --exact`
 
@@ -373,6 +373,16 @@ Expected: PASS，默认视图仍只显示 Activity。
 Run: `cargo test -p poise-tui diagnostics -- --nocapture`
 
 Expected: PASS，覆盖 debug 视角 diagnostics 加载与渲染。
+
+Result:
+
+- `cargo test -p poise-tui diagnostics -- --nocapture` → 初次编译失败，缺少 `Action::ToggleDiagnostics`、`App::toggle_debug_diagnostics`、`ApiClient::get_track_diagnostics`；实现后通过，`6 passed`
+- `cargo test -p poise-tui deserializes_track_diagnostics_view_fixture -- --exact` → 因测试过滤只命中 `0 tests`
+- `cargo test -p poise-tui protocol::tests::deserializes_track_diagnostics_view_fixture -- --exact` → 通过，`1 passed`
+- `cargo test -p poise-tui renders_grid_detail_execution_activity_and_commands -- --exact` → 因测试过滤只命中 `0 tests`
+- `cargo test -p poise-tui views::instance::tests::renders_grid_detail_execution_activity_and_commands -- --exact` → 调整默认视图断言后通过，`1 passed`
+
+Commit: `47fe47e`
 
 ### Task 4: 全链路验收与文档同步
 
