@@ -613,7 +613,9 @@ mod tests {
                 execution_status: detail.execution.execution_status,
                 active_slot_count: detail.execution.active_slot_count,
             },
-            statistics: detail.statistics.clone(),
+            statistics: crate::protocol::TrackListStatisticsView {
+                total_pnl: detail.statistics.total_pnl,
+            },
         }
     }
 

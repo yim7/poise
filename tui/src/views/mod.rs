@@ -8,7 +8,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, View};
-use crate::protocol::ExecutionStatusView;
 use crate::theme::Theme;
 
 const KEY_HINTS: &str = "q quit | arrows/jk move | Enter details | Esc back | ? help | p/r command";
@@ -47,20 +46,21 @@ fn render_status_line(app: &App) -> Line<'static> {
         spans.push(Span::styled(message.to_string(), Theme::status_value()));
     }
 
+    spans.push(Span::raw(" | "));
+    spans.push(Span::styled(
+        view_label(app.current_view),
+        Theme::status_context(),
+    ));
+
     if let Some(grid) = app.selected_grid() {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
-            format!(
-                "{} | {} / {}",
-                view_label(app.current_view),
-                grid.id,
-                grid.instrument.symbol
-            ),
+            format!("{} / {}", grid.id, grid.instrument.symbol),
             Theme::status_context(),
         ));
     }
 
-    if selected_execution_needs_attention(app) {
+    if app.selected_execution_status() == Some(crate::protocol::ExecutionStatusView::AttentionRequired) {
         if let Some(track_id) = app.selected_track_id() {
             spans.push(Span::raw(" | "));
             spans.push(Span::styled(
@@ -72,18 +72,6 @@ fn render_status_line(app: &App) -> Line<'static> {
 
     Line::from(spans)
 }
-
-fn selected_execution_needs_attention(app: &App) -> bool {
-    app.current_track_detail()
-        .map(|detail| detail.execution.execution_status == ExecutionStatusView::AttentionRequired)
-        .or_else(|| {
-            app.selected_grid().map(|grid| {
-                grid.execution.execution_status == ExecutionStatusView::AttentionRequired
-            })
-        })
-        .unwrap_or(false)
-}
-
 fn view_label(view: View) -> &'static str {
     match view {
         View::Dashboard => "dashboard",
@@ -145,5 +133,17 @@ mod tests {
 
         assert!(text.contains("websocket connected"));
         assert!(text.contains("q quit"));
+    }
+
+    #[test]
+    fn renders_view_context_even_without_selected_grid() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(vec![]);
+
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("dashboard"));
     }
 }

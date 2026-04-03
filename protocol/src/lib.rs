@@ -28,7 +28,7 @@ pub struct TrackListItemView {
     pub exposure: ExposureSummaryView,
     pub execution: ExecutionBadgeView,
     #[serde(default)]
-    pub statistics: GridStatisticsView,
+    pub statistics: TrackListStatisticsView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +48,11 @@ pub struct ExposureSummaryView {
     pub current: f64,
     #[serde(default)]
     pub target: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrackListStatisticsView {
+    pub total_pnl: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,7 +348,7 @@ mod tests {
                         "reference_price":64123.4,
                         "exposure":{"current":0.5,"target":0.75},
                         "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
-                        "statistics":{"total_pnl":1245.3,"realized_pnl":980.1}
+                        "statistics":{"total_pnl":1245.3}
                     }
                 ]
             }"#,
@@ -358,8 +363,8 @@ mod tests {
             Some(1245.3)
         );
         assert_eq!(
-            serialized["items"][0]["statistics"]["realized_pnl"].as_f64(),
-            Some(980.1)
+            serialized["items"][0]["statistics"].get("realized_pnl"),
+            None
         );
     }
 

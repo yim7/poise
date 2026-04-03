@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::protocol::{GridCommandType, TrackDetailView, TrackListItemView};
+use crate::protocol::{ExecutionStatusView, GridCommandType, TrackDetailView, TrackListItemView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -53,6 +53,15 @@ impl App {
         self.current_track
             .as_ref()
             .filter(|detail| self.selected_track_id() == Some(detail.identity.id.as_str()))
+    }
+
+    pub fn selected_execution_status(&self) -> Option<ExecutionStatusView> {
+        self.current_track_detail()
+            .map(|detail| detail.execution.execution_status)
+            .or_else(|| {
+                self.selected_grid()
+                    .map(|grid| grid.execution.execution_status)
+            })
     }
 
     pub fn select_next(&mut self) {
@@ -177,7 +186,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        ExecutionStateView, TrackDetailView, TrackListItemView, TrackStreamEvent,
+        ExecutionStateView, ExecutionStatusView, TrackDetailView, TrackListItemView, TrackStreamEvent,
         TrackStreamPayload,
     };
 
@@ -285,6 +294,36 @@ mod tests {
         assert_eq!(
             app.current_track_detail().unwrap().status.reference_price,
             Some(101.5)
+        );
+    }
+
+    #[test]
+    fn selected_execution_status_prefers_current_detail_and_falls_back_to_grid() {
+        let mut app = App::new(track_list_items());
+        app.grids[0].execution.execution_status = ExecutionStatusView::Normal;
+
+        assert_eq!(
+            app.selected_execution_status(),
+            Some(ExecutionStatusView::Normal)
+        );
+
+        let mut detail = detail_view("btc-core");
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail);
+
+        assert_eq!(
+            app.selected_execution_status(),
+            Some(ExecutionStatusView::AttentionRequired)
+        );
+
+        app.select_next();
+        app.show_instance_for_selected();
+
+        assert_eq!(
+            app.selected_execution_status(),
+            Some(ExecutionStatusView::Normal)
         );
     }
 }

@@ -3,7 +3,8 @@ pub use poise_protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
     ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, GridStatisticsView,
     GridStatus, ReplacementGateView, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-    TrackListItemView, TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+    TrackListItemView, TrackListResponse, TrackListStatisticsView, TrackStreamEvent,
+    TrackStreamPayload,
 };
 
 #[cfg(test)]

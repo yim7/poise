@@ -10,7 +10,7 @@ use poise_protocol::{
     GridIdentityView, GridLifecycleView, GridMarketView, GridPositionView, GridStatisticsView,
     GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView, InstrumentView,
     OutOfBandPolicy as ProtocolPolicy, ReplacementGateView, ShapeFamily as ProtocolShapeFamily,
-    Side as ProtocolSide, TrackDetailView, TrackListItemView,
+    Side as ProtocolSide, TrackDetailView, TrackListItemView, TrackListStatisticsView,
 };
 
 use crate::read_model::TrackReadModel;
@@ -40,12 +40,8 @@ impl TrackProjector {
                 execution_status: project_execution_status(source),
                 active_slot_count: active_slot_count(source),
             },
-            statistics: GridStatisticsView {
+            statistics: TrackListStatisticsView {
                 total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
-                realized_pnl: source.realized_pnl_cumulative,
-                max_inventory_gap_abs: 0.0,
-                max_gap_age_ms: 0,
-                stats_started_at: None,
             },
         }
     }
@@ -421,7 +417,7 @@ mod tests {
         assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
         assert_eq!(item_json["statistics"]["total_pnl"].as_f64(), Some(1245.3));
-        assert_eq!(item_json["statistics"]["realized_pnl"].as_f64(), Some(980.1));
+        assert_eq!(item_json["statistics"].get("realized_pnl"), None);
 
         let mut anomaly_source = source_with_submitting_effect();
         anomaly_source.has_recovery_anomaly = true;
