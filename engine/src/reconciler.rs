@@ -183,10 +183,10 @@ fn account_capacity_denial_reason(
         );
     }
 
-    if let Some(max_increase_notional) = constraint.max_increase_notional {
-        if required_increase_notional > max_increase_notional + f64::EPSILON {
-            return Some("insufficient account margin".to_string());
-        }
+    if let Some(max_increase_notional) = constraint.max_increase_notional
+        && required_increase_notional > max_increase_notional + f64::EPSILON
+    {
+        return Some("insufficient account margin".to_string());
     }
 
     None

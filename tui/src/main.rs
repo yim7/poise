@@ -383,7 +383,7 @@ async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Resu
 async fn handle_ws_event(app: &mut App, event: TrackStreamEvent) {
     match event.payload {
         TrackStreamPayload::TrackListItemChanged { item } => app.apply_track_list_item(item),
-        TrackStreamPayload::TrackDetailChanged { detail } => app.apply_track_detail(detail),
+        TrackStreamPayload::TrackDetailChanged { detail } => app.apply_track_detail(*detail),
     }
 }
 
@@ -435,14 +435,13 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
 
     let response = client.list_tracks().await?;
     let mut refreshed = App::new(response.items);
-    if let Some(selected_track_id) = selected_track_id {
-        if let Some(index) = refreshed
+    if let Some(selected_track_id) = selected_track_id
+        && let Some(index) = refreshed
             .grids
             .iter()
             .position(|grid| grid.id == selected_track_id)
-        {
-            refreshed.selected_index = index;
-        }
+    {
+        refreshed.selected_index = index;
     }
 
     if let Some(track_id) = refreshed.selected_track_id().map(ToOwned::to_owned) {
@@ -1017,14 +1016,18 @@ mod tests {
         sender
             .send(TrackStreamEvent {
                 track_id: BTC_GRID_ID.into(),
-                payload: TrackStreamPayload::TrackDetailChanged { detail: first },
+                payload: TrackStreamPayload::TrackDetailChanged {
+                    detail: Box::new(first),
+                },
             })
             .await
             .unwrap();
         sender
             .send(TrackStreamEvent {
                 track_id: BTC_GRID_ID.into(),
-                payload: TrackStreamPayload::TrackDetailChanged { detail: second },
+                payload: TrackStreamPayload::TrackDetailChanged {
+                    detail: Box::new(second),
+                },
             })
             .await
             .unwrap();

@@ -1524,7 +1524,7 @@ mod tests {
 
     #[tokio::test]
     async fn restarted_pending_submit_with_matching_live_order_is_recovered_without_duplicate_submit()
-    {
+     {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
         fixture
@@ -1691,13 +1691,9 @@ mod tests {
             let persistence = Arc::clone(&persistence);
             let failed_effect_id = failed_effect_id.clone();
             async move {
-                persistence
-                    .all_effects()
-                    .await
-                    .into_iter()
-                    .any(|effect| {
-                        effect.effect_id == failed_effect_id && effect.status == EffectStatus::Failed
-                    })
+                persistence.all_effects().await.into_iter().any(|effect| {
+                    effect.effect_id == failed_effect_id && effect.status == EffectStatus::Failed
+                })
             }
         })
         .await;
@@ -1790,14 +1786,10 @@ mod tests {
         wait_until_async(|| {
             let persistence = Arc::clone(&persistence);
             async move {
-                persistence
-                    .all_effects()
-                    .await
-                    .into_iter()
-                    .any(|effect| {
-                        effect.effect_id == "BTCUSDT:recovery:0"
-                            && effect.status == EffectStatus::Superseded
-                    })
+                persistence.all_effects().await.into_iter().any(|effect| {
+                    effect.effect_id == "BTCUSDT:recovery:0"
+                        && effect.status == EffectStatus::Superseded
+                })
             }
         })
         .await;
@@ -1890,14 +1882,10 @@ mod tests {
         wait_until_async(|| {
             let persistence = Arc::clone(&persistence);
             async move {
-                persistence
-                    .all_effects()
-                    .await
-                    .into_iter()
-                    .any(|effect| {
-                        effect.effect_id == "BTCUSDT:recovery:0"
-                            && effect.status == EffectStatus::Superseded
-                    })
+                persistence.all_effects().await.into_iter().any(|effect| {
+                    effect.effect_id == "BTCUSDT:recovery:0"
+                        && effect.status == EffectStatus::Superseded
+                })
             }
         })
         .await;
@@ -4388,7 +4376,15 @@ mod tests {
             .await;
 
         timeout(Duration::from_millis(800), async {
-            wait_until(|| fixture.exchange.canceled_order_ids.lock().unwrap().len() >= 1).await;
+            wait_until(|| {
+                !fixture
+                    .exchange
+                    .canceled_order_ids
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            })
+            .await;
         })
         .await
         .expect("unknown live order should still be auto-canceled with pending submit effect");

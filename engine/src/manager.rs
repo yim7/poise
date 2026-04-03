@@ -515,11 +515,11 @@ impl TrackManager {
                 .tracks
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-            if let Some(state) = plan.resolution.state() {
-                if state != &track.executor_state {
-                    track.executor_state = state.clone();
-                    track.replacement_gate_reason = None;
-                }
+            if let Some(state) = plan.resolution.state()
+                && state != &track.executor_state
+            {
+                track.executor_state = state.clone();
+                track.replacement_gate_reason = None;
             }
         };
 
@@ -751,7 +751,7 @@ impl TrackManager {
             return Ok((vec![], vec![]));
         }
 
-        if matches!(self.tracks[&id].status, TrackStatus::Paused) {
+        if matches!(self.tracks[id].status, TrackStatus::Paused) {
             let track = self.tracks.get_mut(id).unwrap();
             track.reference_price = Some(reference_price);
             track.target_exposure = None;

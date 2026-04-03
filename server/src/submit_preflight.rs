@@ -79,7 +79,10 @@ impl SubmitPreflight {
 
     #[cfg(test)]
     pub async fn is_attempted(&self, effect_id: &str) -> bool {
-        self.attempted_submit_effects.lock().await.contains(effect_id)
+        self.attempted_submit_effects
+            .lock()
+            .await
+            .contains(effect_id)
     }
 }
 

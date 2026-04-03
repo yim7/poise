@@ -201,7 +201,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let next_target_exposure = input
         .current_plan
         .as_ref()
-        .and_then(|_| current_plan_submit)
+        .and(current_plan_submit)
         .map(|submit| submit.target_exposure.clone())
         .unwrap_or_else(|| input.target_exposure.clone());
 

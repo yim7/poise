@@ -276,7 +276,7 @@ mod tests {
             panic!("unexpected payload variant");
         };
 
-        app.apply_track_detail(detail);
+        app.apply_track_detail(*detail);
 
         assert_eq!(
             app.current_track_detail().unwrap().status.reference_price,

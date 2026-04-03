@@ -11,10 +11,7 @@ use crate::protocol::{
 };
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(detail) = app
-        .current_track_detail()
-        .or_else(|| app.current_track.as_ref())
-    else {
+    let Some(detail) = app.current_track_detail().or(app.current_track.as_ref()) else {
         let empty = Paragraph::new("No track detail loaded")
             .block(Block::default().title("Instance").borders(Borders::ALL));
         frame.render_widget(empty, area);

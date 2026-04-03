@@ -502,9 +502,7 @@ fn replacement_gate_reason_for_working_order(
     reference_price: f64,
     rules: &ExchangeRules,
 ) -> Option<ReplacementGateReason> {
-    if current_order.order_id.is_none() {
-        return None;
-    }
+    current_order.order_id.as_ref()?;
     if current_order.side != desired_order.side {
         return None;
     }

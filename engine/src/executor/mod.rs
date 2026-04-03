@@ -74,6 +74,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submit_intent_input<'a>(
         track_id: &'a TrackId,
         instrument: &'a Instrument,
@@ -98,6 +99,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn executor_input<'a>(
         track_id: &'a TrackId,
         instrument: &'a Instrument,

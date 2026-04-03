@@ -96,10 +96,6 @@ struct BackupFile {
 }
 
 impl PreparedStateStore {
-    pub fn state_repository(&self) -> Arc<dyn StateRepositoryPort> {
-        self.repositories.state_repository()
-    }
-
     pub async fn run_startup<T, F, Fut>(mut self, startup: F) -> Result<T>
     where
         F: FnOnce(StateRepositories) -> Fut,
@@ -397,7 +393,7 @@ mod tests {
         let prepared = prepare_state_repository(&config, StateBootstrapMode::Strict)
             .await
             .unwrap();
-        let _ = prepared.state_repository();
+        let _ = prepared.repositories.state_repository();
     }
 
     #[tokio::test]
@@ -433,6 +429,7 @@ mod tests {
             .unwrap();
 
         let loaded = prepared
+            .repositories
             .state_repository()
             .load_track_state("btc-core")
             .await
@@ -498,6 +495,7 @@ mod tests {
             .unwrap();
 
         let loaded = prepared
+            .repositories
             .state_repository()
             .load_track_state("btc-core")
             .await

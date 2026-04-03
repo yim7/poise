@@ -72,7 +72,9 @@ async fn push_projected_updates(
         },
         TrackStreamEvent {
             track_id: track_id_text,
-            payload: TrackStreamPayload::TrackDetailChanged { detail },
+            payload: TrackStreamPayload::TrackDetailChanged {
+                detail: Box::new(detail),
+            },
         },
     ];
 
@@ -552,19 +554,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .extend(persisted_effects.iter().cloned());
-            if let Some(effect_status_update) = effect_status_update {
-                if let Some(effect) = self
+            if let Some(effect_status_update) = effect_status_update
+                && let Some(effect) = self
                     .effects
                     .lock()
                     .unwrap()
                     .iter_mut()
                     .find(|effect| effect.effect_id == effect_status_update.effect_id)
-                {
-                    effect.status = effect_status_update.status;
-                    effect.attempt_count += effect_status_update.attempt_delta;
-                    effect.last_error = effect_status_update.last_error.clone();
-                    effect.updated_at = now;
-                }
+            {
+                effect.status = effect_status_update.status;
+                effect.attempt_count += effect_status_update.attempt_delta;
+                effect.last_error = effect_status_update.last_error.clone();
+                effect.updated_at = now;
             }
 
             Ok(poise_engine::ports::CommittedTrackWrite {

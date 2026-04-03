@@ -149,17 +149,12 @@ pub struct ExecutionSlotOrderView {
     pub quantity: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatusView {
+    #[default]
     Normal,
     AttentionRequired,
-}
-
-impl Default for ExecutionStatusView {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,7 +243,7 @@ pub struct TrackStreamEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TrackStreamPayload {
     TrackListItemChanged { item: TrackListItemView },
-    TrackDetailChanged { detail: TrackDetailView },
+    TrackDetailChanged { detail: Box<TrackDetailView> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,11 +270,63 @@ pub enum Side {
     Sell,
 }
 
+impl fmt::Display for GridStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::WaitingMarketData => "waiting",
+            Self::Active => "active",
+            Self::Frozen => "frozen",
+            Self::ReducingOnly => "reducing_only",
+            Self::Holding => "holding",
+            Self::Terminated => "terminated",
+            Self::Paused => "paused",
+        };
+
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for ShapeFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Linear => "linear",
+            Self::Convex => "convex",
+            Self::Concave => "concave",
+        };
+
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for OutOfBandPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Freeze => "freeze",
+            Self::ReduceOnly => "reduce_only",
+            Self::Terminate => "terminate",
+            Self::Hold => "hold",
+        };
+
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Buy => "buy",
+            Self::Sell => "sell",
+        };
+
+        f.write_str(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackListResponse,
+        TrackStreamEvent, TrackStreamPayload,
     };
 
     #[test]
@@ -341,7 +388,6 @@ mod tests {
         assert_eq!(event.track_id, "btc-core");
         match event.payload {
             TrackStreamPayload::TrackDetailChanged { detail } => {
-                let detail: TrackDetailView = detail;
                 assert_eq!(detail.identity.id, "btc-core");
             }
             _ => panic!("unexpected payload variant"),
@@ -353,57 +399,5 @@ mod tests {
         let request: TrackCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
 
         assert_eq!(request.command, GridCommandType::Pause);
-    }
-}
-
-impl fmt::Display for GridStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::WaitingMarketData => "waiting",
-            Self::Active => "active",
-            Self::Frozen => "frozen",
-            Self::ReducingOnly => "reducing_only",
-            Self::Holding => "holding",
-            Self::Terminated => "terminated",
-            Self::Paused => "paused",
-        };
-
-        f.write_str(value)
-    }
-}
-
-impl fmt::Display for ShapeFamily {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Linear => "linear",
-            Self::Convex => "convex",
-            Self::Concave => "concave",
-        };
-
-        f.write_str(value)
-    }
-}
-
-impl fmt::Display for OutOfBandPolicy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Freeze => "freeze",
-            Self::ReduceOnly => "reduce_only",
-            Self::Terminate => "terminate",
-            Self::Hold => "hold",
-        };
-
-        f.write_str(value)
-    }
-}
-
-impl fmt::Display for Side {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Buy => "buy",
-            Self::Sell => "sell",
-        };
-
-        f.write_str(value)
     }
 }

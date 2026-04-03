@@ -1239,7 +1239,12 @@ mod tests {
         };
 
         let first_btc = storage
-            .save_transition("btc-core", &btc_snapshot, &[], &[submit_effect.clone()])
+            .save_transition(
+                "btc-core",
+                &btc_snapshot,
+                &[],
+                std::slice::from_ref(&submit_effect),
+            )
             .await
             .unwrap()
             .effects

@@ -74,7 +74,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "track_snapshots", "market_data_stale_since", "TEXT")?;
 
     ensure_columns_present(
-        &conn,
+        conn,
         "track_snapshots",
         &[
             "track_id",
@@ -98,9 +98,9 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "updated_at",
         ],
     )?;
-    ensure_columns_present(&conn, "track_events", &["track_id"])?;
+    ensure_columns_present(conn, "track_events", &["track_id"])?;
     ensure_columns_present(
-        &conn,
+        conn,
         "track_effects",
         &[
             "effect_id",
@@ -116,7 +116,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         ],
     )?;
     ensure_columns_present(
-        &conn,
+        conn,
         "follow_up_retirements",
         &[
             "track_id",

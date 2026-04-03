@@ -342,6 +342,46 @@ pub fn clear_all_working_orders(previous_state: &ExecutorState) -> ExecutorState
     state
 }
 
+pub(super) fn submit_pending_slot(
+    desired_order: &DesiredOrder,
+    request: &OrderRequest,
+) -> ExecutionSlot {
+    ExecutionSlot {
+        slot: desired_order.slot.clone(),
+        state: SlotState::SubmitPending,
+        working_order: Some(WorkingOrder {
+            order_id: None,
+            client_order_id: request.client_order_id.clone(),
+            side: desired_order.side,
+            price: desired_order.price,
+            quantity: desired_order.quantity,
+            target_exposure: desired_order.target_exposure.clone(),
+            status: OrderStatus::Submitting,
+            role: desired_order.role.clone(),
+        }),
+    }
+}
+
+pub(super) fn target_exposure_reached(
+    current_exposure: &poise_core::types::Exposure,
+    target_exposure: &poise_core::types::Exposure,
+) -> bool {
+    let delta = target_exposure.0 - current_exposure.0;
+    if delta.abs() <= f64::EPSILON {
+        return true;
+    }
+
+    if target_exposure.0.abs() <= f64::EPSILON {
+        return current_exposure.0.abs() <= f64::EPSILON;
+    }
+
+    if target_exposure.0 >= 0.0 {
+        current_exposure.0 >= target_exposure.0
+    } else {
+        current_exposure.0 <= target_exposure.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -574,45 +614,5 @@ mod tests {
             late_terminal.absorb_result,
             OrderUpdateAbsorbResult::Applied
         );
-    }
-}
-
-pub(super) fn submit_pending_slot(
-    desired_order: &DesiredOrder,
-    request: &OrderRequest,
-) -> ExecutionSlot {
-    ExecutionSlot {
-        slot: desired_order.slot.clone(),
-        state: SlotState::SubmitPending,
-        working_order: Some(WorkingOrder {
-            order_id: None,
-            client_order_id: request.client_order_id.clone(),
-            side: desired_order.side,
-            price: desired_order.price,
-            quantity: desired_order.quantity,
-            target_exposure: desired_order.target_exposure.clone(),
-            status: OrderStatus::Submitting,
-            role: desired_order.role.clone(),
-        }),
-    }
-}
-
-pub(super) fn target_exposure_reached(
-    current_exposure: &poise_core::types::Exposure,
-    target_exposure: &poise_core::types::Exposure,
-) -> bool {
-    let delta = target_exposure.0 - current_exposure.0;
-    if delta.abs() <= f64::EPSILON {
-        return true;
-    }
-
-    if target_exposure.0.abs() <= f64::EPSILON {
-        return current_exposure.0.abs() <= f64::EPSILON;
-    }
-
-    if target_exposure.0 >= 0.0 {
-        current_exposure.0 >= target_exposure.0
-    } else {
-        current_exposure.0 <= target_exposure.0
     }
 }

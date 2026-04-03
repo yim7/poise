@@ -362,8 +362,8 @@ impl EffectWorker {
                         &instrument,
                     )
                     .await?;
-                    if let Cancellation::One { order_id, .. } = &cancellation {
-                        if let Err(retirement_error) = self
+                    if let Cancellation::One { order_id, .. } = &cancellation
+                        && let Err(retirement_error) = self
                             .state
                             .write_service
                             .request_follow_up_retirement(
@@ -375,13 +375,12 @@ impl EffectWorker {
                                 },
                             )
                             .await
-                        {
-                            tracing::warn!(
-                                track_id = %persisted.track_id.as_str(),
-                                order_id = %order_id,
-                                "failed to request follow-up retirement after unknown cancel outcome: {retirement_error}"
-                            );
-                        }
+                    {
+                        tracing::warn!(
+                            track_id = %persisted.track_id.as_str(),
+                            order_id = %order_id,
+                            "failed to request follow-up retirement after unknown cancel outcome: {retirement_error}"
+                        );
                     }
                 }
                 self.state
@@ -642,10 +641,12 @@ mod tests {
         );
         worker.run_once().await.unwrap();
 
-        assert!(!state
-            .submit_preflight
-            .is_attempted(&skipped_effect_id)
-            .await);
+        assert!(
+            !state
+                .submit_preflight
+                .is_attempted(&skipped_effect_id)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -653,12 +654,8 @@ mod tests {
         let preflight = SubmitPreflight::new();
         preflight.mark_submit_started("effect-1").await;
 
-        let started_decision = preflight
-            .decide("effect-1", "client-1")
-            .await;
-        let fresh_decision = preflight
-            .decide("effect-2", "client-2")
-            .await;
+        let started_decision = preflight.decide("effect-1", "client-1").await;
+        let fresh_decision = preflight.decide("effect-2", "client-2").await;
 
         assert_eq!(
             started_decision,
@@ -1057,7 +1054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_recovery_proceed_receipt_keeps_current_plan_target() {
+    async fn submit_recovery_proceed_keeps_active_pending_target_when_rounded_request_matches() {
         let repository = Arc::new(MemoryRepository::default());
         let exchange = Arc::new(FakeExchange::default());
         let config = TrackConfig {
@@ -1085,7 +1082,6 @@ mod tests {
             exchange_rules,
         )
         .await;
-        let expected_target = poise_core::strategy::target_exposure(94.99, &config);
         let snapshot = snapshot_with_submit_pending_order(
             94.99,
             config.clone(),
@@ -1149,7 +1145,7 @@ mod tests {
                 .first()
                 .and_then(|slot| slot.working_order.as_ref())
                 .map(|order| order.target_exposure.clone()),
-            Some(expected_target)
+            Some(Exposure(4.0))
         );
     }
 

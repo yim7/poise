@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
@@ -307,6 +310,7 @@ impl ServerPlatform {
     }
 }
 
+#[cfg(test)]
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     let parent = path
         .parent()
