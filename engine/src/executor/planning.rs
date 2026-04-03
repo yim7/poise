@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::ports::OrderRequest;
-use crate::runtime::{ExecutionSlot, ExecutorState, SlotState, WorkingOrder};
+use crate::runtime::{
+    ExecutionRound, ExecutionSlot, ExecutorDiagnostics, ExecutorState, SlotState, WorkingOrder,
+};
 use crate::track::{Instrument, TrackId};
 
 use super::round_policy::{
-    RoundDecision, evaluate_round_policy, round_policy_input_from_state,
+    RoundPolicyActiveRound, evaluate_round_policy, round_policy_input_from_state,
     round_policy_input_from_state_with_lifecycle,
 };
 use super::rebalance_trigger::{ActiveLifecycle, RebalanceTriggerDecision};
@@ -104,6 +106,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         &submit_intent.current_exposure,
         &submit_intent.target_exposure,
         executor_state,
+        None,
         submit_intent.min_rebalance_units,
         submit_intent.observed_at,
         Some(active_lifecycle),
@@ -118,25 +121,28 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
 
     ExecutorPlan {
         state: ExecutorState {
-            mode: round_decision.mode,
-            inventory_gap: round_decision.inventory_gap,
-            gap_started_at: round_decision.gap_started_at,
-            last_reprice_at: if effects.iter().any(|effect| {
-                matches!(
-                    effect,
-                    ExecutionAction::SubmitOrder { .. } | ExecutionAction::CancelOrder { .. }
-                )
-            }) {
-                Some(submit_intent.observed_at)
-            } else {
-                executor_state.and_then(|state| state.last_reprice_at)
+            active_round: round_decision.active_round,
+            diagnostics: ExecutorDiagnostics {
+                mode: round_decision.mode,
+                inventory_gap: round_decision.inventory_gap,
+                gap_started_at: round_decision.gap_started_at,
+                last_reprice_at: if effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        ExecutionAction::SubmitOrder { .. } | ExecutionAction::CancelOrder { .. }
+                    )
+                }) {
+                    Some(submit_intent.observed_at)
+                } else {
+                    executor_state.and_then(|state| state.diagnostics.last_reprice_at)
+                },
+                last_execution_reason: round_decision.last_execution_reason,
+                recovery_anomaly: None,
             },
             slots,
             recent_terminal_orders: executor_state
                 .map(|state| state.recent_terminal_orders.clone())
                 .unwrap_or_default(),
-            last_execution_reason: round_decision.last_execution_reason,
-            recovery_anomaly: None,
             stats: round_decision.stats,
         },
         desired_orders,
@@ -147,17 +153,23 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn current_submit_hint(input: SubmitIntentInput<'_>) -> Option<PendingSubmitHint> {
-    evaluate_submit_intent_with_active_lifecycle(input, ActiveLifecycle::none()).submit_hint
+    evaluate_submit_intent_with_active_lifecycle(input, ActiveLifecycle::none(), None).submit_hint
 }
 
 pub(super) fn evaluate_submit_intent_with_active_lifecycle(
     input: SubmitIntentInput<'_>,
     active_lifecycle: ActiveLifecycle<'_>,
+    active_round: Option<&ExecutionRound>,
 ) -> SubmitIntentEvaluation {
     let round_decision = evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
         &input.current_exposure,
         &input.target_exposure,
         None,
+        active_round.map(|round| RoundPolicyActiveRound {
+            target_exposure: &round.target_exposure,
+            mode: round.mode.clone(),
+            started_at: round.started_at,
+        }),
         input.min_rebalance_units,
         input.observed_at,
         Some(active_lifecycle),
@@ -195,14 +207,17 @@ pub fn refresh_state(
     ));
 
     ExecutorState {
-        mode: round_decision.mode,
-        inventory_gap: round_decision.inventory_gap,
-        gap_started_at: round_decision.gap_started_at,
-        last_reprice_at: previous_state.last_reprice_at,
+        active_round: round_decision.active_round,
+        diagnostics: ExecutorDiagnostics {
+            mode: round_decision.mode,
+            inventory_gap: round_decision.inventory_gap,
+            gap_started_at: round_decision.gap_started_at,
+            last_reprice_at: previous_state.diagnostics.last_reprice_at,
+            last_execution_reason: round_decision.last_execution_reason,
+            recovery_anomaly: previous_state.diagnostics.recovery_anomaly.clone(),
+        },
         slots: previous_state.slots.clone(),
         recent_terminal_orders: previous_state.recent_terminal_orders.clone(),
-        last_execution_reason: round_decision.last_execution_reason,
-        recovery_anomaly: previous_state.recovery_anomaly.clone(),
         stats: round_decision.stats,
     }
 }
@@ -225,12 +240,15 @@ pub(crate) fn round_policy_input_for_test<'a>(
 }
 
 #[cfg(test)]
-pub(crate) fn round_decision_for_test(input: ExecutorInput<'_>) -> RoundDecision {
+pub(crate) fn round_decision_for_test(
+    input: ExecutorInput<'_>,
+) -> super::round_policy::RoundDecision {
     let active_lifecycle = ActiveLifecycle::from_executor_state(input.executor_state);
     evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
         &input.submit_intent.current_exposure,
         &input.submit_intent.target_exposure,
         input.executor_state,
+        None,
         input.submit_intent.min_rebalance_units,
         input.submit_intent.observed_at,
         Some(active_lifecycle),

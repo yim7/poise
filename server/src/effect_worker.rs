@@ -528,6 +528,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn effect_worker_writeback_keeps_round_target_without_working_order_target_copy() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+        let expected_round_target = match transition.effects.as_slice() {
+            [TrackEffect::SubmitOrder {
+                target_exposure, ..
+            }] => target_exposure.clone(),
+            _ => panic!("expected a single submit effect"),
+        };
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        let manager_handle = state.write_service.manager();
+        let manager = manager_handle.read().await;
+        let snapshot = manager.snapshot("btc-core").unwrap();
+        let executor = serde_json::to_value(&snapshot).unwrap()["executor_state"]
+            .as_object()
+            .expect("executor state should serialize as an object")
+            .clone();
+        let active_round = executor
+            .get("active_round")
+            .and_then(|value| value.as_object())
+            .expect("receipt writeback should preserve active_round");
+        let working_order = executor["slots"][0]["working_order"]
+            .as_object()
+            .expect("working order should be present after receipt");
+
+        assert_eq!(
+            active_round["target_exposure"],
+            serde_json::json!(expected_round_target.0)
+        );
+        assert!(
+            !working_order.contains_key("target_exposure"),
+            "working order should not keep a target copy after writeback"
+        );
+    }
+
+    #[tokio::test]
     async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
         let repository = Arc::new(MemoryRepository::default());
         let exchange = Arc::new(FakeExchange::default());
@@ -1091,11 +1145,14 @@ mod tests {
                 side: Side::Buy,
                 price: 90.0,
                 quantity: 4.0,
-                target_exposure: Exposure(4.0),
                 status: OrderStatus::Submitting,
                 role: poise_engine::executor::OrderRole::IncreaseInventory,
             },
         );
+        let expected_round_target = snapshot
+            .desired_exposure
+            .clone()
+            .expect("snapshot should carry desired exposure");
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
@@ -1141,11 +1198,10 @@ mod tests {
         assert_eq!(
             snapshot
                 .executor_state
-                .slots
-                .first()
-                .and_then(|slot| slot.working_order.as_ref())
-                .map(|order| order.target_exposure.clone()),
-            Some(Exposure(4.0))
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(expected_round_target)
         );
     }
 
@@ -1274,7 +1330,7 @@ mod tests {
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(snapshot.current_exposure, Exposure(4.0));
         assert_eq!(snapshot.desired_exposure, Some(Exposure(4.0)));
-        assert!(snapshot.executor_state.recovery_anomaly.is_none());
+        assert!(snapshot.executor_state.diagnostics.recovery_anomaly.is_none());
 
         let effect = repository
             .list_all_effects()
@@ -1364,18 +1420,25 @@ mod tests {
             desired_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(6.0),
-                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
-                last_reprice_at: None,
+                active_round: Some(poise_engine::runtime::ExecutionRound {
+                    target_exposure: Exposure(6.0),
+                    mode: ExecutionMode::Passive,
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
+                }),
+                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(6.0),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                    recovery_anomaly: Some(RecoveryAnomaly::UnknownLiveOrder),
+                },
                 slots: vec![poise_engine::runtime::ExecutionSlot {
                     slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                     state: SlotState::Empty,
                     working_order: None,
                 }],
                 recent_terminal_orders: Vec::new(),
-                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-                recovery_anomaly: Some(RecoveryAnomaly::UnknownLiveOrder),
                 stats: ExecutionStats {
                     started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
                     max_inventory_gap_abs: Exposure(6.0),
@@ -1403,10 +1466,19 @@ mod tests {
             desired_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(4.0),
-                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
-                last_reprice_at: None,
+                active_round: Some(poise_engine::runtime::ExecutionRound {
+                    target_exposure: Exposure(6.0),
+                    mode: ExecutionMode::Passive,
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
+                }),
+                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(4.0),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                    recovery_anomaly: None,
+                },
                 slots: vec![poise_engine::runtime::ExecutionSlot {
                     slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                     state: SlotState::Working,
@@ -1416,14 +1488,11 @@ mod tests {
                         side: Side::Buy,
                         price: 95.0,
                         quantity: 15.0,
-                        target_exposure: Exposure(6.0),
                         status: OrderStatus::New,
                         role: poise_engine::executor::OrderRole::IncreaseInventory,
                     }),
                 }],
                 recent_terminal_orders: Vec::new(),
-                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-                recovery_anomaly: None,
                 stats: ExecutionStats {
                     started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
                     max_inventory_gap_abs: Exposure(4.0),
@@ -1458,18 +1527,25 @@ mod tests {
             )),
             manual_target_override: None,
             executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(order.target_exposure.0),
-                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
-                last_reprice_at: None,
+                active_round: Some(poise_engine::runtime::ExecutionRound {
+                    target_exposure: poise_core::strategy::target_exposure(reference_price, &config),
+                    mode: ExecutionMode::Passive,
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
+                }),
+                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(poise_core::strategy::target_exposure(reference_price, &config).0),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                    recovery_anomaly: None,
+                },
                 slots: vec![poise_engine::runtime::ExecutionSlot {
                     slot: poise_engine::executor::OrderSlot::new("inventory_core"),
                     state: SlotState::SubmitPending,
                     working_order: Some(order),
                 }],
                 recent_terminal_orders: Vec::new(),
-                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-                recovery_anomaly: None,
                 stats: ExecutionStats {
                     started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
                     max_inventory_gap_abs: Exposure(0.0),

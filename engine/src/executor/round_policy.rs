@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use poise_core::types::{Exposure, Side};
 
-use crate::runtime::{ExecutionStats, ExecutorState, SlotState};
+use crate::runtime::{ExecutionRound, ExecutionStats, ExecutorState, SlotState};
 
 use super::rebalance_trigger::{
     ActiveLifecycle, RebalanceTriggerDecision, RebalanceTriggerInput, evaluate_rebalance_trigger,
@@ -26,6 +26,7 @@ pub struct RoundPolicySlotSummary {
 pub struct RoundPolicyActiveRound<'a> {
     pub target_exposure: &'a Exposure,
     pub mode: ExecutionMode,
+    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,11 +50,12 @@ pub struct RoundPolicyInput<'a> {
     previous_inventory_gap: Option<Exposure>,
     previous_gap_started_at: Option<DateTime<Utc>>,
     previous_stats: Option<&'a ExecutionStats>,
-    legacy_active_lifecycle: ActiveLifecycle<'a>,
+    active_lifecycle: ActiveLifecycle<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundDecision {
+    pub active_round: Option<ExecutionRound>,
     pub lifecycle: RoundLifecycleDecision,
     pub(super) trigger_decision: RebalanceTriggerDecision,
     pub inventory_gap: Exposure,
@@ -74,6 +76,7 @@ pub fn round_policy_input_from_state<'a>(
         current_exposure,
         desired_exposure,
         previous_state,
+        None,
         min_rebalance_units,
         observed_at,
         None,
@@ -84,14 +87,23 @@ pub(super) fn round_policy_input_from_state_with_lifecycle<'a>(
     current_exposure: &'a Exposure,
     desired_exposure: &'a Exposure,
     previous_state: Option<&'a ExecutorState>,
+    active_round: Option<RoundPolicyActiveRound<'a>>,
     min_rebalance_units: f64,
     observed_at: DateTime<Utc>,
-    legacy_active_lifecycle: Option<ActiveLifecycle<'a>>,
+    active_lifecycle: Option<ActiveLifecycle<'a>>,
 ) -> RoundPolicyInput<'a> {
     RoundPolicyInput {
         current_exposure,
         desired_exposure,
-        active_round: None,
+        active_round: active_round.or_else(|| {
+            previous_state.and_then(|state| {
+                state.active_round.as_ref().map(|active_round| RoundPolicyActiveRound {
+                    target_exposure: &active_round.target_exposure,
+                    mode: active_round.mode.clone(),
+                    started_at: active_round.started_at,
+                })
+            })
+        }),
         slots: previous_state
             .map(|state| {
                 state
@@ -109,13 +121,13 @@ pub(super) fn round_policy_input_from_state_with_lifecycle<'a>(
             .unwrap_or_default(),
         observed_at,
         min_rebalance_units,
-        previous_mode: previous_state.map(|state| state.mode.clone()),
+        previous_mode: previous_state.map(|state| state.diagnostics.mode.clone()),
         previous_last_execution_reason: previous_state
-            .and_then(|state| state.last_execution_reason.clone()),
-        previous_inventory_gap: previous_state.map(|state| state.inventory_gap.clone()),
-        previous_gap_started_at: previous_state.and_then(|state| state.gap_started_at),
+            .and_then(|state| state.diagnostics.last_execution_reason.clone()),
+        previous_inventory_gap: previous_state.map(|state| state.diagnostics.inventory_gap.clone()),
+        previous_gap_started_at: previous_state.and_then(|state| state.diagnostics.gap_started_at),
         previous_stats: previous_state.map(|state| &state.stats),
-        legacy_active_lifecycle: legacy_active_lifecycle
+        active_lifecycle: active_lifecycle
             .unwrap_or_else(|| ActiveLifecycle::from_executor_state(previous_state)),
     }
 }
@@ -141,21 +153,42 @@ pub fn evaluate_round_policy(input: RoundPolicyInput<'_>) -> RoundDecision {
     let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
         current_exposure: input.current_exposure,
         latest_target_exposure: input.desired_exposure,
+        active_round_target_exposure: input.active_round.as_ref().map(|round| round.target_exposure),
         min_rebalance_units: input.min_rebalance_units,
-        active_lifecycle: input.legacy_active_lifecycle,
+        active_lifecycle: input.active_lifecycle,
     });
-    let has_active_round =
-        input.active_round.is_some() || input.legacy_active_lifecycle.slot().is_some();
+    let has_active_round = input.active_round.is_some();
     let lifecycle = match trigger_decision {
-        RebalanceTriggerDecision::PreserveActiveLifecycle => RoundLifecycleDecision::ContinueRound,
+        RebalanceTriggerDecision::PreserveActiveLifecycle if has_active_round => {
+            RoundLifecycleDecision::ContinueRound
+        }
+        RebalanceTriggerDecision::PreserveActiveLifecycle => RoundLifecycleDecision::StartRound,
         RebalanceTriggerDecision::TriggerFreshAction if has_active_round => {
             RoundLifecycleDecision::SwitchRound
         }
         RebalanceTriggerDecision::TriggerFreshAction => RoundLifecycleDecision::StartRound,
         RebalanceTriggerDecision::Suppress => RoundLifecycleDecision::FinishRound,
     };
+    let active_round = match lifecycle {
+        RoundLifecycleDecision::ContinueRound => input.active_round.map(|active_round| {
+            ExecutionRound {
+                target_exposure: active_round.target_exposure.clone(),
+                mode: mode.clone(),
+                started_at: active_round.started_at,
+            }
+        }),
+        RoundLifecycleDecision::StartRound | RoundLifecycleDecision::SwitchRound => {
+            Some(ExecutionRound {
+                target_exposure: input.desired_exposure.clone(),
+                mode: mode.clone(),
+                started_at: input.observed_at,
+            })
+        }
+        RoundLifecycleDecision::FinishRound => None,
+    };
 
     RoundDecision {
+        active_round,
         lifecycle,
         trigger_decision,
         inventory_gap,

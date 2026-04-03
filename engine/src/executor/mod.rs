@@ -138,10 +138,19 @@ mod tests {
         gap_started_at: Option<DateTime<Utc>>,
     ) -> ExecutorState {
         ExecutorState {
-            mode,
-            inventory_gap: Exposure(4.0),
-            gap_started_at,
-            last_reprice_at: None,
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: Exposure(4.0),
+                mode: mode.clone(),
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode,
+                inventory_gap: Exposure(4.0),
+                gap_started_at,
+                last_reprice_at: None,
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+            },
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::Working,
@@ -151,14 +160,11 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    target_exposure: Exposure(4.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
                 max_inventory_gap_abs: Exposure(4.0),
@@ -177,10 +183,51 @@ mod tests {
                 side: Side::Sell,
                 price: 96.0,
                 quantity: 12.0,
-                target_exposure: Exposure(2.0),
                 status: OrderStatus::PartiallyFilled,
                 role: OrderRole::DecreaseInventory,
             }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inventory_core_state(
+        now: DateTime<Utc>,
+        inventory_gap: Exposure,
+        round_target_exposure: Exposure,
+        side: Side,
+        quantity: f64,
+        status: OrderStatus,
+        role: OrderRole,
+    ) -> ExecutorState {
+        ExecutorState {
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: round_target_exposure,
+                mode: ExecutionMode::Passive,
+                started_at: now,
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap,
+                gap_started_at: Some(now),
+                last_reprice_at: None,
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+            },
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side,
+                    price: 95.0,
+                    quantity,
+                    status,
+                    role,
+                }),
+            }],
+            recent_terminal_orders: Vec::new(),
+            stats: ExecutionStats::new(now),
         }
     }
 
@@ -203,9 +250,9 @@ mod tests {
             None,
             now,
         ));
-        assert_eq!(passive.state.mode, ExecutionMode::Passive);
+        assert_eq!(passive.state.diagnostics.mode, ExecutionMode::Passive);
         assert_eq!(
-            passive.state.last_execution_reason,
+            passive.state.diagnostics.last_execution_reason,
             Some(ExecutionReason::GapEnteredPassive)
         );
 
@@ -224,9 +271,9 @@ mod tests {
             )),
             now,
         ));
-        assert_eq!(rebalance.state.mode, ExecutionMode::Rebalance);
+        assert_eq!(rebalance.state.diagnostics.mode, ExecutionMode::Rebalance);
         assert_eq!(
-            rebalance.state.last_execution_reason,
+            rebalance.state.diagnostics.last_execution_reason,
             Some(ExecutionReason::GapEscalatedToRebalance)
         );
 
@@ -245,14 +292,15 @@ mod tests {
             )),
             now,
         ));
-        assert_eq!(catch_up.state.mode, ExecutionMode::CatchUp);
+        assert_eq!(catch_up.state.diagnostics.mode, ExecutionMode::CatchUp);
         assert_eq!(
-            catch_up.state.last_execution_reason,
+            catch_up.state.diagnostics.last_execution_reason,
             Some(ExecutionReason::GapEscalatedToCatchUp)
         );
         assert_eq!(catch_up.desired_orders.len(), 1);
         assert!(
-            catch_up.state.stats.max_inventory_gap_abs.0 >= catch_up.state.inventory_gap.0.abs()
+            catch_up.state.stats.max_inventory_gap_abs.0
+                >= catch_up.state.diagnostics.inventory_gap.0.abs()
         );
     }
 
@@ -353,6 +401,131 @@ mod tests {
     }
 
     #[test]
+    fn planning_starts_active_round_when_execution_first_begins() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            now,
+        ));
+        let state_json = serde_json::to_value(&plan.state).unwrap();
+        let active_round = state_json["active_round"]
+            .as_object()
+            .expect("planning should start an active round");
+
+        assert_eq!(active_round["target_exposure"], serde_json::json!(4.0));
+    }
+
+    #[test]
+    fn refresh_state_preserves_active_round_when_only_desired_exposure_changes() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let initial_plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            now,
+        ));
+
+        let refreshed = refresh_state(
+            &initial_plan.state,
+            &Exposure(0.0),
+            &Exposure(4.2),
+            0.5,
+            now + Duration::seconds(30),
+        );
+        let refreshed_json = serde_json::to_value(&refreshed).unwrap();
+        let active_round = refreshed_json["active_round"]
+            .as_object()
+            .expect("refresh_state should keep the existing active round");
+
+        assert_eq!(active_round["target_exposure"], serde_json::json!(4.0));
+    }
+
+    #[test]
+    fn recovery_uses_active_round_target_when_receipt_and_live_order_are_replayed() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let planned = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            now,
+        ));
+        let submit_effect = planned
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                ExecutionAction::SubmitOrder { request, .. } => Some(request.clone()),
+                _ => None,
+            })
+            .expect("planning should emit a submit order");
+
+        let recovery = recover_working_orders(RecoveryInput {
+            current_exposure: &Exposure(0.0),
+            target_exposure: None,
+            min_rebalance_units: 0.5,
+            previous_state: Some(&planned.state),
+            live_orders: &[OrderObservation {
+                order_id: "order-1".into(),
+                client_order_id: submit_effect.client_order_id.clone(),
+                side: submit_effect.side,
+                price: submit_effect.price,
+                quantity: submit_effect.quantity,
+                realized_pnl: 0.0,
+                status: OrderStatus::New,
+            }],
+            pending_submit_hints: &[],
+            observed_at: now + Duration::seconds(1),
+        });
+        let RecoveryResolution::Rebuilt { state } = recovery else {
+            panic!("recovery should rebuild the working slot");
+        };
+        let state_json = serde_json::to_value(&state).unwrap();
+        let active_round = state_json["active_round"]
+            .as_object()
+            .expect("recovery should preserve active round");
+        let working_order = state_json["slots"][0]["working_order"]
+            .as_object()
+            .expect("rebuilt slot should keep working order");
+
+        assert_eq!(active_round["target_exposure"], serde_json::json!(4.0));
+        assert!(
+            !working_order.contains_key("target_exposure"),
+            "working order should not persist its own target copy"
+        );
+    }
+
+    #[test]
     fn cancel_plan_keeps_live_slot_until_cancel_effect_completes() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
@@ -418,30 +591,15 @@ mod tests {
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(0.8),
-            gap_started_at: Some(now),
-            last_reprice_at: None,
-            slots: vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("order-1".into()),
-                    client_order_id: "client-1".into(),
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 0.8,
-                    target_exposure: Exposure(2.8),
-                    status: OrderStatus::New,
-                    role: OrderRole::IncreaseInventory,
-                }),
-            }],
-            recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
-            stats: ExecutionStats::new(now),
-        };
+        let existing_state = inventory_core_state(
+            now,
+            Exposure(0.8),
+            Exposure(2.8),
+            Side::Buy,
+            0.8,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
 
         let plan = plan(executor_input(
             &track_id,
@@ -467,30 +625,15 @@ mod tests {
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(-0.8),
-            gap_started_at: Some(now),
-            last_reprice_at: None,
-            slots: vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("order-1".into()),
-                    client_order_id: "client-1".into(),
-                    side: Side::Sell,
-                    price: 95.0,
-                    quantity: 0.8,
-                    target_exposure: Exposure(0.2),
-                    status: OrderStatus::PartiallyFilled,
-                    role: OrderRole::DecreaseInventory,
-                }),
-            }],
-            recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
-            stats: ExecutionStats::new(now),
-        };
+        let existing_state = inventory_core_state(
+            now,
+            Exposure(-0.8),
+            Exposure(0.2),
+            Side::Sell,
+            0.8,
+            OrderStatus::PartiallyFilled,
+            OrderRole::DecreaseInventory,
+        );
 
         let plan = plan(executor_input(
             &track_id,
@@ -517,30 +660,15 @@ mod tests {
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(-1.0),
-            gap_started_at: Some(now),
-            last_reprice_at: None,
-            slots: vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("order-1".into()),
-                    client_order_id: "client-1".into(),
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 1.0,
-                    target_exposure: Exposure(4.0),
-                    status: OrderStatus::PartiallyFilled,
-                    role: OrderRole::IncreaseInventory,
-                }),
-            }],
-            recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
-            stats: ExecutionStats::new(now),
-        };
+        let existing_state = inventory_core_state(
+            now,
+            Exposure(-1.0),
+            Exposure(4.0),
+            Side::Buy,
+            1.0,
+            OrderStatus::PartiallyFilled,
+            OrderRole::IncreaseInventory,
+        );
 
         let plan = plan(executor_input(
             &track_id,
@@ -585,8 +713,13 @@ mod tests {
             client_order_id: "client-pending".into(),
             reduce_only: false,
         };
-        let existing_state =
-            record_submit_request(&ExecutorState::empty(now), &request, Exposure(2.8));
+        let mut seeded_state = ExecutorState::empty(now);
+        seeded_state.active_round = Some(crate::runtime::ExecutionRound {
+            target_exposure: Exposure(2.8),
+            mode: ExecutionMode::Passive,
+            started_at: now,
+        });
+        let existing_state = record_submit_request(&seeded_state, &request, Exposure(2.8));
 
         let plan = plan(executor_input(
             &track_id,
@@ -612,30 +745,15 @@ mod tests {
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let existing_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(0.8),
-            gap_started_at: Some(now),
-            last_reprice_at: None,
-            slots: vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("order-1".into()),
-                    client_order_id: "client-1".into(),
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 0.8,
-                    target_exposure: Exposure(2.8),
-                    status: OrderStatus::New,
-                    role: OrderRole::IncreaseInventory,
-                }),
-            }],
-            recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
-            stats: ExecutionStats::new(now),
-        };
+        let existing_state = inventory_core_state(
+            now,
+            Exposure(0.8),
+            Exposure(2.8),
+            Side::Buy,
+            0.8,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
 
         let plan = plan(executor_input(
             &track_id,
@@ -1225,7 +1343,6 @@ mod tests {
                 side: Side::Sell,
                 price: 96.0,
                 quantity: 12.0,
-                target_exposure: Exposure(2.0),
                 status: OrderStatus::Submitting,
                 role: OrderRole::DecreaseInventory,
             }),
@@ -1439,7 +1556,7 @@ mod tests {
         let RecoveryResolution::Rebuilt { state } = recovery else {
             panic!("expected two uniquely matched live orders to be rebuilt");
         };
-        assert!(state.recovery_anomaly.is_none());
+        assert!(state.diagnostics.recovery_anomaly.is_none());
         assert_eq!(state.slots.len(), 2);
         assert_eq!(state.slots[0].slot, OrderSlot::new("inventory_core"));
         assert_eq!(
@@ -1522,7 +1639,7 @@ mod tests {
         assert_eq!(anomaly, RecoveryAnomaly::DuplicateLiveOrders);
         assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
         assert_eq!(
-            state.recovery_anomaly.as_ref(),
+            state.diagnostics.recovery_anomaly.as_ref(),
             Some(&RecoveryAnomaly::DuplicateLiveOrders)
         );
     }
@@ -1660,7 +1777,6 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    target_exposure: Exposure(4.0),
                     status: OrderStatus::Submitting,
                     role: OrderRole::IncreaseInventory,
                 }),
@@ -1802,30 +1918,15 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let track_id = TrackId::new("track-1");
         let instrument = test_instrument();
-        let previous_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(0.4),
-            gap_started_at: Some(now),
-            last_reprice_at: Some(now),
-            slots: vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("order-large-sell".into()),
-                    client_order_id: "client-large-sell".into(),
-                    side: Side::Sell,
-                    price: 100.0,
-                    quantity: 16.9,
-                    target_exposure: Exposure(-10.0),
-                    status: OrderStatus::New,
-                    role: OrderRole::IncreaseInventory,
-                }),
-            }],
-            recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
-            stats: ExecutionStats::new(now),
-        };
+        let previous_state = inventory_core_state(
+            now,
+            Exposure(0.4),
+            Exposure(-10.0),
+            Side::Sell,
+            16.9,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
         let request = OrderRequest {
             instrument: instrument.clone(),
             side: Side::Buy,
@@ -2010,10 +2111,9 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(target_exposure, Exposure(4.0));
         assert_eq!(
-            state.slots[0]
-                .working_order
+            state.active_round
                 .as_ref()
-                .map(|order| order.target_exposure.clone()),
+                .map(|round| round.target_exposure.clone()),
             Some(Exposure(4.0))
         );
     }
@@ -2073,10 +2173,9 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(target_exposure, Exposure(2.8));
         assert_eq!(
-            state.slots[0]
-                .working_order
+            state.active_round
                 .as_ref()
-                .map(|order| order.target_exposure.clone()),
+                .map(|round| round.target_exposure.clone()),
             Some(Exposure(2.8))
         );
     }
@@ -2441,7 +2540,7 @@ mod tests {
             panic!("expected stale receipt-backed slot to be cleared");
         };
         assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
-        assert!(state.recovery_anomaly.is_none());
+        assert!(state.diagnostics.recovery_anomaly.is_none());
     }
 
     #[test]

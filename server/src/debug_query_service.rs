@@ -203,10 +203,19 @@ mod tests {
             desired_exposure: Some(Exposure(4.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(0.5),
-                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                last_reprice_at: None,
+                active_round: Some(poise_engine::runtime::ExecutionRound {
+                    target_exposure: Exposure(4.0),
+                    mode: ExecutionMode::Passive,
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                }),
+                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(0.5),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    last_execution_reason: None,
+                    recovery_anomaly: None,
+                },
                 slots: vec![ExecutionSlot {
                     slot: OrderSlot::new("inventory_core"),
                     state: SlotState::Working,
@@ -216,14 +225,11 @@ mod tests {
                         side: Side::Buy,
                         price: 100.5,
                         quantity: 0.1,
-                        target_exposure: Exposure(4.0),
                         status: OrderStatus::New,
                         role: OrderRole::IncreaseInventory,
                     }),
                 }],
                 recent_terminal_orders: Vec::new(),
-                last_execution_reason: None,
-                recovery_anomaly: None,
                 stats: ExecutionStats {
                     started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
                     max_inventory_gap_abs: Exposure(0.5),

@@ -816,7 +816,7 @@ fn should_cancel_unknown_live_orders(
 ) -> bool {
     !open_orders.is_empty()
         && snapshot.is_some_and(|snapshot| {
-            snapshot.executor_state.recovery_anomaly
+            snapshot.executor_state.diagnostics.recovery_anomaly
                 == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
                 && snapshot
                     .executor_state
@@ -868,7 +868,7 @@ async fn seed_recovery_tracking(
             &mut tracked,
             instruments,
             &track.id,
-            snapshot.executor_state.recovery_anomaly.is_some(),
+            snapshot.executor_state.diagnostics.recovery_anomaly.is_some(),
             retry_interval,
         );
     }
@@ -963,7 +963,14 @@ mod tests {
         let instance = current_instance(&fixture.state).await;
         let order = inventory_core_order(&instance).unwrap();
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
-        assert_eq!(order.target_exposure, Exposure(4.0));
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(Exposure(4.0))
+        );
 
         shutdown(handles).await;
     }
@@ -1288,7 +1295,14 @@ mod tests {
         );
         let order = inventory_core_order(&instance).expect("submit should become working");
         assert_eq!(order.client_order_id, first_request.client_order_id);
-        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(first_target_exposure.clone())
+        );
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
     }
 
@@ -1362,7 +1376,14 @@ mod tests {
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
         let order = inventory_core_order(&instance).expect("working order should remain active");
-        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(first_target_exposure.clone())
+        );
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
     }
 
@@ -1471,7 +1492,14 @@ mod tests {
         );
         let order = inventory_core_order(&instance).expect("working order should remain active");
         assert_eq!(order.client_order_id, first_order.client_order_id);
-        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(first_target_exposure.clone())
+        );
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
         assert!((order.quantity - remaining_quantity).abs() < 1e-9);
     }
@@ -2599,7 +2627,7 @@ mod tests {
         assert!(inventory_core_order(&instance).is_none());
         assert_eq!(instance.current_exposure, Exposure(6.0));
         assert_eq!(
-            instance.executor_state.recovery_anomaly.as_ref(),
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
 
@@ -2755,7 +2783,6 @@ mod tests {
                 side: Side::Sell,
                 price: 106.0,
                 quantity: 15.0,
-                target_exposure: Exposure(-10.0),
                 status: OrderStatus::New,
                 role: OrderRole::IncreaseInventory,
             },
@@ -3591,7 +3618,6 @@ mod tests {
                     side: Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
-                    target_exposure: Exposure(6.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
@@ -3790,7 +3816,7 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(0.0));
         assert_eq!(instance.desired_exposure, Some(Exposure(0.0)));
         assert_eq!(
-            instance.executor_state.recovery_anomaly.as_ref(),
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -3881,7 +3907,14 @@ mod tests {
         assert_eq!(order.side, Side::Buy);
         assert_eq!(order.price, 95.0);
         assert_eq!(order.quantity, 7.5);
-        assert_eq!(order.target_exposure, Exposure(4.0));
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(Exposure(4.0))
+        );
         assert_eq!(order.status, OrderStatus::Submitting);
 
         let transition = fixture
@@ -3945,7 +3978,7 @@ mod tests {
         let handles = fixture.runtime.start().await.unwrap();
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4065,7 +4098,7 @@ mod tests {
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert!(instance.executor_state.recovery_anomaly.is_none());
+        assert!(instance.executor_state.diagnostics.recovery_anomaly.is_none());
         assert_eq!(instance.executor_state.slots.len(), 2);
         assert_eq!(
             instance.executor_state.slots[0]
@@ -4137,7 +4170,7 @@ mod tests {
             .unwrap()
             .expect("final snapshot should be persisted");
         assert_eq!(snapshot.current_exposure, Exposure(2.0));
-        assert_eq!(snapshot.executor_state.recovery_anomaly, None);
+        assert_eq!(snapshot.executor_state.diagnostics.recovery_anomaly, None);
         assert_eq!(
             snapshot.executor_state.slots,
             vec![ExecutionSlot {
@@ -4182,7 +4215,7 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4218,7 +4251,12 @@ mod tests {
         fixture.exchange.open_orders.lock().unwrap().clear();
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref().is_none()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
+                .is_none()
         })
         .await;
         assert!(fixture.exchange.get_position_calls.load(Ordering::SeqCst) >= 3);
@@ -4282,7 +4320,7 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4299,7 +4337,12 @@ mod tests {
         );
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref().is_none()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
+                .is_none()
         })
         .await;
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -4344,7 +4387,7 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4400,7 +4443,12 @@ mod tests {
 
         timeout(Duration::from_millis(800), async {
             wait_until_instance(&fixture.state, |instance| {
-                instance.executor_state.recovery_anomaly.as_ref().is_none()
+                instance
+                    .executor_state
+                    .diagnostics
+                    .recovery_anomaly
+                    .as_ref()
+                    .is_none()
             })
             .await;
         })
@@ -4798,7 +4846,7 @@ mod tests {
         )]);
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -5281,7 +5329,7 @@ mod tests {
         side: Side,
         price: f64,
         quantity: f64,
-        target_exposure: Exposure,
+        _target_exposure: Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -5290,7 +5338,6 @@ mod tests {
             side,
             price,
             quantity,
-            target_exposure,
             status,
             role: match side {
                 Side::Buy => OrderRole::IncreaseInventory,
@@ -5300,19 +5347,30 @@ mod tests {
     }
 
     fn set_executor_state(snapshot: &mut TrackSnapshot, order: WorkingOrder, state: SlotState) {
+        let target_exposure = snapshot
+            .desired_exposure
+            .clone()
+            .unwrap_or_else(|| snapshot.current_exposure.clone());
         snapshot.executor_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
-            gap_started_at: Some(test_server_time()),
-            last_reprice_at: None,
+            active_round: Some(poise_engine::runtime::ExecutionRound {
+                target_exposure: target_exposure.clone(),
+                mode: ExecutionMode::Passive,
+                started_at: test_server_time(),
+            }),
+            diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: snapshot.current_exposure.delta(&target_exposure),
+                gap_started_at: Some(test_server_time()),
+                last_reprice_at: None,
+                last_execution_reason: None,
+                recovery_anomaly: None,
+            },
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state,
                 working_order: Some(order),
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
-            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: test_server_time(),
                 max_inventory_gap_abs: Exposure(0.0),

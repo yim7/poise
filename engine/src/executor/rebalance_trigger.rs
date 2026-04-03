@@ -56,6 +56,7 @@ impl<'a> ActiveLifecycle<'a> {
 pub(super) struct RebalanceTriggerInput<'a> {
     pub current_exposure: &'a Exposure,
     pub latest_target_exposure: &'a Exposure,
+    pub active_round_target_exposure: Option<&'a Exposure>,
     pub min_rebalance_units: f64,
     pub active_lifecycle: ActiveLifecycle<'a>,
 }
@@ -72,6 +73,7 @@ pub(super) fn evaluate_rebalance_trigger(
 ) -> RebalanceTriggerDecision {
     if active_lifecycle_should_be_preserved(
         &input.active_lifecycle,
+        input.active_round_target_exposure,
         input.current_exposure,
         input.latest_target_exposure,
         input.min_rebalance_units,
@@ -89,15 +91,12 @@ pub(super) fn evaluate_rebalance_trigger(
 
 fn active_lifecycle_should_be_preserved(
     active_lifecycle: &ActiveLifecycle<'_>,
+    active_round_target_exposure: Option<&Exposure>,
     current_exposure: &Exposure,
     latest_target_exposure: &Exposure,
     min_rebalance_units: f64,
 ) -> bool {
-    let Some(anchor) = active_lifecycle
-        .slot()
-        .and_then(|slot| slot.working_order.as_ref())
-        .map(|order| order.target_exposure.clone())
-    else {
+    let Some(anchor) = active_round_target_exposure else {
         return false;
     };
 

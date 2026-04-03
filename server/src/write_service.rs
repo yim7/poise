@@ -903,7 +903,11 @@ impl TrackWriteService {
         if has_track_write {
             self.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
                 track_id: TrackId::new(id),
-                recovery_anomaly_active: next_snapshot.executor_state.recovery_anomaly.is_some(),
+                recovery_anomaly_active: next_snapshot
+                    .executor_state
+                    .diagnostics
+                    .recovery_anomaly
+                    .is_some(),
             });
         }
         if has_effect_status_update {
@@ -1477,7 +1481,6 @@ mod tests {
                     side: Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
-                    target_exposure: Exposure(2.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
@@ -1619,7 +1622,7 @@ mod tests {
         side: Side,
         price: f64,
         quantity: f64,
-        target_exposure: Exposure,
+        _target_exposure: Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -1628,7 +1631,6 @@ mod tests {
             side,
             price,
             quantity,
-            target_exposure,
             status,
             role: match side {
                 Side::Buy => OrderRole::IncreaseInventory,
@@ -1657,19 +1659,30 @@ mod tests {
         order: WorkingOrder,
         state: SlotState,
     ) {
+        let target_exposure = snapshot
+            .desired_exposure
+            .clone()
+            .unwrap_or_else(|| snapshot.current_exposure.clone());
         snapshot.executor_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
-            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
-            last_reprice_at: None,
+            active_round: Some(poise_engine::runtime::ExecutionRound {
+                target_exposure: target_exposure.clone(),
+                mode: ExecutionMode::Passive,
+                started_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+            }),
+            diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: snapshot.current_exposure.delta(&target_exposure),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                last_execution_reason: None,
+                recovery_anomaly: None,
+            },
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state,
                 working_order: Some(order),
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
-            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
                 max_inventory_gap_abs: Exposure(0.0),

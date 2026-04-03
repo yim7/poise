@@ -615,7 +615,7 @@ impl TrackManager {
             track.risk_state.realized_pnl_cumulative += observation.realized_pnl;
         }
 
-        if track.executor_state.recovery_anomaly.is_some() {
+        if track.executor_state.diagnostics.recovery_anomaly.is_some() {
             return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
         }
 
@@ -867,7 +867,7 @@ impl TrackManager {
         reference_price: f64,
     ) -> Result<PlannedInventoryExecution> {
         let target = reconciler::reconcile_target(track, reference_price);
-        if track.executor_state.recovery_anomaly.is_some() {
+        if track.executor_state.diagnostics.recovery_anomaly.is_some() {
             return Ok(PlannedInventoryExecution {
                 events: target.events,
                 effects: vec![TrackEffect::NoOp],
@@ -1056,7 +1056,7 @@ mod tests {
         side: poise_core::types::Side,
         price: f64,
         quantity: f64,
-        target_exposure: poise_core::types::Exposure,
+        _target_exposure: poise_core::types::Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -1065,7 +1065,6 @@ mod tests {
             side,
             price,
             quantity,
-            target_exposure,
             status,
             role: match side {
                 poise_core::types::Side::Buy => OrderRole::IncreaseInventory,
@@ -1079,6 +1078,15 @@ mod tests {
             .executor_state
             .slots
             .retain(|slot| slot.slot != OrderSlot::new("inventory_core"));
+        if track.executor_state.active_round.is_none() {
+            track.executor_state.active_round = track.desired_exposure.clone().map(|target_exposure| {
+                crate::runtime::ExecutionRound {
+                    target_exposure,
+                    mode: track.executor_state.diagnostics.mode.clone(),
+                    started_at: track.executor_state.stats.started_at,
+                }
+            });
+        }
         track.executor_state.slots.insert(
             0,
             ExecutionSlot {
@@ -1099,6 +1107,15 @@ mod tests {
             .executor_state
             .slots
             .retain(|slot| slot.slot != OrderSlot::new(slot_name));
+        if track.executor_state.active_round.is_none() {
+            track.executor_state.active_round = track.desired_exposure.clone().map(|target_exposure| {
+                crate::runtime::ExecutionRound {
+                    target_exposure,
+                    mode: track.executor_state.diagnostics.mode.clone(),
+                    started_at: track.executor_state.stats.started_at,
+                }
+            });
+        }
         track.executor_state.slots.push(ExecutionSlot {
             slot: OrderSlot::new(slot_name),
             state,
@@ -1108,7 +1125,7 @@ mod tests {
 
     fn working_order_from_submit_request(
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        _target_exposure: poise_core::types::Exposure,
     ) -> WorkingOrder {
         WorkingOrder {
             order_id: None,
@@ -1116,7 +1133,6 @@ mod tests {
             side: request.side,
             price: request.price,
             quantity: request.quantity,
-            target_exposure,
             status: OrderStatus::Submitting,
             role: if request.reduce_only {
                 OrderRole::DecreaseInventory
@@ -1197,10 +1213,19 @@ mod tests {
 
     fn passive_executor_state_with_matching_buy_order() -> ExecutorState {
         ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: poise_core::types::Exposure(4.0),
-            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
-            last_reprice_at: None,
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: poise_core::types::Exposure(4.0),
+                mode: ExecutionMode::Passive,
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: poise_core::types::Exposure(4.0),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+            },
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::Working,
@@ -1210,14 +1235,11 @@ mod tests {
                     side: poise_core::types::Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    target_exposure: poise_core::types::Exposure(4.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
                 max_inventory_gap_abs: poise_core::types::Exposure(4.0),
@@ -1348,8 +1370,8 @@ mod tests {
         let track = manager.get_track("btc1").unwrap();
         let executor_state = &track.executor_state;
         assert_eq!(executor_state.slots, vec![empty_inventory_core_slot()]);
-        assert_eq!(executor_state.inventory_gap, Exposure(0.0));
-        assert_eq!(executor_state.gap_started_at, None);
+        assert_eq!(executor_state.diagnostics.inventory_gap, Exposure(0.0));
+        assert_eq!(executor_state.diagnostics.gap_started_at, None);
         assert_eq!(executor_state.stats.started_at, started_at);
     }
 
@@ -2304,8 +2326,9 @@ mod tests {
             SlotState::Working,
         );
         let executor_state = &mut track.executor_state;
-        executor_state.inventory_gap = Exposure(2.0);
-        executor_state.gap_started_at = Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap());
+        executor_state.diagnostics.inventory_gap = Exposure(2.0);
+        executor_state.diagnostics.gap_started_at =
+            Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap());
         executor_state.stats.started_at = Utc.with_ymd_and_hms(2026, 3, 29, 7, 30, 0).unwrap();
         executor_state.stats.max_inventory_gap_abs = Exposure(6.0);
         executor_state.stats.max_gap_age_ms = 120_000;
@@ -2318,7 +2341,7 @@ mod tests {
         assert_eq!(executor_state.stats.started_at, resumed_at);
         assert_eq!(executor_state.stats.max_inventory_gap_abs, Exposure(2.0));
         assert_eq!(executor_state.stats.max_gap_age_ms, 0);
-        assert_eq!(executor_state.gap_started_at, Some(resumed_at));
+        assert_eq!(executor_state.diagnostics.gap_started_at, Some(resumed_at));
     }
 
     #[test]
@@ -2339,7 +2362,7 @@ mod tests {
             track.executor_state.slots,
             vec![empty_inventory_core_slot()]
         );
-        assert_eq!(track.executor_state.last_reprice_at, None);
+        assert_eq!(track.executor_state.diagnostics.last_reprice_at, None);
 
         let transition = manager
             .observe(
@@ -2638,6 +2661,11 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
+        track.executor_state.active_round = Some(crate::runtime::ExecutionRound {
+            target_exposure: poise_core::types::Exposure(-2.0),
+            mode: ExecutionMode::Passive,
+            started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
+        });
         track.executor_state.slots = vec![ExecutionSlot {
             slot: OrderSlot::new("inventory_core"),
             state: SlotState::SubmitPending,
@@ -2647,7 +2675,6 @@ mod tests {
                 side: poise_core::types::Side::Buy,
                 price: 95.0,
                 quantity: test_config().base_qty_per_unit() * 4.0,
-                target_exposure: poise_core::types::Exposure(-2.0),
                 status: OrderStatus::Submitting,
                 role: OrderRole::DecreaseInventory,
             }),
@@ -2691,7 +2718,7 @@ mod tests {
             [
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure,
+                    target_exposure: _,
                 },
             ] => Some(WorkingOrder {
                 order_id: None,
@@ -2699,7 +2726,6 @@ mod tests {
                 side: request.side,
                 price: request.price,
                 quantity: request.quantity,
-                target_exposure: target_exposure.clone(),
                 status: OrderStatus::Submitting,
                 role: OrderRole::IncreaseInventory,
             }),
@@ -2782,14 +2808,18 @@ mod tests {
                 side: poise_core::types::Side::Buy,
                 price,
                 quantity,
-                target_exposure,
                 status: OrderStatus::Submitting,
                 role: _,
             }) if client_order_id == "btc-core-reconcile"
                 && (*price - 90.0).abs() < f64::EPSILON
                 && (*quantity - 4.0).abs() < f64::EPSILON
-                && *target_exposure == poise_core::types::Exposure(4.0)
         ));
+        assert_eq!(
+            manager.get_track("btc-core").unwrap().executor_state.active_round.as_ref().map(
+                |round| round.target_exposure.clone()
+            ),
+            Some(poise_core::types::Exposure(4.0))
+        );
     }
 
     #[test]
@@ -2848,14 +2878,18 @@ mod tests {
                 side: poise_core::types::Side::Buy,
                 price,
                 quantity,
-                target_exposure,
                 status: OrderStatus::Submitting,
                 role: _,
             }) if client_order_id == "btc-core-reconcile"
                 && (*price - 96.0).abs() < f64::EPSILON
                 && (*quantity - 0.8).abs() < f64::EPSILON
-                && *target_exposure == poise_core::types::Exposure(2.8)
         ));
+        assert_eq!(
+            manager.get_track("btc-core").unwrap().executor_state.active_round.as_ref().map(
+                |round| round.target_exposure.clone()
+            ),
+            Some(poise_core::types::Exposure(2.8))
+        );
     }
 
     #[test]
@@ -3266,7 +3300,7 @@ mod tests {
         );
         assert!(inventory_core_order(track).is_none());
         assert_eq!(
-            track.executor_state.recovery_anomaly.as_ref(),
+            track.executor_state.diagnostics.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
     }
@@ -3421,7 +3455,7 @@ mod tests {
         assert!(transition.events.is_empty());
         assert!(transition.effects.is_empty());
         let track = manager.get_track("btc1").unwrap();
-        assert!(track.executor_state.recovery_anomaly.is_none());
+        assert!(track.executor_state.diagnostics.recovery_anomaly.is_none());
         assert_eq!(track.executor_state.slots.len(), 2);
         assert_eq!(
             track.executor_state.slots[0].slot,
@@ -3505,14 +3539,21 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.desired_exposure = Some(poise_core::types::Exposure(6.0));
         track.executor_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: poise_core::types::Exposure(6.0),
-            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
-            last_reprice_at: None,
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: poise_core::types::Exposure(6.0),
+                mode: ExecutionMode::Passive,
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: poise_core::types::Exposure(6.0),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
+            },
             slots: vec![empty_inventory_core_slot()],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
                 max_inventory_gap_abs: poise_core::types::Exposure(6.0),
@@ -3538,7 +3579,7 @@ mod tests {
         let track = manager.get_track("btc1").unwrap();
         assert!(inventory_core_order(track).is_none());
         assert_eq!(
-            track.executor_state.recovery_anomaly.as_ref(),
+            track.executor_state.diagnostics.recovery_anomaly.as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert_eq!(
@@ -3553,14 +3594,21 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         track.executor_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: poise_core::types::Exposure(4.0),
-            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
-            last_reprice_at: None,
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: poise_core::types::Exposure(4.0),
+                mode: ExecutionMode::Passive,
+                started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: poise_core::types::Exposure(4.0),
+                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap()),
+                last_reprice_at: None,
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
+            },
             slots: vec![empty_inventory_core_slot()],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder),
             stats: ExecutionStats {
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 7, 55, 0).unwrap(),
                 max_inventory_gap_abs: poise_core::types::Exposure(4.0),
@@ -3585,7 +3633,12 @@ mod tests {
 
         assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
         assert_eq!(
-            transition.snapshot.executor_state.recovery_anomaly.as_ref(),
+            transition
+                .snapshot
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref(),
             Some(&crate::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(inventory_core_order_from_snapshot(&transition.snapshot).is_none());
@@ -3601,8 +3654,8 @@ mod tests {
         track.status = TrackStatus::Active;
         track.current_exposure = Exposure(2.0);
         track.desired_exposure = Some(Exposure(4.0));
-        track.executor_state.inventory_gap = Exposure(2.0);
-        track.executor_state.gap_started_at =
+        track.executor_state.diagnostics.inventory_gap = Exposure(2.0);
+        track.executor_state.diagnostics.gap_started_at =
             Some(Utc.with_ymd_and_hms(2026, 3, 29, 10, 0, 0).unwrap());
         track.executor_state.stats.started_at =
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 45, 0).unwrap();
@@ -3619,11 +3672,11 @@ mod tests {
         assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
         assert_eq!(transition.snapshot.status, TrackStatus::Frozen);
         assert_eq!(
-            transition.snapshot.executor_state.inventory_gap,
+            transition.snapshot.executor_state.diagnostics.inventory_gap,
             Exposure(2.0)
         );
         assert_eq!(
-            transition.snapshot.executor_state.gap_started_at,
+            transition.snapshot.executor_state.diagnostics.gap_started_at,
             Some(Utc.with_ymd_and_hms(2026, 3, 29, 10, 0, 0).unwrap())
         );
         assert_eq!(
