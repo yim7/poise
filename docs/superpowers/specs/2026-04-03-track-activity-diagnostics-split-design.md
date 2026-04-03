@@ -295,6 +295,7 @@ pub struct TrackDiagnosticItemView {
 
 - `activity` 默认展示给用户
 - debug 模式下可以额外请求 `diagnostics`
+- 当前 TUI 通过 `d` 键显式切换 debug 视角，并在打开时按需请求 diagnostics
 
 这样后续新增类似事件时，只改服务端分类规则，而不是修改每个客户端的过滤逻辑。
 

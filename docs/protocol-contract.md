@@ -201,6 +201,7 @@
 - `GET /tracks/:id` 继续返回稳定用户详情，不包含 diagnostics
 - `/debug/...` 下的 diagnostics 为 debug 专用、非稳定、best-effort 接口
 - diagnostics 不作为自动化、告警或外部集成契约
+- 当前 TUI 默认不请求这个接口，只有进入显式 debug 视角时才按需加载
 
 ## 3. WebSocket
 
