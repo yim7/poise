@@ -10,8 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-    TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
+    GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+    TrackDiagnosticsView, TrackListResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct ApiClient {
 
 #[derive(Debug)]
 enum WsMessageOutcome {
-    Event(TrackStreamEvent),
+    Event(StreamEvent),
     Closed,
     Ignore,
 }
@@ -110,7 +110,7 @@ fn should_bypass_proxy(base_url: &str) -> bool {
     }
 }
 
-pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<TrackStreamEvent>> {
+pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<StreamEvent>> {
     let (stream, _) = connect_async(url)
         .await
         .with_context(|| format!("failed to connect websocket `{url}`"))?;
@@ -154,7 +154,7 @@ fn decode_ws_message(message: Message) -> Result<WsMessageOutcome> {
     }
 }
 
-fn decode_ws_event_text(text: &str) -> Result<TrackStreamEvent> {
+fn decode_ws_event_text(text: &str) -> Result<StreamEvent> {
     serde_json::from_str(text).context("invalid websocket event json")
 }
 
@@ -184,8 +184,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::protocol::{
-        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-        TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
+        GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackDiagnosticsView, TrackListResponse,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
@@ -200,7 +200,7 @@ mod tests {
         serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap()
     }
 
-    fn track_stream_event() -> TrackStreamEvent {
+    fn track_stream_event() -> StreamEvent {
         serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
         ))
@@ -337,8 +337,7 @@ mod tests {
 
         let event = receiver.recv().await.unwrap();
 
-        assert_eq!(event.track_id, BTC_GRID_ID);
-        assert_eq!(event.payload, track_stream_event().payload);
+        assert_eq!(event, track_stream_event());
     }
 
     #[test]

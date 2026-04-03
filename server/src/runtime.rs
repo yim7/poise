@@ -19,7 +19,7 @@ use tokio::time::{Instant, MissedTickBehavior, sleep};
 
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
-use crate::notifications::TrackInternalNotification;
+use crate::notifications::ServerNotification;
 use crate::order_outcome::{
     ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
 };
@@ -538,10 +538,9 @@ impl ServerRuntime {
                     }
                     notification = notifications.recv() => {
                         match notification {
-                            Ok(TrackInternalNotification::TrackWriteCommitted {
-                                track_id,
-                                recovery_anomaly_active,
-                            }) => {
+                            Ok(ServerNotification::TrackChanged { track_id }) => {
+                                let recovery_anomaly_active =
+                                    load_recovery_anomaly_active(&state, track_id.as_str()).await;
                                 update_recovery_tracking(
                                     &mut tracked,
                                     &instruments,
@@ -549,12 +548,18 @@ impl ServerRuntime {
                                     recovery_anomaly_active,
                                     retry_interval,
                                 );
-                            }
-                            Ok(TrackInternalNotification::TrackEffectStateChanged { track_id }) => {
                                 if let Err(error) = reconcile_submit_preflight_state(&state).await {
                                     tracing::warn!(
-                                        "failed to reconcile submit preflight state after effect state change for {}: {}",
+                                        "failed to reconcile submit preflight state after track change for {}: {}",
                                         track_id.as_str(),
+                                        error.message()
+                                    );
+                                }
+                            }
+                            Ok(ServerNotification::AccountChanged) => {
+                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
+                                    tracing::warn!(
+                                        "failed to reconcile submit preflight state after account change: {}",
                                         error.message()
                                     );
                                 }
@@ -877,6 +882,23 @@ async fn seed_recovery_tracking(
         );
     }
     tracked
+}
+
+async fn load_recovery_anomaly_active(state: &ServerState, track_id: &str) -> bool {
+    match state.state_repository.load_track_state(track_id).await {
+        Ok(Some(snapshot)) => snapshot
+            .executor_state
+            .diagnostics
+            .recovery_anomaly
+            .is_some(),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                "failed to load runtime snapshot for recovery tracking on `{track_id}`: {error}"
+            );
+            false
+        }
+    }
 }
 
 fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {
@@ -3073,7 +3095,7 @@ mod tests {
                 .unwrap();
             if matches!(
                 event,
-                crate::notifications::TrackInternalNotification::TrackEffectStateChanged { .. }
+                crate::notifications::ServerNotification::TrackChanged { .. }
             ) {
                 saw_effect_state_changed = true;
                 break;
@@ -3112,7 +3134,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
         worker.run_once().await.unwrap();
 
@@ -3122,7 +3144,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::TrackInternalNotification::TrackEffectStateChanged { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
     }
 
@@ -3475,7 +3497,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
 
         shutdown(handles).await;
@@ -3640,7 +3662,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
 
         shutdown(handles).await;

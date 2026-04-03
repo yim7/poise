@@ -368,7 +368,7 @@ mod tests {
         StateRepositoryPort, TrackReadRepositoryPort, TrackSnapshot,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_protocol::{TrackStreamEvent, TrackStreamPayload};
+    use poise_protocol::StreamEvent;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -776,12 +776,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        let payload: TrackStreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
-
-        assert_eq!(payload.track_id, "btc-core");
+        let payload: StreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
         assert!(matches!(
-            payload.payload,
-            TrackStreamPayload::TrackListItemChanged { .. }
+            payload,
+            StreamEvent::TrackListItemChanged { ref track_id, .. } if track_id == "btc-core"
         ));
 
         server.abort();

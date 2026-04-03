@@ -216,7 +216,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::assembly::{ServerState, build_server_state};
-    use crate::notifications::TrackInternalNotification;
+    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
@@ -269,7 +269,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
         let write_service = Arc::new(TrackWriteService::new(
@@ -590,7 +590,7 @@ mod tests {
                 .snapshot("btc-core")
                 .expect("seeded manager should expose runtime snapshot"),
         );
-        let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackReadRepositoryPort>

@@ -1,10 +1,10 @@
 #[allow(unused_imports)]
 pub use poise_protocol::{
-    ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-    ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, GridStatisticsView,
-    GridStatus, ReplacementGateView, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-    TrackDiagnosticsView, TrackListItemView, TrackListResponse, TrackListStatisticsView,
-    TrackStreamEvent, TrackStreamPayload,
+    AccountSummaryView, ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView,
+    ExecutionStateView, ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView,
+    GridStatisticsView, GridStatus, ReplacementGateView, RiskSignalView, StreamEvent,
+    TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackDiagnosticsView,
+    TrackListItemView, TrackListResponse, TrackListStatisticsView,
 };
 
 #[cfg(test)]
@@ -13,9 +13,9 @@ pub use poise_protocol::{ExecutionBadgeView, ExposureSummaryView};
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandType,
+        ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandType, StreamEvent,
         TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackDiagnosticsView,
-        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+        TrackListResponse,
     };
 
     #[test]
@@ -106,32 +106,32 @@ mod tests {
 
     #[test]
     fn deserializes_grid_stream_list_item_changed() {
-        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+        let event: StreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_list_item_changed.json"
         ))
         .unwrap();
 
-        assert_eq!(event.track_id, "btc-core");
-        match event.payload {
-            TrackStreamPayload::TrackListItemChanged { item } => {
+        match event {
+            StreamEvent::TrackListItemChanged { track_id, item } => {
+                assert_eq!(track_id, "btc-core");
                 assert_eq!(item.instrument.venue, "binance_futures");
                 assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
                 assert_eq!(item.execution.active_slot_count, 0);
             }
-            _ => panic!("unexpected payload variant"),
+            other => panic!("unexpected event variant: {other:?}"),
         }
     }
 
     #[test]
     fn deserializes_grid_stream_detail_changed() {
-        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+        let event: StreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap();
 
-        assert_eq!(event.track_id, "btc-core");
-        match event.payload {
-            TrackStreamPayload::TrackDetailChanged { detail } => {
+        match event {
+            StreamEvent::TrackDetailChanged { track_id, detail } => {
+                assert_eq!(track_id, "btc-core");
                 let detail_json = serde_json::to_value(&detail).unwrap();
                 assert_eq!(detail.identity.instrument.symbol, "BTCUSDT");
                 assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
@@ -154,39 +154,38 @@ mod tests {
                 );
                 assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
             }
-            _ => panic!("unexpected payload variant"),
+            other => panic!("unexpected event variant: {other:?}"),
         }
     }
 
     #[test]
     fn deserializes_grid_stream_detail_changed_without_statistics() {
-        let event: TrackStreamEvent = serde_json::from_str(
+        let event: StreamEvent = serde_json::from_str(
             r#"{
+                "type":"track_detail_changed",
                 "track_id":"btc-core",
-                "payload":{
-                    "type":"track_detail_changed",
-                    "detail":{
-                        "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
-                        "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
-                        "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                        "market":{"mark_price":64123.4,"index_price":64120.1},
-                        "position":{"current_exposure":0.5,"target_exposure":0.75},
-                        "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
-                        "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
-                        "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
-                    }
+                "detail":{
+                    "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                    "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
+                    "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                    "market":{"mark_price":64123.4,"index_price":64120.1},
+                    "position":{"current_exposure":0.5,"target_exposure":0.75},
+                    "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                    "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
+                    "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
                 }
             }"#,
         )
         .unwrap();
 
-        match event.payload {
-            TrackStreamPayload::TrackDetailChanged { detail } => {
+        match event {
+            StreamEvent::TrackDetailChanged { track_id, detail } => {
+                assert_eq!(track_id, "btc-core");
                 assert_eq!(detail.identity.id, "btc-core");
                 assert!((detail.statistics.realized_pnl - 0.0).abs() < f64::EPSILON);
                 assert!((detail.statistics.total_pnl - 0.0).abs() < f64::EPSILON);
             }
-            _ => panic!("unexpected payload variant"),
+            other => panic!("unexpected event variant: {other:?}"),
         }
     }
 

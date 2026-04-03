@@ -1,10 +1,10 @@
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use poise_protocol::{TrackStreamEvent, TrackStreamPayload};
+use poise_protocol::StreamEvent;
 
 use crate::assembly::ServerState;
-use crate::notifications::TrackInternalNotification;
+use crate::notifications::ServerNotification;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -15,8 +15,8 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 
     loop {
         let track_id = match receiver.recv().await {
-            Ok(TrackInternalNotification::TrackWriteCommitted { track_id, .. })
-            | Ok(TrackInternalNotification::TrackEffectStateChanged { track_id }) => track_id,
+            Ok(ServerNotification::TrackChanged { track_id }) => track_id,
+            Ok(ServerNotification::AccountChanged) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     "websocket notification stream lagged by {skipped} messages; closing socket for resync"
@@ -66,15 +66,13 @@ async fn push_projected_updates(
     let list_item = state.projector.project_list_item(&source);
     let detail = state.projector.project_detail(&source);
     let events = [
-        TrackStreamEvent {
+        StreamEvent::TrackListItemChanged {
             track_id: track_id_text.clone(),
-            payload: TrackStreamPayload::TrackListItemChanged { item: list_item },
+            item: list_item,
         },
-        TrackStreamEvent {
+        StreamEvent::TrackDetailChanged {
             track_id: track_id_text,
-            payload: TrackStreamPayload::TrackDetailChanged {
-                detail: Box::new(detail),
-            },
+            detail: Box::new(detail),
         },
     ];
 
@@ -91,7 +89,7 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
-async fn send_event(socket: &mut WebSocket, event: TrackStreamEvent) -> bool {
+async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> bool {
     let message = match serde_json::to_string(&event) {
         Ok(message) => message,
         Err(error) => {
@@ -125,15 +123,13 @@ mod tests {
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
-    use poise_protocol::{
-        ExecutionStateView, ExecutionStatusView, GridStatus, TrackStreamEvent, TrackStreamPayload,
-    };
+    use poise_protocol::{ExecutionStateView, ExecutionStatusView, GridStatus, StreamEvent};
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
     use crate::assembly::{ServerState, build_server_state};
     use crate::effect_worker::EffectWorker;
-    use crate::notifications::TrackInternalNotification;
+    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
@@ -184,7 +180,7 @@ mod tests {
         (format!("ws://{address}/ws"), service, state)
     }
 
-    async fn recv_event(stream: &mut ClientStream) -> TrackStreamEvent {
+    async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
         let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -208,20 +204,45 @@ mod tests {
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+        service.emit_internal_notification(ServerNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
-            recovery_anomaly_active: false,
         });
 
         let payload_a = recv_event(&mut stream_a).await;
         let payload_b = recv_event(&mut stream_b).await;
 
         assert_eq!(payload_a, payload_b);
-        assert_eq!(payload_a.track_id, "btc-core");
         assert!(matches!(
-            payload_a.payload,
-            TrackStreamPayload::TrackListItemChanged { .. }
+            payload_a,
+            StreamEvent::TrackListItemChanged { ref track_id, .. } if track_id == "btc-core"
         ));
+    }
+
+    #[tokio::test]
+    async fn broadcasts_track_events_with_stream_event_envelope() {
+        let repository = seeded_repository();
+        let (url, service, _) = spawn_server(repository).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        service.emit_internal_notification(
+            crate::notifications::ServerNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            },
+        );
+
+        let first = recv_event(&mut stream).await;
+        let second = recv_event(&mut stream).await;
+        let events = [first, second];
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TrackListItemChanged { track_id, .. } if track_id == "btc-core"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TrackDetailChanged { track_id, .. } if track_id == "btc-core"
+        )));
     }
 
     #[tokio::test]
@@ -241,13 +262,13 @@ mod tests {
         let events = [first, second];
 
         assert!(events.iter().any(|event| matches!(
-            event.payload,
-            TrackStreamPayload::TrackListItemChanged { .. }
+            event,
+            StreamEvent::TrackListItemChanged { track_id, .. } if track_id == "btc-core"
         )));
         let detail = events
             .iter()
-            .find_map(|event| match &event.payload {
-                TrackStreamPayload::TrackDetailChanged { detail } => Some(detail),
+            .find_map(|event| match event {
+                StreamEvent::TrackDetailChanged { detail, .. } => Some(detail),
                 _ => None,
             })
             .expect("should emit projected detail change");
@@ -273,8 +294,8 @@ mod tests {
 
         let item = events
             .iter()
-            .find_map(|event| match &event.payload {
-                TrackStreamPayload::TrackListItemChanged { item } => Some(item),
+            .find_map(|event| match event {
+                StreamEvent::TrackListItemChanged { item, .. } => Some(item),
                 _ => None,
             })
             .expect("should emit projected list item change");
@@ -282,10 +303,9 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert!(
-            events.iter().any(|event| matches!(
-                event.payload,
-                TrackStreamPayload::TrackDetailChanged { .. }
-            ))
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TrackDetailChanged { .. }))
         );
 
         drop(service);
@@ -300,9 +320,8 @@ mod tests {
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+            service.emit_internal_notification(ServerNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
-                recovery_anomaly_active: false,
             });
         }
 
@@ -334,9 +353,8 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+        service.emit_internal_notification(ServerNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
-            recovery_anomaly_active: false,
         });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
@@ -367,9 +385,8 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+        service.emit_internal_notification(ServerNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
-            recovery_anomaly_active: false,
         });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {

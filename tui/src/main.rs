@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::api_client::{ApiClient, connect_ws};
 use crate::app::{App, View};
 use crate::input::{Action, CommandKind, handle_key_event};
-use crate::protocol::{TrackCommandAccepted, TrackStreamEvent, TrackStreamPayload};
+use crate::protocol::{StreamEvent, TrackCommandAccepted};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -195,7 +195,7 @@ async fn load_initial_state(client: &ApiClient) -> Result<App> {
 async fn bootstrap_runtime_state(
     client: &ApiClient,
     ws_url: &str,
-) -> (App, Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>) {
+) -> (App, Option<tokio::sync::mpsc::Receiver<StreamEvent>>) {
     let mut app = match load_initial_state(client).await {
         Ok(app) => app,
         Err(error) => {
@@ -226,7 +226,7 @@ async fn run_loop(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) -> Result<()> {
     loop {
         maybe_load_initial_state(client, app).await;
@@ -280,7 +280,7 @@ async fn process_ws_event(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) {
     if ws_receiver.is_none() {
         maybe_reconnect_websocket(client, ws_url, app, ws_receiver).await;
@@ -314,7 +314,7 @@ async fn maybe_reconnect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) {
     if !app.should_retry_websocket() {
         return;
@@ -410,16 +410,17 @@ async fn refresh_selected_track_diagnostics_best_effort(client: &ApiClient, app:
     }
 }
 
-async fn handle_ws_event(client: &ApiClient, app: &mut App, event: TrackStreamEvent) {
-    match event.payload {
-        TrackStreamPayload::TrackListItemChanged { item } => app.apply_track_list_item(item),
-        TrackStreamPayload::TrackDetailChanged { detail } => {
+async fn handle_ws_event(client: &ApiClient, app: &mut App, event: StreamEvent) {
+    match event {
+        StreamEvent::TrackListItemChanged { item, .. } => app.apply_track_list_item(item),
+        StreamEvent::TrackDetailChanged { detail, .. } => {
             let selected_matches = app.selected_track_id() == Some(detail.identity.id.as_str());
             app.apply_track_detail(*detail);
             if selected_matches {
                 refresh_selected_track_diagnostics_best_effort(client, app).await;
             }
         }
+        StreamEvent::AccountSummaryChanged { summary } => app.apply_account_summary(summary),
     }
 }
 
@@ -427,7 +428,7 @@ async fn reconnect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) {
     app.set_status_message("websocket disconnected, reconnecting");
     connect_websocket(client, ws_url, app, ws_receiver, "websocket reconnected").await;
@@ -437,7 +438,7 @@ async fn connect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
     success_message: &str,
 ) {
     *ws_receiver = match connect_ws(ws_url).await {
@@ -530,9 +531,9 @@ mod tests {
     use crate::app::App;
     use crate::input::Action;
     use crate::protocol::{
-        ExecutionStateView, GridCommandType, GridStatus, TrackCommandAccepted, TrackCommandRequest,
-        TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse,
-        TrackStreamEvent, TrackStreamPayload,
+        ExecutionStateView, GridCommandType, GridStatus, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
+        TrackListResponse,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -580,14 +581,14 @@ mod tests {
         detail
     }
 
-    fn track_list_item_changed_event() -> TrackStreamEvent {
+    fn track_list_item_changed_event() -> StreamEvent {
         serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_list_item_changed.json"
         ))
         .unwrap()
     }
 
-    fn track_detail_changed_event() -> TrackStreamEvent {
+    fn track_detail_changed_event() -> StreamEvent {
         serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
         ))
@@ -1160,8 +1161,8 @@ mod tests {
             Some(101.5)
         );
         assert!(matches!(
-            track_detail_changed_event().payload,
-            TrackStreamPayload::TrackDetailChanged { .. }
+            track_detail_changed_event(),
+            StreamEvent::TrackDetailChanged { .. }
         ));
     }
 
@@ -1198,20 +1199,16 @@ mod tests {
         second.position.current_exposure = 3.0;
 
         sender
-            .send(TrackStreamEvent {
+            .send(StreamEvent::TrackDetailChanged {
                 track_id: BTC_GRID_ID.into(),
-                payload: TrackStreamPayload::TrackDetailChanged {
-                    detail: Box::new(first),
-                },
+                detail: Box::new(first),
             })
             .await
             .unwrap();
         sender
-            .send(TrackStreamEvent {
+            .send(StreamEvent::TrackDetailChanged {
                 track_id: BTC_GRID_ID.into(),
-                payload: TrackStreamPayload::TrackDetailChanged {
-                    detail: Box::new(second),
-                },
+                detail: Box::new(second),
             })
             .await
             .unwrap();
@@ -1435,7 +1432,10 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         let event = ws_receiver.as_mut().unwrap().recv().await.unwrap();
-        assert_eq!(event.track_id, BTC_GRID_ID);
+        assert!(matches!(
+            event,
+            StreamEvent::TrackDetailChanged { ref track_id, .. } if track_id == BTC_GRID_ID
+        ));
         assert_eq!(app.status_message(), Some("websocket reconnected"));
     }
 

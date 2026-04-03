@@ -256,17 +256,49 @@ pub enum ExecutionStateView {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackStreamEvent {
-    pub track_id: String,
-    pub payload: TrackStreamPayload,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskSignalView {
+    #[default]
+    Normal,
+    Attention,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AccountSummaryView {
+    #[serde(default)]
+    pub equity: Option<f64>,
+    #[serde(default)]
+    pub available: Option<f64>,
+    #[serde(default)]
+    pub unrealized_pnl: Option<f64>,
+    #[serde(default)]
+    pub day_change_pct: Option<f64>,
+    #[serde(default)]
+    pub risk_signal: RiskSignalView,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub day_base_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum TrackStreamPayload {
-    TrackListItemChanged { item: TrackListItemView },
-    TrackDetailChanged { detail: Box<TrackDetailView> },
+pub enum StreamEvent {
+    TrackListItemChanged {
+        track_id: String,
+        item: TrackListItemView,
+    },
+    TrackDetailChanged {
+        track_id: String,
+        detail: Box<TrackDetailView>,
+    },
+    AccountSummaryChanged {
+        summary: AccountSummaryView,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,8 +380,8 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDiagnosticsView,
-        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+        AccountSummaryView, GridCommandType, RiskSignalView, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackDiagnosticsView, TrackListResponse,
     };
 
     #[test]
@@ -397,30 +429,28 @@ mod tests {
 
     #[test]
     fn deserializes_track_stream_detail_changed_with_track_id() {
-        let event: TrackStreamEvent = serde_json::from_str(
+        let event: StreamEvent = serde_json::from_str(
             r#"{
+                "type":"track_detail_changed",
                 "track_id":"btc-core",
-                "payload":{
-                    "type":"track_detail_changed",
-                    "detail":{
-                        "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
-                        "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
-                        "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                        "market":{"mark_price":64123.4,"index_price":64120.1},
-                        "position":{"current_exposure":0.5,"target_exposure":0.75},
-                        "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
-                        "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
-                        "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
-                        "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
-                    }
+                "detail":{
+                    "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                    "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                    "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                    "market":{"mark_price":64123.4,"index_price":64120.1},
+                    "position":{"current_exposure":0.5,"target_exposure":0.75},
+                    "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
+                    "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                    "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                    "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
                 }
             }"#,
         )
         .unwrap();
 
-        assert_eq!(event.track_id, "btc-core");
-        match event.payload {
-            TrackStreamPayload::TrackDetailChanged { detail } => {
+        match event {
+            StreamEvent::TrackDetailChanged { track_id, detail } => {
+                assert_eq!(track_id, "btc-core");
                 let detail_json = serde_json::to_value(&detail).unwrap();
                 assert_eq!(detail.identity.id, "btc-core");
                 assert_eq!(
@@ -440,7 +470,46 @@ mod tests {
                     Some(0.5)
                 );
             }
-            _ => panic!("unexpected payload variant"),
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_account_summary_changed_stream_event() {
+        let event: StreamEvent = serde_json::from_str(
+            r#"{
+                "type":"account_summary_changed",
+                "summary":{
+                    "equity":12500.5,
+                    "available":9800.25,
+                    "unrealized_pnl":-120.75,
+                    "day_change_pct":-1.35,
+                    "risk_signal":"attention",
+                    "reason":"day_change -1.35%",
+                    "day_base_at":"2026-04-04T00:01:23Z",
+                    "updated_at":"2026-04-04T01:02:03Z"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        match event {
+            StreamEvent::AccountSummaryChanged { summary } => {
+                assert_eq!(
+                    summary,
+                    AccountSummaryView {
+                        equity: Some(12_500.5),
+                        available: Some(9_800.25),
+                        unrealized_pnl: Some(-120.75),
+                        day_change_pct: Some(-1.35),
+                        risk_signal: RiskSignalView::Attention,
+                        reason: Some("day_change -1.35%".to_string()),
+                        day_base_at: Some("2026-04-04T00:01:23Z".to_string()),
+                        updated_at: Some("2026-04-04T01:02:03Z".to_string()),
+                    }
+                );
+            }
+            other => panic!("unexpected event variant: {other:?}"),
         }
     }
 

@@ -90,7 +90,7 @@
 - Test: `cargo test -p poise-server websocket::tests::broadcasts_track_events_with_stream_event_envelope -- --nocapture`
 - Test: `cargo test -p poise-tui app::tests::apply_account_summary_event_updates_state -- --nocapture`
 
-- [ ] **Step 1: 先写失败测试，固定新的协议壳和内部通知壳**
+- [x] **Step 1: 先写失败测试，固定新的协议壳和内部通知壳**
 
 要求：
 - 在 `protocol/src/lib.rs` 增加序列化测试，固定新的事件模型：
@@ -114,7 +114,7 @@ pub enum StreamEvent {
 - 在 `server/src/websocket.rs` 固定 track 事件也必须走 `StreamEvent`
 - 在 `tui/src/app.rs` 固定账户事件进入后会写入 `App::account_summary`
 
-- [ ] **Step 2: 运行定向测试，确认当前代码还停留在旧壳上**
+- [x] **Step 2: 运行定向测试，确认当前代码还停留在旧壳上**
 
 Run:
 `cargo test -p poise-protocol deserializes_account_summary_changed_stream_event -- --nocapture`
@@ -128,7 +128,7 @@ Expected:
   - server 内部仍只有 `TrackInternalNotification`
   - TUI `App` 尚无账户摘要状态
 
-- [ ] **Step 3: 实现统一事件外壳和账户摘要 DTO 骨架**
+- [x] **Step 3: 实现统一事件外壳和账户摘要 DTO 骨架**
 
 要求：
 - 在 `protocol/src/lib.rs` 新增：
@@ -152,7 +152,7 @@ pub enum ServerNotification {
   - `account_summary: Option<AccountSummaryView>`
   - `apply_account_summary(summary)`
 
-- [ ] **Step 4: 跑定向回归，确认统一事件壳稳定**
+- [x] **Step 4: 跑定向回归，确认统一事件壳稳定**
 
 Run:
 `cargo test -p poise-protocol`

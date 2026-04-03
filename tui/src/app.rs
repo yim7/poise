@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    ExecutionStatusView, GridCommandType, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
+    AccountSummaryView, ExecutionStatusView, GridCommandType, TrackDetailView,
+    TrackDiagnosticsView, TrackListItemView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +14,7 @@ pub enum View {
 
 #[derive(Debug, Clone)]
 pub struct App {
+    pub account_summary: Option<AccountSummaryView>,
     pub grids: Vec<TrackListItemView>,
     pub current_track: Option<TrackDetailView>,
     pub selected_index: usize,
@@ -32,6 +34,7 @@ impl App {
         grids.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
+            account_summary: None,
             grids,
             current_track: None,
             selected_index: 0,
@@ -151,6 +154,10 @@ impl App {
         }
     }
 
+    pub fn apply_account_summary(&mut self, summary: AccountSummaryView) {
+        self.account_summary = Some(summary);
+    }
+
     pub fn debug_diagnostics_enabled(&self) -> bool {
         self.debug_diagnostics_enabled
     }
@@ -231,8 +238,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        ExecutionStateView, ExecutionStatusView, TrackDetailView, TrackDiagnosticsView,
-        TrackListItemView, TrackStreamEvent, TrackStreamPayload,
+        AccountSummaryView, ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent,
+        TrackDetailView, TrackDiagnosticsView, TrackListItemView,
     };
 
     use super::{App, View};
@@ -333,12 +340,12 @@ mod tests {
         app.show_instance_for_selected();
         app.apply_track_detail(detail_view("btc-core"));
 
-        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+        let event: StreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap();
-        let TrackStreamPayload::TrackDetailChanged { detail } = event.payload else {
-            panic!("unexpected payload variant");
+        let StreamEvent::TrackDetailChanged { detail, .. } = event else {
+            panic!("unexpected event variant");
         };
 
         app.apply_track_detail(*detail);
@@ -397,5 +404,35 @@ mod tests {
 
         app.set_debug_diagnostics_enabled(false);
         assert!(app.current_track_diagnostics().is_none());
+    }
+
+    #[test]
+    fn apply_account_summary_event_updates_state() {
+        let mut app = App::new(track_list_items());
+
+        app.apply_account_summary(AccountSummaryView {
+            equity: Some(12_500.0),
+            available: Some(9_000.0),
+            unrealized_pnl: Some(-350.0),
+            day_change_pct: Some(-2.75),
+            risk_signal: RiskSignalView::Attention,
+            reason: Some("day_change -2.75%".to_string()),
+            day_base_at: Some("2026-04-04T00:00:01Z".to_string()),
+            updated_at: Some("2026-04-04T01:23:45Z".to_string()),
+        });
+
+        assert_eq!(
+            app.account_summary,
+            Some(AccountSummaryView {
+                equity: Some(12_500.0),
+                available: Some(9_000.0),
+                unrealized_pnl: Some(-350.0),
+                day_change_pct: Some(-2.75),
+                risk_signal: RiskSignalView::Attention,
+                reason: Some("day_change -2.75%".to_string()),
+                day_base_at: Some("2026-04-04T00:00:01Z".to_string()),
+                updated_at: Some("2026-04-04T01:23:45Z".to_string()),
+            })
+        );
     }
 }
