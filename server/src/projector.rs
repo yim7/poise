@@ -60,6 +60,10 @@ impl TrackProjector {
             strategy: GridStrategyView {
                 lower_price: source.lower_price,
                 upper_price: source.upper_price,
+                long_exposure_units: source.long_exposure_units,
+                short_exposure_units: source.short_exposure_units,
+                notional_per_unit: source.notional_per_unit,
+                min_rebalance_units: source.min_rebalance_units,
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
             },
@@ -184,10 +188,7 @@ fn project_execution_state(source: &TrackReadModel) -> ExecutionStateView {
 }
 
 fn project_execution_status(source: &TrackReadModel) -> ExecutionStatusView {
-    if source.has_recovery_anomaly
-        || source.has_account_margin_guard
-        || source.has_stale_market_data
-    {
+    if !project_attention_reasons(source).is_empty() {
         ExecutionStatusView::AttentionRequired
     } else {
         ExecutionStatusView::Normal
@@ -197,15 +198,22 @@ fn project_execution_status(source: &TrackReadModel) -> ExecutionStatusView {
 fn project_attention_reasons(source: &TrackReadModel) -> Vec<String> {
     let mut reasons = Vec::new();
 
-    if let Some(anomaly) = source.recovery_anomaly.as_ref() {
-        reasons.push(format!(
-            "recovery anomaly: {}",
-            project_recovery_anomaly(anomaly)
-        ));
+    if source.has_recovery_anomaly {
+        reasons.push(
+            source
+                .recovery_anomaly
+                .as_ref()
+                .map(|anomaly| format!("recovery anomaly: {}", project_recovery_anomaly(anomaly)))
+                .unwrap_or_else(|| "recovery anomaly".to_string()),
+        );
     }
 
     if source.has_stale_market_data {
         reasons.push("market data stale".to_string());
+    }
+
+    if source.has_account_margin_guard {
+        reasons.push("insufficient account margin".to_string());
     }
 
     reasons
@@ -336,6 +344,22 @@ mod tests {
         let detail = TrackProjector::new().project_detail(&source);
         let detail_json = serde_json::to_value(&detail).unwrap();
 
+        assert_eq!(
+            detail_json["strategy"]["long_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["short_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["notional_per_unit"].as_f64(),
+            Some(375.0)
+        );
+        assert_eq!(
+            detail_json["strategy"]["min_rebalance_units"].as_f64(),
+            Some(0.5)
+        );
         assert!(!detail.available_commands.is_empty());
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
         assert_eq!(detail.available_commands.len(), 4);
@@ -418,6 +442,65 @@ mod tests {
         assert_eq!(
             detail.execution.attention_reasons,
             vec!["market data stale".to_string()]
+        );
+    }
+
+    #[test]
+    fn account_margin_guard_projects_attention_reason_and_status() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.has_account_margin_guard = true;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            detail.execution.attention_reasons,
+            vec!["insufficient account margin".to_string()]
+        );
+    }
+
+    #[test]
+    fn multiple_attention_sources_preserve_reason_order_and_attention_status() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.has_recovery_anomaly = true;
+        source.recovery_anomaly = Some(poise_engine::executor::RecoveryAnomaly::DuplicateLiveOrders);
+        source.has_stale_market_data = true;
+        source.has_account_margin_guard = true;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            detail.execution.attention_reasons,
+            vec![
+                "recovery anomaly: duplicate_live_orders".to_string(),
+                "market data stale".to_string(),
+                "insufficient account margin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn recovery_anomaly_without_specific_kind_still_projects_attention_reason() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.has_recovery_anomaly = true;
+        source.recovery_anomaly = None;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            detail.execution.attention_reasons,
+            vec!["recovery anomaly".to_string()]
         );
     }
 
@@ -559,6 +642,10 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,
             upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
             reference_price: Some(101.25),

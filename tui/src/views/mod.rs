@@ -1,6 +1,7 @@
 pub mod dashboard;
 pub mod help;
 pub mod instance;
+pub mod instance_layout;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};

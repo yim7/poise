@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_grid_detail_returns_projected_detail() {
+    async fn get_track_detail_returns_track_detail_view() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -434,6 +434,22 @@ mod tests {
 
         assert_eq!(payload.identity.id, "btc-core");
         assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
+        assert_eq!(
+            payload_json["strategy"]["long_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            payload_json["strategy"]["short_exposure_units"].as_f64(),
+            Some(8.0)
+        );
+        assert_eq!(
+            payload_json["strategy"]["notional_per_unit"].as_f64(),
+            Some(375.0)
+        );
+        assert_eq!(
+            payload_json["strategy"]["min_rebalance_units"].as_f64(),
+            Some(0.5)
+        );
         assert!((payload.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((payload.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert_eq!(
