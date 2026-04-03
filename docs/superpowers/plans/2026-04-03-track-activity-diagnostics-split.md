@@ -84,7 +84,7 @@ Result:
 - `cargo test -p poise-protocol tests::deserializes_track_diagnostics_response -- --exact` → 通过，`1 passed`
 - `cargo test -p poise-protocol` → 通过，`5 passed`
 
-Commit: pending
+Commit: `c829bfc`
 
 ### Task 2: 引入单一 classifier 与独立 debug query service，并把 `ExposureTargetChanged` 从 activity 挪到 diagnostics
 
