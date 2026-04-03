@@ -51,15 +51,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             "updated at: {}",
             detail.status.lifecycle.updated_at
         )),
-        Line::from(format!(
-            "reference: {}",
-            detail
-                .status
-                .reference_price
-                .map(|value| format!("{value:.4}"))
-                .unwrap_or_else(|| "-".to_string()),
-        )),
         format_exposure_line(
+            detail.status.reference_price,
             detail.position.current_exposure,
             detail.position.target_exposure,
         ),
@@ -265,16 +258,18 @@ fn format_optional_price(value: Option<f64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn format_exposure_line(current: f64, target: Option<f64>) -> Line<'static> {
+fn format_exposure_line(reference_price: Option<f64>, current: f64, target: Option<f64>) -> Line<'static> {
     let signal = exposure_signal(current, target);
+    let reference_text = reference_price
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "-".to_string());
     let target_text = target
         .map(|value| format!("{value:.4}"))
         .unwrap_or_else(|| "-".to_string());
 
     Line::from(vec![
-        Span::raw("exposure: "),
-        Span::styled(signal.text, signal.style),
-        Span::raw(format!(" ({current:.4} -> {target_text})")),
+        Span::raw(format!("reference/exposure: {reference_text} / ")),
+        Span::styled(format!("{current:.4} → {target_text}"), signal.style),
     ])
 }
 
@@ -433,7 +428,7 @@ mod tests {
         assert!(text.contains("upper: 110.0000"));
         assert!(text.contains("shape: linear"));
         assert!(text.contains("out of band policy: freeze"));
-        assert!(text.contains("3.5000 -> 4.0000"));
+        assert!(text.contains("reference/exposure: 101.2500 / 3.5000 → 4.0000"));
         assert!(text.contains("execution status: normal"));
         assert!(text.contains("inventory gap / age: 0.5000 / 60000 ms"));
         assert!(text.contains("active slots: 1"));

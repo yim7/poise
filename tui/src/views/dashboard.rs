@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.execution.execution_status,
             item.execution.active_slot_count,
         );
-        let exposure = exposure_signal(item.exposure.current, item.exposure.target);
+        let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
         let total_pnl = pnl_signal(item.statistics.total_pnl);
 
         Row::new(vec![
@@ -40,10 +40,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         rows,
         [
             Constraint::Length(14),
+            Constraint::Length(12),
             Constraint::Length(14),
-            Constraint::Length(16),
-            Constraint::Length(16),
-            Constraint::Length(16),
+            Constraint::Length(15),
+            Constraint::Length(22),
             Constraint::Length(14),
         ],
     )
@@ -57,6 +57,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         state.select(Some(app.selected_index));
     }
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn format_exposure_summary(current: f64, target: Option<f64>) -> SignalDisplay {
+    let signal = exposure_signal(current, target);
+
+    SignalDisplay {
+        text: format!("{current:.4} | {}", signal.text),
+        style: signal.style,
+    }
 }
 
 fn format_execution_badge(
@@ -157,6 +166,7 @@ mod tests {
         assert!(text.contains("Dashboard"));
         assert!(text.contains("BTCUSDT"));
         assert!(text.contains("PnL"));
+        assert!(text.contains("3.5000"));
         assert!(text.contains("↑ +0.5000"));
         assert!(text.contains("↑ +1245.30"));
         assert!(text.contains("Execution"));
@@ -219,6 +229,7 @@ mod tests {
             .unwrap();
         let text = buffer_text(&terminal);
 
+        assert!(text.contains("3.5000"));
         assert!(text.contains("↓ -0.5000"));
         assert!(text.contains("↓ -245.30"));
     }
