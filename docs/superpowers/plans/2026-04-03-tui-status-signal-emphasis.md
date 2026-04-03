@@ -129,3 +129,6 @@ git commit -m "feat: emphasize tui status and direction signals"
   - `cargo test -p poise-server projector::tests -- --nocapture`
   - `cargo test -p poise-tui`
 - 实现 commit SHA：`2d7c459`
+- Review 修复 commit SHA：
+  - `5194e2c`
+  - `d6edc95`
