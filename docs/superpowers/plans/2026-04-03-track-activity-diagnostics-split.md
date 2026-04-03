@@ -98,7 +98,7 @@ Commit: `c829bfc`
 - Test: `server/src/debug_query_service.rs`
 - Test: `server/src/http.rs`
 
-- [ ] **Step 1: 写失败测试，覆盖 `ExposureTargetChanged` 不再进入稳定 activity**
+- [x] **Step 1: 写失败测试，覆盖 `ExposureTargetChanged` 不再进入稳定 activity**
 
 在 `server/src/projector.rs` 新增测试：
 
@@ -114,7 +114,7 @@ fn project_activity_excludes_exposure_target_changed_events() {
 }
 ```
 
-- [ ] **Step 2: 写失败测试，覆盖 diagnostics 返回 `ExposureTargetChanged`**
+- [x] **Step 2: 写失败测试，覆盖 diagnostics 返回 `ExposureTargetChanged`**
 
 在 `server/src/http.rs` 新增集成测试：
 
@@ -142,7 +142,7 @@ async fn get_track_diagnostics_returns_exposure_target_changed_events() {
 }
 ```
 
-- [ ] **Step 3: 运行定向测试，确认当前实现仍把该事件放进 activity 且没有 diagnostics 路由**
+- [x] **Step 3: 运行定向测试，确认当前实现仍把该事件放进 activity 且没有 diagnostics 路由**
 
 Run: `cargo test -p poise-server project_activity_excludes_exposure_target_changed_events -- --exact`
 
@@ -152,7 +152,7 @@ Run: `cargo test -p poise-server get_track_diagnostics_returns_exposure_target_c
 
 Expected: FAIL，当前 `/debug/tracks/:id/diagnostics` 路由不存在。
 
-- [ ] **Step 4: 新增单一 event presentation classifier**
+- [x] **Step 4: 新增单一 event presentation classifier**
 
 在 `server/src/event_presentation.rs` 定义单一分类入口，例如：
 
@@ -186,11 +186,11 @@ pub fn classify_track_events(source: &TrackReadModel) -> Vec<PresentedEvent> {
 - classifier 不依赖 `TrackDetailView`、`TrackDiagnosticsView`、`GridActivityItemView`、`TrackDiagnosticItemView`
 - protocol DTO 的组装放在 projector / debug query service
 
-- [ ] **Step 5: 让稳定 projector 只消费 classifier 的 activity 输出**
+- [x] **Step 5: 让稳定 projector 只消费 classifier 的 activity 输出**
 
 把 `TrackProjector::project_activity()` 改为调用 classifier，并只消费 `audience == Activity` 的中间项，再在本层渲染成 `GridActivityItemView`。
 
-- [ ] **Step 6: 新增独立 debug query service，负责 diagnostics DTO 组装**
+- [x] **Step 6: 新增独立 debug query service，负责 diagnostics DTO 组装**
 
 建议新建 `server/src/debug_query_service.rs`，接口例如：
 
@@ -217,7 +217,7 @@ impl TrackDebugQueryService {
 - diagnostics DTO 组装不放在 `http.rs`
 - 如果未来新增 debug websocket / CLI / batch diagnostics，都复用这个 query 边界
 
-- [ ] **Step 7: 写失败测试，覆盖 debug query service 正确投影 diagnostics**
+- [x] **Step 7: 写失败测试，覆盖 debug query service 正确投影 diagnostics**
 
 在 `server/src/debug_query_service.rs` 新增测试，要求：
 
@@ -225,7 +225,7 @@ impl TrackDebugQueryService {
 - 非 diagnostics 事件不会误入
 - 返回结果按时间排序
 
-- [ ] **Step 8: 让 HTTP handler 只调用 debug query service**
+- [x] **Step 8: 让 HTTP handler 只调用 debug query service**
 
 在 `server/src/http.rs` / 路由装配中增加：
 
@@ -239,7 +239,7 @@ handler 流程：
 2. 做 `200 / 404 / 500` 映射
 3. 不在 handler 内组装 diagnostics items
 
-- [ ] **Step 9: 运行定向测试，确认分类边界已经生效**
+- [x] **Step 9: 运行定向测试，确认分类边界已经生效**
 
 Run: `cargo test -p poise-server project_activity_excludes_exposure_target_changed_events -- --exact`
 
@@ -253,7 +253,7 @@ Run: `cargo test -p poise-server get_track_diagnostics_returns_exposure_target_c
 
 Expected: PASS
 
-- [ ] **Step 10: 跑服务端相关回归测试**
+- [x] **Step 10: 跑服务端相关回归测试**
 
 Run: `cargo test -p poise-server projector::tests::project_detail_includes_available_commands_and_activity -- --exact`
 
@@ -266,6 +266,17 @@ Expected: PASS，并补断言稳定详情里不含 diagnostics。
 Run: `cargo test -p poise-server query_service::tests::load_detail_source_reads_snapshot_events_and_effects -- --exact`
 
 Expected: PASS，证明这次没有把 diagnostics 组装重新塞回通用查询层。
+
+Result:
+
+- `cargo test -p poise-server projector::tests::project_activity_excludes_exposure_target_changed_events -- --exact` → 初次失败，`left: 2 right: 1`；实现后通过，`1 passed`
+- `cargo test -p poise-server http::tests::get_track_diagnostics_returns_exposure_target_changed_events -- --exact` → 初次失败，`left: 404 right: 200`；补齐路由后再次失败，断言缺少 `target exposure`；补齐测试夹具后通过，`1 passed`
+- `cargo test -p poise-server debug_query_service -- --nocapture` → 通过，`1 passed`
+- `cargo test -p poise-server projector::tests::project_detail_includes_available_commands_and_activity -- --exact` → 更新稳定 activity 断言后通过，`1 passed`
+- `cargo test -p poise-server http::tests::get_grid_detail_returns_projected_detail -- --exact` → 通过，`1 passed`
+- `cargo test -p poise-server query_service::tests::load_detail_source_reads_snapshot_events_and_effects -- --exact` → 通过，`1 passed`
+
+Commit: `c7d65c7`
 
 ### Task 3: 为 diagnostics 加入 TUI debug 视角的按需加载
 
