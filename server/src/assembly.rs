@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
 use crate::config::Config;
+use crate::debug_query_service::TrackDebugQueryService;
 use crate::projector::TrackProjector;
 use crate::query_service::TrackQueryService;
 use crate::runtime::{
@@ -30,6 +31,8 @@ pub struct ServerState {
     pub state_repository: Arc<dyn StateRepositoryPort>,
     #[allow(dead_code)]
     pub query_service: Arc<TrackQueryService>,
+    #[allow(dead_code)]
+    pub debug_query_service: Arc<TrackDebugQueryService>,
     #[allow(dead_code)]
     pub projector: Arc<TrackProjector>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
@@ -335,10 +338,12 @@ pub(crate) fn build_server_state(
 ) -> ServerState {
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     write_service.set_account_margin_guard(account_margin_guard.clone());
+    let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     ServerState {
         write_service,
         state_repository,
         query_service,
+        debug_query_service,
         projector,
         account_margin_guard,
         reconcile_guards: Arc::new(TrackReconcileGuards::default()),
@@ -992,10 +997,11 @@ mod tests {
             state_repository.clone(),
             events.clone(),
         ));
+        let query_service = Arc::new(TrackQueryService::new(read_repository));
         let state = build_server_state(
             write_service,
             state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            query_service,
             Arc::new(TrackProjector::new()),
         );
 

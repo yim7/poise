@@ -5,7 +5,8 @@ use axum::{Json, Router};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
-    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
+    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+    TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -30,6 +31,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/health", get(health))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
+        .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
         .route("/tracks/:id/commands", post(submit_command))
         .route("/ws", get(crate::websocket::ws_handler))
         .layer(CorsLayer::permissive())
@@ -99,6 +101,21 @@ async fn get_track_detail(
         .map_err(map_query_error)?
         .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
     Ok(Json(state.projector.project_detail(&source)))
+}
+
+async fn get_track_diagnostics(
+    Path(id): Path<String>,
+    State(state): State<ServerState>,
+) -> Result<Json<TrackDiagnosticsView>, (StatusCode, Json<ErrorResponse>)> {
+    let track_id = TrackId::new(id.clone());
+    let diagnostics = state
+        .debug_query_service
+        .load_track_diagnostics(&track_id)
+        .await
+        .map_err(map_query_error)?
+        .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
+
+    Ok(Json(diagnostics))
 }
 
 async fn submit_command(
@@ -181,7 +198,10 @@ mod tests {
     use chrono::Utc;
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::ExchangeRules;
+    use poise_core::{
+        events::DomainEvent,
+        types::{ExchangeRules, Exposure},
+    };
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         ClockPort, OrderStatus, StateRepositoryPort, StoredTrackSnapshot, TrackReadRepositoryPort,
@@ -189,7 +209,8 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, GridCommandType,
-        GridStatus, TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
+        GridStatus, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackDiagnosticsView, TrackListResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
@@ -237,7 +258,15 @@ mod tests {
         snapshot.risk.realized_pnl_cumulative = 980.1;
         snapshot.risk.unrealized_pnl = 265.2;
         repository
-            .save_transition("btc-core", &snapshot, &[], &[])
+            .save_transition(
+                "btc-core",
+                &snapshot,
+                &[DomainEvent::ExposureTargetChanged {
+                    from: Exposure(3.5),
+                    to: Exposure(4.0),
+                }],
+                &[],
+            )
             .await
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
@@ -249,10 +278,11 @@ mod tests {
             notifications,
         ));
 
+        let query_service = Arc::new(TrackQueryService::new(read_repository));
         build_server_state(
             write_service,
             state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            query_service,
             Arc::new(TrackProjector::new()),
         )
     }
@@ -546,6 +576,9 @@ mod tests {
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackReadRepositoryPort>,
+        ));
         let app = router(build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
@@ -553,9 +586,7 @@ mod tests {
                 notifications,
             )),
             state_repository,
-            Arc::new(TrackQueryService::new(
-                repository as Arc<dyn TrackReadRepositoryPort>,
-            )),
+            query_service,
             Arc::new(TrackProjector::new()),
         ));
 
@@ -702,6 +733,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_track_diagnostics_returns_exposure_target_changed_events() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/debug/tracks/btc-core/diagnostics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TrackDiagnosticsView = serde_json::from_slice(&body).unwrap();
+
+        assert!(payload
+            .items
+            .iter()
+            .any(|item| item.message.contains("target exposure")));
     }
 
     #[derive(Default)]

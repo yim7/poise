@@ -1,6 +1,8 @@
 mod assembly;
 mod config;
+mod debug_query_service;
 mod effect_worker;
+mod event_presentation;
 mod http;
 mod notifications;
 mod order_outcome;
