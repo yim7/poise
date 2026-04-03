@@ -7,7 +7,7 @@ use crate::runtime::{AccountCapacityConstraint, TrackRuntime, TrackStatus};
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
     pub new_status: Option<TrackStatus>,
     pub suppress_execution: bool,
 }
@@ -24,7 +24,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
                 })
                 .into_iter()
                 .collect(),
-            target_exposure: target,
+            desired_exposure: target,
             new_status: Some(TrackStatus::Terminated),
             suppress_execution: delta.is_zero(),
         };
@@ -40,7 +40,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
                 })
                 .into_iter()
                 .collect(),
-            target_exposure: target_override,
+            desired_exposure: target_override,
             new_status: Some(TrackStatus::ReducingOnly),
             suppress_execution: delta.is_zero(),
         };
@@ -75,7 +75,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
         RiskDecision::Deny { reason } => {
             return TargetReconcileResult {
                 events: vec![DomainEvent::RiskDenied { reason }],
-                target_exposure: grid.current_exposure.clone(),
+                desired_exposure: grid.current_exposure.clone(),
                 new_status: None,
                 suppress_execution: true,
             };
@@ -94,7 +94,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     if would_increase_risk_out_of_band {
         return TargetReconcileResult {
             events,
-            target_exposure: approved_target,
+            desired_exposure: approved_target,
             new_status,
             suppress_execution: true,
         };
@@ -108,7 +108,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     ) {
         return TargetReconcileResult {
             events: vec![DomainEvent::RiskDenied { reason }],
-            target_exposure: grid.current_exposure.clone(),
+                desired_exposure: grid.current_exposure.clone(),
             new_status: None,
             suppress_execution: true,
         };
@@ -118,7 +118,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     if delta.is_zero() {
         return TargetReconcileResult {
             events,
-            target_exposure: approved_target,
+            desired_exposure: approved_target,
             new_status,
             suppress_execution: true,
         };
@@ -131,7 +131,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
 
     TargetReconcileResult {
         events,
-        target_exposure: approved_target,
+        desired_exposure: approved_target,
         new_status,
         suppress_execution: false,
     }
@@ -150,7 +150,7 @@ fn apply_out_of_band(
     policy: OutOfBandPolicy,
 ) -> (Exposure, Option<TrackStatus>) {
     let frozen_target = grid
-        .target_exposure
+        .desired_exposure
         .clone()
         .unwrap_or_else(|| grid.current_exposure.clone());
 
@@ -262,7 +262,7 @@ mod tests {
         let result = reconcile_target(&grid, 100.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.target_exposure, Exposure(0.0));
+        assert_eq!(result.desired_exposure, Exposure(0.0));
     }
 
     #[test]
@@ -273,7 +273,7 @@ mod tests {
 
         let result = reconcile_target(&grid, 90.0);
 
-        assert!((result.target_exposure.0 - 8.0).abs() < 0.001);
+        assert!((result.desired_exposure.0 - 8.0).abs() < 0.001);
         assert!(!result.suppress_execution);
         assert!(
             result
@@ -327,7 +327,7 @@ mod tests {
         let result = reconcile_target(&grid, 85.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::ReducingOnly));
-        assert!(result.target_exposure.0.abs() < 0.001);
+        assert!(result.desired_exposure.0.abs() < 0.001);
     }
 
     #[test]
@@ -340,7 +340,7 @@ mod tests {
         let result = reconcile_target(&grid, 85.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::Terminated));
-        assert!(result.target_exposure.0.abs() < 0.001);
+        assert!(result.desired_exposure.0.abs() < 0.001);
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
 
         let result = reconcile_target(&grid, 90.0);
 
-        assert_eq!(result.target_exposure, Exposure(4.0));
+        assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -376,7 +376,7 @@ mod tests {
         let result = reconcile_target(&grid, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.target_exposure, Exposure(4.0));
+        assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -400,7 +400,7 @@ mod tests {
 
         let result = reconcile_target(&grid, 90.0);
 
-        assert_eq!(result.target_exposure, Exposure(0.0));
+        assert_eq!(result.desired_exposure, Exposure(0.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -413,12 +413,12 @@ mod tests {
         let mut grid = test_runtime();
         grid.status = TrackStatus::Active;
         grid.current_exposure = Exposure(4.0);
-        grid.target_exposure = Some(Exposure(6.0));
+        grid.desired_exposure = Some(Exposure(6.0));
         grid.config.out_of_band_policy = OutOfBandPolicy::Freeze;
 
         let result = reconcile_target(&grid, 85.0);
 
-        assert_eq!(result.target_exposure.0, 6.0);
+        assert_eq!(result.desired_exposure.0, 6.0);
         assert!(result.suppress_execution);
     }
 
@@ -434,7 +434,7 @@ mod tests {
 
         let result = reconcile_target(&grid, 90.0);
 
-        assert_eq!(result.target_exposure, Exposure(4.0));
+        assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -456,7 +456,7 @@ mod tests {
         let result = reconcile_target(&grid, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.target_exposure, grid.current_exposure);
+        assert_eq!(result.desired_exposure, grid.current_exposure);
         assert_eq!(
             result.events,
             vec![DomainEvent::RiskDenied {
@@ -479,7 +479,7 @@ mod tests {
         let result = reconcile_target(&grid, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.target_exposure, grid.current_exposure);
+        assert_eq!(result.desired_exposure, grid.current_exposure);
         assert_eq!(
             result.events,
             vec![DomainEvent::RiskDenied {
@@ -503,7 +503,7 @@ mod tests {
         let result = reconcile_target(&grid, 100.0);
 
         assert!(!result.suppress_execution);
-        assert_eq!(result.target_exposure, Exposure(2.0));
+        assert_eq!(result.desired_exposure, Exposure(2.0));
         assert!(
             result
                 .events

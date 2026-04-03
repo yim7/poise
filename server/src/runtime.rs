@@ -1224,7 +1224,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1282,7 +1282,7 @@ mod tests {
         let instance = current_instance(&state).await;
         assert!(
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
@@ -1298,7 +1298,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1357,7 +1357,7 @@ mod tests {
         let instance = current_instance(&state).await;
         assert!(
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
@@ -1373,7 +1373,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1465,7 +1465,7 @@ mod tests {
         let instance = current_instance(&state).await;
         assert!(
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
@@ -1711,7 +1711,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -1811,7 +1811,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -1954,7 +1954,7 @@ mod tests {
         .await;
 
         let instance = current_instance(&state).await;
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert!(inventory_core_order(&instance).is_none());
 
         shutdown(handles).await;
@@ -2166,7 +2166,7 @@ mod tests {
         .await;
 
         let instance = current_instance(&fixture.state).await;
-        assert_eq!(instance.target_exposure, None);
+        assert_eq!(instance.desired_exposure, None);
         assert!(inventory_core_order(&instance).is_none());
         assert!(
             fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
@@ -2182,7 +2182,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -2277,7 +2277,7 @@ mod tests {
         let config = rounded_submit_test_config();
         let mut snapshot = test_snapshot_with_config(config.clone());
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(3.0));
+        snapshot.desired_exposure = Some(Exposure(3.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
         let state = test_state_with_config(
@@ -2416,7 +2416,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -2453,7 +2453,7 @@ mod tests {
             .unwrap();
         assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
         assert_eq!(
-            current_instance(&state).await.target_exposure,
+            current_instance(&state).await.desired_exposure,
             Some(Exposure(4.0))
         );
 
@@ -2613,7 +2613,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.current_exposure = Exposure(6.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(92.5);
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -2677,7 +2677,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         set_executor_state(
             &mut snapshot,
             working_order(
@@ -2745,7 +2745,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(-6.0);
-        snapshot.target_exposure = Some(Exposure(-10.0));
+        snapshot.desired_exposure = Some(Exposure(-10.0));
         snapshot.observed.reference_price = Some(105.0);
         set_executor_state(
             &mut snapshot,
@@ -3129,7 +3129,7 @@ mod tests {
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until_instance(&fixture.state, |instance| {
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .map(|exposure| (exposure.0 - 4.0).abs() < f64::EPSILON)
                 .unwrap_or(false)
@@ -3149,7 +3149,7 @@ mod tests {
         wait_until_instance(&fixture.state, |instance| {
             (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
                 && instance
-                    .target_exposure
+                    .desired_exposure
                     .as_ref()
                     .map(|exposure| (exposure.0 - 4.0).abs() < f64::EPSILON)
                     .unwrap_or(false)
@@ -3158,7 +3158,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert!((instance.risk.unrealized_pnl - 11.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
@@ -3188,7 +3188,7 @@ mod tests {
             .unwrap();
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
         manager.restore_track_state(&snapshot).unwrap();
@@ -3258,7 +3258,7 @@ mod tests {
     async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
 
@@ -3342,7 +3342,7 @@ mod tests {
     async fn position_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event() {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(100.0);
         snapshot.risk.unrealized_pnl = 0.0;
@@ -3470,7 +3470,7 @@ mod tests {
             config: test_config(),
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(Exposure(0.0)),
+            desired_exposure: Some(Exposure(0.0)),
             manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
@@ -3574,7 +3574,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(
             instance.observed.out_of_band_since,
             Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap())
@@ -3691,7 +3691,7 @@ mod tests {
     async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(92.5);
         set_executor_state(
             &mut snapshot,
@@ -3766,7 +3766,7 @@ mod tests {
     #[tokio::test]
     async fn startup_sync_marks_attention_required_when_live_order_cannot_be_claimed() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture(
             Some(snapshot),
@@ -3788,7 +3788,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(0.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(0.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(0.0)));
         assert_eq!(
             instance.executor_state.recovery_anomaly.as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
@@ -3812,7 +3812,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(
             inventory_core_order(&instance)
                 .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
@@ -4151,7 +4151,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
@@ -4240,7 +4240,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_task_cancels_unknown_live_orders_automatically() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
@@ -4313,7 +4313,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_effect_exists() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
@@ -4419,7 +4419,7 @@ mod tests {
         let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
         let mut snapshot = test_snapshot();
         snapshot.status = TrackStatus::Paused;
-        snapshot.target_exposure = None;
+        snapshot.desired_exposure = None;
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
             Some(snapshot),
@@ -4660,7 +4660,7 @@ mod tests {
         let submitted = fixture.exchange.submitted_orders.lock().unwrap().clone();
         assert_eq!(submitted[0].side, Side::Sell);
         assert_eq!(
-            current_instance(&fixture.state).await.target_exposure,
+            current_instance(&fixture.state).await.desired_exposure,
             Some(Exposure(0.0))
         );
 
@@ -5338,7 +5338,7 @@ mod tests {
             config,
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(Exposure(6.0)),
+            desired_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,

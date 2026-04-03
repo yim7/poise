@@ -147,8 +147,8 @@ pub struct TrackRuntime {
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) status: TrackStatus,
     pub(crate) current_exposure: Exposure,
-    // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
-    pub(crate) target_exposure: Option<Exposure>,
+    // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
+    pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) manual_target_override: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
@@ -197,7 +197,7 @@ impl TrackRuntime {
             exchange_rules,
             status: TrackStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
-            target_exposure: None,
+            desired_exposure: None,
             manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
@@ -237,7 +237,7 @@ impl TrackRuntime {
             config: self.config.clone(),
             status: self.status.clone(),
             current_exposure: self.current_exposure.clone(),
-            target_exposure: self.target_exposure.clone(),
+            desired_exposure: self.desired_exposure.clone(),
             manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
@@ -275,7 +275,7 @@ impl TrackRuntime {
 
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
-        self.target_exposure = snapshot.target_exposure.clone();
+        self.desired_exposure = snapshot.desired_exposure.clone();
         self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
@@ -394,7 +394,7 @@ mod tests {
         let mut runtime = test_runtime();
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
-        runtime.target_exposure = Some(Exposure(6.0));
+        runtime.desired_exposure = Some(Exposure(6.0));
         runtime.manual_target_override = Some(Exposure(0.0));
         runtime.last_tick_at = Some(
             DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
@@ -447,7 +447,7 @@ mod tests {
 
         assert_eq!(restored.status, TrackStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
-        assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
         assert_eq!(restored.last_tick_at, runtime.last_tick_at);
         assert_eq!(
@@ -471,7 +471,7 @@ mod tests {
         let mut runtime = test_runtime();
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
-        runtime.target_exposure = Some(Exposure(6.0));
+        runtime.desired_exposure = Some(Exposure(6.0));
         runtime.reference_price = Some(96.0);
         runtime.executor_state = test_executor_state();
 
@@ -566,5 +566,60 @@ mod tests {
             restored.risk.account_capacity_constraint,
             AccountCapacityConstraint::default()
         );
+    }
+
+    #[test]
+    fn snapshot_deserializes_legacy_target_exposure_into_desired_exposure() {
+        let legacy_snapshot = json!({
+            "track_id": "grid-1",
+            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+            "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_exposure_units": 8.0,
+                "short_exposure_units": 8.0,
+                "notional_per_unit": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+            },
+            "status": "active",
+            "current_exposure": 4.0,
+            "target_exposure": 6.0,
+            "executor_state": {
+                "mode": "passive",
+                "inventory_gap": 0.0,
+                "gap_started_at": null,
+                "last_reprice_at": null,
+                "slots": [{
+                    "slot": "inventory_core",
+                    "state": "empty",
+                    "working_order": null
+                }],
+                "last_execution_reason": null,
+                "recovery_anomaly": null,
+                "stats": {
+                    "started_at": "2026-03-29T09:00:00Z",
+                    "max_inventory_gap_abs": 0.0,
+                    "max_gap_age_ms": 0
+                }
+            },
+            "replacement_gate_reason": null,
+            "risk": {
+                "realized_pnl_day": null,
+                "realized_pnl_today": 0.0,
+                "realized_pnl_cumulative": 0.0,
+                "unrealized_pnl": 0.0
+            },
+            "observed": {
+                "reference_price": 96.0,
+                "out_of_band_since": null,
+                "last_tick_at": null,
+                "market_data_stale_since": null
+            }
+        });
+
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+
+        assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
     }
 }

@@ -236,7 +236,7 @@ impl SqliteStorage {
                 config_json,
                 status_json,
                 state.current_exposure.0,
-                state.target_exposure.as_ref().map(|exposure| exposure.0),
+                state.desired_exposure.as_ref().map(|exposure| exposure.0),
                 state.manual_target_override.as_ref().map(|exposure| exposure.0),
                 executor_state_json,
                 replacement_gate_reason_json,
@@ -439,7 +439,7 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
-        let target_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
+        let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
         let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
         let out_of_band_since = out_of_band_since
             .map(|value| {
@@ -487,7 +487,7 @@ impl SqliteStorage {
             config,
             status,
             current_exposure: Exposure(row.get(5)?),
-            target_exposure,
+            desired_exposure,
             manual_target_override,
             executor_state,
             replacement_gate_reason,

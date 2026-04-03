@@ -200,7 +200,7 @@ mod tests {
             },
             status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
-            target_exposure: Some(Exposure(4.0)),
+            desired_exposure: Some(Exposure(4.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,

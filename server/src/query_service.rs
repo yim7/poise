@@ -96,6 +96,7 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
+    use crate::projector::TrackProjector;
     use crate::read_model::TrackReadModel;
 
     use super::TrackQueryService;
@@ -160,7 +161,7 @@ mod tests {
         assert_eq!(read_model.symbol, "BTCUSDT");
         assert_eq!(read_model.reference_price, Some(101.25));
         assert_eq!(read_model.current_exposure, 3.5);
-        assert_eq!(read_model.target_exposure, Some(4.0));
+        assert_eq!(read_model.desired_exposure, Some(4.0));
         assert_eq!(read_model.executor_mode, ExecutionMode::Passive);
         assert_eq!(read_model.inventory_gap, 0.5);
         assert_eq!(read_model.max_inventory_gap_abs, 0.5);
@@ -169,6 +170,79 @@ mod tests {
         assert!(!read_model.slots[0].is_submit_pending);
         assert_eq!(read_model.recent_track_events.len(), 1);
         assert_eq!(read_model.recent_effects.len(), 1);
+    }
+
+    #[test]
+    fn query_service_projects_desired_exposure_as_target_exposure_for_clients() {
+        let read_model = TrackReadModel::from_snapshot(
+            TrackRuntimeSnapshot {
+                track_id: TrackId::new("btc-core"),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                config: TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: ShapeFamily::Linear,
+                    out_of_band_policy: OutOfBandPolicy::Freeze,
+                },
+                status: TrackStatus::Active,
+                current_exposure: Exposure(3.5),
+                desired_exposure: Some(Exposure(4.0)),
+                manual_target_override: None,
+                executor_state: ExecutorState {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(0.5),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    slots: vec![ExecutionSlot {
+                        slot: OrderSlot::new("inventory_core"),
+                        state: SlotState::Working,
+                        working_order: Some(WorkingOrder {
+                            order_id: Some("order-1".into()),
+                            client_order_id: "client-1".into(),
+                            side: Side::Buy,
+                            price: 100.5,
+                            quantity: 0.1,
+                            target_exposure: Exposure(4.0),
+                            status: OrderStatus::New,
+                            role: OrderRole::IncreaseInventory,
+                        }),
+                    }],
+                    recent_terminal_orders: Vec::new(),
+                    last_execution_reason: None,
+                    recovery_anomaly: None,
+                    stats: ExecutionStats {
+                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                        max_inventory_gap_abs: Exposure(0.5),
+                        max_gap_age_ms: 0,
+                    },
+                },
+                replacement_gate_reason: None,
+                risk: RiskState {
+                    realized_pnl_day: None,
+                    realized_pnl_today: 0.0,
+                    realized_pnl_cumulative: 0.0,
+                    unrealized_pnl: 0.0,
+                    ..RiskState::default()
+                },
+                observed: ObservedState {
+                    reference_price: Some(101.25),
+                    out_of_band_since: None,
+                    last_tick_at: None,
+                    market_data_stale_since: None,
+                },
+            },
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(read_model.desired_exposure, Some(4.0));
+        let projected = TrackProjector::new().project_detail(&read_model);
+        assert_eq!(projected.position.target_exposure, Some(4.0));
     }
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
@@ -300,7 +374,7 @@ mod tests {
             },
             status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
-            target_exposure: Some(Exposure(4.0)),
+            desired_exposure: Some(Exposure(4.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,

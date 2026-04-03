@@ -1273,7 +1273,7 @@ mod tests {
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(snapshot.current_exposure, Exposure(4.0));
-        assert_eq!(snapshot.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(snapshot.desired_exposure, Some(Exposure(4.0)));
         assert!(snapshot.executor_state.recovery_anomaly.is_none());
 
         let effect = repository
@@ -1361,7 +1361,7 @@ mod tests {
             config: test_config(),
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(Exposure(6.0)),
+            desired_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
@@ -1400,7 +1400,7 @@ mod tests {
             config: test_config(),
             status: TrackStatus::Active,
             current_exposure: Exposure(2.0),
-            target_exposure: Some(Exposure(6.0)),
+            desired_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
                 mode: ExecutionMode::Passive,
@@ -1452,7 +1452,7 @@ mod tests {
             config: config.clone(),
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(poise_core::strategy::target_exposure(
+            desired_exposure: Some(poise_core::strategy::target_exposure(
                 reference_price,
                 &config,
             )),

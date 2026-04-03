@@ -1119,7 +1119,7 @@ mod tests {
         let manager_handle = service.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
-        assert_eq!(snapshot.target_exposure, None);
+        assert_eq!(snapshot.desired_exposure, None);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
                 .await
@@ -1311,7 +1311,7 @@ mod tests {
             reduce_only: false,
         };
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -1751,7 +1751,7 @@ mod tests {
             reduce_only: false,
         };
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -1885,7 +1885,7 @@ mod tests {
         };
         let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -2006,7 +2006,7 @@ mod tests {
         };
         let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -2113,7 +2113,7 @@ mod tests {
         };
         let stale_quantity = snapshot.config.base_qty_per_unit() * 6.0;
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
