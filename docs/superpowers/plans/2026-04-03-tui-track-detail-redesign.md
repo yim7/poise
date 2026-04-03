@@ -145,7 +145,7 @@ Run: `cargo test -p poise-tui protocol::tests::deserializes_grid_stream_detail_c
 
 Expected: PASS
 
-- [ ] **Step 8: 回写计划记录并提交**
+- [x] **Step 8: 回写计划记录并提交**
 
 Run:
 
@@ -161,7 +161,7 @@ git commit -m "feat: expose detail strategy facts"
   - `cargo test -p poise-server projector::tests -- --nocapture`
   - `cargo test -p poise-server http::tests::get_track_detail_returns_track_detail_view -- --exact`
   - `cargo test -p poise-tui protocol::tests::deserializes_grid_stream_detail_changed -- --exact`
-- 实现 commit SHA：
+- 实现 commit SHA：`145e40e`
 
 ### Task 2: 重画详情页并收敛布局退化规则
 
