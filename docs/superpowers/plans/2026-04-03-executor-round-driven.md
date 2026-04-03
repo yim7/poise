@@ -59,11 +59,16 @@
 - Modify: `server/src/read_model.rs`
 - Modify: `server/src/projector.rs`
 - Modify: `server/src/query_service.rs`
+- Modify: `server/src/debug_query_service.rs`
+- Modify: `server/src/effect_worker.rs`
+- Modify: `server/src/runtime.rs`
+- Modify: `server/src/write_service.rs`
+- Modify: `storage/src/sqlite.rs`
 - Test: `engine/src/runtime.rs`
 - Test: `engine/src/manager.rs`
 - Test: `server/src/query_service.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住内部重命名和外部协议稳定**
+- [x] **Step 1: 先写失败测试，锁住内部重命名和外部协议稳定**
 
 在 `engine/src/runtime.rs`、`engine/src/manager.rs`、`server/src/query_service.rs` 至少增加这些测试：
 
@@ -84,7 +89,7 @@ fn query_service_projects_desired_exposure_as_target_exposure_for_clients() {}
 - `TrackRuntime` 内部字段完成重命名
 - 外部协议里的 `target_exposure` 暂不改名，但它只表达当前系统希望达到的目标，不得表示 `ExecutionRound.target_exposure`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -96,7 +101,7 @@ Expected:
 
 - 当前实现会失败，因为内部仍普遍使用 `target_exposure` 作为运行态字段名。
 
-- [ ] **Step 3: 做最小实现，完成 `desired_exposure` 切换并保留 API 稳定**
+- [x] **Step 3: 做最小实现，完成 `desired_exposure` 切换并保留 API 稳定**
 
 要求：
 
@@ -105,9 +110,10 @@ Expected:
 - `reconciler`、`manager`、query 层统一改为新名字
 - `server` 对外协议和现有 UI DTO 暂不改字段名，继续把 `desired_exposure` 投影为现有 `target_exposure`
 - 在 `read_model` / `projector` / `query_service` 明确固定这条不变量：协议层 `target_exposure` 只投影 `desired_exposure`
+- 快照字段改名会同步影响 `storage` 和依赖快照测试夹具的 `server` 模块，这些接线也在本 task 内一起完成
 - 本 task 内不引入 `ExecutionRound`，只完成外层 owner 的重命名与别名兼容
 
-- [ ] **Step 4: 跑 Task 1 回归**
+- [x] **Step 4: 跑 Task 1 回归**
 
 Run:
 
@@ -121,12 +127,16 @@ Expected:
 - 对外协议仍保持 `target_exposure`
 - 旧快照兼容测试通过
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/reconciler.rs engine/src/manager.rs server/src/read_model.rs server/src/projector.rs server/src/query_service.rs
 git commit -m "refactor(engine): rename runtime target to desired exposure"
 ```
+
+Commit:
+
+- `07e821b` `refactor(engine): rename runtime target to desired exposure`
 
 ### Task 2: 先引入共享 `round_policy` 和唯一 `RoundPolicyInput` 构造，收紧 round 生命周期 owner
 
