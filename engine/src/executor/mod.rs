@@ -6,9 +6,9 @@ mod recording;
 mod recovery;
 mod slots;
 
-pub(crate) use planning::{DesiredOrder, ExecutorInput, SubmitIntentInput, plan, refresh_state};
 #[cfg(test)]
 pub(crate) use planning::current_submit_hint;
+pub(crate) use planning::{DesiredOrder, ExecutorInput, SubmitIntentInput, plan, refresh_state};
 pub use planning::{OrderRole, OrderSlot, PendingSubmitHint};
 pub use recording::OrderUpdateAbsorbResult;
 #[cfg(test)]
@@ -356,6 +356,116 @@ mod tests {
         assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
         assert!(plan.desired_orders.is_empty());
         assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn reduce_only_working_order_is_kept_when_small_target_drift_crosses_zero() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(-0.8),
+            gap_started_at: Some(now),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side: Side::Sell,
+                    price: 95.0,
+                    quantity: 0.8,
+                    target_exposure: Exposure(0.2),
+                    status: OrderStatus::PartiallyFilled,
+                    role: OrderRole::DecreaseInventory,
+                }),
+            }],
+            recent_terminal_orders: Vec::new(),
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(now),
+        };
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            1.0,
+            0.5,
+            Exposure(1.0),
+            Exposure(-0.1),
+            95.0,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert!(plan.desired_orders.is_empty());
+        assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn working_order_is_replanned_when_current_exposure_crosses_anchor_direction_even_if_target_drift_is_within_threshold()
+     {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = ExecutorState {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(-1.0),
+            gap_started_at: Some(now),
+            last_reprice_at: None,
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new("inventory_core"),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 1.0,
+                    target_exposure: Exposure(4.0),
+                    status: OrderStatus::PartiallyFilled,
+                    role: OrderRole::IncreaseInventory,
+                }),
+            }],
+            recent_terminal_orders: Vec::new(),
+            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+            recovery_anomaly: None,
+            stats: ExecutionStats::new(now),
+        };
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            1.0,
+            0.5,
+            Exposure(5.0),
+            Exposure(3.8),
+            95.0,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { order_id, .. },
+                ExecutionAction::SubmitOrder {
+                    request,
+                    target_exposure,
+                }
+            ] if order_id == "order-1"
+                && request.side == Side::Sell
+                && request.reduce_only
+                && (request.quantity - 1.2).abs() < 1e-9
+                && *target_exposure == Exposure(3.8)
+        ));
     }
 
     #[test]
@@ -1803,7 +1913,7 @@ mod tests {
 
     #[test]
     fn submit_recovery_proceeds_with_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
-    {
+     {
         let rules = test_exchange_rules();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let track_id = TrackId::new("track-1");
@@ -1862,6 +1972,159 @@ mod tests {
                 .map(|order| order.target_exposure.clone()),
             Some(Exposure(2.8))
         );
+    }
+
+    #[test]
+    fn submit_recovery_does_not_proceed_matching_pending_submit_without_current_plan() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 96.0,
+            quantity: 0.8,
+            client_order_id: "track-1-small-reconcile".into(),
+            reduce_only: false,
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(2.8));
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(2.8),
+            current_exposure: &Exposure(2.0),
+            live_order: None,
+            current_plan: None,
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { state },
+            effects,
+        } = recovery
+        else {
+            panic!(
+                "missing current plan should supersede stale pending submit instead of proceeding"
+            );
+        };
+
+        assert!(effects.is_empty());
+        assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
+    }
+
+    #[test]
+    fn submit_recovery_does_not_proceed_matching_pending_submit_when_current_plan_is_below_exchange_floor()
+     {
+        let mut rules = test_exchange_rules();
+        rules.min_qty = 1.0;
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 96.0,
+            quantity: 0.8,
+            client_order_id: "track-1-small-reconcile".into(),
+            reduce_only: false,
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(2.8));
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(2.8),
+            current_exposure: &Exposure(2.0),
+            live_order: None,
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.0,
+                Exposure(2.0),
+                Exposure(2.2),
+                96.0,
+                now,
+            )),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { state },
+            effects,
+        } = recovery
+        else {
+            panic!(
+                "unmeetable current plan should supersede stale pending submit instead of proceeding"
+            );
+        };
+
+        assert!(effects.is_empty());
+        assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
+    }
+
+    #[test]
+    fn submit_recovery_replans_when_current_exposure_crosses_anchor_direction_even_if_target_drift_is_within_threshold()
+     {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 90.0,
+            quantity: 1.0,
+            client_order_id: "track-1-anchor".into(),
+            reduce_only: false,
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            target_exposure: &Exposure(4.0),
+            current_exposure: &Exposure(5.0),
+            live_order: None,
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.5,
+                Exposure(5.0),
+                Exposure(3.8),
+                90.0,
+                now,
+            )),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { .. },
+            effects,
+        } = recovery
+        else {
+            panic!(
+                "pending submit should be superseded when current exposure makes the anchored direction invalid"
+            );
+        };
+
+        assert!(matches!(
+            effects.as_slice(),
+            [TrackEffect::SubmitOrder {
+                request,
+                target_exposure,
+            }] if request.side == Side::Sell
+                && request.reduce_only
+                && (request.quantity - 1.2).abs() < 1e-9
+                && *target_exposure == Exposure(3.8)
+        ));
     }
 
     #[test]
@@ -1965,6 +2228,69 @@ mod tests {
 
         assert!(effects.is_empty());
         assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
+    }
+
+    #[test]
+    fn submit_recovery_supersedes_stale_effect_without_new_submit_when_active_replacement_pending_is_still_within_threshold()
+     {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let stale_request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 90.0,
+            quantity: 6.0,
+            client_order_id: "track-1-stale".into(),
+            reduce_only: false,
+        };
+        let replacement_request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 90.0,
+            quantity: 4.0,
+            client_order_id: "track-1-replacement".into(),
+            reduce_only: false,
+        };
+        let previous_state = record_submit_request(
+            &ExecutorState::empty(now),
+            &replacement_request,
+            Exposure(4.0),
+        );
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &stale_request,
+            target_exposure: &Exposure(6.0),
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+            current_plan: Some(submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                1.0,
+                0.5,
+                Exposure(0.0),
+                Exposure(4.2),
+                90.0,
+                now,
+            )),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { state },
+            effects,
+        } = recovery
+        else {
+            panic!(
+                "stale submit effect should be superseded without generating a third submit when the active replacement is still within threshold"
+            );
+        };
+
+        assert!(effects.is_empty());
+        assert_eq!(state.slots, previous_state.slots);
     }
 
     #[test]

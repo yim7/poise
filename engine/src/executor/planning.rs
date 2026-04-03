@@ -10,7 +10,7 @@ use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, Wo
 use crate::track::{Instrument, TrackId};
 
 use super::rebalance_trigger::{
-    RebalanceTriggerDecision, RebalanceTriggerInput, evaluate_rebalance_trigger,
+    ActiveLifecycle, RebalanceTriggerDecision, RebalanceTriggerInput, evaluate_rebalance_trigger,
 };
 use super::{ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, recording, slots};
 
@@ -72,6 +72,12 @@ pub struct PendingSubmitHint {
     pub target_exposure: Exposure,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct SubmitIntentEvaluation {
+    pub trigger_decision: RebalanceTriggerDecision,
+    pub submit_hint: Option<PendingSubmitHint>,
+}
+
 const REBALANCE_GAP_THRESHOLD: f64 = 2.0;
 const CATCH_UP_GAP_THRESHOLD: f64 = 5.0;
 const REBALANCE_AGE_MS: i64 = 60_000;
@@ -95,12 +101,12 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         submit_intent,
         executor_state,
     } = input;
-    let (current_slot, _) = slots::split_inventory_core_slot(executor_state);
+    let active_lifecycle = ActiveLifecycle::from_executor_state(executor_state);
     let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
         current_exposure: &submit_intent.current_exposure,
         latest_target_exposure: &submit_intent.target_exposure,
         min_rebalance_units: submit_intent.min_rebalance_units,
-        active_slot: Some(&current_slot),
+        active_lifecycle,
     });
     let inventory_gap = submit_intent
         .current_exposure
@@ -123,8 +129,12 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         gap_age_ms,
     );
     let desired_orders = plan_desired_orders(&submit_intent, &trigger_decision);
-    let (effects, slots, replacement_gate_reason) =
-        diff_desired_orders(&submit_intent, executor_state, &desired_orders, &trigger_decision);
+    let (effects, slots, replacement_gate_reason) = diff_desired_orders(
+        &submit_intent,
+        executor_state,
+        &desired_orders,
+        &trigger_decision,
+    );
 
     ExecutorPlan {
         state: ExecutorState {
@@ -157,25 +167,32 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn current_submit_hint(input: SubmitIntentInput<'_>) -> Option<PendingSubmitHint> {
-    current_submit_hint_with_slot(input, None)
+    evaluate_submit_intent_with_active_lifecycle(input, ActiveLifecycle::none()).submit_hint
 }
 
-pub(super) fn current_submit_hint_with_slot(
+pub(super) fn evaluate_submit_intent_with_active_lifecycle(
     input: SubmitIntentInput<'_>,
-    active_slot: Option<&ExecutionSlot>,
-) -> Option<PendingSubmitHint> {
+    active_lifecycle: ActiveLifecycle<'_>,
+) -> SubmitIntentEvaluation {
     let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
         current_exposure: &input.current_exposure,
         latest_target_exposure: &input.target_exposure,
         min_rebalance_units: input.min_rebalance_units,
-        active_slot,
+        active_lifecycle,
     });
-    let desired_order = desired_inventory_order_for_submit_intent(&input, &trigger_decision)?;
-    let request = desired_order_to_request(&input, &desired_order);
-    Some(PendingSubmitHint {
-        request,
-        target_exposure: desired_order.target_exposure,
-    })
+    let submit_hint =
+        desired_inventory_order_for_submit_intent(&input, &trigger_decision).map(|desired_order| {
+            let request = desired_order_to_request(&input, &desired_order);
+            PendingSubmitHint {
+                request,
+                target_exposure: desired_order.target_exposure,
+            }
+        });
+
+    SubmitIntentEvaluation {
+        trigger_decision,
+        submit_hint,
+    }
 }
 
 pub fn refresh_state(
@@ -293,9 +310,13 @@ fn desired_inventory_order_for_submit_intent(
     input: &SubmitIntentInput<'_>,
     trigger_decision: &RebalanceTriggerDecision,
 ) -> Option<DesiredOrder> {
-    if !trigger_decision.should_trigger_next_action {
+    if !matches!(
+        trigger_decision,
+        RebalanceTriggerDecision::TriggerFreshAction
+    ) {
         return None;
     }
+
     let inventory_gap = input.current_exposure.delta(&input.target_exposure);
     let side = Side::from_exposure(&inventory_gap)?;
     let price = round_to_step(input.reference_price, input.exchange_rules.price_tick);
@@ -335,9 +356,13 @@ fn diff_desired_orders(
 
     match desired_order {
         None => {
-            if !trigger_decision.should_trigger_next_action
-                && matches!(current_slot.state, SlotState::SubmitPending | SlotState::Working)
-            {
+            if matches!(
+                trigger_decision,
+                RebalanceTriggerDecision::PreserveActiveLifecycle
+            ) && matches!(
+                current_slot.state,
+                SlotState::SubmitPending | SlotState::Working
+            ) {
                 return (
                     vec![ExecutionAction::NoOp],
                     slots::with_inventory_core_slot(sibling_slots, current_slot),

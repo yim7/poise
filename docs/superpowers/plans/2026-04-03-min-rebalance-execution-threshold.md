@@ -126,9 +126,13 @@ Expected:
 同时在 `engine/src/executor/recovery.rs`：
 
 - 直接消费 shared trigger 决策
-- 当 `current_plan` 相对当前 pending submit 的锚点漂移仍在门槛内：
-  - 返回 `AwaitExchangeState`
-  - 不 supersede 当前 pending submit
+- 当 `current_plan` 相对当前活动 lifecycle 的锚点漂移仍在门槛内：
+  - 如果 recovering effect 仍是当前活动 pending submit：
+    - 返回 `Proceed`
+    - 不 supersede 当前 pending submit
+  - 如果 recovering effect 已经 stale，但当前活动 pending submit 仍有效：
+    - 返回 `Superseded`
+    - 不额外生成新的 submit effect
 - 当漂移跨过门槛：
   - 才按最新目标继续进入 supersede / replacement submit 逻辑
 
@@ -184,6 +188,7 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {}
 - 用接近用户现场的重复 tick / 部分成交场景
 - 断言 recent effects 中不会出现一串连续 `Superseded`
 - 断言当前 lifecycle 仍保留
+- 至少有一条测试覆盖 `PartiallyFilled + PositionUpdate + 小幅 target 漂移`，锁住“成交一点后不继续撤挂重挂”
 
 - [x] **Step 2: 运行定向测试，确认当前行为仍会失败**
 

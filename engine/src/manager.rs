@@ -2217,8 +2217,8 @@ mod tests {
     }
 
     #[test]
-    fn resume_track_preserves_active_execution_anchor_when_last_price_drift_stays_within_threshold(
-    ) {
+    fn resume_track_preserves_active_execution_anchor_when_last_price_drift_stays_within_threshold()
+    {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2696,7 +2696,7 @@ mod tests {
 
     #[test]
     fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request_within_anchor_threshold()
-    {
+     {
         let mut manager = test_manager_with_cached_price(94.99);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
@@ -2741,8 +2741,9 @@ mod tests {
             )
             .unwrap();
 
-        let executor::SubmitRecoveryResolution::Proceed { target_exposure, .. } =
-            recovery.resolution
+        let executor::SubmitRecoveryResolution::Proceed {
+            target_exposure, ..
+        } = recovery.resolution
         else {
             panic!("matching rounded request should keep the pending submit proceeding");
         };
@@ -2768,7 +2769,7 @@ mod tests {
 
     #[test]
     fn recover_submit_effect_proceeds_with_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
-    {
+     {
         let mut manager = test_manager_with_cached_price(96.125);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(2.0);
@@ -2804,10 +2805,13 @@ mod tests {
             )
             .unwrap();
 
-        let executor::SubmitRecoveryResolution::Proceed { target_exposure, .. } =
-            recovery.resolution
+        let executor::SubmitRecoveryResolution::Proceed {
+            target_exposure, ..
+        } = recovery.resolution
         else {
-            panic!("pending submit should continue when drift stays within the active anchor threshold");
+            panic!(
+                "pending submit should continue when drift stays within the active anchor threshold"
+            );
         };
         assert!(recovery.effects.is_empty());
         assert_eq!(target_exposure, poise_core::types::Exposure(2.8));
@@ -2827,6 +2831,52 @@ mod tests {
                 && (*quantity - 0.8).abs() < f64::EPSILON
                 && *target_exposure == poise_core::types::Exposure(2.8)
         ));
+    }
+
+    #[test]
+    fn recover_submit_effect_supersedes_pending_submit_when_track_is_paused_and_has_no_current_plan()
+     {
+        let mut manager = test_manager_with_cached_price(96.125);
+        let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
+        track.status = TrackStatus::Paused;
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+        seed_executor_slot(
+            track,
+            working_order(
+                None,
+                "btc-core-reconcile",
+                poise_core::types::Side::Buy,
+                96.0,
+                0.8,
+                poise_core::types::Exposure(2.8),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+
+        let recovery = manager
+            .recover_submit_effect(
+                &TrackId::new("btc-core"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "btc-core-reconcile".into(),
+                    side: poise_core::types::Side::Buy,
+                    price: 96.0,
+                    quantity: 0.8,
+                    reduce_only: false,
+                },
+                poise_core::types::Exposure(2.8),
+                None,
+            )
+            .unwrap();
+
+        let executor::SubmitRecoveryResolution::Superseded { .. } = recovery.resolution else {
+            panic!("paused track should supersede pending submit instead of proceeding");
+        };
+        assert!(recovery.effects.is_empty());
+        assert!(inventory_core_order(manager.get_track("btc-core").unwrap()).is_none());
     }
 
     #[test]

@@ -339,7 +339,9 @@ mod tests {
     }
 
     fn start_paper_zellij_script_path() -> PathBuf {
-        workspace_root().join("scripts").join("start-paper-zellij.sh")
+        workspace_root()
+            .join("scripts")
+            .join("start-paper-zellij.sh")
     }
 
     fn paper_layout_path() -> PathBuf {

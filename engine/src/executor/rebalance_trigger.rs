@@ -1,50 +1,113 @@
-use poise_core::types::Exposure;
+use poise_core::types::{Exposure, Side};
 
-use crate::runtime::{ExecutionSlot, SlotState};
+use crate::runtime::{ExecutionSlot, ExecutorState, SlotState};
+
+use super::{INVENTORY_CORE_SLOT, slots};
 
 const MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR: f64 = 16.0;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ActiveLifecycle<'a> {
+    slot: Option<&'a ExecutionSlot>,
+}
+
+impl<'a> ActiveLifecycle<'a> {
+    pub(super) fn none() -> Self {
+        Self { slot: None }
+    }
+
+    pub(super) fn from_executor_state(executor_state: Option<&'a ExecutorState>) -> Self {
+        let slot = executor_state.and_then(|state| {
+            state
+                .slots
+                .iter()
+                .find(|slot| slot.slot.0 == INVENTORY_CORE_SLOT)
+        });
+        Self::from_slot(slot)
+    }
+
+    fn from_slot(slot: Option<&'a ExecutionSlot>) -> Self {
+        Self {
+            slot: slot.filter(|slot| {
+                matches!(slot.state, SlotState::SubmitPending | SlotState::Working)
+                    && slot.working_order.is_some()
+            }),
+        }
+    }
+
+    pub(super) fn slot(&self) -> Option<&'a ExecutionSlot> {
+        self.slot
+    }
+
+    pub(super) fn pending_submit_for_request(
+        &self,
+        client_order_id: &str,
+    ) -> Option<&'a ExecutionSlot> {
+        self.slot.filter(|slot| {
+            slot.state == SlotState::SubmitPending
+                && slot
+                    .working_order
+                    .as_ref()
+                    .is_some_and(|order| order.client_order_id == client_order_id)
+        })
+    }
+}
 
 pub(super) struct RebalanceTriggerInput<'a> {
     pub current_exposure: &'a Exposure,
     pub latest_target_exposure: &'a Exposure,
     pub min_rebalance_units: f64,
-    pub active_slot: Option<&'a ExecutionSlot>,
+    pub active_lifecycle: ActiveLifecycle<'a>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct RebalanceTriggerDecision {
-    pub anchor: Exposure,
-    pub trigger_delta: Exposure,
-    pub should_trigger_next_action: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RebalanceTriggerDecision {
+    PreserveActiveLifecycle,
+    TriggerFreshAction,
+    Suppress,
 }
 
 pub(super) fn evaluate_rebalance_trigger(
     input: RebalanceTriggerInput<'_>,
 ) -> RebalanceTriggerDecision {
-    let anchor = resolve_anchor(&input);
-    let trigger_delta = anchor.delta(input.latest_target_exposure);
-    let should_trigger_next_action =
-        !trigger_delta_below_min_rebalance_units(&trigger_delta, input.min_rebalance_units);
-
-    RebalanceTriggerDecision {
-        anchor,
-        trigger_delta,
-        should_trigger_next_action,
+    if active_lifecycle_should_be_preserved(
+        &input.active_lifecycle,
+        input.current_exposure,
+        input.latest_target_exposure,
+        input.min_rebalance_units,
+    ) {
+        return RebalanceTriggerDecision::PreserveActiveLifecycle;
     }
+
+    let fresh_trigger_delta = input.current_exposure.delta(input.latest_target_exposure);
+    if !trigger_delta_below_min_rebalance_units(&fresh_trigger_delta, input.min_rebalance_units) {
+        return RebalanceTriggerDecision::TriggerFreshAction;
+    }
+
+    RebalanceTriggerDecision::Suppress
 }
 
-fn resolve_anchor(input: &RebalanceTriggerInput<'_>) -> Exposure {
-    match input.active_slot {
-        Some(slot)
-            if matches!(slot.state, SlotState::SubmitPending | SlotState::Working) =>
-        {
-            slot.working_order
-                .as_ref()
-                .map(|order| order.target_exposure.clone())
-                .unwrap_or_else(|| input.current_exposure.clone())
-        }
-        _ => input.current_exposure.clone(),
-    }
+fn active_lifecycle_should_be_preserved(
+    active_lifecycle: &ActiveLifecycle<'_>,
+    current_exposure: &Exposure,
+    latest_target_exposure: &Exposure,
+    min_rebalance_units: f64,
+) -> bool {
+    let Some(anchor) = active_lifecycle
+        .slot()
+        .and_then(|slot| slot.working_order.as_ref())
+        .map(|order| order.target_exposure.clone())
+    else {
+        return false;
+    };
+
+    let trigger_delta = anchor.delta(latest_target_exposure);
+    trigger_delta_below_min_rebalance_units(&trigger_delta, min_rebalance_units)
+        && active_lifecycle_matches_latest_target(
+            active_lifecycle.slot(),
+            current_exposure,
+            latest_target_exposure,
+        )
 }
 
 fn trigger_delta_below_min_rebalance_units(
@@ -60,4 +123,47 @@ fn trigger_delta_below_min_rebalance_units(
         * MIN_REBALANCE_COMPARISON_TOLERANCE_FACTOR
         * abs_gap.max(min_rebalance_units).max(1.0);
     abs_gap + tolerance < min_rebalance_units
+}
+
+fn active_lifecycle_matches_latest_target(
+    active_slot: Option<&ExecutionSlot>,
+    current_exposure: &Exposure,
+    latest_target_exposure: &Exposure,
+) -> bool {
+    let Some(slot) = active_slot else {
+        return false;
+    };
+    if !matches!(slot.state, SlotState::SubmitPending | SlotState::Working) {
+        return false;
+    }
+    let Some(order) = slot.working_order.as_ref() else {
+        return false;
+    };
+
+    let inventory_gap = current_exposure.delta(latest_target_exposure);
+    let Some(expected_side) = Side::from_exposure(&inventory_gap) else {
+        return false;
+    };
+    let expected_role = slots::role_for_target_change(current_exposure, latest_target_exposure);
+
+    if order.side != expected_side {
+        return false;
+    }
+
+    if order.role == expected_role {
+        return true;
+    }
+
+    reduce_only_order_still_converges(order, current_exposure, latest_target_exposure)
+}
+
+fn reduce_only_order_still_converges(
+    order: &crate::runtime::WorkingOrder,
+    current_exposure: &Exposure,
+    latest_target_exposure: &Exposure,
+) -> bool {
+    order.role == super::OrderRole::DecreaseInventory
+        && current_exposure.0.abs() > f64::EPSILON
+        && latest_target_exposure.0.abs() > f64::EPSILON
+        && current_exposure.0.signum() != latest_target_exposure.0.signum()
 }
