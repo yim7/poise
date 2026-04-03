@@ -169,14 +169,11 @@ git commit -m "feat: expose detail strategy facts"
 - Create: `tui/src/views/instance_layout.rs`
 - Modify: `tui/src/views/mod.rs`
 - Modify: `tui/src/views/instance.rs`
-- Modify: `tui/src/theme.rs`
-- Modify: `tui/tests/fixtures/track_detail_view.json`
-- Modify: `tui/tests/fixtures/track_diagnostics_view.json`
 - Modify: `docs/superpowers/plans/2026-04-03-tui-track-detail-redesign.md`
 - Test: `tui/src/views/instance_layout.rs`
 - Test: `tui/src/views/instance.rs`
 
-- [ ] **Step 1: 写失败测试，锁住新的详情页主区块和命令位置**
+- [x] **Step 1: 写失败测试，锁住新的详情页主区块和命令位置**
 
 在 `tui/src/views/instance.rs` 新增测试 `renders_redesigned_detail_sections_and_status_commands`，确认默认详情页：
 
@@ -185,7 +182,7 @@ git commit -m "feat: expose detail strategy facts"
 - `Status` 区块中包含紧凑命令提示，例如 `commands: p pause`
 - `Strategy` 区块显示新增字段，例如 `min rebalance units`
 
-- [ ] **Step 2: 写失败测试，锁住 `Trace` 行为和 diagnostics 归位**
+- [x] **Step 2: 写失败测试，锁住 `Trace` 行为和 diagnostics 归位**
 
 新增测试 `renders_trace_panel_with_diagnostics_in_debug_view`，补两组断言：
 
@@ -205,7 +202,7 @@ assert!(text.contains("target exposure 3.5000 -> 4.0000"));
 
 要求 diagnostics 只出现在 `Trace` 区，不新增独立主区块。
 
-- [ ] **Step 3: 写失败测试，直接锁住布局策略模块的模式选择**
+- [x] **Step 3: 写失败测试，直接锁住布局策略模块的模式选择**
 
 在 `tui/src/views/instance_layout.rs` 新增模块测试，直接断言：
 
@@ -220,7 +217,7 @@ assert!(text.contains("target exposure 3.5000 -> 4.0000"));
 
 这些测试只验证模式和区块可见性，不验证最终文案。
 
-- [ ] **Step 4: 写失败测试，锁住 `标准 / 紧凑 / 最小` 三档退化在渲染层的表现**
+- [x] **Step 4: 写失败测试，锁住 `标准 / 紧凑 / 最小` 三档退化在渲染层的表现**
 
 在 `tui/src/views/instance.rs` 增加不同高度的渲染断言，至少覆盖：
 
@@ -230,21 +227,21 @@ assert!(text.contains("target exposure 3.5000 -> 4.0000"));
 
 同时确认模式切换不依赖内容多少，只依赖渲染区域高度。
 
-- [ ] **Step 5: 运行 TUI 定向测试，确认红灯**
+- [x] **Step 5: 运行 TUI 定向测试，确认红灯**
 
 Run: `cargo test -p poise-tui instance_layout -- --nocapture`
 
-Run: `cargo test -p poise-tui renders_redesigned_detail_sections_and_status_commands -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_redesigned_detail_sections_and_status_commands -- --exact`
 
-Run: `cargo test -p poise-tui renders_trace_panel_with_diagnostics_in_debug_view -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_trace_panel_with_diagnostics_in_debug_view -- --exact`
 
-Run: `cargo test -p poise-tui renders_compact_detail_layout_when_height_is_limited -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_compact_detail_layout_when_height_is_limited -- --exact`
 
-Run: `cargo test -p poise-tui renders_minimal_detail_layout_when_height_is_tight -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_minimal_detail_layout_when_height_is_tight -- --exact`
 
 Expected: FAIL，因为当前还没有布局策略模块测试，也没有新的详情页布局行为。
 
-- [ ] **Step 6: 写最小实现，先落布局策略模块，再重写详情页渲染**
+- [x] **Step 6: 写最小实现，先落布局策略模块，再重写详情页渲染**
 
 新增 `tui/src/views/instance_layout.rs`，把模式选择和区块约束集中到单一函数：
 
@@ -274,39 +271,39 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
 
 如果现有样式不够，再在 `tui/src/theme.rs` 增加详情页状态块或 Trace 所需的最小样式 helper，但不要把布局判断放进样式层。
 
-- [ ] **Step 7: 运行定向测试，确认转绿**
+- [x] **Step 7: 运行定向测试，确认转绿**
 
 Run: `cargo test -p poise-tui instance_layout -- --nocapture`
 
-Run: `cargo test -p poise-tui renders_redesigned_detail_sections_and_status_commands -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_redesigned_detail_sections_and_status_commands -- --exact`
 
-Run: `cargo test -p poise-tui renders_trace_panel_with_diagnostics_in_debug_view -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_trace_panel_with_diagnostics_in_debug_view -- --exact`
 
-Run: `cargo test -p poise-tui renders_compact_detail_layout_when_height_is_limited -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_compact_detail_layout_when_height_is_limited -- --exact`
 
-Run: `cargo test -p poise-tui renders_minimal_detail_layout_when_height_is_tight -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_minimal_detail_layout_when_height_is_tight -- --exact`
 
-Run: `cargo test -p poise-tui renders_attention_required_block_with_reason -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_attention_required_block_with_reason -- --exact`
 
 Expected: PASS
 
-- [ ] **Step 8: 运行 TUI 回归测试**
+- [x] **Step 8: 运行 TUI 回归测试**
 
 Run: `cargo test -p poise-tui`
 
 Expected: PASS
 
-- [ ] **Step 9: 回写计划记录并提交**
+- [x] **Step 9: 回写计划记录并提交**
 
 Run:
 
 ```bash
-git add tui/src/views/mod.rs tui/src/views/instance.rs tui/src/views/instance_layout.rs tui/src/theme.rs tui/tests/fixtures/track_detail_view.json tui/tests/fixtures/track_diagnostics_view.json docs/superpowers/plans/2026-04-03-tui-track-detail-redesign.md
+git add tui/src/views/mod.rs tui/src/views/instance.rs tui/src/views/instance_layout.rs docs/superpowers/plans/2026-04-03-tui-track-detail-redesign.md
 git commit -m "feat: redesign tui track detail view"
 ```
 
 **Task 记录：**
-- 状态：未开始
+- 状态：已完成
 - 验收：
   - `cargo test -p poise-tui`
 - 实现 commit SHA：
