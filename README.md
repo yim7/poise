@@ -78,6 +78,13 @@ tick_timeout_secs = 30
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit < 0`、`stop_loss_pct > 0`
 - 示例里的 `btc-core` 区间总带宽是 `2000 USD`，在线性模式下等效每格约 `100 USD`
 - 联调前要按当前测试网价格手动平移这个区间
+- `min_rebalance_units` 当前表示“触发下一次执行动作的最小目标变化”，不再只是 `current_exposure -> latest_target` 的停手阈值
+- 没有活动生命周期时，`min_rebalance_units` 的参考点是 `current_exposure`
+- 存在 `SubmitPending` 或 `Working` 时，`min_rebalance_units` 的参考点是当前执行目标 `working_order.target_exposure`
+- 当最新目标相对当前执行目标的漂移仍低于门槛时，系统会继续当前生命周期：
+  - 已有 `SubmitPending` 会继续执行，不会因为小幅 target 漂移被连续 supersede
+  - 已有 `Working` 不会因为小幅 target 漂移被 cancel-replace
+- 如果需要更频繁跟随最新目标，应调低该值；如果希望执行更稳、减少 supersede / cancel-replace，应调高该值
 
 ### 2. 启动服务端
 

@@ -6,9 +6,9 @@ use crate::ports::OrderRequest;
 use crate::runtime::{ExecutionStats, ExecutorState, SlotState};
 use crate::transition::TrackEffect;
 
-use super::{
-    ExecutionMode, PendingSubmitHint, SubmitIntentInput, current_submit_hint, recording, slots,
-};
+use super::planning::evaluate_submit_intent_with_active_lifecycle;
+use super::rebalance_trigger::{ActiveLifecycle, RebalanceTriggerDecision};
+use super::{ExecutionMode, PendingSubmitHint, SubmitIntentInput, recording, slots};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,29 +136,43 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         };
     }
 
-    let current_plan_submit = input
-        .current_plan
+    let active_lifecycle = ActiveLifecycle::from_executor_state(Some(input.previous_state));
+
+    let current_plan_evaluation = input.current_plan.as_ref().map(|current_plan| {
+        evaluate_submit_intent_with_active_lifecycle(current_plan.clone(), active_lifecycle)
+    });
+    let current_plan_submit = current_plan_evaluation
         .as_ref()
-        .and_then(|current_plan| current_submit_hint(current_plan.clone()));
+        .and_then(|evaluation| evaluation.submit_hint.as_ref());
+
+    let matching_pending_submit_can_proceed = active_lifecycle
+        .pending_submit_for_request(&input.request.client_order_id)
+        .is_some_and(|slot| {
+            current_plan_evaluation.as_ref().is_some_and(|evaluation| {
+                evaluation.trigger_decision == RebalanceTriggerDecision::PreserveActiveLifecycle
+            }) && pending_submit_matches_request(slot, input.request, input.exchange_rules)
+        });
+
+    if matching_pending_submit_can_proceed {
+        let target_exposure = active_lifecycle
+            .pending_submit_for_request(&input.request.client_order_id)
+            .and_then(|slot| slot.working_order.as_ref())
+            .map(|order| order.target_exposure.clone())
+            .unwrap_or_else(|| input.target_exposure.clone());
+        return SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Proceed {
+                state: input.previous_state.clone(),
+                target_exposure,
+            },
+            effects: vec![],
+        };
+    }
 
     if !submit_recovery_matches_current_plan(
         input.request,
-        current_plan_submit.as_ref(),
+        current_plan_submit,
         input.exchange_rules,
     ) {
-        if current_plan_submit.is_none() {
-            let has_matching_pending_submit_slot = input.previous_state.slots.iter().any(|slot| {
-                slot.state == SlotState::SubmitPending
-                    && slots::slot_matches_order(slot, &input.request.client_order_id, None)
-            });
-            if input.current_plan.is_some() && has_matching_pending_submit_slot {
-                return SubmitRecoveryPlan {
-                    resolution: SubmitRecoveryResolution::AwaitExchangeState,
-                    effects: vec![],
-                };
-            }
-        }
-
         let cleared_state =
             recording::clear_pending_submit(input.previous_state, &input.request.client_order_id);
         if let Some(next_submit) = current_plan_submit {
@@ -171,8 +185,8 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
                     ),
                 },
                 effects: vec![TrackEffect::SubmitOrder {
-                    request: next_submit.request,
-                    target_exposure: next_submit.target_exposure,
+                    request: next_submit.request.clone(),
+                    target_exposure: next_submit.target_exposure.clone(),
                 }],
             };
         }
@@ -187,7 +201,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let next_target_exposure = input
         .current_plan
         .as_ref()
-        .and_then(|_| current_plan_submit.as_ref())
+        .and_then(|_| current_plan_submit)
         .map(|submit| submit.target_exposure.clone())
         .unwrap_or_else(|| input.target_exposure.clone());
 
@@ -329,6 +343,26 @@ fn submit_recovery_matches_current_plan(
     current_plan_submit
         .map(|submit| submit_requests_match(request, &submit.request, exchange_rules))
         .unwrap_or(false)
+}
+
+fn pending_submit_matches_request(
+    slot: &crate::runtime::ExecutionSlot,
+    request: &OrderRequest,
+    exchange_rules: &ExchangeRules,
+) -> bool {
+    let Some(order) = slot.working_order.as_ref() else {
+        return false;
+    };
+    slot.state == SlotState::SubmitPending
+        && order.client_order_id == request.client_order_id
+        && order.side == request.side
+        && slots::role_for_reduce_only(request.reduce_only) == order.role
+        && values_match_with_step(order.price, request.price, exchange_rules.price_tick)
+        && values_match_with_step(
+            order.quantity,
+            request.quantity,
+            exchange_rules.quantity_step,
+        )
 }
 
 fn values_match_with_step(left: f64, right: f64, step: f64) -> bool {

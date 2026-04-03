@@ -1782,8 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_market_cancels_existing_working_order_when_small_rebalance_is_below_min_rebalance_units()
-     {
+    fn observe_market_keeps_latest_strategy_target_while_preserving_active_execution_anchor() {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -1792,15 +1791,16 @@ mod tests {
         track.current_exposure = poise_core::types::Exposure(2.0);
         track.config.notional_per_unit = 100.0;
         track.config.min_rebalance_units = 0.5;
+        let expected_target = poise_core::strategy::target_exposure(96.125, &track.config);
         seed_executor_slot(
             track,
             working_order(
                 Some("order-1"),
                 "client-1",
-                poise_core::types::Side::Sell,
-                99.9,
-                1.5,
-                poise_core::types::Exposure(0.5),
+                poise_core::types::Side::Buy,
+                96.0,
+                0.8,
+                poise_core::types::Exposure(2.8),
                 OrderStatus::New,
             ),
             SlotState::Working,
@@ -1810,21 +1810,36 @@ mod tests {
             .observe(
                 &TrackId::new("btc1"),
                 TrackObservation::Market(MarketObservation {
-                    reference_price: 97.0,
+                    reference_price: 96.125,
                 }),
             )
             .unwrap();
 
-        assert!(matches!(
-            transition.effects.as_slice(),
-            [TrackEffect::CancelOrder { order_id, .. }] if order_id == "order-1"
-        ));
+        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
         assert!(
             transition
                 .snapshot
                 .target_exposure
                 .as_ref()
-                .is_some_and(|target| (target.0 - 2.4).abs() < 0.001)
+                .is_some_and(|target| (target.0 - expected_target.0).abs() < 0.001)
+        );
+        assert!(
+            transition
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        );
+        assert_eq!(
+            inventory_core_order_from_snapshot(&transition.snapshot),
+            Some(&working_order(
+                Some("order-1"),
+                "client-1",
+                poise_core::types::Side::Buy,
+                96.0,
+                0.8,
+                poise_core::types::Exposure(2.8),
+                OrderStatus::New,
+            ))
         );
     }
 
@@ -2202,7 +2217,8 @@ mod tests {
     }
 
     #[test]
-    fn resume_track_recomputes_replacement_gate_reason_from_last_price() {
+    fn resume_track_preserves_active_execution_anchor_when_last_price_drift_stays_within_threshold()
+    {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2236,10 +2252,7 @@ mod tests {
 
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(track.status, TrackStatus::Active);
-        assert_eq!(
-            track.replacement_gate_reason,
-            Some(ReplacementGateReason::RoundedMatch)
-        );
+        assert_eq!(track.replacement_gate_reason, None);
     }
 
     #[test]
@@ -2682,7 +2695,8 @@ mod tests {
     }
 
     #[test]
-    fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request() {
+    fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request_within_anchor_threshold()
+     {
         let mut manager = test_manager_with_cached_price(94.99);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
@@ -2727,11 +2741,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            recovery.resolution,
-            executor::SubmitRecoveryResolution::Proceed { .. }
-        ));
+        let executor::SubmitRecoveryResolution::Proceed {
+            target_exposure, ..
+        } = recovery.resolution
+        else {
+            panic!("matching rounded request should keep the pending submit proceeding");
+        };
         assert!(recovery.effects.is_empty());
+        assert_eq!(target_exposure, poise_core::types::Exposure(4.0));
         assert!(matches!(
             inventory_core_order(manager.get_track("btc-core").unwrap()),
             Some(WorkingOrder {
@@ -2746,13 +2763,14 @@ mod tests {
             }) if client_order_id == "btc-core-reconcile"
                 && (*price - 90.0).abs() < f64::EPSILON
                 && (*quantity - 4.0).abs() < f64::EPSILON
-                && *target_exposure == expected_target
+                && *target_exposure == poise_core::types::Exposure(4.0)
         ));
     }
 
     #[test]
-    fn recover_submit_effect_keeps_pending_submit_when_current_plan_is_below_min_rebalance_units() {
-        let mut manager = test_manager_with_cached_price(97.0);
+    fn recover_submit_effect_proceeds_with_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
+     {
+        let mut manager = test_manager_with_cached_price(96.125);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(2.0);
         track.config.notional_per_unit = 100.0;
@@ -2763,7 +2781,7 @@ mod tests {
                 None,
                 "btc-core-reconcile",
                 poise_core::types::Side::Buy,
-                97.0,
+                96.0,
                 0.8,
                 poise_core::types::Exposure(2.8),
                 OrderStatus::Submitting,
@@ -2778,7 +2796,7 @@ mod tests {
                     instrument: test_instrument("BTCUSDT"),
                     client_order_id: "btc-core-reconcile".into(),
                     side: poise_core::types::Side::Buy,
-                    price: 97.0,
+                    price: 96.0,
                     quantity: 0.8,
                     reduce_only: false,
                 },
@@ -2787,11 +2805,16 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            recovery.resolution,
-            executor::SubmitRecoveryResolution::AwaitExchangeState
-        ));
+        let executor::SubmitRecoveryResolution::Proceed {
+            target_exposure, ..
+        } = recovery.resolution
+        else {
+            panic!(
+                "pending submit should continue when drift stays within the active anchor threshold"
+            );
+        };
         assert!(recovery.effects.is_empty());
+        assert_eq!(target_exposure, poise_core::types::Exposure(2.8));
         assert!(matches!(
             inventory_core_order(manager.get_track("btc-core").unwrap()),
             Some(WorkingOrder {
@@ -2804,10 +2827,56 @@ mod tests {
                 status: OrderStatus::Submitting,
                 role: _,
             }) if client_order_id == "btc-core-reconcile"
-                && (*price - 97.0).abs() < f64::EPSILON
+                && (*price - 96.0).abs() < f64::EPSILON
                 && (*quantity - 0.8).abs() < f64::EPSILON
                 && *target_exposure == poise_core::types::Exposure(2.8)
         ));
+    }
+
+    #[test]
+    fn recover_submit_effect_supersedes_pending_submit_when_track_is_paused_and_has_no_current_plan()
+     {
+        let mut manager = test_manager_with_cached_price(96.125);
+        let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
+        track.status = TrackStatus::Paused;
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+        seed_executor_slot(
+            track,
+            working_order(
+                None,
+                "btc-core-reconcile",
+                poise_core::types::Side::Buy,
+                96.0,
+                0.8,
+                poise_core::types::Exposure(2.8),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+
+        let recovery = manager
+            .recover_submit_effect(
+                &TrackId::new("btc-core"),
+                &OrderRequest {
+                    instrument: test_instrument("BTCUSDT"),
+                    client_order_id: "btc-core-reconcile".into(),
+                    side: poise_core::types::Side::Buy,
+                    price: 96.0,
+                    quantity: 0.8,
+                    reduce_only: false,
+                },
+                poise_core::types::Exposure(2.8),
+                None,
+            )
+            .unwrap();
+
+        let executor::SubmitRecoveryResolution::Superseded { .. } = recovery.resolution else {
+            panic!("paused track should supersede pending submit instead of proceeding");
+        };
+        assert!(recovery.effects.is_empty());
+        assert!(inventory_core_order(manager.get_track("btc-core").unwrap()).is_none());
     }
 
     #[test]
