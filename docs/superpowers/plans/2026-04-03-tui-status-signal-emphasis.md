@@ -114,7 +114,7 @@ Run: `cargo test -p poise-server projector::tests`
 
 Run: `cargo test -p poise-tui`
 
-- [ ] **Step 12: 更新计划记录并提交**
+- [x] **Step 12: 更新计划记录并提交**
 
 Run:
 ```bash
@@ -123,9 +123,9 @@ git commit -m "feat: emphasize tui status and direction signals"
 ```
 
 **Task 记录：**
-- 状态：已验收，待提交与 SHA 回写
+- 状态：已完成
 - 验收：
   - `cargo test -p poise-protocol`
   - `cargo test -p poise-server projector::tests -- --nocapture`
   - `cargo test -p poise-tui`
-- 实现 commit SHA：待补
+- 实现 commit SHA：`2d7c459`
