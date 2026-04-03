@@ -40,6 +40,13 @@ impl TrackProjector {
                 execution_status: project_execution_status(source),
                 active_slot_count: active_slot_count(source),
             },
+            statistics: GridStatisticsView {
+                total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
+                realized_pnl: source.realized_pnl_cumulative,
+                max_inventory_gap_abs: 0.0,
+                max_gap_age_ms: 0,
+                stats_started_at: None,
+            },
         }
     }
 
@@ -406,12 +413,15 @@ mod tests {
     fn projects_execution_badge_from_working_orders() {
         let source = source_with_submitting_effect();
         let item = TrackProjector::new().project_list_item(&source);
+        let item_json = serde_json::to_value(&item).unwrap();
 
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.state, ExecutionStateView::Open);
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
+        assert_eq!(item_json["statistics"]["total_pnl"].as_f64(), Some(1245.3));
+        assert_eq!(item_json["statistics"]["realized_pnl"].as_f64(), Some(980.1));
 
         let mut anomaly_source = source_with_submitting_effect();
         anomaly_source.has_recovery_anomaly = true;

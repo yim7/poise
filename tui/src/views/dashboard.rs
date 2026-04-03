@@ -1,9 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::widgets::{Block, Borders, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::app::App;
 use crate::protocol::{ExecutionStateView, ExecutionStatusView};
+use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -13,30 +14,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         "Lifecycle",
         "Execution",
         "Exposure",
-        "Last Price",
+        "PnL",
     ])
     .style(Theme::table_header());
     let rows = app.grids.iter().map(|item| {
-        let exposure = format!("{:.4}", item.exposure.current);
-        let reference_price = item
-            .reference_price
-            .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "-".to_string());
         let execution = format_execution_badge(
             item.execution.state,
             item.execution.execution_status,
             item.execution.active_slot_count,
         );
+        let exposure = exposure_signal(item.exposure.current, item.exposure.target);
+        let total_pnl = pnl_signal(item.statistics.total_pnl);
 
         Row::new(vec![
-            item.id.clone(),
-            item.instrument.symbol.clone(),
-            item.lifecycle.status.to_string(),
-            execution,
-            exposure,
-            reference_price,
+            Cell::from(item.id.clone()),
+            Cell::from(item.instrument.symbol.clone()),
+            Cell::from(item.lifecycle.status.to_string()).style(Theme::status(&item.lifecycle.status)),
+            Cell::from(execution.text).style(execution.style),
+            Cell::from(exposure.text).style(exposure.style),
+            Cell::from(total_pnl.text).style(total_pnl.style),
         ])
-        .style(Theme::status(&item.lifecycle.status))
     });
 
     let table = Table::new(
@@ -47,7 +44,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Constraint::Length(16),
             Constraint::Length(16),
             Constraint::Length(16),
-            Constraint::Length(16),
+            Constraint::Length(14),
         ],
     )
     .header(header)
@@ -66,26 +63,36 @@ fn format_execution_badge(
     state: ExecutionStateView,
     execution_status: ExecutionStatusView,
     active_slot_count: u32,
-) -> String {
+) -> SignalDisplay {
     let state = match state {
         ExecutionStateView::Open => "open",
         ExecutionStateView::Paused => "paused",
         ExecutionStateView::Closed => "closed",
     };
 
-    let mut badge = state.to_string();
-    if matches!(execution_status, ExecutionStatusView::AttentionRequired) {
-        badge.push_str(" ATTN");
-    }
-    if active_slot_count > 0 {
+    let badge = if matches!(execution_status, ExecutionStatusView::AttentionRequired) {
+        format!("! ATTN {state}")
+    } else {
+        state.to_string()
+    };
+    let text = if active_slot_count > 0 {
         format!("{badge} ({active_slot_count})")
     } else {
         badge
-    }
+    };
+
+    let style = if matches!(execution_status, ExecutionStatusView::AttentionRequired) {
+        Theme::execution_attention()
+    } else {
+        Theme::status_neutral()
+    };
+
+    SignalDisplay { text, style }
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -102,6 +109,34 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn background_colors_for_substring(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Color> {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        let needle_chars: Vec<char> = needle.chars().collect();
+
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let start = y as usize * width + x as usize;
+                if x as usize + needle_chars.len() > width {
+                    continue;
+                }
+
+                let matches = needle_chars.iter().enumerate().all(|(offset, expected)| {
+                    buffer.content()[start + offset].symbol().chars().next() == Some(*expected)
+                });
+                if matches {
+                    return needle_chars
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, _)| buffer.content()[start + offset].bg)
+                        .collect();
+                }
+            }
+        }
+
+        Vec::new()
     }
 
     #[test]
@@ -121,9 +156,11 @@ mod tests {
 
         assert!(text.contains("Dashboard"));
         assert!(text.contains("BTCUSDT"));
-        assert!(text.contains("3.5000"));
+        assert!(text.contains("PnL"));
+        assert!(text.contains("↑ +0.5000"));
+        assert!(text.contains("↑ +1245.30"));
         assert!(text.contains("Execution"));
-        assert!(text.contains("open (1)"));
+        assert!(text.contains("open"));
     }
 
     #[test]
@@ -135,6 +172,46 @@ mod tests {
         ))
         .unwrap();
         response.items[0].execution.execution_status = ExecutionStatusView::AttentionRequired;
+        let mut extra = response.items[0].clone();
+        extra.id = "eth-core".to_string();
+        extra.instrument.symbol = "ETHUSDT".to_string();
+        response.items.push(extra);
+        let mut app = App::new(response.items);
+        app.select_next();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("! ATTN open"));
+        assert!(
+            background_colors_for_substring(&terminal, "! ATTN open")
+                .iter()
+                .any(|bg| *bg != Color::Reset)
+        );
+    }
+
+    #[test]
+    fn renders_reduce_signal_and_negative_pnl_in_dashboard() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(
+            r#"{
+                "items": [
+                    {
+                        "id": "btc-core",
+                        "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"},
+                        "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
+                        "reference_price": 101.25,
+                        "exposure": {"current": 3.5, "target": 3.0},
+                        "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
+                        "statistics": {"total_pnl": -245.3, "realized_pnl": -12.5}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
         let app = App::new(response.items);
 
         terminal
@@ -142,6 +219,7 @@ mod tests {
             .unwrap();
         let text = buffer_text(&terminal);
 
-        assert!(text.contains("open ATTN (1)"));
+        assert!(text.contains("↓ -0.5000"));
+        assert!(text.contains("↓ -245.30"));
     }
 }

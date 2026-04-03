@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
@@ -9,6 +9,8 @@ use crate::protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
     ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, ReplacementGateView,
 };
+use crate::signal::{exposure_signal, pnl_signal};
+use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(detail) = app.current_track_detail().or(app.current_track.as_ref()) else {
@@ -50,19 +52,17 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             detail.status.lifecycle.updated_at
         )),
         Line::from(format!(
-            "reference/exposure: {} / {:.4} -> {}",
+            "reference: {}",
             detail
                 .status
                 .reference_price
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "-".to_string()),
-            detail.position.current_exposure,
-            detail
-                .position
-                .target_exposure
-                .map(|value| format!("{value:.4}"))
-                .unwrap_or_else(|| "-".to_string())
         )),
+        format_exposure_line(
+            detail.position.current_exposure,
+            detail.position.target_exposure,
+        ),
     ];
     let summary = Paragraph::new(summary_lines)
         .block(Block::default().title("Overview").borders(Borders::ALL));
@@ -70,13 +70,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let statistics_lines = vec![
         Line::from("Total PnL | Realized PnL | Max Gap | Max Gap Age"),
-        Line::from(format!(
-            "{} | {} | {:.4} | {} ms",
-            format_pnl(detail.statistics.total_pnl),
-            format_pnl(detail.statistics.realized_pnl),
+        format_statistics_line(
+            detail.statistics.total_pnl,
+            detail.statistics.realized_pnl,
             detail.statistics.max_inventory_gap_abs,
             detail.statistics.max_gap_age_ms,
-        )),
+        ),
         Line::from(format!(
             "stats since: {}",
             detail
@@ -202,7 +201,10 @@ fn execution_lines(
         execution.execution_status,
         ExecutionStatusView::AttentionRequired
     ) {
-        lines.push(Line::from("ATTENTION REQUIRED"));
+        lines.push(Line::from(Span::styled(
+            "! ATTENTION REQUIRED",
+            Theme::execution_attention(),
+        )));
         if execution.attention_reasons.is_empty() {
             lines.push(Line::from("alerts: unresolved execution anomaly"));
         } else {
@@ -263,8 +265,34 @@ fn format_optional_price(value: Option<f64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn format_pnl(value: f64) -> String {
-    format!("{value:+.2}")
+fn format_exposure_line(current: f64, target: Option<f64>) -> Line<'static> {
+    let signal = exposure_signal(current, target);
+    let target_text = target
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "-".to_string());
+
+    Line::from(vec![
+        Span::raw("exposure: "),
+        Span::styled(signal.text, signal.style),
+        Span::raw(format!(" ({current:.4} -> {target_text})")),
+    ])
+}
+
+fn format_statistics_line(
+    total_pnl: f64,
+    realized_pnl: f64,
+    max_inventory_gap_abs: f64,
+    max_gap_age_ms: i64,
+) -> Line<'static> {
+    let total = pnl_signal(total_pnl);
+    let realized = pnl_signal(realized_pnl);
+
+    Line::from(vec![
+        Span::styled(total.text, total.style),
+        Span::raw(" | "),
+        Span::styled(realized.text, realized.style),
+        Span::raw(format!(" | {max_inventory_gap_abs:.4} | {max_gap_age_ms} ms")),
+    ])
 }
 
 fn format_command(command: &GridCommandView) -> String {
@@ -296,6 +324,7 @@ fn format_activity_timestamp(ts: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Local};
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -314,7 +343,35 @@ mod tests {
             .collect::<String>()
     }
 
-    fn render_text_with_size(detail: TrackDetailView, width: u16, height: u16) -> String {
+    fn background_colors_for_substring(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Color> {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        let needle_chars: Vec<char> = needle.chars().collect();
+
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let start = y as usize * width + x as usize;
+                if x as usize + needle_chars.len() > width {
+                    continue;
+                }
+
+                let matches = needle_chars.iter().enumerate().all(|(offset, expected)| {
+                    buffer.content()[start + offset].symbol().chars().next() == Some(*expected)
+                });
+                if matches {
+                    return needle_chars
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, _)| buffer.content()[start + offset].bg)
+                        .collect();
+                }
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn render_terminal(detail: TrackDetailView, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
@@ -330,6 +387,11 @@ mod tests {
             .draw(|frame| render(frame, frame.area(), &app))
             .unwrap();
 
+        terminal
+    }
+
+    fn render_text_with_size(detail: TrackDetailView, width: u16, height: u16) -> String {
+        let terminal = render_terminal(detail, width, height);
         buffer_text(&terminal)
     }
 
@@ -364,13 +426,14 @@ mod tests {
         assert!(text.contains("Realized PnL"));
         assert!(text.contains("Max Gap"));
         assert!(text.contains("Max Gap Age"));
-        assert!(text.contains("+1245.30"));
-        assert!(text.contains("+980.10"));
+        assert!(text.contains("↑ +1245.30"));
+        assert!(text.contains("↑ +980.10"));
         assert!(text.contains("stats since: 2026-03-26T09:45:00Z"));
         assert!(text.contains("lower: 90.0000"));
         assert!(text.contains("upper: 110.0000"));
         assert!(text.contains("shape: linear"));
         assert!(text.contains("out of band policy: freeze"));
+        assert!(text.contains("3.5000 -> 4.0000"));
         assert!(text.contains("execution status: normal"));
         assert!(text.contains("inventory gap / age: 0.5000 / 60000 ms"));
         assert!(text.contains("active slots: 1"));
@@ -395,7 +458,7 @@ mod tests {
         let text = render_text(detail);
 
         assert!(text.contains("Total PnL | Realized PnL"));
-        assert!(text.contains("-123456789.12 | +987654321.99"));
+        assert!(text.contains("↓ -123456789.12 | ↑ +987654321.99"));
         assert!(!text.contains("-123456789.12+987654321.99"));
     }
 
@@ -438,9 +501,15 @@ mod tests {
         detail.execution.attention_reasons =
             vec!["recovery anomaly: unknown_live_order".to_string()];
 
-        let text = render_text(detail);
+        let terminal = render_terminal(detail, 100, 36);
+        let text = buffer_text(&terminal);
 
-        assert!(text.contains("ATTENTION REQUIRED"));
+        assert!(text.contains("! ATTENTION REQUIRED"));
         assert!(text.contains("recovery anomaly: unknown_live_order"));
+        assert!(
+            background_colors_for_substring(&terminal, "! ATTENTION REQUIRED")
+                .iter()
+                .any(|bg| *bg != Color::Reset)
+        );
     }
 }

@@ -27,6 +27,8 @@ pub struct TrackListItemView {
     pub reference_price: Option<f64>,
     pub exposure: ExposureSummaryView,
     pub execution: ExecutionBadgeView,
+    #[serde(default)]
+    pub statistics: GridStatisticsView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,15 +342,25 @@ mod tests {
                         "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
                         "reference_price":64123.4,
                         "exposure":{"current":0.5,"target":0.75},
-                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1}
+                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
+                        "statistics":{"total_pnl":1245.3,"realized_pnl":980.1}
                     }
                 ]
             }"#,
         )
         .unwrap();
+        let serialized = serde_json::to_value(&response).unwrap();
 
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].id, "btc-core");
+        assert_eq!(
+            serialized["items"][0]["statistics"]["total_pnl"].as_f64(),
+            Some(1245.3)
+        );
+        assert_eq!(
+            serialized["items"][0]["statistics"]["realized_pnl"].as_f64(),
+            Some(980.1)
+        );
     }
 
     #[test]

@@ -21,6 +21,10 @@
         "state": "open",
         "execution_status": "normal",
         "active_slot_count": 0
+      },
+      "statistics": {
+        "total_pnl": 1245.3,
+        "realized_pnl": 980.1
       }
     }
   }

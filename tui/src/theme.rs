@@ -1,6 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::protocol::GridStatus;
+use crate::signal::SignalKind;
 
 pub struct Theme;
 
@@ -13,6 +14,23 @@ impl Theme {
 
     pub fn footer() -> Style {
         Style::default().fg(Color::DarkGray)
+    }
+
+    pub fn status_value() -> Style {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn status_context() -> Style {
+        Style::default().fg(Color::Cyan)
+    }
+
+    pub fn status_alert() -> Style {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn table_header() -> Style {
@@ -38,5 +56,42 @@ impl Theme {
         };
 
         Style::default().fg(color)
+    }
+
+    pub fn execution_attention() -> Style {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn status_neutral() -> Style {
+        Style::default().fg(Color::White)
+    }
+
+    pub fn signal_positive(kind: SignalKind) -> Style {
+        match kind {
+            SignalKind::Exposure => Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            SignalKind::Pnl => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        }
+    }
+
+    pub fn signal_negative(kind: SignalKind) -> Style {
+        match kind {
+            SignalKind::Exposure => Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+            SignalKind::Pnl => Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        }
+    }
+
+    pub fn signal_neutral() -> Style {
+        Style::default().fg(Color::DarkGray)
     }
 }

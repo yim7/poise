@@ -45,6 +45,10 @@ impl App {
             .map(|grid| grid.id.as_str())
     }
 
+    pub fn selected_grid(&self) -> Option<&TrackListItemView> {
+        self.grids.get(self.selected_index)
+    }
+
     pub fn current_track_detail(&self) -> Option<&TrackDetailView> {
         self.current_track
             .as_ref()
