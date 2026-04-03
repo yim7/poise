@@ -74,9 +74,17 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(diagnostics.items.len(), 1);
-        assert!(diagnostics.items[0].message.contains("target exposure"));
+        assert_eq!(diagnostics.items.len(), 2);
+        assert_eq!(
+            diagnostics.items[0].message,
+            "target exposure 3.5000 -> 4.0000"
+        );
         assert_eq!(diagnostics.items[0].ts, "2026-03-26T10:01:00+00:00");
+        assert_eq!(
+            diagnostics.items[1].message,
+            "target exposure 4.0000 -> 4.5000"
+        );
+        assert_eq!(diagnostics.items[1].ts, "2026-03-26T10:01:10+00:00");
     }
 
     struct FakeReadRepository {
@@ -100,18 +108,27 @@ mod tests {
                         id: 1,
                         track_id: track_id.clone(),
                         event: DomainEvent::ExposureTargetChanged {
-                            from: Exposure(3.5),
-                            to: Exposure(4.0),
+                            from: Exposure(4.0),
+                            to: Exposure(4.5),
                         },
-                        created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
+                        created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 10).unwrap(),
                     },
                     StoredTrackEvent {
                         id: 2,
-                        track_id,
+                        track_id: track_id.clone(),
                         event: DomainEvent::ReplacementGateApplied {
                             reason: poise_core::events::ReplacementGateReason::RoundedMatch,
                         },
                         created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 5).unwrap(),
+                    },
+                    StoredTrackEvent {
+                        id: 3,
+                        track_id,
+                        event: DomainEvent::ExposureTargetChanged {
+                            from: Exposure(3.5),
+                            to: Exposure(4.0),
+                        },
+                        created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
                     },
                 ],
                 effects: vec![PersistedTrackEffect {
