@@ -1428,6 +1428,7 @@ mod tests {
             manager.snapshot("btc-core").unwrap()
         };
         snapshot.current_exposure = Exposure(2.0);
+        snapshot.desired_exposure = Some(Exposure(4.0));
         set_executor_state(
             &mut snapshot,
             working_order(
