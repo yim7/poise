@@ -10,8 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
-    TrackStreamEvent,
+    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+    TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
 };
 
 #[derive(Debug, Clone)]
@@ -63,6 +63,17 @@ impl ApiClient {
             .with_context(|| format!("failed to request track detail for `{id}`"))?;
 
         decode_json(response, "get track detail").await
+    }
+
+    pub async fn get_track_diagnostics(&self, id: &str) -> Result<TrackDiagnosticsView> {
+        let response = self
+            .http
+            .get(self.endpoint(&format!("/debug/tracks/{id}/diagnostics")))
+            .send()
+            .await
+            .with_context(|| format!("failed to request track diagnostics for `{id}`"))?;
+
+        decode_json(response, "get track diagnostics").await
     }
 
     pub async fn submit_command(
@@ -174,7 +185,7 @@ mod tests {
 
     use crate::protocol::{
         GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-        TrackListResponse, TrackStreamEvent,
+        TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
@@ -196,6 +207,11 @@ mod tests {
         .unwrap()
     }
 
+    fn track_diagnostics_view() -> TrackDiagnosticsView {
+        serde_json::from_str(include_str!("../tests/fixtures/track_diagnostics_view.json"))
+            .unwrap()
+    }
+
     async fn list_tracks() -> Json<TrackListResponse> {
         Json(track_list_response())
     }
@@ -206,6 +222,13 @@ mod tests {
         let detail = track_detail_view();
         assert_eq!(detail.identity.id, id);
         Json(detail)
+    }
+
+    async fn get_track_diagnostics(
+        axum::extract::Path(id): axum::extract::Path<String>,
+    ) -> Json<TrackDiagnosticsView> {
+        assert_eq!(id, BTC_GRID_ID);
+        Json(track_diagnostics_view())
     }
 
     async fn submit_command(
@@ -234,6 +257,7 @@ mod tests {
         let app = Router::new()
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
+            .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
             .route("/tracks/:id/commands", post(submit_command))
             .route("/ws", get(ws_handler));
 
@@ -268,6 +292,17 @@ mod tests {
         assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
+    }
+
+    #[tokio::test]
+    async fn get_track_diagnostics_decodes_debug_payload() {
+        let (base_url, _) = spawn_stub_server().await;
+        let client = ApiClient::new(base_url);
+
+        let diagnostics = client.get_track_diagnostics(BTC_GRID_ID).await.unwrap();
+
+        assert_eq!(diagnostics.items.len(), 1);
+        assert!(diagnostics.items[0].message.contains("target exposure"));
     }
 
     #[tokio::test]

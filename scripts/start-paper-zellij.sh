@@ -48,7 +48,7 @@ done
 cd "$REPO_ROOT"
 mkdir -p "$LOG_DIR"
 
-if [[ ! -f "$CONFIG_PATH" ]]; then
+if [[ "$DRY_RUN" -ne 1 && ! -f "$CONFIG_PATH" ]]; then
   echo "config file not found: $CONFIG_PATH" >&2
   echo "先复制 configs/binance-testnet.demo.toml 到本地 *.local.toml，再填入测试网凭证。" >&2
   exit 1

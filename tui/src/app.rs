@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use crate::protocol::{ExecutionStatusView, GridCommandType, TrackDetailView, TrackListItemView};
+use crate::protocol::{
+    ExecutionStatusView, GridCommandType, TrackDetailView, TrackDiagnosticsView,
+    TrackListItemView,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -16,6 +19,9 @@ pub struct App {
     pub selected_index: usize,
     pub current_view: View,
     pub should_quit: bool,
+    debug_diagnostics_enabled: bool,
+    current_track_diagnostics: Option<TrackDiagnosticsView>,
+    current_track_diagnostics_track_id: Option<String>,
     status_message: Option<String>,
     initial_load_pending: bool,
     next_http_retry_at: Instant,
@@ -32,6 +38,9 @@ impl App {
             selected_index: 0,
             current_view: View::Dashboard,
             should_quit: false,
+            debug_diagnostics_enabled: false,
+            current_track_diagnostics: None,
+            current_track_diagnostics_track_id: None,
             status_message: None,
             initial_load_pending: false,
             next_http_retry_at: Instant::now(),
@@ -61,6 +70,14 @@ impl App {
             .or_else(|| {
                 self.selected_grid()
                     .map(|grid| grid.execution.execution_status)
+            })
+    }
+
+    pub fn current_track_diagnostics(&self) -> Option<&TrackDiagnosticsView> {
+        self.current_track_diagnostics
+            .as_ref()
+            .filter(|_| {
+                self.current_track_diagnostics_track_id.as_deref() == self.selected_track_id()
             })
     }
 
@@ -137,6 +154,37 @@ impl App {
         }
     }
 
+    pub fn debug_diagnostics_enabled(&self) -> bool {
+        self.debug_diagnostics_enabled
+    }
+
+    pub fn set_debug_diagnostics_enabled(&mut self, enabled: bool) {
+        self.debug_diagnostics_enabled = enabled;
+        if !enabled {
+            self.clear_track_diagnostics();
+        }
+    }
+
+    pub fn toggle_debug_diagnostics(&mut self) -> bool {
+        let enabled = !self.debug_diagnostics_enabled;
+        self.set_debug_diagnostics_enabled(enabled);
+        enabled
+    }
+
+    pub fn apply_track_diagnostics(&mut self, diagnostics: TrackDiagnosticsView) {
+        let Some(track_id) = self.selected_track_id().map(ToOwned::to_owned) else {
+            return;
+        };
+
+        self.current_track_diagnostics = Some(diagnostics);
+        self.current_track_diagnostics_track_id = Some(track_id);
+    }
+
+    pub fn clear_track_diagnostics(&mut self) {
+        self.current_track_diagnostics = None;
+        self.current_track_diagnostics_track_id = None;
+    }
+
     pub fn is_command_enabled(&self, command: GridCommandType) -> bool {
         self.current_track_detail()
             .and_then(|detail| {
@@ -186,8 +234,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        ExecutionStateView, ExecutionStatusView, TrackDetailView, TrackListItemView, TrackStreamEvent,
-        TrackStreamPayload,
+        ExecutionStateView, ExecutionStatusView, TrackDetailView, TrackDiagnosticsView,
+        TrackListItemView, TrackStreamEvent, TrackStreamPayload,
     };
 
     use super::{App, View};
@@ -214,6 +262,11 @@ mod tests {
             "BTCUSDT".into()
         };
         detail
+    }
+
+    fn diagnostics_view() -> TrackDiagnosticsView {
+        serde_json::from_str(include_str!("../tests/fixtures/track_diagnostics_view.json"))
+            .unwrap()
     }
 
     #[test]
@@ -325,5 +378,25 @@ mod tests {
             app.selected_execution_status(),
             Some(ExecutionStatusView::Normal)
         );
+    }
+
+    #[test]
+    fn track_diagnostics_follow_debug_visibility_and_selected_track() {
+        let mut app = App::new(track_list_items());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        assert!(!app.debug_diagnostics_enabled());
+        assert!(app.current_track_diagnostics().is_none());
+
+        assert!(app.toggle_debug_diagnostics());
+        app.apply_track_diagnostics(diagnostics_view());
+        assert_eq!(app.current_track_diagnostics().unwrap().items.len(), 1);
+
+        app.select_next();
+        assert!(app.current_track_diagnostics().is_none());
+
+        app.set_debug_diagnostics_enabled(false);
+        assert!(app.current_track_diagnostics().is_none());
     }
 }

@@ -23,6 +23,7 @@ pub enum Action {
     None,
     OpenSelectedInstance,
     RefreshSelectedInstance,
+    ToggleDiagnostics,
     SubmitCommand(CommandKind),
 }
 
@@ -82,6 +83,13 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
             if app.current_view == View::Instance && app.is_command_enabled(GridCommandType::Resume)
             {
                 Action::SubmitCommand(CommandKind::Resume)
+            } else {
+                Action::None
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            if app.current_view == View::Instance {
+                Action::ToggleDiagnostics
             } else {
                 Action::None
             }
@@ -219,6 +227,17 @@ mod tests {
         assert_eq!(
             handle_key_event(&mut app, key(KeyCode::Char('r'))),
             Action::None
+        );
+    }
+
+    #[test]
+    fn d_toggles_diagnostics_in_instance_view() {
+        let mut app = app();
+        app.current_view = View::Instance;
+
+        assert_eq!(
+            handle_key_event(&mut app, key(KeyCode::Char('d'))),
+            Action::ToggleDiagnostics
         );
     }
 }

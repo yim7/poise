@@ -11,6 +11,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Enter    open instance details"),
         Line::from("Esc      back to dashboard"),
         Line::from("[ / ]    switch instance"),
+        Line::from("d        toggle diagnostics"),
         Line::from("?        open help"),
         Line::from("p / r    pause or resume current instance"),
     ];
@@ -44,6 +45,7 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Help"));
+        assert!(text.contains("toggle diagnostics"));
         assert!(text.contains("pause or resume"));
         assert!(text.contains("switch instance"));
     }

@@ -31,14 +31,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(6),
-            Constraint::Length(5),
-            Constraint::Length(6),
-            Constraint::Length(execution_height),
-            Constraint::Length(6),
-            Constraint::Min(0),
-        ])
+        .constraints(if app.debug_diagnostics_enabled() {
+            vec![
+                Constraint::Length(6),
+                Constraint::Length(5),
+                Constraint::Length(6),
+                Constraint::Length(execution_height),
+                Constraint::Length(6),
+                Constraint::Min(0),
+                Constraint::Length(5),
+            ]
+        } else {
+            vec![
+                Constraint::Length(6),
+                Constraint::Length(5),
+                Constraint::Length(6),
+                Constraint::Length(execution_height),
+                Constraint::Length(6),
+                Constraint::Min(0),
+            ]
+        })
         .split(area);
 
     let summary_lines = vec![
@@ -141,6 +153,38 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let activity = Paragraph::new(activity_lines)
         .block(Block::default().title("Activity").borders(Borders::ALL));
     frame.render_widget(activity, sections[5]);
+
+    if app.debug_diagnostics_enabled() {
+        let diagnostics_lines: Vec<Line<'_>> =
+            if let Some(diagnostics) = app.current_track_diagnostics() {
+                if diagnostics.items.is_empty() {
+                    vec![Line::from("No diagnostics yet")]
+                } else {
+                    diagnostics
+                        .items
+                        .iter()
+                        .map(|item| {
+                            let level = match item.level {
+                                ActivityLevelView::Info => "info",
+                                ActivityLevelView::Warn => "warn",
+                                ActivityLevelView::Error => "error",
+                            };
+                            Line::from(format!(
+                                "{} [{}] {}",
+                                format_activity_timestamp(&item.ts),
+                                level,
+                                item.message
+                            ))
+                        })
+                        .collect()
+                }
+            } else {
+                vec![Line::from("No diagnostics loaded")]
+            };
+        let diagnostics = Paragraph::new(diagnostics_lines)
+            .block(Block::default().title("Diagnostics").borders(Borders::ALL));
+        frame.render_widget(diagnostics, sections[6]);
+    }
 }
 
 fn execution_lines(
@@ -269,7 +313,8 @@ fn format_exposure_line(reference_price: Option<f64>, current: f64, target: Opti
 
     Line::from(vec![
         Span::raw(format!("reference/exposure: {reference_text} / ")),
-        Span::styled(format!("{current:.4} → {target_text}"), signal.style),
+        Span::raw(format!("{current:.4} → {target_text} ")),
+        Span::styled(format!("[{}]", signal.text), signal.style),
     ])
 }
 
@@ -324,7 +369,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::{App, View};
-    use crate::protocol::{ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView};
+    use crate::protocol::{
+        ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView,
+        TrackDiagnosticsView,
+    };
 
     use super::render;
 
@@ -394,6 +442,13 @@ mod tests {
         render_text_with_size(detail, 100, 36)
     }
 
+    fn diagnostics_view() -> TrackDiagnosticsView {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_diagnostics_view.json"
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn renders_grid_detail_execution_activity_and_commands() {
         let mut detail: TrackDetailView =
@@ -428,7 +483,7 @@ mod tests {
         assert!(text.contains("upper: 110.0000"));
         assert!(text.contains("shape: linear"));
         assert!(text.contains("out of band policy: freeze"));
-        assert!(text.contains("reference/exposure: 101.2500 / 3.5000 → 4.0000"));
+        assert!(text.contains("reference/exposure: 101.2500 / 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("execution status: normal"));
         assert!(text.contains("inventory gap / age: 0.5000 / 60000 ms"));
         assert!(text.contains("active slots: 1"));
@@ -439,7 +494,41 @@ mod tests {
         assert!(text.contains("flatten: disabled - no position to flatten"));
         assert!(text.contains("replacement gate"));
         assert!(text.contains("9.0 bps < 13.0 bps"));
+        assert!(!text.contains("Diagnostics"));
         assert!(!text.contains("client-1"));
+    }
+
+    #[test]
+    fn diagnostics_panel_is_hidden_by_default_and_visible_in_debug_view() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let mut app = App::new(response.items);
+        app.current_view = View::Instance;
+        app.apply_track_detail(detail.clone());
+        app.show_instance_for_selected();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let default_text = buffer_text(&terminal);
+        assert!(!default_text.contains("Diagnostics"));
+        assert!(!default_text.contains("target exposure 3.5000 -> 4.0000"));
+
+        app.toggle_debug_diagnostics();
+        app.apply_track_diagnostics(diagnostics_view());
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let debug_text = buffer_text(&terminal);
+        assert!(debug_text.contains("Diagnostics"));
+        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
     }
 
     #[test]

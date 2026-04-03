@@ -195,6 +195,18 @@ pub struct GridActivityItemView {
     pub level: ActivityLevelView,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackDiagnosticsView {
+    pub items: Vec<TrackDiagnosticItemView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackDiagnosticItemView {
+    pub ts: String,
+    pub message: String,
+    pub level: ActivityLevelView,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityLevelView {
@@ -332,8 +344,8 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackListResponse,
-        TrackStreamEvent, TrackStreamPayload,
+        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDiagnosticsView,
+        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
     };
 
     #[test]
@@ -416,5 +428,24 @@ mod tests {
         let request: TrackCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
 
         assert_eq!(request.command, GridCommandType::Pause);
+    }
+
+    #[test]
+    fn deserializes_track_diagnostics_response() {
+        let payload: TrackDiagnosticsView = serde_json::from_str(
+            r#"{
+                "items":[
+                    {
+                        "ts":"2026-04-03T02:26:47Z",
+                        "message":"target exposure -3.9534 -> -3.7500",
+                        "level":"info"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(payload.items.len(), 1);
+        assert_eq!(payload.items[0].message, "target exposure -3.9534 -> -3.7500");
     }
 }

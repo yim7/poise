@@ -294,7 +294,7 @@ async fn process_ws_event(
         match receiver.try_recv() {
             Ok(event) => {
                 handled_event = true;
-                handle_ws_event(app, event).await;
+                handle_ws_event(client, app, event).await;
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -329,6 +329,12 @@ async fn handle_action(client: &ApiClient, app: &mut App, action: Action) -> Res
         Action::OpenSelectedInstance | Action::RefreshSelectedInstance => {
             refresh_selected_grid_detail(client, app).await?;
             app.show_instance_for_selected();
+            Ok(())
+        }
+        Action::ToggleDiagnostics => {
+            if app.toggle_debug_diagnostics() {
+                refresh_selected_track_diagnostics(client, app).await?;
+            }
             Ok(())
         }
         Action::SubmitCommand(command) => submit_selected_command(client, app, command).await,
@@ -378,13 +384,42 @@ async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Resu
         .to_string();
     let detail = client.get_track_detail(&track_id).await?;
     app.apply_track_detail(detail);
+    refresh_selected_track_diagnostics_best_effort(client, app).await;
     Ok(())
 }
 
-async fn handle_ws_event(app: &mut App, event: TrackStreamEvent) {
+async fn refresh_selected_track_diagnostics(client: &ApiClient, app: &mut App) -> Result<()> {
+    let track_id = app
+        .selected_track_id()
+        .context("no instance selected for diagnostics")?
+        .to_string();
+    let diagnostics = client.get_track_diagnostics(&track_id).await?;
+    app.apply_track_diagnostics(diagnostics);
+    Ok(())
+}
+
+async fn refresh_selected_track_diagnostics_best_effort(client: &ApiClient, app: &mut App) {
+    if !app.debug_diagnostics_enabled() {
+        app.clear_track_diagnostics();
+        return;
+    }
+
+    if let Err(error) = refresh_selected_track_diagnostics(client, app).await {
+        tracing::warn!("failed to refresh diagnostics: {error}");
+        app.clear_track_diagnostics();
+    }
+}
+
+async fn handle_ws_event(client: &ApiClient, app: &mut App, event: TrackStreamEvent) {
     match event.payload {
         TrackStreamPayload::TrackListItemChanged { item } => app.apply_track_list_item(item),
-        TrackStreamPayload::TrackDetailChanged { detail } => app.apply_track_detail(*detail),
+        TrackStreamPayload::TrackDetailChanged { detail } => {
+            let selected_matches = app.selected_track_id() == Some(detail.identity.id.as_str());
+            app.apply_track_detail(*detail);
+            if selected_matches {
+                refresh_selected_track_diagnostics_best_effort(client, app).await;
+            }
+        }
     }
 }
 
@@ -433,9 +468,13 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     let selected_track_id = app.selected_track_id().map(ToOwned::to_owned);
     let current_view = app.current_view;
     let should_quit = app.should_quit;
+    let debug_diagnostics_enabled = app.debug_diagnostics_enabled();
+    let should_load_diagnostics =
+        debug_diagnostics_enabled && matches!(current_view, View::Instance);
 
     let response = client.list_tracks().await?;
     let mut refreshed = App::new(response.items);
+    refreshed.set_debug_diagnostics_enabled(debug_diagnostics_enabled);
     if let Some(selected_track_id) = selected_track_id
         && let Some(index) = refreshed
             .grids
@@ -448,6 +487,9 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     if let Some(track_id) = refreshed.selected_track_id().map(ToOwned::to_owned) {
         let detail = client.get_track_detail(&track_id).await?;
         refreshed.apply_track_detail(detail);
+        if should_load_diagnostics {
+            refresh_selected_track_diagnostics_best_effort(client, &mut refreshed).await;
+        }
     }
 
     refreshed.current_view = current_view;
@@ -469,6 +511,7 @@ mod tests {
 
     use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
     use axum::extract::{Path, Query, State};
+    use axum::http::StatusCode;
     use axum::response::Response;
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -481,14 +524,15 @@ mod tests {
         ApiClient, CommandKind, TracingDestination, View, bootstrap_runtime_state, derive_ws_url,
         format_command_response, handle_action, handle_ws_event, load_initial_state,
         maybe_load_initial_state, parse_tracing_destination, process_ws_event,
-        submit_selected_command,
+        submit_selected_command, sync_projected_state,
     };
     use crate::api_client::connect_ws;
     use crate::app::App;
+    use crate::input::Action;
     use crate::protocol::{
         ExecutionStateView, GridCommandType, GridStatus, TrackCommandAccepted, TrackCommandRequest,
-        TrackDetailView, TrackListItemView, TrackListResponse, TrackStreamEvent,
-        TrackStreamPayload,
+        TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse,
+        TrackStreamEvent, TrackStreamPayload,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -574,6 +618,21 @@ mod tests {
         })
     }
 
+    async fn get_projected_diagnostics(
+        Path(id): Path<String>,
+        State(state): State<ProjectionStubState>,
+    ) -> Json<crate::protocol::TrackDiagnosticsView> {
+        state
+            .requests
+            .lock()
+            .await
+            .push(format!("/debug/tracks/{id}/diagnostics"));
+        Json(
+            serde_json::from_str(include_str!("../tests/fixtures/track_diagnostics_view.json"))
+                .unwrap(),
+        )
+    }
+
     async fn spawn_projection_stub_server() -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
@@ -583,6 +642,47 @@ mod tests {
         let app = Router::new()
             .route("/tracks", get(list_projected_grids))
             .route("/tracks/:id", get(get_projected_detail))
+            .route(
+                "/debug/tracks/:id/diagnostics",
+                get(get_projected_diagnostics),
+            )
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (ApiClient::new(format!("http://{address}")), state)
+    }
+
+    async fn get_failing_projected_diagnostics(
+        Path(id): Path<String>,
+        State(state): State<ProjectionStubState>,
+    ) -> (StatusCode, String) {
+        state
+            .requests
+            .lock()
+            .await
+            .push(format!("/debug/tracks/{id}/diagnostics"));
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "diagnostics unavailable".to_string(),
+        )
+    }
+
+    async fn spawn_projection_stub_server_with_failing_diagnostics() -> (ApiClient, ProjectionStubState) {
+        let state = ProjectionStubState {
+            requests: Arc::new(Mutex::new(vec![])),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/tracks", get(list_projected_grids))
+            .route("/tracks/:id", get(get_projected_detail))
+            .route(
+                "/debug/tracks/:id/diagnostics",
+                get(get_failing_projected_diagnostics),
+            )
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -965,14 +1065,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diagnostics_are_requested_only_after_debug_toggle() {
+        let (client, state) = spawn_projection_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec!["/tracks".to_string(), format!("/tracks/{BTC_GRID_ID}")]
+        );
+
+        handle_action(&client, &mut app, Action::ToggleDiagnostics)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_projected_state_keeps_stable_detail_when_diagnostics_request_fails() {
+        let (client, state) = spawn_projection_stub_server_with_failing_diagnostics().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.set_debug_diagnostics_enabled(true);
+
+        sync_projected_state(&client, &mut app).await.unwrap();
+
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert!(app.current_track_diagnostics().is_none());
+        assert!(
+            state
+                .requests
+                .lock()
+                .await
+                .contains(&format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_ws_event_refreshes_diagnostics_for_selected_track_in_debug_mode() {
+        let (client, _) = spawn_projection_stub_server().await;
+        let mut app = App::new(track_list_response().items);
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.set_debug_diagnostics_enabled(true);
+        app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
+        let mut stale_diagnostics: TrackDiagnosticsView = serde_json::from_str(include_str!(
+            "../tests/fixtures/track_diagnostics_view.json"
+        ))
+        .unwrap();
+        stale_diagnostics.items[0].message = "stale diagnostics".into();
+        app.apply_track_diagnostics(stale_diagnostics);
+
+        handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
+
+        assert_eq!(app.current_track.as_ref().unwrap().status.reference_price, Some(101.5));
+        assert_eq!(app.current_track_diagnostics().unwrap().items.len(), 1);
+        assert!(
+            app.current_track_diagnostics().unwrap().items[0]
+                .message
+                .contains("target exposure")
+        );
+    }
+
+    #[tokio::test]
     async fn handle_ws_event_applies_projected_updates_without_refetch() {
         let mut app = App::new(track_list_response().items);
         app.current_view = View::Instance;
         app.show_instance_for_selected();
         app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
 
-        handle_ws_event(&mut app, track_list_item_changed_event()).await;
-        handle_ws_event(&mut app, track_detail_changed_event()).await;
+        let (client, _) = spawn_projection_stub_server().await;
+        handle_ws_event(&client, &mut app, track_list_item_changed_event()).await;
+        handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
         assert_eq!(app.grids[0].reference_price, Some(101.4));
         assert_eq!(
@@ -1066,7 +1240,7 @@ mod tests {
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        handle_ws_event(&mut app, track_detail_changed_event()).await;
+        handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
         assert_eq!(
             app.current_track.as_ref().unwrap().status.reference_price,
