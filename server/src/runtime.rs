@@ -868,7 +868,11 @@ async fn seed_recovery_tracking(
             &mut tracked,
             instruments,
             &track.id,
-            snapshot.executor_state.diagnostics.recovery_anomaly.is_some(),
+            snapshot
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .is_some(),
             retry_interval,
         );
     }
@@ -2694,7 +2698,11 @@ mod tests {
         assert!(inventory_core_order(&instance).is_none());
         assert_eq!(instance.current_exposure, Exposure(6.0));
         assert_eq!(
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref(),
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
 
@@ -3883,7 +3891,11 @@ mod tests {
         assert_eq!(instance.current_exposure, Exposure(0.0));
         assert_eq!(instance.desired_exposure, Some(Exposure(0.0)));
         assert_eq!(
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref(),
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -4045,7 +4057,11 @@ mod tests {
         let handles = fixture.runtime.start().await.unwrap();
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4165,7 +4181,13 @@ mod tests {
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert!(instance.executor_state.diagnostics.recovery_anomaly.is_none());
+        assert!(
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .is_none()
+        );
         assert_eq!(instance.executor_state.slots.len(), 2);
         assert_eq!(
             instance.executor_state.slots[0]
@@ -4282,7 +4304,11 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4387,7 +4413,11 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4454,7 +4484,11 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4913,7 +4947,11 @@ mod tests {
         )]);
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.diagnostics.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;

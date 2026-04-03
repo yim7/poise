@@ -302,7 +302,11 @@ fn format_optional_price(value: Option<f64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn format_exposure_line(reference_price: Option<f64>, current: f64, target: Option<f64>) -> Line<'static> {
+fn format_exposure_line(
+    reference_price: Option<f64>,
+    current: f64,
+    target: Option<f64>,
+) -> Line<'static> {
     let signal = exposure_signal(current, target);
     let reference_text = reference_price
         .map(|value| format!("{value:.4}"))
@@ -331,7 +335,9 @@ fn format_statistics_line(
         Span::styled(total.text, total.style),
         Span::raw(" | "),
         Span::styled(realized.text, realized.style),
-        Span::raw(format!(" | {max_inventory_gap_abs:.4} | {max_gap_age_ms} ms")),
+        Span::raw(format!(
+            " | {max_inventory_gap_abs:.4} | {max_gap_age_ms} ms"
+        )),
     ])
 }
 
@@ -364,9 +370,9 @@ fn format_activity_timestamp(ts: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Local};
-    use ratatui::style::Color;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use crate::app::{App, View};
     use crate::protocol::{
@@ -386,7 +392,10 @@ mod tests {
             .collect::<String>()
     }
 
-    fn background_colors_for_substring(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Color> {
+    fn background_colors_for_substring(
+        terminal: &Terminal<TestBackend>,
+        needle: &str,
+    ) -> Vec<Color> {
         let buffer = terminal.backend().buffer();
         let width = buffer.area.width as usize;
         let needle_chars: Vec<char> = needle.chars().collect();

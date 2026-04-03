@@ -27,6 +27,25 @@ pub struct OrderObservationApplication {
     pub absorb_result: OrderUpdateAbsorbResult,
 }
 
+fn updated_active_round(
+    previous_state: &ExecutorState,
+    target_exposure: poise_core::types::Exposure,
+) -> ExecutionRound {
+    ExecutionRound {
+        target_exposure,
+        mode: previous_state
+            .active_round
+            .as_ref()
+            .map(|round| round.mode.clone())
+            .unwrap_or_else(|| previous_state.diagnostics.mode.clone()),
+        started_at: previous_state
+            .active_round
+            .as_ref()
+            .map(|round| round.started_at)
+            .unwrap_or(previous_state.stats.started_at),
+    }
+}
+
 pub fn record_submit_request(
     previous_state: &ExecutorState,
     request: &OrderRequest,
@@ -35,21 +54,10 @@ pub fn record_submit_request(
     let ((_, sibling_slots), _) =
         slots::split_inventory_core_slot_from_slots(&previous_state.slots);
     let mut state = previous_state.clone();
-    let active_round_mode = state
-        .active_round
-        .as_ref()
-        .map(|round| round.mode.clone())
-        .unwrap_or_else(|| state.diagnostics.mode.clone());
-    let active_round_started_at = state
-        .active_round
-        .as_ref()
-        .map(|round| round.started_at)
-        .unwrap_or(state.stats.started_at);
-    state.active_round = Some(ExecutionRound {
-        target_exposure: target_exposure.clone(),
-        mode: active_round_mode,
-        started_at: active_round_started_at,
-    });
+    state.active_round = Some(updated_active_round(
+        previous_state,
+        target_exposure.clone(),
+    ));
     state.slots = slots::with_inventory_core_slot(
         sibling_slots,
         ExecutionSlot {
@@ -138,21 +146,7 @@ pub fn record_submit_receipt(
     };
 
     let mut state = previous_state.clone();
-    let active_round_mode = state
-        .active_round
-        .as_ref()
-        .map(|round| round.mode.clone())
-        .unwrap_or_else(|| state.diagnostics.mode.clone());
-    let active_round_started_at = state
-        .active_round
-        .as_ref()
-        .map(|round| round.started_at)
-        .unwrap_or(state.stats.started_at);
-    state.active_round = Some(ExecutionRound {
-        target_exposure,
-        mode: active_round_mode,
-        started_at: active_round_started_at,
-    });
+    state.active_round = Some(updated_active_round(previous_state, target_exposure));
     state.slots[*slot_index] = ExecutionSlot {
         slot: slot.slot.clone(),
         state: SlotState::Working,
@@ -498,6 +492,30 @@ mod tests {
         assert!(
             !order.contains_key("target_exposure"),
             "working order should only keep exchange facts"
+        );
+    }
+
+    #[test]
+    fn updated_active_round_preserves_existing_metadata_when_target_changes() {
+        let previous_state = working_state();
+        let updated = updated_active_round(&previous_state, Exposure(6.0));
+
+        assert_eq!(updated.target_exposure, Exposure(6.0));
+        assert_eq!(
+            updated.mode,
+            previous_state
+                .active_round
+                .as_ref()
+                .expect("working state should carry active round")
+                .mode
+        );
+        assert_eq!(
+            updated.started_at,
+            previous_state
+                .active_round
+                .as_ref()
+                .expect("working state should carry active round")
+                .started_at
         );
     }
 

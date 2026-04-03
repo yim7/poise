@@ -7,8 +7,10 @@ use crate::runtime::{ExecutorState, SlotState};
 use crate::transition::TrackEffect;
 
 use super::planning::evaluate_submit_intent_with_active_lifecycle;
-use super::round_policy::{RoundDecision, evaluate_round_policy, round_policy_input_from_state};
-use super::rebalance_trigger::{ActiveLifecycle, RebalanceTriggerDecision};
+use super::rebalance_trigger::ActiveLifecycle;
+use super::round_policy::{
+    RoundDecision, RoundLifecycleDecision, evaluate_round_policy, round_policy_input_from_state,
+};
 use super::{PendingSubmitHint, SubmitIntentInput, recording, slots};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -169,7 +171,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         .pending_submit_for_request(&input.request.client_order_id)
         .is_some_and(|slot| {
             current_plan_evaluation.as_ref().is_some_and(|evaluation| {
-                evaluation.trigger_decision == RebalanceTriggerDecision::PreserveActiveLifecycle
+                evaluation.lifecycle == RoundLifecycleDecision::ContinueRound
             }) && input
                 .previous_state
                 .active_round

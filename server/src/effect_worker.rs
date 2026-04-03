@@ -543,9 +543,11 @@ mod tests {
             [TrackEffect::SubmitOrder { .. }]
         ));
         let expected_round_target = match transition.effects.as_slice() {
-            [TrackEffect::SubmitOrder {
-                target_exposure, ..
-            }] => target_exposure.clone(),
+            [
+                TrackEffect::SubmitOrder {
+                    target_exposure, ..
+                },
+            ] => target_exposure.clone(),
             _ => panic!("expected a single submit effect"),
         };
 
@@ -1330,7 +1332,13 @@ mod tests {
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(snapshot.current_exposure, Exposure(4.0));
         assert_eq!(snapshot.desired_exposure, Some(Exposure(4.0)));
-        assert!(snapshot.executor_state.diagnostics.recovery_anomaly.is_none());
+        assert!(
+            snapshot
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .is_none()
+        );
 
         let effect = repository
             .list_all_effects()
@@ -1528,13 +1536,18 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
-                    target_exposure: poise_core::strategy::target_exposure(reference_price, &config),
+                    target_exposure: poise_core::strategy::target_exposure(
+                        reference_price,
+                        &config,
+                    ),
                     mode: ExecutionMode::Passive,
                     started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
                 }),
                 diagnostics: poise_engine::runtime::ExecutorDiagnostics {
                     mode: ExecutionMode::Passive,
-                    inventory_gap: Exposure(poise_core::strategy::target_exposure(reference_price, &config).0),
+                    inventory_gap: Exposure(
+                        poise_core::strategy::target_exposure(reference_price, &config).0,
+                    ),
                     gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                     last_reprice_at: None,
                     last_execution_reason: Some(ExecutionReason::GapEnteredPassive),

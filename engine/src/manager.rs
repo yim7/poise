@@ -1722,7 +1722,10 @@ mod tests {
             .unwrap();
 
         let track = manager.get_track("btc1").unwrap();
-        assert_eq!(track.desired_exposure, Some(poise_core::types::Exposure(4.0)));
+        assert_eq!(
+            track.desired_exposure,
+            Some(poise_core::types::Exposure(4.0))
+        );
         assert_eq!(
             transition.snapshot.desired_exposure,
             Some(poise_core::types::Exposure(4.0))
@@ -2835,9 +2838,13 @@ mod tests {
                 && (*quantity - 4.0).abs() < f64::EPSILON
         ));
         assert_eq!(
-            manager.get_track("btc-core").unwrap().executor_state.active_round.as_ref().map(
-                |round| round.target_exposure.clone()
-            ),
+            manager
+                .get_track("btc-core")
+                .unwrap()
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
             Some(poise_core::types::Exposure(4.0))
         );
     }
@@ -2904,9 +2911,13 @@ mod tests {
                 && (*quantity - 0.8).abs() < f64::EPSILON
         ));
         assert_eq!(
-            manager.get_track("btc-core").unwrap().executor_state.active_round.as_ref().map(
-                |round| round.target_exposure.clone()
-            ),
+            manager
+                .get_track("btc-core")
+                .unwrap()
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
             Some(poise_core::types::Exposure(2.8))
         );
     }
@@ -3695,7 +3706,11 @@ mod tests {
             Exposure(2.0)
         );
         assert_eq!(
-            transition.snapshot.executor_state.diagnostics.gap_started_at,
+            transition
+                .snapshot
+                .executor_state
+                .diagnostics
+                .gap_started_at,
             Some(Utc.with_ymd_and_hms(2026, 3, 29, 10, 0, 0).unwrap())
         );
         assert_eq!(

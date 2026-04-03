@@ -1,20 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 mod planning;
-mod round_policy;
 mod rebalance_trigger;
 mod recording;
 mod recovery;
+mod round_policy;
 mod slots;
 
 #[cfg(test)]
 pub(crate) use planning::current_submit_hint;
 pub(crate) use planning::{DesiredOrder, ExecutorInput, SubmitIntentInput, plan, refresh_state};
 pub use planning::{OrderRole, OrderSlot, PendingSubmitHint};
-#[cfg(test)]
-pub(crate) use round_policy::{
-    RoundLifecycleDecision, evaluate_round_policy, round_policy_input_from_state,
-};
 pub use recording::OrderUpdateAbsorbResult;
 #[cfg(test)]
 pub(crate) use recording::apply_order_observation;
@@ -27,6 +23,10 @@ pub use recovery::{RecoveryAnomaly, SubmitRecoveryPlan, SubmitRecoveryResolution
 pub(crate) use recovery::{
     RecoveryInput, RecoveryResolution, SubmitRecoveryInput, recover_submit_effect,
     recover_working_orders, submit_requests_match,
+};
+#[cfg(test)]
+pub(crate) use round_policy::{
+    RoundLifecycleDecision, evaluate_round_policy, round_policy_input_from_state,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,7 +388,10 @@ mod tests {
             now,
         ));
 
-        assert_eq!(rebalance_plan.state.diagnostics.mode, ExecutionMode::Rebalance);
+        assert_eq!(
+            rebalance_plan.state.diagnostics.mode,
+            ExecutionMode::Rebalance
+        );
         assert!(matches!(
             rebalance_plan.effects.as_slice(),
             [
@@ -428,7 +431,10 @@ mod tests {
             Some(&rebalance_state),
             now,
         ));
-        assert_eq!(rebalance_plan.state.diagnostics.mode, ExecutionMode::Rebalance);
+        assert_eq!(
+            rebalance_plan.state.diagnostics.mode,
+            ExecutionMode::Rebalance
+        );
         assert_eq!(rebalance_plan.effects, vec![ExecutionAction::NoOp]);
 
         let mut catch_up_state = rebalance_state.clone();
@@ -475,10 +481,8 @@ mod tests {
     #[test]
     fn round_policy_continues_execution_when_drift_stays_within_tolerance() {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let previous_state = test_executor_state(
-            ExecutionMode::Passive,
-            Some(now - Duration::seconds(90)),
-        );
+        let previous_state =
+            test_executor_state(ExecutionMode::Passive, Some(now - Duration::seconds(90)));
 
         let decision = evaluate_round_policy(round_policy_input_from_state(
             &Exposure(0.0),
@@ -497,25 +501,21 @@ mod tests {
         let rules = test_exchange_rules();
         let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let previous_state = test_executor_state(
-            ExecutionMode::Passive,
-            Some(now - Duration::seconds(90)),
-        );
+        let previous_state =
+            test_executor_state(ExecutionMode::Passive, Some(now - Duration::seconds(90)));
 
-        let planning_decision = planning::round_decision_for_test(
-            executor_input(
-                &track_id,
-                &instrument,
-                &rules,
-                3.75,
-                0.5,
-                Exposure(0.0),
-                Exposure(4.2),
-                99.9,
-                Some(&previous_state),
-                now,
-            ),
-        );
+        let planning_decision = planning::round_decision_for_test(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.5,
+            Exposure(0.0),
+            Exposure(4.2),
+            99.9,
+            Some(&previous_state),
+            now,
+        ));
         let recovery_decision = recovery::round_decision_for_test(
             &Exposure(0.0),
             &Exposure(4.2),
@@ -530,10 +530,8 @@ mod tests {
     #[test]
     fn round_policy_input_from_state_is_shared_by_planning_and_recovery() {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let previous_state = test_executor_state(
-            ExecutionMode::Passive,
-            Some(now - Duration::seconds(90)),
-        );
+        let previous_state =
+            test_executor_state(ExecutionMode::Passive, Some(now - Duration::seconds(90)));
 
         let planning_input = planning::round_policy_input_for_test(
             &Exposure(0.0),
@@ -1096,6 +1094,68 @@ mod tests {
         ));
 
         assert!(hint.is_none());
+    }
+
+    #[test]
+    fn submit_intent_evaluation_reports_start_round_for_fresh_action() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let evaluation = planning::evaluate_submit_intent_with_active_lifecycle(
+            submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                3.75,
+                0.0,
+                Exposure(0.0),
+                Exposure(4.0),
+                95.0,
+                now,
+            ),
+            rebalance_trigger::ActiveLifecycle::none(),
+            None,
+        );
+
+        assert_eq!(evaluation.lifecycle, RoundLifecycleDecision::StartRound);
+        assert_eq!(
+            evaluation
+                .submit_hint
+                .as_ref()
+                .map(|hint| hint.target_exposure.clone()),
+            Some(Exposure(4.0))
+        );
+    }
+
+    #[test]
+    fn submit_intent_evaluation_reports_continue_round_for_preserved_active_lifecycle() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let previous_state =
+            test_executor_state(ExecutionMode::Passive, Some(now - Duration::seconds(90)));
+
+        let evaluation = planning::evaluate_submit_intent_with_active_lifecycle(
+            submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                3.75,
+                0.5,
+                Exposure(0.0),
+                Exposure(4.2),
+                99.9,
+                now,
+            ),
+            rebalance_trigger::ActiveLifecycle::from_executor_state(Some(&previous_state)),
+            Some(&previous_state),
+        );
+
+        assert_eq!(evaluation.lifecycle, RoundLifecycleDecision::ContinueRound);
+        assert!(evaluation.submit_hint.is_none());
     }
 
     #[test]
@@ -2264,7 +2324,8 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(target_exposure, Exposure(4.0));
         assert_eq!(
-            state.active_round
+            state
+                .active_round
                 .as_ref()
                 .map(|round| round.target_exposure.clone()),
             Some(Exposure(4.0))
@@ -2326,7 +2387,8 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(target_exposure, Exposure(2.8));
         assert_eq!(
-            state.active_round
+            state
+                .active_round
                 .as_ref()
                 .map(|round| round.target_exposure.clone()),
             Some(Exposure(2.8))

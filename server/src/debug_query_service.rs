@@ -20,7 +20,11 @@ impl TrackDebugQueryService {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackDiagnosticsView>> {
-        let Some(source) = self.query_service.load_track_detail_source(track_id).await? else {
+        let Some(source) = self
+            .query_service
+            .load_track_detail_source(track_id)
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -163,7 +167,10 @@ mod tests {
             Ok(vec![self.snapshot.clone()])
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok((track_id.as_str() == "btc-core").then_some(self.snapshot.clone()))
         }
 
@@ -172,7 +179,9 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredTrackEvent>> {
-            Ok((track_id.as_str() == "btc-core").then_some(self.events.clone()).unwrap_or_default())
+            Ok((track_id.as_str() == "btc-core")
+                .then_some(self.events.clone())
+                .unwrap_or_default())
         }
 
         async fn list_recent_track_effects(
@@ -180,7 +189,9 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok((track_id.as_str() == "btc-core").then_some(self.effects.clone()).unwrap_or_default())
+            Ok((track_id.as_str() == "btc-core")
+                .then_some(self.effects.clone())
+                .unwrap_or_default())
         }
     }
 

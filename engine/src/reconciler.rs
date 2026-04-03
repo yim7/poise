@@ -108,7 +108,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     ) {
         return TargetReconcileResult {
             events: vec![DomainEvent::RiskDenied { reason }],
-                desired_exposure: grid.current_exposure.clone(),
+            desired_exposure: grid.current_exposure.clone(),
             new_status: None,
             suppress_execution: true,
         };

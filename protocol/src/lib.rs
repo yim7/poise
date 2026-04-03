@@ -446,6 +446,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(payload.items.len(), 1);
-        assert_eq!(payload.items[0].message, "target exposure -3.9534 -> -3.7500");
+        assert_eq!(
+            payload.items[0].message,
+            "target exposure -3.9534 -> -3.7500"
+        );
     }
 }

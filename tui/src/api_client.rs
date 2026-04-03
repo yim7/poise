@@ -208,8 +208,10 @@ mod tests {
     }
 
     fn track_diagnostics_view() -> TrackDiagnosticsView {
-        serde_json::from_str(include_str!("../tests/fixtures/track_diagnostics_view.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/track_diagnostics_view.json"
+        ))
+        .unwrap()
     }
 
     async fn list_tracks() -> Json<TrackListResponse> {

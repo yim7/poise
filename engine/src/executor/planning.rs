@@ -11,11 +11,11 @@ use crate::runtime::{
 };
 use crate::track::{Instrument, TrackId};
 
+use super::rebalance_trigger::ActiveLifecycle;
 use super::round_policy::{
-    RoundDecision, evaluate_round_policy, round_policy_input_from_state,
+    RoundDecision, RoundLifecycleDecision, evaluate_round_policy, round_policy_input_from_state,
     round_policy_input_from_state_with_lifecycle,
 };
-use super::rebalance_trigger::{ActiveLifecycle, RebalanceTriggerDecision};
 use super::{ExecutionMode, INVENTORY_CORE_SLOT, recording, slots};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +78,7 @@ pub struct PendingSubmitHint {
 
 #[derive(Debug, Clone)]
 pub(super) struct SubmitIntentEvaluation {
-    pub trigger_decision: RebalanceTriggerDecision,
+    pub lifecycle: RoundLifecycleDecision,
     pub submit_hint: Option<PendingSubmitHint>,
 }
 
@@ -122,7 +122,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         executor_state,
         &desired_orders,
         &round_decision.mode,
-        &round_decision.trigger_decision,
+        &round_decision.lifecycle,
     );
 
     ExecutorPlan {
@@ -176,17 +176,19 @@ pub(super) fn evaluate_submit_intent_with_active_lifecycle(
         input.observed_at,
         Some(active_lifecycle),
     ));
-    let submit_hint = desired_inventory_order_for_submit_intent(&input, executor_state, &round_decision)
-        .map(|desired_order| {
-            let request = desired_order_to_request(&input, &desired_order);
-            PendingSubmitHint {
-                request,
-                target_exposure: desired_order.target_exposure,
-            }
-        });
+    let submit_hint =
+        desired_inventory_order_for_submit_intent(&input, executor_state, &round_decision).map(
+            |desired_order| {
+                let request = desired_order_to_request(&input, &desired_order);
+                PendingSubmitHint {
+                    request,
+                    target_exposure: desired_order.target_exposure,
+                }
+            },
+        );
 
     SubmitIntentEvaluation {
-        trigger_decision: round_decision.trigger_decision,
+        lifecycle: round_decision.lifecycle,
         submit_hint,
     }
 }
@@ -270,17 +272,24 @@ fn desired_inventory_order_for_submit_intent(
     executor_state: Option<&ExecutorState>,
     round_decision: &RoundDecision,
 ) -> Option<DesiredOrder> {
-    match round_decision.trigger_decision {
-        RebalanceTriggerDecision::TriggerFreshAction => {
-            desired_inventory_order_for_target(input, &input.target_exposure)
+    match round_decision.lifecycle {
+        RoundLifecycleDecision::StartRound | RoundLifecycleDecision::SwitchRound => {
+            desired_inventory_order_for_target(
+                input,
+                round_decision
+                    .active_round
+                    .as_ref()
+                    .map(|round| &round.target_exposure)
+                    .unwrap_or(&input.target_exposure),
+            )
         }
-        RebalanceTriggerDecision::PreserveActiveLifecycle => desired_inventory_order_for_preserved_round(
+        RoundLifecycleDecision::ContinueRound => desired_inventory_order_for_preserved_round(
             input,
             executor_state,
             &round_decision.mode,
             round_decision.active_round.as_ref(),
         ),
-        RebalanceTriggerDecision::Suppress => None,
+        RoundLifecycleDecision::FinishRound => None,
     }
 }
 
@@ -323,8 +332,7 @@ fn desired_inventory_order_for_preserved_round(
     let current_slot = state
         .slots
         .iter()
-        .find(|slot| slot.slot == OrderSlot::new(INVENTORY_CORE_SLOT))
-        ?;
+        .find(|slot| slot.slot == OrderSlot::new(INVENTORY_CORE_SLOT))?;
     let current_order = current_slot.working_order.as_ref()?;
     let desired_order = desired_inventory_order_for_target(input, &active_round.target_exposure)?;
 
@@ -336,8 +344,7 @@ fn desired_inventory_order_for_preserved_round(
                 &desired_order,
                 input.reference_price,
                 input.exchange_rules,
-            )
-            {
+            ) {
                 return None;
             }
             Some(desired_order)
@@ -365,7 +372,7 @@ fn diff_desired_orders(
     executor_state: Option<&ExecutorState>,
     desired_orders: &[DesiredOrder],
     mode: &ExecutionMode,
-    trigger_decision: &RebalanceTriggerDecision,
+    lifecycle: &RoundLifecycleDecision,
 ) -> (
     Vec<ExecutionAction>,
     Vec<ExecutionSlot>,
@@ -376,13 +383,12 @@ fn diff_desired_orders(
 
     match desired_order {
         None => {
-            if matches!(
-                trigger_decision,
-                RebalanceTriggerDecision::PreserveActiveLifecycle
-            ) && matches!(
-                current_slot.state,
-                SlotState::SubmitPending | SlotState::Working
-            ) {
+            if matches!(lifecycle, RoundLifecycleDecision::ContinueRound)
+                && matches!(
+                    current_slot.state,
+                    SlotState::SubmitPending | SlotState::Working
+                )
+            {
                 return (
                     vec![ExecutionAction::NoOp],
                     slots::with_inventory_core_slot(sibling_slots, current_slot),

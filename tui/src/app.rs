@@ -1,8 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    ExecutionStatusView, GridCommandType, TrackDetailView, TrackDiagnosticsView,
-    TrackListItemView,
+    ExecutionStatusView, GridCommandType, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,11 +73,9 @@ impl App {
     }
 
     pub fn current_track_diagnostics(&self) -> Option<&TrackDiagnosticsView> {
-        self.current_track_diagnostics
-            .as_ref()
-            .filter(|_| {
-                self.current_track_diagnostics_track_id.as_deref() == self.selected_track_id()
-            })
+        self.current_track_diagnostics.as_ref().filter(|_| {
+            self.current_track_diagnostics_track_id.as_deref() == self.selected_track_id()
+        })
     }
 
     pub fn select_next(&mut self) {
@@ -265,8 +262,10 @@ mod tests {
     }
 
     fn diagnostics_view() -> TrackDiagnosticsView {
-        serde_json::from_str(include_str!("../tests/fixtures/track_diagnostics_view.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/track_diagnostics_view.json"
+        ))
+        .unwrap()
     }
 
     #[test]

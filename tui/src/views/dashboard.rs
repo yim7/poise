@@ -8,15 +8,8 @@ use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let header = Row::new([
-        "ID",
-        "Symbol",
-        "Lifecycle",
-        "Execution",
-        "Exposure",
-        "PnL",
-    ])
-    .style(Theme::table_header());
+    let header = Row::new(["ID", "Symbol", "Lifecycle", "Execution", "Exposure", "PnL"])
+        .style(Theme::table_header());
     let rows = app.grids.iter().map(|item| {
         let execution = format_execution_badge(
             item.execution.state,
@@ -29,7 +22,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Row::new(vec![
             Cell::from(item.id.clone()),
             Cell::from(item.instrument.symbol.clone()),
-            Cell::from(item.lifecycle.status.to_string()).style(Theme::status(&item.lifecycle.status)),
+            Cell::from(item.lifecycle.status.to_string())
+                .style(Theme::status(&item.lifecycle.status)),
             Cell::from(execution.text).style(execution.style),
             Cell::from(exposure.text).style(exposure.style),
             Cell::from(total_pnl.text).style(total_pnl.style),
@@ -101,9 +95,9 @@ fn format_execution_badge(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Color;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use crate::app::App;
     use crate::protocol::ExecutionStatusView;
@@ -120,7 +114,10 @@ mod tests {
             .collect::<String>()
     }
 
-    fn background_colors_for_substring(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Color> {
+    fn background_colors_for_substring(
+        terminal: &Terminal<TestBackend>,
+        needle: &str,
+    ) -> Vec<Color> {
         let buffer = terminal.backend().buffer();
         let width = buffer.area.width as usize;
         let needle_chars: Vec<char> = needle.chars().collect();
