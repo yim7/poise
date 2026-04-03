@@ -355,7 +355,7 @@ Commit:
 - Test: `engine/src/manager.rs`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 `Passive / Rebalance / CatchUp` 的行为差异**
+- [x] **Step 1: 先写失败测试，锁住 `Passive / Rebalance / CatchUp` 的行为差异**
 
 新增测试至少覆盖：
 
@@ -379,7 +379,7 @@ async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active
 - `Passive / Rebalance / CatchUp` 至少在报价容忍度、替换积极度、stale 条件上有真实差异
 - runtime 集成场景中，不再因为小漂移和链路延迟持续调整
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -391,7 +391,7 @@ Expected:
 
 - 当前实现会失败，因为 `mode` 目前不会实质影响报价和替换逻辑。
 
-- [ ] **Step 3: 做最小实现，让 `mode` 进入 round 内执行策略**
+- [x] **Step 3: 做最小实现，让 `mode` 进入 round 内执行策略**
 
 要求：
 
@@ -400,7 +400,7 @@ Expected:
 - `manager.rs` 和 `server/src/runtime.rs` 只补集成测试与最小接线，不新增旁路 mode 知识
 - 第一阶段继续只做单槽位，不引入 `lane`
 
-- [ ] **Step 4: 跑 Task 4 回归**
+- [x] **Step 4: 跑 Task 4 回归**
 
 Run:
 
@@ -413,12 +413,16 @@ Expected:
 - `mode` 对单槽位执行有真实影响
 - runtime 层不再出现旧的 tick-driven 调整风暴
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/planning.rs engine/src/executor/recovery.rs engine/src/executor/mod.rs engine/src/manager.rs server/src/runtime.rs
 git commit -m "feat(engine): make execution mode drive round quote behavior"
 ```
+
+Commit:
+
+- `fbd2672` `feat(engine): make execution mode drive round quote behavior`
 
 ### Task 5: 全量回归、文档回写和计划同步
 
