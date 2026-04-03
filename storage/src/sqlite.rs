@@ -236,6 +236,7 @@ impl SqliteStorage {
                 config_json,
                 status_json,
                 state.current_exposure.0,
+                // Stored in legacy `target_exposure` column for backward compatibility.
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
                 state.manual_target_override.as_ref().map(|exposure| exposure.0),
                 executor_state_json,
@@ -439,6 +440,8 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
+        // Read runtime `desired_exposure` from the legacy `target_exposure` column
+        // until the storage migration is performed.
         let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
         let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
         let out_of_band_since = out_of_band_since

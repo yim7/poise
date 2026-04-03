@@ -2,6 +2,8 @@ use anyhow::{Result, ensure};
 use rusqlite::Connection;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
+    // `target_exposure` is the legacy snapshot column name. It currently stores
+    // runtime `desired_exposure` and should be migrated in a dedicated schema change.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS track_snapshots (
             track_id TEXT PRIMARY KEY,
