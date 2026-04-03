@@ -468,4 +468,4 @@ Regression fix commit:
 
 Commit:
 
-- `PENDING` `docs: finalize executor round-driven implementation plan notes`
+- `87eb4d7` `docs: finalize executor round-driven implementation plan notes`
