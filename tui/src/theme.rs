@@ -41,15 +41,14 @@ impl Theme {
 
     pub fn highlight() -> Style {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightCyan)
+            .bg(Color::DarkGray)
             .add_modifier(Modifier::BOLD)
     }
 
     pub fn status(status: &GridStatus) -> Style {
         let color = match status {
-            GridStatus::WaitingMarketData => Color::DarkGray,
-            GridStatus::Active => Color::Green,
+            GridStatus::WaitingMarketData => Color::Gray,
+            GridStatus::Active => Color::LightGreen,
             GridStatus::Frozen | GridStatus::Holding => Color::Yellow,
             GridStatus::ReducingOnly => Color::LightYellow,
             GridStatus::Terminated | GridStatus::Paused => Color::Red,
@@ -92,6 +91,31 @@ impl Theme {
     }
 
     pub fn signal_neutral() -> Style {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
+    }
+
+    pub fn signal_flip() -> Style {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Color;
+
+    use crate::protocol::GridStatus;
+
+    use super::Theme;
+
+    #[test]
+    fn uses_light_green_for_active_lifecycle() {
+        assert_eq!(Theme::status(&GridStatus::Active).fg, Some(Color::LightGreen));
+    }
+
+    #[test]
+    fn uses_gray_for_waiting_lifecycle() {
+        assert_eq!(Theme::status(&GridStatus::WaitingMarketData).fg, Some(Color::Gray));
     }
 }

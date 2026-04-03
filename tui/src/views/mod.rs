@@ -24,7 +24,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         .split(frame.area());
 
     let header = Paragraph::new(render_status_line(app))
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+        .block(Block::default().borders(Borders::ALL).title("Context"));
     frame.render_widget(header, areas[0]);
 
     match app.current_view {
@@ -116,7 +116,7 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Poise"));
-        assert!(text.contains("Status"));
+        assert!(text.contains("Context"));
         assert!(text.contains("Keys"));
     }
 

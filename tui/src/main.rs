@@ -1,5 +1,6 @@
 mod api_client;
 mod app;
+mod exposure_presentation;
 mod input;
 mod protocol;
 mod signal;
@@ -1987,8 +1988,8 @@ out_of_band_policy = "hold"
         assert!(dashboard.contains("ETHUSDT"), "dashboard:\n{dashboard}");
 
         session.send_keys(&["Enter"]);
-        let btc_view = wait_for_pane_text(&session, "Overview").await;
-        assert!(btc_view.contains("Overview"), "btc view:\n{btc_view}");
+        let btc_view = wait_for_pane_text(&session, "Market").await;
+        assert!(btc_view.contains("Market"), "btc view:\n{btc_view}");
         assert!(btc_view.contains("BTCUSDT"), "btc view:\n{btc_view}");
 
         session.send_keys(&["]"]);
