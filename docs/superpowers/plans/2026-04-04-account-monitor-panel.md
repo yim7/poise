@@ -164,7 +164,7 @@ Expected:
 - server websocket 测试通过，track 事件已改用统一外壳
 - TUI 能正确解码并应用账户事件，即使此时还没有 `/account` HTTP 接口
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add protocol/src/lib.rs server/src/notifications.rs server/src/write_service.rs server/src/websocket.rs tui/src/protocol.rs tui/src/api_client.rs tui/src/app.rs
@@ -172,7 +172,7 @@ git commit -m "refactor: unify stream and notification envelopes"
 ```
 
 Task 1 code commit:
-`<pending>`
+`aff8afa`
 
 ---
 
