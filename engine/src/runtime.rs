@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use poise_core::events::ReplacementGateReason;
 use poise_core::risk::CapacityBudget;
@@ -60,6 +60,37 @@ impl ExecutionStats {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionRound {
+    pub target_exposure: Exposure,
+    pub mode: ExecutionMode,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutorDiagnostics {
+    pub mode: ExecutionMode,
+    pub inventory_gap: Exposure,
+    pub gap_started_at: Option<DateTime<Utc>>,
+    pub last_reprice_at: Option<DateTime<Utc>>,
+    pub last_execution_reason: Option<ExecutionReason>,
+    #[serde(default)]
+    pub recovery_anomaly: Option<RecoveryAnomaly>,
+}
+
+impl ExecutorDiagnostics {
+    pub fn empty() -> Self {
+        Self {
+            mode: ExecutionMode::Passive,
+            inventory_gap: Exposure(0.0),
+            gap_started_at: None,
+            last_reprice_at: None,
+            last_execution_reason: None,
+            recovery_anomaly: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotState {
@@ -75,7 +106,6 @@ pub struct WorkingOrder {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
-    pub target_exposure: Exposure,
     pub status: OrderStatus,
     pub role: OrderRole,
 }
@@ -94,47 +124,127 @@ pub struct RecentTerminalOrder {
     pub order_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExecutorState {
-    pub mode: ExecutionMode,
-    pub inventory_gap: Exposure,
-    pub gap_started_at: Option<DateTime<Utc>>,
-    pub last_reprice_at: Option<DateTime<Utc>>,
+    pub active_round: Option<ExecutionRound>,
+    pub diagnostics: ExecutorDiagnostics,
     pub slots: Vec<ExecutionSlot>,
-    #[serde(default)]
     pub recent_terminal_orders: Vec<RecentTerminalOrder>,
-    pub last_execution_reason: Option<ExecutionReason>,
-    #[serde(default)]
-    pub recovery_anomaly: Option<RecoveryAnomaly>,
     pub stats: ExecutionStats,
 }
 
 impl ExecutorState {
     pub fn empty(started_at: DateTime<Utc>) -> Self {
         Self {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(0.0),
-            gap_started_at: None,
-            last_reprice_at: None,
+            active_round: None,
+            diagnostics: ExecutorDiagnostics::empty(),
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new(INVENTORY_CORE_SLOT),
                 state: SlotState::Empty,
                 working_order: None,
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
-            recovery_anomaly: None,
             stats: ExecutionStats::new(started_at),
         }
     }
 
     pub fn reset_for_activation(&self, started_at: DateTime<Utc>) -> Self {
         let mut reset = self.clone();
-        reset.gap_started_at = (!reset.inventory_gap.is_zero()).then_some(started_at);
-        reset.last_reprice_at = None;
-        reset.last_execution_reason = None;
+        reset.diagnostics.gap_started_at =
+            (!reset.diagnostics.inventory_gap.is_zero()).then_some(started_at);
+        reset.diagnostics.last_reprice_at = None;
+        reset.diagnostics.last_execution_reason = None;
+        reset.diagnostics.recovery_anomaly = None;
         reset.stats = ExecutionStats::new(started_at);
         reset
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ExecutorStateCompat {
+    #[serde(default)]
+    active_round: Option<ExecutionRound>,
+    #[serde(default)]
+    diagnostics: Option<ExecutorDiagnostics>,
+    #[serde(default)]
+    mode: Option<ExecutionMode>,
+    #[serde(default)]
+    inventory_gap: Option<Exposure>,
+    #[serde(default)]
+    gap_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_reprice_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    slots: Vec<ExecutionSlot>,
+    #[serde(default)]
+    recent_terminal_orders: Vec<RecentTerminalOrder>,
+    #[serde(default)]
+    last_execution_reason: Option<ExecutionReason>,
+    #[serde(default)]
+    recovery_anomaly: Option<RecoveryAnomaly>,
+    stats: ExecutionStats,
+}
+
+#[derive(Serialize)]
+struct ExecutorStateSerialized<'a> {
+    active_round: &'a Option<ExecutionRound>,
+    diagnostics: &'a ExecutorDiagnostics,
+    slots: &'a [ExecutionSlot],
+    recent_terminal_orders: &'a [RecentTerminalOrder],
+    stats: &'a ExecutionStats,
+}
+
+impl From<ExecutorStateCompat> for ExecutorState {
+    fn from(value: ExecutorStateCompat) -> Self {
+        let diagnostics = value.diagnostics.unwrap_or(ExecutorDiagnostics {
+            mode: value.mode.unwrap_or(ExecutionMode::Passive),
+            inventory_gap: value.inventory_gap.unwrap_or(Exposure(0.0)),
+            gap_started_at: value.gap_started_at,
+            last_reprice_at: value.last_reprice_at,
+            last_execution_reason: value.last_execution_reason,
+            recovery_anomaly: value.recovery_anomaly,
+        });
+
+        Self {
+            active_round: value.active_round,
+            diagnostics,
+            slots: if value.slots.is_empty() {
+                vec![ExecutionSlot {
+                    slot: OrderSlot::new(INVENTORY_CORE_SLOT),
+                    state: SlotState::Empty,
+                    working_order: None,
+                }]
+            } else {
+                value.slots
+            },
+            recent_terminal_orders: value.recent_terminal_orders,
+            stats: value.stats,
+        }
+    }
+}
+
+impl Serialize for ExecutorState {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        ExecutorStateSerialized {
+            active_round: &self.active_round,
+            diagnostics: &self.diagnostics,
+            slots: &self.slots,
+            recent_terminal_orders: &self.recent_terminal_orders,
+            stats: &self.stats,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecutorState {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ExecutorStateCompat::deserialize(deserializer).map(Into::into)
     }
 }
 
@@ -147,8 +257,8 @@ pub struct TrackRuntime {
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) status: TrackStatus,
     pub(crate) current_exposure: Exposure,
-    // Reconcile owns target_exposure; exchange sync/restore own observed order and risk fields.
-    pub(crate) target_exposure: Option<Exposure>,
+    // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
+    pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) manual_target_override: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
@@ -197,7 +307,7 @@ impl TrackRuntime {
             exchange_rules,
             status: TrackStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
-            target_exposure: None,
+            desired_exposure: None,
             manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
@@ -237,7 +347,7 @@ impl TrackRuntime {
             config: self.config.clone(),
             status: self.status.clone(),
             current_exposure: self.current_exposure.clone(),
-            target_exposure: self.target_exposure.clone(),
+            desired_exposure: self.desired_exposure.clone(),
             manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
@@ -275,7 +385,7 @@ impl TrackRuntime {
 
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
-        self.target_exposure = snapshot.target_exposure.clone();
+        self.desired_exposure = snapshot.desired_exposure.clone();
         self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
@@ -311,8 +421,9 @@ mod tests {
     use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
-        AccountCapacityConstraint, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
-        SlotState, TrackRuntime, TrackStatus, WorkingOrder,
+        AccountCapacityConstraint, ExecutionRound, ExecutionSlot, ExecutionStats,
+        ExecutorDiagnostics, ExecutorState, RiskState, SlotState, TrackRuntime, TrackStatus,
+        WorkingOrder,
     };
 
     fn test_runtime() -> TrackRuntime {
@@ -347,6 +458,9 @@ mod tests {
     }
 
     fn test_executor_state() -> ExecutorState {
+        let started_at = DateTime::parse_from_rfc3339("2026-03-29T07:55:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let slot = ExecutionSlot {
             slot: OrderSlot::new("passive_buy_1"),
             state: SlotState::Working,
@@ -356,33 +470,37 @@ mod tests {
                 side: Side::Buy,
                 price: 94.5,
                 quantity: 0.25,
-                target_exposure: Exposure(6.0),
                 status: OrderStatus::New,
                 role: OrderRole::IncreaseInventory,
             }),
         };
 
         ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: Exposure(2.0),
-            gap_started_at: Some(
-                DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
-            ),
-            last_reprice_at: Some(
-                DateTime::parse_from_rfc3339("2026-03-29T08:01:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
-            ),
+            active_round: Some(ExecutionRound {
+                target_exposure: Exposure(6.0),
+                mode: ExecutionMode::Passive,
+                started_at,
+            }),
+            diagnostics: ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: Exposure(2.0),
+                gap_started_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+                last_reprice_at: Some(
+                    DateTime::parse_from_rfc3339("2026-03-29T08:01:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                ),
+                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                recovery_anomaly: None,
+            },
             slots: vec![slot],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-            recovery_anomaly: None,
             stats: ExecutionStats {
-                started_at: DateTime::parse_from_rfc3339("2026-03-29T07:55:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
+                started_at,
                 max_inventory_gap_abs: Exposure(3.0),
                 max_gap_age_ms: 42_000,
             },
@@ -394,7 +512,7 @@ mod tests {
         let mut runtime = test_runtime();
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
-        runtime.target_exposure = Some(Exposure(6.0));
+        runtime.desired_exposure = Some(Exposure(6.0));
         runtime.manual_target_override = Some(Exposure(0.0));
         runtime.last_tick_at = Some(
             DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
@@ -447,7 +565,7 @@ mod tests {
 
         assert_eq!(restored.status, TrackStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
-        assert_eq!(restored.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
         assert_eq!(restored.last_tick_at, runtime.last_tick_at);
         assert_eq!(
@@ -467,11 +585,62 @@ mod tests {
     }
 
     #[test]
+    fn empty_executor_state_has_no_active_round_and_empty_inventory_core_slot() {
+        let state = ExecutorState::empty(Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap());
+        let json = serde_json::to_value(&state).unwrap();
+        let object = json
+            .as_object()
+            .expect("executor state should serialize as an object");
+
+        assert!(
+            object.contains_key("active_round"),
+            "executor state should carry active_round explicitly"
+        );
+        assert_eq!(object.get("active_round"), Some(&serde_json::Value::Null));
+        assert!(
+            object.contains_key("diagnostics"),
+            "executor diagnostics should be nested under diagnostics"
+        );
+        assert!(!object.contains_key("mode"));
+        assert_eq!(json["slots"][0]["slot"], json!("inventory_core"));
+        assert_eq!(json["slots"][0]["state"], json!("empty"));
+    }
+
+    #[test]
+    fn snapshot_round_trips_active_round_and_diagnostics() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::Active;
+        runtime.current_exposure = Exposure(4.0);
+        runtime.desired_exposure = Some(Exposure(6.0));
+        runtime.executor_state = test_executor_state();
+
+        let snapshot = runtime.snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+        let executor = json["executor_state"]
+            .as_object()
+            .expect("executor state should serialize as an object");
+
+        assert!(
+            executor.contains_key("active_round"),
+            "snapshot should persist active_round"
+        );
+        assert!(
+            executor.contains_key("diagnostics"),
+            "snapshot should persist diagnostics as a nested object"
+        );
+        assert!(!executor.contains_key("mode"));
+        assert!(!executor.contains_key("inventory_gap"));
+
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.executor_state, snapshot.executor_state);
+    }
+
+    #[test]
     fn restore_from_snapshot_detects_missing_field_via_round_trip() {
         let mut runtime = test_runtime();
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
-        runtime.target_exposure = Some(Exposure(6.0));
+        runtime.desired_exposure = Some(Exposure(6.0));
         runtime.reference_price = Some(96.0);
         runtime.executor_state = test_executor_state();
 
@@ -566,5 +735,60 @@ mod tests {
             restored.risk.account_capacity_constraint,
             AccountCapacityConstraint::default()
         );
+    }
+
+    #[test]
+    fn snapshot_deserializes_legacy_target_exposure_into_desired_exposure() {
+        let legacy_snapshot = json!({
+            "track_id": "grid-1",
+            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+            "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_exposure_units": 8.0,
+                "short_exposure_units": 8.0,
+                "notional_per_unit": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+            },
+            "status": "active",
+            "current_exposure": 4.0,
+            "target_exposure": 6.0,
+            "executor_state": {
+                "mode": "passive",
+                "inventory_gap": 0.0,
+                "gap_started_at": null,
+                "last_reprice_at": null,
+                "slots": [{
+                    "slot": "inventory_core",
+                    "state": "empty",
+                    "working_order": null
+                }],
+                "last_execution_reason": null,
+                "recovery_anomaly": null,
+                "stats": {
+                    "started_at": "2026-03-29T09:00:00Z",
+                    "max_inventory_gap_abs": 0.0,
+                    "max_gap_age_ms": 0
+                }
+            },
+            "replacement_gate_reason": null,
+            "risk": {
+                "realized_pnl_day": null,
+                "realized_pnl_today": 0.0,
+                "realized_pnl_cumulative": 0.0,
+                "unrealized_pnl": 0.0
+            },
+            "observed": {
+                "reference_price": 96.0,
+                "out_of_band_since": null,
+                "last_tick_at": null,
+                "market_data_stale_since": null
+            }
+        });
+
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+
+        assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
     }
 }

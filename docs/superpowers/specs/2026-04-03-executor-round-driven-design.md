@@ -203,8 +203,6 @@ pub struct ExecutionRound {
     pub target_exposure: Exposure,
     pub mode: ExecutionMode,
     pub started_at: DateTime<Utc>,
-    pub last_plan_at: Option<DateTime<Utc>>,
-    pub last_progress_at: Option<DateTime<Utc>>,
 }
 ```
 
@@ -214,6 +212,7 @@ pub struct ExecutionRound {
 
 - `WorkingOrder` 只保留交易所订单事实和执行角色，不再持有 `target_exposure`
 - 若实现阶段需要兼容旧快照迁移，也只能在迁移层临时读取旧字段，不得把它继续作为决策输入
+- 第一阶段把 `last_reprice_at`、gap age、`last_execution_reason` 等时序诊断保留在 `ExecutorDiagnostics`，不再把它们拆进 `ExecutionRound`
 
 ## 7. Owner 边界
 

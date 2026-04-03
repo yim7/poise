@@ -816,7 +816,7 @@ fn should_cancel_unknown_live_orders(
 ) -> bool {
     !open_orders.is_empty()
         && snapshot.is_some_and(|snapshot| {
-            snapshot.executor_state.recovery_anomaly
+            snapshot.executor_state.diagnostics.recovery_anomaly
                 == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
                 && snapshot
                     .executor_state
@@ -868,7 +868,11 @@ async fn seed_recovery_tracking(
             &mut tracked,
             instruments,
             &track.id,
-            snapshot.executor_state.recovery_anomaly.is_some(),
+            snapshot
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .is_some(),
             retry_interval,
         );
     }
@@ -963,7 +967,14 @@ mod tests {
         let instance = current_instance(&fixture.state).await;
         let order = inventory_core_order(&instance).unwrap();
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
-        assert_eq!(order.target_exposure, Exposure(4.0));
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(Exposure(4.0))
+        );
 
         shutdown(handles).await;
     }
@@ -1224,7 +1235,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1282,13 +1293,20 @@ mod tests {
         let instance = current_instance(&state).await;
         assert!(
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
         let order = inventory_core_order(&instance).expect("submit should become working");
         assert_eq!(order.client_order_id, first_request.client_order_id);
-        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(first_target_exposure.clone())
+        );
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
     }
 
@@ -1298,7 +1316,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1357,12 +1375,19 @@ mod tests {
         let instance = current_instance(&state).await;
         assert!(
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
         let order = inventory_core_order(&instance).expect("working order should remain active");
-        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(first_target_exposure.clone())
+        );
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
     }
 
@@ -1373,7 +1398,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(2.0));
+        snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -1465,15 +1490,89 @@ mod tests {
         let instance = current_instance(&state).await;
         assert!(
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
         );
         let order = inventory_core_order(&instance).expect("working order should remain active");
         assert_eq!(order.client_order_id, first_order.client_order_id);
-        assert_eq!(order.target_exposure, first_target_exposure);
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(first_target_exposure.clone())
+        );
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
         assert!((order.quantity - remaining_quantity).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active() {
+        let clock = Arc::new(MutableClock(Arc::new(Mutex::new(test_server_time()))));
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.desired_exposure = Some(Exposure(2.0));
+        snapshot.executor_state = ExecutorState::empty(test_server_time());
+        let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
+            Some(snapshot),
+            btc_position(2.0, 0.0),
+            vec![],
+            test_budget(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            clock.clone() as Arc<dyn ClockPort>,
+        )
+        .await;
+        let worker = EffectWorker::new(
+            fixture.state.clone(),
+            fixture.exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_millis(10),
+        );
+
+        let first = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 96.5)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first.effects.as_slice(),
+            [ExecutionAction::SubmitOrder { .. }]
+        ));
+        worker.run_once().await.unwrap();
+
+        clock.set(test_server_time() + chrono::Duration::seconds(70));
+        let second = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 96.4)
+            .await
+            .unwrap();
+        assert!(matches!(
+            second.effects.as_slice(),
+            [
+                ExecutionAction::CancelOrder { .. },
+                ExecutionAction::SubmitOrder { .. }
+            ]
+        ));
+        worker.run_once().await.unwrap();
+
+        clock.set(test_server_time() + chrono::Duration::seconds(71));
+        let third = fixture
+            .state
+            .write_service
+            .observe_market("BTCUSDT", 96.35)
+            .await
+            .unwrap();
+        assert_eq!(
+            third.effects,
+            vec![ExecutionAction::NoOp],
+            "fresh replacement should not trigger another replacement on the next small drift"
+        );
+        assert_eq!(fixture.exchange.submitted_orders.lock().unwrap().len(), 2);
+        assert_eq!(fixture.exchange.canceled_order_ids.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1711,7 +1810,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -1811,7 +1910,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -1954,7 +2053,7 @@ mod tests {
         .await;
 
         let instance = current_instance(&state).await;
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert!(inventory_core_order(&instance).is_none());
 
         shutdown(handles).await;
@@ -2166,7 +2265,7 @@ mod tests {
         .await;
 
         let instance = current_instance(&fixture.state).await;
-        assert_eq!(instance.target_exposure, None);
+        assert_eq!(instance.desired_exposure, None);
         assert!(inventory_core_order(&instance).is_none());
         assert!(
             fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
@@ -2182,7 +2281,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -2277,7 +2376,7 @@ mod tests {
         let config = rounded_submit_test_config();
         let mut snapshot = test_snapshot_with_config(config.clone());
         snapshot.current_exposure = Exposure(2.0);
-        snapshot.target_exposure = Some(Exposure(3.0));
+        snapshot.desired_exposure = Some(Exposure(3.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
         let state = test_state_with_config(
@@ -2416,7 +2515,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(95.0);
         set_executor_state(
             &mut snapshot,
@@ -2453,7 +2552,7 @@ mod tests {
             .unwrap();
         assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
         assert_eq!(
-            current_instance(&state).await.target_exposure,
+            current_instance(&state).await.desired_exposure,
             Some(Exposure(4.0))
         );
 
@@ -2599,7 +2698,11 @@ mod tests {
         assert!(inventory_core_order(&instance).is_none());
         assert_eq!(instance.current_exposure, Exposure(6.0));
         assert_eq!(
-            instance.executor_state.recovery_anomaly.as_ref(),
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
 
@@ -2613,7 +2716,7 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.current_exposure = Exposure(6.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(92.5);
         let state = test_state(
             exchange.clone() as Arc<dyn ExchangePort>,
@@ -2677,7 +2780,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         set_executor_state(
             &mut snapshot,
             working_order(
@@ -2745,7 +2848,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(-6.0);
-        snapshot.target_exposure = Some(Exposure(-10.0));
+        snapshot.desired_exposure = Some(Exposure(-10.0));
         snapshot.observed.reference_price = Some(105.0);
         set_executor_state(
             &mut snapshot,
@@ -2755,7 +2858,6 @@ mod tests {
                 side: Side::Sell,
                 price: 106.0,
                 quantity: 15.0,
-                target_exposure: Exposure(-10.0),
                 status: OrderStatus::New,
                 role: OrderRole::IncreaseInventory,
             },
@@ -3129,7 +3231,7 @@ mod tests {
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
         wait_until_instance(&fixture.state, |instance| {
             instance
-                .target_exposure
+                .desired_exposure
                 .as_ref()
                 .map(|exposure| (exposure.0 - 4.0).abs() < f64::EPSILON)
                 .unwrap_or(false)
@@ -3149,7 +3251,7 @@ mod tests {
         wait_until_instance(&fixture.state, |instance| {
             (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
                 && instance
-                    .target_exposure
+                    .desired_exposure
                     .as_ref()
                     .map(|exposure| (exposure.0 - 4.0).abs() < f64::EPSILON)
                     .unwrap_or(false)
@@ -3158,7 +3260,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert!((instance.risk.unrealized_pnl - 11.0).abs() < f64::EPSILON);
 
         shutdown(handles).await;
@@ -3188,7 +3290,7 @@ mod tests {
             .unwrap();
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
         manager.restore_track_state(&snapshot).unwrap();
@@ -3258,7 +3360,7 @@ mod tests {
     async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(4.0));
+        snapshot.desired_exposure = Some(Exposure(4.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(95.0);
 
@@ -3342,7 +3444,7 @@ mod tests {
     async fn position_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event() {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         snapshot.observed.reference_price = Some(100.0);
         snapshot.risk.unrealized_pnl = 0.0;
@@ -3470,7 +3572,7 @@ mod tests {
             config: test_config(),
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(Exposure(0.0)),
+            desired_exposure: Some(Exposure(0.0)),
             manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
@@ -3574,7 +3676,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(
             instance.observed.out_of_band_since,
             Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap())
@@ -3591,7 +3693,6 @@ mod tests {
                     side: Side::Buy,
                     price: 94.5,
                     quantity: 0.25,
-                    target_exposure: Exposure(6.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
@@ -3691,7 +3792,7 @@ mod tests {
     async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
         let mut snapshot = test_snapshot();
         snapshot.current_exposure = Exposure(0.0);
-        snapshot.target_exposure = Some(Exposure(6.0));
+        snapshot.desired_exposure = Some(Exposure(6.0));
         snapshot.observed.reference_price = Some(92.5);
         set_executor_state(
             &mut snapshot,
@@ -3766,7 +3867,7 @@ mod tests {
     #[tokio::test]
     async fn startup_sync_marks_attention_required_when_live_order_cannot_be_claimed() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture(
             Some(snapshot),
@@ -3788,9 +3889,13 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(0.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(0.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(0.0)));
         assert_eq!(
-            instance.executor_state.recovery_anomaly.as_ref(),
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref(),
             Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         );
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -3812,7 +3917,7 @@ mod tests {
 
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert_eq!(instance.target_exposure, Some(Exposure(4.0)));
+        assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(
             inventory_core_order(&instance)
                 .map(|order| order.client_order_id.starts_with("BTCUSDT-")),
@@ -3881,7 +3986,14 @@ mod tests {
         assert_eq!(order.side, Side::Buy);
         assert_eq!(order.price, 95.0);
         assert_eq!(order.quantity, 7.5);
-        assert_eq!(order.target_exposure, Exposure(4.0));
+        assert_eq!(
+            instance
+                .executor_state
+                .active_round
+                .as_ref()
+                .map(|round| round.target_exposure.clone()),
+            Some(Exposure(4.0))
+        );
         assert_eq!(order.status, OrderStatus::Submitting);
 
         let transition = fixture
@@ -3945,7 +4057,11 @@ mod tests {
         let handles = fixture.runtime.start().await.unwrap();
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4065,7 +4181,13 @@ mod tests {
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
         let instance = current_instance(&fixture.state).await;
         assert_eq!(instance.current_exposure, Exposure(2.0));
-        assert!(instance.executor_state.recovery_anomaly.is_none());
+        assert!(
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .is_none()
+        );
         assert_eq!(instance.executor_state.slots.len(), 2);
         assert_eq!(
             instance.executor_state.slots[0]
@@ -4137,7 +4259,7 @@ mod tests {
             .unwrap()
             .expect("final snapshot should be persisted");
         assert_eq!(snapshot.current_exposure, Exposure(2.0));
-        assert_eq!(snapshot.executor_state.recovery_anomaly, None);
+        assert_eq!(snapshot.executor_state.diagnostics.recovery_anomaly, None);
         assert_eq!(
             snapshot.executor_state.slots,
             vec![ExecutionSlot {
@@ -4151,7 +4273,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
@@ -4182,7 +4304,11 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4218,7 +4344,12 @@ mod tests {
         fixture.exchange.open_orders.lock().unwrap().clear();
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref().is_none()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
+                .is_none()
         })
         .await;
         assert!(fixture.exchange.get_position_calls.load(Ordering::SeqCst) >= 3);
@@ -4240,7 +4371,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_task_cancels_unknown_live_orders_automatically() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
@@ -4282,7 +4413,11 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4299,7 +4434,12 @@ mod tests {
         );
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref().is_none()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
+                .is_none()
         })
         .await;
         assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
@@ -4313,7 +4453,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_effect_exists() {
         let mut snapshot = test_snapshot();
-        snapshot.target_exposure = Some(Exposure(0.0));
+        snapshot.desired_exposure = Some(Exposure(0.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_recovery_retry_interval(
             Some(snapshot),
@@ -4344,7 +4484,11 @@ mod tests {
         let _ = effect_task.await;
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -4400,7 +4544,12 @@ mod tests {
 
         timeout(Duration::from_millis(800), async {
             wait_until_instance(&fixture.state, |instance| {
-                instance.executor_state.recovery_anomaly.as_ref().is_none()
+                instance
+                    .executor_state
+                    .diagnostics
+                    .recovery_anomaly
+                    .as_ref()
+                    .is_none()
             })
             .await;
         })
@@ -4419,7 +4568,7 @@ mod tests {
         let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
         let mut snapshot = test_snapshot();
         snapshot.status = TrackStatus::Paused;
-        snapshot.target_exposure = None;
+        snapshot.desired_exposure = None;
         snapshot.executor_state = ExecutorState::empty(test_server_time());
         let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
             Some(snapshot),
@@ -4660,7 +4809,7 @@ mod tests {
         let submitted = fixture.exchange.submitted_orders.lock().unwrap().clone();
         assert_eq!(submitted[0].side, Side::Sell);
         assert_eq!(
-            current_instance(&fixture.state).await.target_exposure,
+            current_instance(&fixture.state).await.desired_exposure,
             Some(Exposure(0.0))
         );
 
@@ -4798,7 +4947,11 @@ mod tests {
         )]);
 
         wait_until_instance(&fixture.state, |instance| {
-            instance.executor_state.recovery_anomaly.as_ref()
+            instance
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .as_ref()
                 == Some(&poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
         })
         .await;
@@ -5281,7 +5434,7 @@ mod tests {
         side: Side,
         price: f64,
         quantity: f64,
-        target_exposure: Exposure,
+        _target_exposure: Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -5290,7 +5443,6 @@ mod tests {
             side,
             price,
             quantity,
-            target_exposure,
             status,
             role: match side {
                 Side::Buy => OrderRole::IncreaseInventory,
@@ -5300,19 +5452,30 @@ mod tests {
     }
 
     fn set_executor_state(snapshot: &mut TrackSnapshot, order: WorkingOrder, state: SlotState) {
+        let target_exposure = snapshot
+            .desired_exposure
+            .clone()
+            .unwrap_or_else(|| snapshot.current_exposure.clone());
         snapshot.executor_state = ExecutorState {
-            mode: ExecutionMode::Passive,
-            inventory_gap: snapshot.current_exposure.delta(&order.target_exposure),
-            gap_started_at: Some(test_server_time()),
-            last_reprice_at: None,
+            active_round: Some(poise_engine::runtime::ExecutionRound {
+                target_exposure: target_exposure.clone(),
+                mode: ExecutionMode::Passive,
+                started_at: test_server_time(),
+            }),
+            diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                mode: ExecutionMode::Passive,
+                inventory_gap: snapshot.current_exposure.delta(&target_exposure),
+                gap_started_at: Some(test_server_time()),
+                last_reprice_at: None,
+                last_execution_reason: None,
+                recovery_anomaly: None,
+            },
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state,
                 working_order: Some(order),
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
-            recovery_anomaly: None,
             stats: ExecutionStats {
                 started_at: test_server_time(),
                 max_inventory_gap_abs: Exposure(0.0),
@@ -5338,7 +5501,7 @@ mod tests {
             config,
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            target_exposure: Some(Exposure(6.0)),
+            desired_exposure: Some(Exposure(6.0)),
             manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,

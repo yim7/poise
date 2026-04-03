@@ -236,7 +236,8 @@ impl SqliteStorage {
                 config_json,
                 status_json,
                 state.current_exposure.0,
-                state.target_exposure.as_ref().map(|exposure| exposure.0),
+                // Stored in legacy `target_exposure` column for backward compatibility.
+                state.desired_exposure.as_ref().map(|exposure| exposure.0),
                 state.manual_target_override.as_ref().map(|exposure| exposure.0),
                 executor_state_json,
                 replacement_gate_reason_json,
@@ -439,7 +440,9 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
-        let target_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
+        // Read runtime `desired_exposure` from the legacy `target_exposure` column
+        // until the storage migration is performed.
+        let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
         let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
         let out_of_band_since = out_of_band_since
             .map(|value| {
@@ -487,7 +490,7 @@ impl SqliteStorage {
             config,
             status,
             current_exposure: Exposure(row.get(5)?),
-            target_exposure,
+            desired_exposure,
             manual_target_override,
             executor_state,
             replacement_gate_reason,
@@ -1066,8 +1069,8 @@ mod tests {
         TrackReadRepositoryPort,
     };
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
-        WorkingOrder,
+        ExecutionRound, ExecutionSlot, ExecutionStats, ExecutorDiagnostics, ExecutorState,
+        RiskState, SlotState, TrackStatus, WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -1090,7 +1093,7 @@ mod tests {
             },
             status: TrackStatus::Active,
             current_exposure: Exposure(4.0),
-            target_exposure: Some(Exposure(6.0)),
+            desired_exposure: Some(Exposure(6.0)),
             manual_target_override: Some(Exposure(0.0)),
             replacement_gate_reason: None,
             risk: RiskState {
@@ -1101,18 +1104,29 @@ mod tests {
                 ..RiskState::default()
             },
             executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(2.0),
-                gap_started_at: Some(
-                    DateTime::parse_from_rfc3339("2026-03-24T07:31:00+00:00")
+                active_round: Some(ExecutionRound {
+                    target_exposure: Exposure(6.0),
+                    mode: ExecutionMode::Passive,
+                    started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
                         .unwrap()
                         .with_timezone(&Utc),
-                ),
-                last_reprice_at: Some(
-                    DateTime::parse_from_rfc3339("2026-03-24T07:32:00+00:00")
-                        .unwrap()
-                        .with_timezone(&Utc),
-                ),
+                }),
+                diagnostics: ExecutorDiagnostics {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(2.0),
+                    gap_started_at: Some(
+                        DateTime::parse_from_rfc3339("2026-03-24T07:31:00+00:00")
+                            .unwrap()
+                            .with_timezone(&Utc),
+                    ),
+                    last_reprice_at: Some(
+                        DateTime::parse_from_rfc3339("2026-03-24T07:32:00+00:00")
+                            .unwrap()
+                            .with_timezone(&Utc),
+                    ),
+                    last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
+                    recovery_anomaly: None,
+                },
                 slots: vec![ExecutionSlot {
                     slot: OrderSlot::new("passive_buy_1"),
                     state: SlotState::Working,
@@ -1122,14 +1136,11 @@ mod tests {
                         side: Side::Buy,
                         price: 94.5,
                         quantity: 0.25,
-                        target_exposure: Exposure(6.0),
                         status: OrderStatus::New,
                         role: OrderRole::IncreaseInventory,
                     }),
                 }],
                 recent_terminal_orders: Vec::new(),
-                last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-                recovery_anomaly: None,
                 stats: ExecutionStats {
                     started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
                         .unwrap()
@@ -1383,7 +1394,7 @@ mod tests {
         assert_eq!(loaded.status, TrackStatus::Active);
         assert_eq!(loaded.config, snapshot.config);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
-        assert_eq!(loaded.target_exposure, Some(Exposure(6.0)));
+        assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(
             loaded.risk.realized_pnl_day,
             Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap())

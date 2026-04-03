@@ -31,7 +31,7 @@ impl TrackProjector {
             reference_price: source.reference_price,
             exposure: ExposureSummaryView {
                 current: source.current_exposure,
-                target: source.target_exposure,
+                target: source.desired_exposure,
             },
             execution: ExecutionBadgeView {
                 state: project_execution_state(source),
@@ -69,7 +69,7 @@ impl TrackProjector {
             },
             position: GridPositionView {
                 current_exposure: source.current_exposure,
-                target_exposure: source.target_exposure,
+                target_exposure: source.desired_exposure,
             },
             statistics: GridStatisticsView {
                 total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
@@ -563,7 +563,7 @@ mod tests {
             out_of_band_policy: OutOfBandPolicy::Freeze,
             reference_price: Some(101.25),
             current_exposure: 3.5,
-            target_exposure: Some(4.0),
+            desired_exposure: Some(4.0),
             realized_pnl_cumulative: 980.1,
             unrealized_pnl: 265.2,
             executor_mode: ExecutionMode::Passive,

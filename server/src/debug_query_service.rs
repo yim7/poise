@@ -20,7 +20,11 @@ impl TrackDebugQueryService {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackDiagnosticsView>> {
-        let Some(source) = self.query_service.load_track_detail_source(track_id).await? else {
+        let Some(source) = self
+            .query_service
+            .load_track_detail_source(track_id)
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -163,7 +167,10 @@ mod tests {
             Ok(vec![self.snapshot.clone()])
         }
 
-        async fn load_track_snapshot(&self, track_id: &TrackId) -> Result<Option<StoredTrackSnapshot>> {
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok((track_id.as_str() == "btc-core").then_some(self.snapshot.clone()))
         }
 
@@ -172,7 +179,9 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredTrackEvent>> {
-            Ok((track_id.as_str() == "btc-core").then_some(self.events.clone()).unwrap_or_default())
+            Ok((track_id.as_str() == "btc-core")
+                .then_some(self.events.clone())
+                .unwrap_or_default())
         }
 
         async fn list_recent_track_effects(
@@ -180,7 +189,9 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok((track_id.as_str() == "btc-core").then_some(self.effects.clone()).unwrap_or_default())
+            Ok((track_id.as_str() == "btc-core")
+                .then_some(self.effects.clone())
+                .unwrap_or_default())
         }
     }
 
@@ -200,13 +211,22 @@ mod tests {
             },
             status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
-            target_exposure: Some(Exposure(4.0)),
+            desired_exposure: Some(Exposure(4.0)),
             manual_target_override: None,
             executor_state: ExecutorState {
-                mode: ExecutionMode::Passive,
-                inventory_gap: Exposure(0.5),
-                gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                last_reprice_at: None,
+                active_round: Some(poise_engine::runtime::ExecutionRound {
+                    target_exposure: Exposure(4.0),
+                    mode: ExecutionMode::Passive,
+                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                }),
+                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
+                    mode: ExecutionMode::Passive,
+                    inventory_gap: Exposure(0.5),
+                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
+                    last_reprice_at: None,
+                    last_execution_reason: None,
+                    recovery_anomaly: None,
+                },
                 slots: vec![ExecutionSlot {
                     slot: OrderSlot::new("inventory_core"),
                     state: SlotState::Working,
@@ -216,14 +236,11 @@ mod tests {
                         side: Side::Buy,
                         price: 100.5,
                         quantity: 0.1,
-                        target_exposure: Exposure(4.0),
                         status: OrderStatus::New,
                         role: OrderRole::IncreaseInventory,
                     }),
                 }],
                 recent_terminal_orders: Vec::new(),
-                last_execution_reason: None,
-                recovery_anomaly: None,
                 stats: ExecutionStats {
                     started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
                     max_inventory_gap_abs: Exposure(0.5),

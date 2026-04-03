@@ -1,6 +1,8 @@
 use crate::observation::OrderObservation;
 use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
-use crate::runtime::{ExecutionSlot, ExecutorState, RecentTerminalOrder, SlotState, WorkingOrder};
+use crate::runtime::{
+    ExecutionRound, ExecutionSlot, ExecutorState, RecentTerminalOrder, SlotState, WorkingOrder,
+};
 
 use super::{DesiredOrder, INVENTORY_CORE_SLOT, OrderSlot, slots};
 
@@ -25,6 +27,25 @@ pub struct OrderObservationApplication {
     pub absorb_result: OrderUpdateAbsorbResult,
 }
 
+fn updated_active_round(
+    previous_state: &ExecutorState,
+    target_exposure: poise_core::types::Exposure,
+) -> ExecutionRound {
+    ExecutionRound {
+        target_exposure,
+        mode: previous_state
+            .active_round
+            .as_ref()
+            .map(|round| round.mode.clone())
+            .unwrap_or_else(|| previous_state.diagnostics.mode.clone()),
+        started_at: previous_state
+            .active_round
+            .as_ref()
+            .map(|round| round.started_at)
+            .unwrap_or(previous_state.stats.started_at),
+    }
+}
+
 pub fn record_submit_request(
     previous_state: &ExecutorState,
     request: &OrderRequest,
@@ -33,6 +54,10 @@ pub fn record_submit_request(
     let ((_, sibling_slots), _) =
         slots::split_inventory_core_slot_from_slots(&previous_state.slots);
     let mut state = previous_state.clone();
+    state.active_round = Some(updated_active_round(
+        previous_state,
+        target_exposure.clone(),
+    ));
     state.slots = slots::with_inventory_core_slot(
         sibling_slots,
         ExecutionSlot {
@@ -44,7 +69,6 @@ pub fn record_submit_request(
                 side: request.side,
                 price: request.price,
                 quantity: request.quantity,
-                target_exposure,
                 status: OrderStatus::Submitting,
                 role: slots::role_for_reduce_only(request.reduce_only),
             }),
@@ -122,6 +146,7 @@ pub fn record_submit_receipt(
     };
 
     let mut state = previous_state.clone();
+    state.active_round = Some(updated_active_round(previous_state, target_exposure));
     state.slots[*slot_index] = ExecutionSlot {
         slot: slot.slot.clone(),
         state: SlotState::Working,
@@ -131,7 +156,6 @@ pub fn record_submit_receipt(
             side: request.side,
             price: request.price,
             quantity: request.quantity,
-            target_exposure,
             status: receipt.status,
             role: existing_order.role.clone(),
         }),
@@ -215,7 +239,6 @@ pub fn apply_order_observation_with_result(
                     side: observation.side,
                     price: observation.price,
                     quantity: observation.quantity,
-                    target_exposure: existing_order.target_exposure.clone(),
                     status: observation.status,
                     role: existing_order.role.clone(),
                 }),
@@ -355,7 +378,6 @@ pub(super) fn submit_pending_slot(
             side: desired_order.side,
             price: desired_order.price,
             quantity: desired_order.quantity,
-            target_exposure: desired_order.target_exposure.clone(),
             status: OrderStatus::Submitting,
             role: desired_order.role.clone(),
         }),
@@ -395,10 +417,19 @@ mod tests {
     fn working_state() -> ExecutorState {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         ExecutorState {
-            mode: crate::executor::ExecutionMode::Passive,
-            inventory_gap: Exposure(4.0),
-            gap_started_at: Some(now),
-            last_reprice_at: Some(now),
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: Exposure(4.0),
+                mode: crate::executor::ExecutionMode::Passive,
+                started_at: now,
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode: crate::executor::ExecutionMode::Passive,
+                inventory_gap: Exposure(4.0),
+                gap_started_at: Some(now),
+                last_reprice_at: Some(now),
+                last_execution_reason: None,
+                recovery_anomaly: None,
+            },
             slots: vec![ExecutionSlot {
                 slot: OrderSlot::new("inventory_core"),
                 state: SlotState::Working,
@@ -408,14 +439,11 @@ mod tests {
                     side: Side::Buy,
                     price: 95.0,
                     quantity: 15.0,
-                    target_exposure: Exposure(4.0),
                     status: OrderStatus::New,
                     role: OrderRole::IncreaseInventory,
                 }),
             }],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
-            recovery_anomaly: None,
             stats: ExecutionStats::new(now),
         }
     }
@@ -439,6 +467,56 @@ mod tests {
 
         assert_eq!(applied.state, previous_state);
         assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Unabsorbed);
+    }
+
+    #[test]
+    fn recording_submit_request_does_not_store_target_on_working_order() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let state = record_submit_request(
+            &ExecutorState::empty(now),
+            &OrderRequest {
+                instrument: crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+                side: Side::Buy,
+                price: 95.0,
+                quantity: 15.0,
+                client_order_id: "client-1".into(),
+                reduce_only: false,
+            },
+            Exposure(4.0),
+        );
+        let state_json = serde_json::to_value(&state).unwrap();
+        let order = state_json["slots"][0]["working_order"]
+            .as_object()
+            .expect("submit request should record a working order");
+
+        assert!(
+            !order.contains_key("target_exposure"),
+            "working order should only keep exchange facts"
+        );
+    }
+
+    #[test]
+    fn updated_active_round_preserves_existing_metadata_when_target_changes() {
+        let previous_state = working_state();
+        let updated = updated_active_round(&previous_state, Exposure(6.0));
+
+        assert_eq!(updated.target_exposure, Exposure(6.0));
+        assert_eq!(
+            updated.mode,
+            previous_state
+                .active_round
+                .as_ref()
+                .expect("working state should carry active round")
+                .mode
+        );
+        assert_eq!(
+            updated.started_at,
+            previous_state
+                .active_round
+                .as_ref()
+                .expect("working state should carry active round")
+                .started_at
+        );
     }
 
     #[test]
@@ -554,10 +632,19 @@ mod tests {
     fn clearing_submit_pending_does_not_mark_other_working_orders_as_terminal() {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let previous_state = ExecutorState {
-            mode: crate::executor::ExecutionMode::Passive,
-            inventory_gap: Exposure(1.0),
-            gap_started_at: Some(now),
-            last_reprice_at: Some(now),
+            active_round: Some(crate::runtime::ExecutionRound {
+                target_exposure: Exposure(2.0),
+                mode: crate::executor::ExecutionMode::Passive,
+                started_at: now,
+            }),
+            diagnostics: crate::runtime::ExecutorDiagnostics {
+                mode: crate::executor::ExecutionMode::Passive,
+                inventory_gap: Exposure(1.0),
+                gap_started_at: Some(now),
+                last_reprice_at: Some(now),
+                last_execution_reason: None,
+                recovery_anomaly: None,
+            },
             slots: vec![
                 ExecutionSlot {
                     slot: OrderSlot::new("inventory_core"),
@@ -568,7 +655,6 @@ mod tests {
                         side: Side::Buy,
                         price: 95.0,
                         quantity: 5.0,
-                        target_exposure: Exposure(2.0),
                         status: OrderStatus::Submitting,
                         role: OrderRole::IncreaseInventory,
                     }),
@@ -582,15 +668,12 @@ mod tests {
                         side: Side::Sell,
                         price: 101.0,
                         quantity: 3.0,
-                        target_exposure: Exposure(-1.0),
                         status: OrderStatus::New,
                         role: OrderRole::DecreaseInventory,
                     }),
                 },
             ],
             recent_terminal_orders: Vec::new(),
-            last_execution_reason: None,
-            recovery_anomaly: None,
             stats: ExecutionStats::new(now),
         };
 

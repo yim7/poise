@@ -628,8 +628,10 @@ mod tests {
             .await
             .push(format!("/debug/tracks/{id}/diagnostics"));
         Json(
-            serde_json::from_str(include_str!("../tests/fixtures/track_diagnostics_view.json"))
-                .unwrap(),
+            serde_json::from_str(include_str!(
+                "../tests/fixtures/track_diagnostics_view.json"
+            ))
+            .unwrap(),
         )
     }
 
@@ -670,7 +672,8 @@ mod tests {
         )
     }
 
-    async fn spawn_projection_stub_server_with_failing_diagnostics() -> (ApiClient, ProjectionStubState) {
+    async fn spawn_projection_stub_server_with_failing_diagnostics()
+    -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
         };
@@ -1128,7 +1131,10 @@ mod tests {
 
         handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
-        assert_eq!(app.current_track.as_ref().unwrap().status.reference_price, Some(101.5));
+        assert_eq!(
+            app.current_track.as_ref().unwrap().status.reference_price,
+            Some(101.5)
+        );
         assert_eq!(app.current_track_diagnostics().unwrap().items.len(), 1);
         assert!(
             app.current_track_diagnostics().unwrap().items[0]

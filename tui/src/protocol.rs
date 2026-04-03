@@ -14,8 +14,8 @@ pub use poise_protocol::{ExecutionBadgeView, ExposureSummaryView};
 mod tests {
     use super::{
         ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandType,
-        TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackListResponse,
-        TrackDiagnosticsView, TrackStreamEvent, TrackStreamPayload,
+        TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackDiagnosticsView,
+        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
     };
 
     #[test]

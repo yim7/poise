@@ -116,14 +116,11 @@ pub(super) fn slot_matches_order(
 pub(super) fn rebuild_slot_from_live_order(
     slot: &ExecutionSlot,
     live_order: &OrderObservation,
-    target_exposure: Option<&Exposure>,
+    active_round_target_exposure: Option<&Exposure>,
     current_exposure: &Exposure,
 ) -> ExecutionSlot {
-    let target_exposure = slot
-        .working_order
-        .as_ref()
-        .map(|order| order.target_exposure.clone())
-        .or_else(|| target_exposure.cloned())
+    let target_exposure = active_round_target_exposure
+        .cloned()
         .unwrap_or_else(|| current_exposure.clone());
     let role = slot
         .working_order
@@ -140,7 +137,6 @@ pub(super) fn rebuild_slot_from_live_order(
             side: live_order.side,
             price: live_order.price,
             quantity: live_order.quantity,
-            target_exposure,
             status: live_order.status,
             role,
         }),

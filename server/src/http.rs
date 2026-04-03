@@ -577,7 +577,7 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
         let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackReadRepositoryPort>,
+            repository.clone() as Arc<dyn TrackReadRepositoryPort>
         ));
         let app = router(build_server_state(
             Arc::new(TrackWriteService::new(
@@ -751,10 +751,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDiagnosticsView = serde_json::from_slice(&body).unwrap();
 
-        assert!(payload
-            .items
-            .iter()
-            .any(|item| item.message.contains("target exposure")));
+        assert!(
+            payload
+                .items
+                .iter()
+                .any(|item| item.message.contains("target exposure"))
+        );
     }
 
     #[derive(Default)]

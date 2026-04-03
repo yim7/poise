@@ -60,7 +60,9 @@ fn render_status_line(app: &App) -> Line<'static> {
         ));
     }
 
-    if app.selected_execution_status() == Some(crate::protocol::ExecutionStatusView::AttentionRequired) {
+    if app.selected_execution_status()
+        == Some(crate::protocol::ExecutionStatusView::AttentionRequired)
+    {
         if let Some(track_id) = app.selected_track_id() {
             spans.push(Span::raw(" | "));
             spans.push(Span::styled(

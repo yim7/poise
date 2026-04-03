@@ -26,7 +26,8 @@ pub struct TrackRuntimeSnapshot {
     pub config: TrackConfig,
     pub status: TrackStatus,
     pub current_exposure: Exposure,
-    pub target_exposure: Option<Exposure>,
+    #[serde(alias = "target_exposure")]
+    pub desired_exposure: Option<Exposure>,
     #[serde(default)]
     pub manual_target_override: Option<Exposure>,
     pub executor_state: ExecutorState,
