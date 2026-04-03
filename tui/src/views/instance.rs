@@ -11,7 +11,7 @@ use crate::protocol::{
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
-use crate::views::instance_layout::{DetailLayoutMode, resolve_detail_layout};
+use crate::views::instance_layout::{DetailLayoutMode, resolve_detail_layout, resolve_trace_layout};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(detail) = app.current_track_detail().or(app.current_track.as_ref()) else {
@@ -49,9 +49,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     if let Some(trace_area) = sections.trace {
-        let trace = Paragraph::new(trace_lines(detail, app))
-            .block(Block::default().title("Trace").borders(Borders::ALL));
-        frame.render_widget(trace, trace_area);
+        render_trace(frame, trace_area, detail, app);
     }
 }
 
@@ -68,9 +66,10 @@ fn status_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>>
         detail.execution.execution_status,
         ExecutionStatusView::AttentionRequired
     ) {
+        let reason_summary = attention_summary(&detail.execution.attention_reasons);
         lines.push(Line::from(Span::styled(
             format!(
-                "! ATTENTION REQUIRED | gap {:.4} for {} ms",
+                "! ATTENTION REQUIRED | {reason_summary} | gap {:.4} | age {} ms",
                 detail.execution.inventory_gap, detail.execution.gap_age_ms
             ),
             Theme::execution_attention(),
@@ -211,53 +210,107 @@ fn statistics_lines(
     }
 }
 
-fn trace_lines(detail: &crate::protocol::TrackDetailView, app: &App) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("Activity")];
+fn render_trace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    detail: &crate::protocol::TrackDetailView,
+    app: &App,
+) {
+    let block = Block::default().title("Trace").borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    if detail.activity.is_empty() {
-        lines.push(Line::from("No activity yet"));
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let trace_layout = resolve_trace_layout(inner, app.debug_diagnostics_enabled());
+
+    let activity = Paragraph::new(trace_activity_lines(detail, trace_layout.activity.max_entries));
+    frame.render_widget(activity, trace_layout.activity.area);
+
+    if let Some(diagnostics_area) = trace_layout.diagnostics {
+        let diagnostics =
+            Paragraph::new(trace_diagnostics_lines(app, diagnostics_area.max_entries));
+        frame.render_widget(diagnostics, diagnostics_area.area);
+    }
+}
+
+fn trace_activity_lines(
+    detail: &crate::protocol::TrackDetailView,
+    max_entries: usize,
+) -> Vec<Line<'static>> {
+    let entries = if detail.activity.is_empty() {
+        vec![Line::from("No activity yet")]
     } else {
-        lines.extend(detail.activity.iter().map(|item| {
-            let level = match item.level {
-                ActivityLevelView::Info => "info",
-                ActivityLevelView::Warn => "warn",
-                ActivityLevelView::Error => "error",
-            };
-            Line::from(format!(
-                "{} [{}] {}",
-                format_activity_timestamp(&item.ts),
-                level,
-                item.message
-            ))
-        }));
-    }
+        detail
+            .activity
+            .iter()
+            .map(|item| format_trace_item_line(&item.ts, item.level, &item.message))
+            .collect()
+    };
 
-    if app.debug_diagnostics_enabled() {
-        lines.push(Line::from("Diagnostics"));
-        if let Some(diagnostics) = app.current_track_diagnostics() {
-            if diagnostics.items.is_empty() {
-                lines.push(Line::from("No diagnostics yet"));
-            } else {
-                lines.extend(diagnostics.items.iter().map(|item| {
-                    let level = match item.level {
-                        ActivityLevelView::Info => "info",
-                        ActivityLevelView::Warn => "warn",
-                        ActivityLevelView::Error => "error",
-                    };
-                    Line::from(format!(
-                        "{} [{}] {}",
-                        format_activity_timestamp(&item.ts),
-                        level,
-                        item.message
-                    ))
-                }));
-            }
+    trim_trace_section("Activity", entries, max_entries)
+}
+
+fn trace_diagnostics_lines(app: &App, max_entries: usize) -> Vec<Line<'static>> {
+    let entries = if let Some(diagnostics) = app.current_track_diagnostics() {
+        if diagnostics.items.is_empty() {
+            vec![Line::from("No diagnostics yet")]
         } else {
-            lines.push(Line::from("No diagnostics loaded"));
+            diagnostics
+                .items
+                .iter()
+                .map(|item| format_trace_item_line(&item.ts, item.level, &item.message))
+                .collect()
         }
+    } else {
+        vec![Line::from("No diagnostics loaded")]
+    };
+
+    trim_trace_section("Diagnostics", entries, max_entries)
+}
+
+fn trim_trace_section(
+    title: &'static str,
+    mut entries: Vec<Line<'static>>,
+    max_entries: usize,
+) -> Vec<Line<'static>> {
+    if max_entries == 0 {
+        return vec![Line::from(title)];
     }
 
+    if entries.len() > max_entries {
+        let keep_from = entries.len() - max_entries;
+        entries = entries.split_off(keep_from);
+    }
+
+    let mut lines = vec![Line::from(title)];
+    lines.extend(entries);
     lines
+}
+
+fn format_trace_item_line(ts: &str, level: ActivityLevelView, message: &str) -> Line<'static> {
+    let level = match level {
+        ActivityLevelView::Info => "info",
+        ActivityLevelView::Warn => "warn",
+        ActivityLevelView::Error => "error",
+    };
+
+    Line::from(format!(
+        "{} [{}] {}",
+        format_activity_timestamp(ts),
+        level,
+        message
+    ))
+}
+
+fn attention_summary(attention_reasons: &[String]) -> String {
+    match attention_reasons {
+        [] => "unresolved execution anomaly".to_string(),
+        [reason] => reason.clone(),
+        reasons => format!("{} reasons", reasons.len()),
+    }
 }
 
 fn execution_lines(
@@ -592,6 +645,54 @@ mod tests {
     }
 
     #[test]
+    fn renders_trace_placeholder_when_debug_is_enabled_without_loaded_diagnostics() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        let backend = TestBackend::new(100, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let mut app = App::new(response.items);
+        app.current_view = View::Instance;
+        app.apply_track_detail(detail);
+        app.show_instance_for_selected();
+        app.toggle_debug_diagnostics();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Diagnostics"));
+        assert!(text.contains("No diagnostics loaded"));
+    }
+
+    #[test]
+    fn renders_trace_with_recent_activity_and_diagnostics_when_space_is_limited() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.activity = (1..=4)
+            .map(|index| {
+                let mut item = detail.activity[0].clone();
+                item.message = format!("activity {index}");
+                item
+            })
+            .collect();
+
+        let debug_text = render_text_with_debug(detail, Some(diagnostics_view()), 100, 36);
+
+        assert!(debug_text.contains("Activity"));
+        assert!(debug_text.contains("activity 4"));
+        assert!(!debug_text.contains("activity 1"));
+        assert!(debug_text.contains("Diagnostics"));
+        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
+    }
+
+    #[test]
     fn renders_compact_detail_layout_when_height_is_limited() {
         let detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
@@ -754,12 +855,33 @@ mod tests {
         let terminal = render_terminal(detail, 100, 36);
         let text = buffer_text(&terminal);
 
-        assert!(text.contains("! ATTENTION REQUIRED"));
+        assert!(text.contains(
+            "! ATTENTION REQUIRED | recovery anomaly: unknown_live_order | gap 0.5000 | age 60000 ms"
+        ));
         assert!(text.contains("recovery anomaly: unknown_live_order"));
         assert!(
             background_colors_for_substring(&terminal, "! ATTENTION REQUIRED")
                 .iter()
                 .any(|bg| *bg != Color::Reset)
         );
+    }
+
+    #[test]
+    fn renders_attention_summary_without_hiding_gap_and_age() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons = vec![
+            "recovery anomaly: duplicate_live_orders".to_string(),
+            "market data stale".to_string(),
+            "insufficient account margin".to_string(),
+        ];
+
+        let text = render_text_with_size(detail, 100, 36);
+
+        assert!(text.contains("! ATTENTION REQUIRED | 3 reasons"));
+        assert!(text.contains("gap 0.5000 | age 60000 ms"));
+        assert!(text.contains("alerts: recovery anomaly: duplicate_live_orders | market data stale | insufficient account margin"));
     }
 }
