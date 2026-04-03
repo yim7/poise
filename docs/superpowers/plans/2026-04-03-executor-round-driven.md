@@ -256,7 +256,7 @@ Commit:
 - Test: `engine/src/executor/recording.rs`
 - Test: `server/src/effect_worker.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 `active_round` 生命周期和 target 单 owner**
+- [x] **Step 1: 先写失败测试，锁住 `active_round` 生命周期和 target 单 owner**
 
 新增测试至少覆盖：
 
@@ -291,7 +291,7 @@ async fn effect_worker_writeback_keeps_round_target_without_working_order_target
 - `ExecutionRound.target_exposure` 成为执行层唯一 target owner
 - `WorkingOrder.target_exposure` 在同一个 task 内删除
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -304,7 +304,7 @@ Expected:
 
 - 当前实现会失败，因为还没有 `active_round`，且多个 executor 模块仍从 `WorkingOrder.target_exposure` 读锚点。
 
-- [ ] **Step 3: 做原子切换，引入 `ExecutionRound` 并删除 `WorkingOrder.target_exposure`**
+- [x] **Step 3: 做原子切换，引入 `ExecutionRound` 并删除 `WorkingOrder.target_exposure`**
 
 要求：
 
@@ -317,7 +317,7 @@ Expected:
 - 若发现“有非空 slot 但没有 `active_round`”，按 spec 视为 recovery anomaly，不允许从 slot/order 反推 target
 - 第一阶段继续保留单个 `inventory_core` slot，不做 lane
 
-- [ ] **Step 4: 跑 Task 3 回归**
+- [x] **Step 4: 跑 Task 3 回归**
 
 Run:
 
@@ -332,12 +332,16 @@ Expected:
 - 执行层 target owner 只剩 `active_round.target_exposure`
 - 不再存在 `WorkingOrder.target_exposure` 决策副本
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/manager.rs engine/src/executor/round_policy.rs engine/src/executor/planning.rs engine/src/executor/recovery.rs engine/src/executor/recording.rs engine/src/executor/rebalance_trigger.rs engine/src/executor/slots.rs engine/src/executor/mod.rs server/src/effect_worker.rs
 git commit -m "feat(engine): introduce execution round state"
 ```
+
+Commit:
+
+- `024ee3e` `feat(engine): introduce execution round state`
 
 ### Task 4: 让 `mode` 真正参与单槽位报价、替换和 stale 判断
 
