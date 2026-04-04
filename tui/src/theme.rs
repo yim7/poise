@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::protocol::GridStatus;
+use crate::protocol::TrackStatus;
 use crate::signal::SignalKind;
 
 pub struct Theme;
@@ -45,13 +45,13 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    pub fn status(status: &GridStatus) -> Style {
+    pub fn status(status: &TrackStatus) -> Style {
         let color = match status {
-            GridStatus::WaitingMarketData => Color::Gray,
-            GridStatus::Active => Color::LightGreen,
-            GridStatus::Frozen | GridStatus::Holding => Color::Yellow,
-            GridStatus::ReducingOnly => Color::LightYellow,
-            GridStatus::Terminated | GridStatus::Paused => Color::Red,
+            TrackStatus::WaitingMarketData => Color::Gray,
+            TrackStatus::Active => Color::LightGreen,
+            TrackStatus::Frozen | TrackStatus::Holding => Color::Yellow,
+            TrackStatus::ReducingOnly => Color::LightYellow,
+            TrackStatus::Terminated | TrackStatus::Paused => Color::Red,
         };
 
         Style::default().fg(color)
@@ -105,17 +105,17 @@ impl Theme {
 mod tests {
     use ratatui::style::Color;
 
-    use crate::protocol::GridStatus;
+    use crate::protocol::TrackStatus;
 
     use super::Theme;
 
     #[test]
     fn uses_light_green_for_active_lifecycle() {
-        assert_eq!(Theme::status(&GridStatus::Active).fg, Some(Color::LightGreen));
+        assert_eq!(Theme::status(&TrackStatus::Active).fg, Some(Color::LightGreen));
     }
 
     #[test]
     fn uses_gray_for_waiting_lifecycle() {
-        assert_eq!(Theme::status(&GridStatus::WaitingMarketData).fg, Some(Color::Gray));
+        assert_eq!(Theme::status(&TrackStatus::WaitingMarketData).fg, Some(Color::Gray));
     }
 }

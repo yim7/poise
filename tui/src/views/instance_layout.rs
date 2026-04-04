@@ -201,7 +201,9 @@ mod tests {
         assert_eq!(trace.activity.area.height, 6);
         assert_eq!(trace.activity.max_entries, 5);
         assert_eq!(
-            trace.diagnostics.map(|layout| (layout.area.height, layout.max_entries)),
+            trace
+                .diagnostics
+                .map(|layout| (layout.area.height, layout.max_entries)),
             Some((2, 1))
         );
     }
@@ -231,7 +233,9 @@ mod tests {
         assert_eq!(trace.activity.area.height, 2);
         assert_eq!(trace.activity.max_entries, 1);
         assert_eq!(
-            trace.diagnostics.map(|layout| (layout.area.height, layout.max_entries)),
+            trace
+                .diagnostics
+                .map(|layout| (layout.area.height, layout.max_entries)),
             Some((2, 1))
         );
     }
@@ -243,7 +247,9 @@ mod tests {
         assert_eq!(trace.activity.area.height, 3);
         assert_eq!(trace.activity.max_entries, 2);
         assert_eq!(
-            trace.diagnostics.map(|layout| (layout.area.height, layout.max_entries)),
+            trace
+                .diagnostics
+                .map(|layout| (layout.area.height, layout.max_entries)),
             Some((2, 1))
         );
     }

@@ -120,7 +120,7 @@ pub enum ShapeFamily { Linear, Convex, Concave }
 pub enum OutOfBandPolicy { Freeze, ReduceOnly, Terminate, Hold }
 
 /// 纯函数：给定价格，返回目标占用
-pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure;
+pub fn desired_exposure(price: f64, config: &GridConfig) -> Exposure;
 
 /// 纯函数：验证配置合法性
 pub fn validate_config(config: &GridConfig) -> Result<(), ConfigError>;
@@ -141,7 +141,7 @@ pub enum BandBoundary { Below, Above }
 ```rust
 pub struct ExposureIntent {
     pub current_exposure: Exposure,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
 }
 
 pub enum RiskDecision {

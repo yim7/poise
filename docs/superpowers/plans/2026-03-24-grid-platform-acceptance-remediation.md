@@ -54,7 +54,7 @@ engine/src/reconciler.rs     # 纯函数：目标计算 → 风控裁剪 → 执
 engine/src/manager.rs        # 真实仓位回写、挂单回写、tick 处理不再伪造仓位
 engine/src/lib.rs            # 导出新增模块（如果需要）
 
-storage/src/schema.rs        # 快照表迁移，补 target_exposure / pending_order / risk columns
+storage/src/schema.rs        # 快照表迁移，补 desired_exposure / pending_order / risk columns
 storage/src/sqlite.rs        # Snapshot 新字段序列化与反序列化
 
 exchanges/binance/src/types.rs      # OpenOrder 增加 symbol，必要时补 realized pnl 字段
@@ -64,7 +64,7 @@ exchanges/binance/src/websocket.rs  # 解析用户流的订单状态、仓位、
 
 server/src/assembly.rs       # 组装 runtime，预取 exchange rules，缩小职责
 server/src/config.rs         # 默认预算公式修正，snake_case 配置解析
-server/src/http.rs           # 快照响应新增 target_exposure / pending_order
+server/src/http.rs           # 快照响应新增 desired_exposure / pending_order
 server/src/main.rs           # `--config` 变成必填并打印用法
 
 tui/src/protocol.rs               # snake_case 线协议 + 新快照字段
@@ -147,7 +147,7 @@ fn deserializes_snake_case_snapshot() {
             "symbol":"BTCUSDT",
             "status":"holding",
             "current_exposure":3.5,
-            "target_exposure":0.0,
+            "desired_exposure":0.0,
             "last_price":112.0,
             "config":{
                 "lower_price":90.0,
@@ -397,28 +397,28 @@ fn on_price_tick_updates_target_without_faking_current_exposure() {
     let instance = manager.get_instance("btc1").unwrap();
 
     assert_eq!(instance.current_exposure.0, 0.0);
-    assert_eq!(instance.target_exposure.as_ref().unwrap().0, 8.0);
+    assert_eq!(instance.desired_exposure.as_ref().unwrap().0, 8.0);
 }
 ```
 
 在 `storage/src/sqlite.rs` 增加 roundtrip 测试：
 
 ```rust
-assert_eq!(loaded.target_exposure, Some(Exposure(6.0)));
+assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
 assert!(loaded.pending_order.is_some());
 ```
 
 在 `server/src/http.rs` 增加快照测试：
 
 ```rust
-assert_eq!(payload.target_exposure, Some(4.0));
+assert_eq!(payload.desired_exposure, Some(4.0));
 assert!(payload.pending_order.is_some());
 ```
 
 - [ ] **Step 2: 运行这些测试，确认它们因为 snapshot/state 还没扩宽而失败**
 
 Run: `cargo test -p poise-engine on_price_tick_updates_target_without_faking_current_exposure -- --exact`
-Expected: FAIL，原因是 `add_instance` / `StrategyInstance` 还没有 `target_exposure`
+Expected: FAIL，原因是 `add_instance` / `StrategyInstance` 还没有 `desired_exposure`
 
 Run: `cargo test -p poise-engine on_price_tick_returns_tick_outcome_with_plan_and_events -- --exact`
 Expected: FAIL，原因是 `on_price_tick` 还没有返回可供 runtime 执行的 `TickOutcome`
@@ -442,7 +442,7 @@ pub struct PendingOrder {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
     pub status: String,
 }
 
@@ -464,7 +464,7 @@ pub struct StrategyInstance {
     pub exchange_rules: ExchangeRules,
     pub status: InstanceStatus,
     pub current_exposure: Exposure,
-    pub target_exposure: Option<Exposure>,
+    pub desired_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
     pub risk_state: RiskState,
     pub last_price: Option<f64>,
@@ -482,14 +482,14 @@ pub struct InstanceSnapshot {
     pub symbol: String,
     pub status: InstanceStatus,
     pub current_exposure: f64,
-    pub target_exposure: Option<f64>,
+    pub desired_exposure: Option<f64>,
     pub last_price: Option<f64>,
     pub pending_order: Option<PendingOrder>,
     pub config: GridConfig,
 }
 ```
 
-客户端侧 `target_exposure()` helper 改成优先用服务端给出的字段，只在 `None` 时再退回本地推导。
+客户端侧 `desired_exposure()` helper 改成优先用服务端给出的字段，只在 `None` 时再退回本地推导。
 
 - [ ] **Step 5: 做 SQLite 迁移，不允许破坏已有 `.data`**
 
@@ -514,7 +514,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Res
 
 至少补这些列：
 
-- `target_exposure REAL`
+- `desired_exposure REAL`
 - `pending_order_json TEXT`
 - `realized_pnl_day TEXT`
 - `realized_pnl_today REAL NOT NULL DEFAULT 0`
@@ -524,7 +524,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Res
 
 `on_price_tick` 只允许更新：
 
-- `target_exposure`
+- `desired_exposure`
 - `status`
 - `last_price`
 - `events`
@@ -533,13 +533,13 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Res
 不允许再直接写：
 
 ```rust
-instance.current_exposure = result.target_exposure;
+instance.current_exposure = result.desired_exposure;
 ```
 
 替代为：
 
 ```rust
-instance.target_exposure = Some(result.target_exposure);
+instance.desired_exposure = Some(result.desired_exposure);
 ```
 
 `current_exposure` 只允许通过后续的持仓同步方法更新。
@@ -584,7 +584,7 @@ Expected: PASS
 
 ```bash
 git add engine/src/instance.rs engine/src/ports.rs engine/src/manager.rs storage/src/schema.rs storage/src/sqlite.rs server/src/assembly.rs server/src/http.rs tui/src/protocol.rs tui/src/app.rs tui/src/views/instance.rs
-git commit -m "refactor: separate actual exposure from target exposure"
+git commit -m "refactor: separate actual exposure from desired exposure"
 ```
 
 ---
@@ -796,12 +796,12 @@ fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
     let mut instance = test_instance();
     instance.status = InstanceStatus::Active;
     instance.current_exposure = Exposure(4.0);
-    instance.target_exposure = Some(Exposure(6.0));
+    instance.desired_exposure = Some(Exposure(6.0));
     instance.config.out_of_band_policy = OutOfBandPolicy::Freeze;
 
     let result = reconcile(&instance, 85.0, &test_budget());
 
-    assert_eq!(result.target_exposure.0, 6.0);
+    assert_eq!(result.desired_exposure.0, 6.0);
     assert!(!result.plan.has_actions());
 }
 ```
@@ -872,7 +872,7 @@ let request = OrderRequest {
 
 ```rust
 let frozen_target = instance
-    .target_exposure
+    .desired_exposure
     .clone()
     .unwrap_or_else(|| instance.current_exposure.clone());
 ```
@@ -894,7 +894,7 @@ let would_increase_risk_out_of_band =
 if would_increase_risk_out_of_band {
     return ReconcileResult {
         plan: ExecutionPlan::noop(),
-        target_exposure: approved_target,
+        desired_exposure: approved_target,
         new_status,
     };
 }
@@ -960,11 +960,11 @@ if matches!(order.status.as_str(), "NEW" | "PARTIALLY_FILLED") {
         side: order.side,
         price: order.price,
         quantity: order.orig_qty,
-        target_exposure: instance
+        desired_exposure: instance
             .pending_order
             .as_ref()
-            .map(|pending| pending.target_exposure.clone())
-            .or_else(|| instance.target_exposure.clone())
+            .map(|pending| pending.desired_exposure.clone())
+            .or_else(|| instance.desired_exposure.clone())
             .unwrap_or_else(|| instance.current_exposure.clone()),
         status: order.status.clone(),
     });
@@ -1076,7 +1076,7 @@ async fn filled_order_updates_realized_pnl_and_trips_daily_loss_cap() { ... }
 
 - assembly 恢复的持久化快照先被装回 manager
 - `runtime.start()` 启动同步后，真实 `position` / `open_orders` 覆盖快照里的 `current_exposure` / `pending_order`
-- 快照里的 `target_exposure`、`out_of_band_since` 这类本地上下文继续保留
+- 快照里的 `desired_exposure`、`out_of_band_since` 这类本地上下文继续保留
 - 第一笔 tick 不会对启动前已经存在的挂单重复下单
 
 - [ ] **Step 2: 运行这些集成测试，确认当前 server 还没有执行闭环**
@@ -1169,7 +1169,7 @@ if let Some(snapshot) = storage.load_instance_state(&instance_id)? {
 
 恢复目的不是拿本地快照当真值，而是恢复：
 
-- `target_exposure`
+- `desired_exposure`
 - `last_price`
 - `out_of_band_since`
 - `risk_state.realized_pnl_today`
@@ -1317,7 +1317,7 @@ git commit -m "feat(server): wire reconcile plans into exchange execution"
 
 ```rust
 assert!(text.contains("actual exposure"));
-assert!(text.contains("target exposure"));
+assert!(text.contains("desired exposure"));
 assert!(text.contains("pending order"));
 ```
 
@@ -1326,7 +1326,7 @@ assert!(text.contains("pending order"));
 ```rust
 InstanceSnapshot {
     current_exposure: 1.0,
-    target_exposure: Some(4.0),
+    desired_exposure: Some(4.0),
     pending_order: Some(PendingOrder {
         symbol: "BTCUSDT".into(),
         order_id: Some("12345".into()),
@@ -1343,16 +1343,16 @@ InstanceSnapshot {
 - [ ] **Step 2: 运行 TUI 视图测试，确认当前界面还没有展示挂单和服务端目标值**
 
 Run: `cargo test -p poise-tui views::instance::tests::renders_instance_details_and_events -- --exact`
-Expected: FAIL，原因是视图仍然只展示 `current exposure` 和客户端推导的 `target exposure`
+Expected: FAIL，原因是视图仍然只展示 `current exposure` 和客户端推导的 `desired exposure`
 
 - [ ] **Step 3: 用服务端快照替代客户端猜测**
 
 在 `tui/src/protocol.rs` 保留：
 
 ```rust
-pub fn target_exposure(&self) -> Option<f64> {
-    self.target_exposure
-        .or_else(|| self.last_price.map(|last_price| self.config.target_exposure(last_price)))
+pub fn desired_exposure(&self) -> Option<f64> {
+    self.desired_exposure
+        .or_else(|| self.last_price.map(|last_price| self.config.desired_exposure(last_price)))
 }
 ```
 
@@ -1361,9 +1361,9 @@ pub fn target_exposure(&self) -> Option<f64> {
 ```rust
 Line::from(format!("actual exposure: {:.4}", snapshot.current_exposure)),
 Line::from(format!(
-    "target exposure: {}",
+    "desired exposure: {}",
     snapshot
-        .target_exposure()
+        .desired_exposure()
         .map(|value| format!("{value:.4}"))
         .unwrap_or_else(|| "-".to_string())
 )),
@@ -1443,7 +1443,7 @@ git commit -m "test: re-accept grid platform after execution loop fixes"
    - 风控会 cap / flatten
    - `reconcile` 产出真实订单动作
    - user stream / position sync 会回写真实仓位和挂单状态
-5. HTTP/TUI 快照里同时能看到 `current_exposure` 与 `target_exposure`
+5. HTTP/TUI 快照里同时能看到 `current_exposure` 与 `desired_exposure`
 6. 本计划文件已补“验收记录”
 
 ## 验收记录

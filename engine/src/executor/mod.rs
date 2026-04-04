@@ -87,7 +87,7 @@ mod tests {
         base_qty_per_unit: f64,
         min_rebalance_units: f64,
         current_exposure: Exposure,
-        target_exposure: Exposure,
+        desired_exposure: Exposure,
         reference_price: f64,
         observed_at: DateTime<Utc>,
     ) -> SubmitIntentInput<'a> {
@@ -98,7 +98,7 @@ mod tests {
             base_qty_per_unit,
             min_rebalance_units,
             current_exposure,
-            target_exposure,
+            desired_exposure,
             reference_price,
             observed_at,
         }
@@ -112,7 +112,7 @@ mod tests {
         base_qty_per_unit: f64,
         min_rebalance_units: f64,
         current_exposure: Exposure,
-        target_exposure: Exposure,
+        desired_exposure: Exposure,
         reference_price: f64,
         executor_state: Option<&'a ExecutorState>,
         observed_at: DateTime<Utc>,
@@ -125,7 +125,7 @@ mod tests {
                 base_qty_per_unit,
                 min_rebalance_units,
                 current_exposure,
-                target_exposure,
+                desired_exposure,
                 reference_price,
                 observed_at,
             ),
@@ -139,7 +139,7 @@ mod tests {
     ) -> ExecutorState {
         ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
                 mode: mode.clone(),
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
             }),
@@ -193,7 +193,7 @@ mod tests {
     fn inventory_core_state(
         now: DateTime<Utc>,
         inventory_gap: Exposure,
-        round_target_exposure: Exposure,
+        round_desired_exposure: Exposure,
         side: Side,
         quantity: f64,
         status: OrderStatus,
@@ -201,7 +201,7 @@ mod tests {
     ) -> ExecutorState {
         ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: round_target_exposure,
+                desired_exposure: round_desired_exposure,
                 mode: ExecutionMode::Passive,
                 started_at: now,
             }),
@@ -575,7 +575,7 @@ mod tests {
             .as_object()
             .expect("planning should start an active round");
 
-        assert_eq!(active_round["target_exposure"], serde_json::json!(4.0));
+        assert_eq!(active_round["desired_exposure"], serde_json::json!(4.0));
     }
 
     #[test]
@@ -610,7 +610,7 @@ mod tests {
             .as_object()
             .expect("refresh_state should keep the existing active round");
 
-        assert_eq!(active_round["target_exposure"], serde_json::json!(4.0));
+        assert_eq!(active_round["desired_exposure"], serde_json::json!(4.0));
     }
 
     #[test]
@@ -643,7 +643,7 @@ mod tests {
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(0.0),
-            target_exposure: None,
+            desired_exposure: None,
             min_rebalance_units: 0.5,
             previous_state: Some(&planned.state),
             live_orders: &[OrderObservation {
@@ -669,9 +669,9 @@ mod tests {
             .as_object()
             .expect("rebuilt slot should keep working order");
 
-        assert_eq!(active_round["target_exposure"], serde_json::json!(4.0));
+        assert_eq!(active_round["desired_exposure"], serde_json::json!(4.0));
         assert!(
-            !working_order.contains_key("target_exposure"),
+            !working_order.contains_key("desired_exposure"),
             "working order should not persist its own target copy"
         );
     }
@@ -840,13 +840,13 @@ mod tests {
                 ExecutionAction::CancelOrder { order_id, .. },
                 ExecutionAction::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 }
             ] if order_id == "order-1"
                 && request.side == Side::Sell
                 && request.reduce_only
                 && (request.quantity - 1.2).abs() < 1e-9
-                && *target_exposure == Exposure(3.8)
+                && *desired_exposure == Exposure(3.8)
         ));
     }
 
@@ -866,7 +866,7 @@ mod tests {
         };
         let mut seeded_state = ExecutorState::empty(now);
         seeded_state.active_round = Some(crate::runtime::ExecutionRound {
-            target_exposure: Exposure(2.8),
+            desired_exposure: Exposure(2.8),
             mode: ExecutionMode::Passive,
             started_at: now,
         });
@@ -923,8 +923,8 @@ mod tests {
             plan.effects.as_slice(),
             [
                 ExecutionAction::CancelOrder { order_id, .. },
-                ExecutionAction::SubmitOrder { target_exposure, .. }
-            ] if order_id == "order-1" && *target_exposure == Exposure(3.4)
+                ExecutionAction::SubmitOrder { desired_exposure, .. }
+            ] if order_id == "order-1" && *desired_exposure == Exposure(3.4)
         ));
     }
 
@@ -954,9 +954,9 @@ mod tests {
             plan.effects.as_slice(),
             [ExecutionAction::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             }] if request.quantity > 0.0
-                && *target_exposure == Exposure(near_equal_gap)
+                && *desired_exposure == Exposure(near_equal_gap)
         ));
     }
 
@@ -1071,7 +1071,7 @@ mod tests {
         assert_eq!(hint.request.side, Side::Buy);
         assert_eq!(hint.request.price, 95.0);
         assert_eq!(hint.request.quantity, 15.0);
-        assert_eq!(hint.target_exposure, Exposure(4.0));
+        assert_eq!(hint.desired_exposure, Exposure(4.0));
     }
 
     #[test]
@@ -1124,7 +1124,7 @@ mod tests {
             evaluation
                 .submit_hint
                 .as_ref()
-                .map(|hint| hint.target_exposure.clone()),
+                .map(|hint| hint.desired_exposure.clone()),
             Some(Exposure(4.0))
         );
     }
@@ -1675,7 +1675,7 @@ mod tests {
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(0.0),
-            target_exposure: None,
+            desired_exposure: None,
             min_rebalance_units: 0.5,
             previous_state: Some(&ExecutorState::empty(now)),
             live_orders: &[OrderObservation {
@@ -1706,7 +1706,7 @@ mod tests {
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
-            target_exposure: Some(&Exposure(4.0)),
+            desired_exposure: Some(&Exposure(4.0)),
             min_rebalance_units: 0.5,
             previous_state: Some(&ExecutorState::empty(now)),
             live_orders: &[OrderObservation {
@@ -1739,7 +1739,7 @@ mod tests {
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
-            target_exposure: Some(&Exposure(4.0)),
+            desired_exposure: Some(&Exposure(4.0)),
             min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[
@@ -1819,7 +1819,7 @@ mod tests {
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(0.0),
-            target_exposure: Some(&Exposure(4.0)),
+            desired_exposure: Some(&Exposure(4.0)),
             min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[
@@ -1888,7 +1888,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(4.0),
+            desired_exposure: &Exposure(4.0),
             current_exposure: &Exposure(0.0),
             live_order: Some(&OrderObservation {
                 order_id: "order-1".into(),
@@ -1942,7 +1942,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(6.0),
+            desired_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -1976,7 +1976,7 @@ mod tests {
                     client_order_id: format!("track-1-{}", now.timestamp_millis()),
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             }]
         );
         assert_eq!(
@@ -2031,7 +2031,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(-10.0),
+            desired_exposure: &Exposure(-10.0),
             current_exposure: &Exposure(-9.6),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2090,7 +2090,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(-10.0),
+            desired_exposure: &Exposure(-10.0),
             current_exposure: &Exposure(-10.0),
             live_order: None,
             current_plan: None,
@@ -2153,7 +2153,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(-9.2),
+            desired_exposure: &Exposure(-9.2),
             current_exposure: &Exposure(-10.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2294,7 +2294,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(6.0),
+            desired_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2314,7 +2314,7 @@ mod tests {
             resolution:
                 SubmitRecoveryResolution::Proceed {
                     state,
-                    target_exposure,
+                    desired_exposure,
                 },
             effects,
         } = recovery
@@ -2322,12 +2322,12 @@ mod tests {
             panic!("expected matching request to keep proceed resolution");
         };
         assert!(effects.is_empty());
-        assert_eq!(target_exposure, Exposure(4.0));
+        assert_eq!(desired_exposure, Exposure(4.0));
         assert_eq!(
             state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(Exposure(4.0))
         );
     }
@@ -2354,7 +2354,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(2.8),
+            desired_exposure: &Exposure(2.8),
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2374,7 +2374,7 @@ mod tests {
             resolution:
                 SubmitRecoveryResolution::Proceed {
                     state,
-                    target_exposure,
+                    desired_exposure,
                 },
             effects,
         } = recovery
@@ -2385,12 +2385,12 @@ mod tests {
         };
 
         assert!(effects.is_empty());
-        assert_eq!(target_exposure, Exposure(2.8));
+        assert_eq!(desired_exposure, Exposure(2.8));
         assert_eq!(
             state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(Exposure(2.8))
         );
     }
@@ -2415,7 +2415,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(2.8),
+            desired_exposure: &Exposure(2.8),
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: None,
@@ -2458,7 +2458,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(2.8),
+            desired_exposure: &Exposure(2.8),
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2510,7 +2510,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(4.0),
+            desired_exposure: &Exposure(4.0),
             current_exposure: &Exposure(5.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2540,11 +2540,11 @@ mod tests {
             effects.as_slice(),
             [TrackEffect::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             }] if request.side == Side::Sell
                 && request.reduce_only
                 && (request.quantity - 1.2).abs() < 1e-9
-                && *target_exposure == Exposure(3.8)
+                && *desired_exposure == Exposure(3.8)
         ));
     }
 
@@ -2569,7 +2569,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &request,
-            target_exposure: &Exposure(2.8),
+            desired_exposure: &Exposure(2.8),
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2596,9 +2596,9 @@ mod tests {
         assert!(matches!(
             effects.as_slice(),
             [TrackEffect::SubmitOrder {
-                target_exposure,
+                desired_exposure,
                 ..
-            }] if *target_exposure == Exposure(3.4)
+            }] if *desired_exposure == Exposure(3.4)
         ));
     }
 
@@ -2621,7 +2621,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &ExecutorState::empty(now),
             request: &request,
-            target_exposure: &Exposure(0.8),
+            desired_exposure: &Exposure(0.8),
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2684,7 +2684,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: &previous_state,
             request: &stale_request,
-            target_exposure: &Exposure(6.0),
+            desired_exposure: &Exposure(6.0),
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
@@ -2743,7 +2743,7 @@ mod tests {
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
-            target_exposure: Some(&Exposure(4.0)),
+            desired_exposure: Some(&Exposure(4.0)),
             min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[],
@@ -2786,12 +2786,12 @@ mod tests {
         };
         let pending_submit_hints = vec![PendingSubmitHint {
             request: request.clone(),
-            target_exposure: Exposure(4.0),
+            desired_exposure: Exposure(4.0),
         }];
 
         let recovery = recover_working_orders(RecoveryInput {
             current_exposure: &Exposure(2.0),
-            target_exposure: Some(&Exposure(4.0)),
+            desired_exposure: Some(&Exposure(4.0)),
             min_rebalance_units: 0.5,
             previous_state: Some(&previous_state),
             live_orders: &[],

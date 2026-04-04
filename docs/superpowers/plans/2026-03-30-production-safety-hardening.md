@@ -125,7 +125,7 @@ fn plan_sets_reduce_only_for_decrease_inventory_order() {
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
         current_exposure: Exposure(6.0),
-        target_exposure: Exposure(2.0),
+        desired_exposure: Exposure(2.0),
         reference_price: 95.0,
         executor_state: None,
         observed_at: now,
@@ -152,7 +152,7 @@ fn plan_does_not_set_reduce_only_for_increase_inventory_order() {
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
         current_exposure: Exposure(0.0),
-        target_exposure: Exposure(4.0),
+        desired_exposure: Exposure(4.0),
         reference_price: 95.0,
         executor_state: None,
         observed_at: now,
@@ -199,13 +199,13 @@ fn submit_recovery_supersedes_when_reduce_only_changes() {
         previous_state: &previous_state,
         live_order: None,
         current_exposure: &Exposure(6.0),
-        target_exposure: &Exposure(10.0),
+        desired_exposure: &Exposure(10.0),
         exchange_rules: &rules,
         current_plan: Some(SubmitRecoveryPlanContext {
             track_id: &track_id,
             instrument: &instrument,
             base_qty_per_unit: 3.75,
-            target_exposure: Exposure(10.0),
+            desired_exposure: Exposure(10.0),
             reference_price: 100.0,
             observed_at: now,
         }),
@@ -513,7 +513,7 @@ fn plan_generates_unique_client_order_ids_across_calls() {
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
         current_exposure: Exposure(0.0),
-        target_exposure: Exposure(4.0),
+        desired_exposure: Exposure(4.0),
         reference_price: 95.0,
         executor_state: None,
         observed_at: t1,
@@ -524,7 +524,7 @@ fn plan_generates_unique_client_order_ids_across_calls() {
         exchange_rules: &rules,
         base_qty_per_unit: 3.75,
         current_exposure: Exposure(0.0),
-        target_exposure: Exposure(4.0),
+        desired_exposure: Exposure(4.0),
         reference_price: 95.0,
         executor_state: None,
         observed_at: t2,
@@ -897,7 +897,7 @@ pub fn reconcile_target(grid: &GridRuntime, reference_price: f64) -> TargetRecon
                 from: grid.current_exposure.clone(),
                 to: target_override.clone(),
             }).into_iter().collect(),
-            target_exposure: target_override,
+            desired_exposure: target_override,
             new_status: Some(GridStatus::ReducingOnly),
             suppress_execution: delta.is_zero(),
         };
@@ -970,7 +970,7 @@ fn flatten_keeps_zero_target_even_when_price_is_in_band() {
         .observe(&track_id, GridObservation::Market(MarketObservation { reference_price: 100.0 }))
         .unwrap();
 
-    assert_eq!(transition.snapshot.target_exposure, Some(Exposure(0.0)));
+    assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(0.0)));
 }
 
 #[test]

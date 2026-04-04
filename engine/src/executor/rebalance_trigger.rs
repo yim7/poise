@@ -55,8 +55,8 @@ impl<'a> ActiveLifecycle<'a> {
 
 pub(super) struct RebalanceTriggerInput<'a> {
     pub current_exposure: &'a Exposure,
-    pub latest_target_exposure: &'a Exposure,
-    pub active_round_target_exposure: Option<&'a Exposure>,
+    pub latest_desired_exposure: &'a Exposure,
+    pub active_round_desired_exposure: Option<&'a Exposure>,
     pub min_rebalance_units: f64,
     pub active_lifecycle: ActiveLifecycle<'a>,
 }
@@ -73,15 +73,15 @@ pub(super) fn evaluate_rebalance_trigger(
 ) -> RebalanceTriggerDecision {
     if active_lifecycle_should_be_preserved(
         &input.active_lifecycle,
-        input.active_round_target_exposure,
+        input.active_round_desired_exposure,
         input.current_exposure,
-        input.latest_target_exposure,
+        input.latest_desired_exposure,
         input.min_rebalance_units,
     ) {
         return RebalanceTriggerDecision::PreserveActiveLifecycle;
     }
 
-    let fresh_trigger_delta = input.current_exposure.delta(input.latest_target_exposure);
+    let fresh_trigger_delta = input.current_exposure.delta(input.latest_desired_exposure);
     if !trigger_delta_below_min_rebalance_units(&fresh_trigger_delta, input.min_rebalance_units) {
         return RebalanceTriggerDecision::TriggerFreshAction;
     }
@@ -91,21 +91,21 @@ pub(super) fn evaluate_rebalance_trigger(
 
 fn active_lifecycle_should_be_preserved(
     active_lifecycle: &ActiveLifecycle<'_>,
-    active_round_target_exposure: Option<&Exposure>,
+    active_round_desired_exposure: Option<&Exposure>,
     current_exposure: &Exposure,
-    latest_target_exposure: &Exposure,
+    latest_desired_exposure: &Exposure,
     min_rebalance_units: f64,
 ) -> bool {
-    let Some(anchor) = active_round_target_exposure else {
+    let Some(anchor) = active_round_desired_exposure else {
         return false;
     };
 
-    let trigger_delta = anchor.delta(latest_target_exposure);
+    let trigger_delta = anchor.delta(latest_desired_exposure);
     trigger_delta_below_min_rebalance_units(&trigger_delta, min_rebalance_units)
         && active_lifecycle_matches_latest_target(
             active_lifecycle.slot(),
             current_exposure,
-            latest_target_exposure,
+            latest_desired_exposure,
         )
 }
 
@@ -127,7 +127,7 @@ fn trigger_delta_below_min_rebalance_units(
 fn active_lifecycle_matches_latest_target(
     active_slot: Option<&ExecutionSlot>,
     current_exposure: &Exposure,
-    latest_target_exposure: &Exposure,
+    latest_desired_exposure: &Exposure,
 ) -> bool {
     let Some(slot) = active_slot else {
         return false;
@@ -139,11 +139,11 @@ fn active_lifecycle_matches_latest_target(
         return false;
     };
 
-    let inventory_gap = current_exposure.delta(latest_target_exposure);
+    let inventory_gap = current_exposure.delta(latest_desired_exposure);
     let Some(expected_side) = Side::from_exposure(&inventory_gap) else {
         return false;
     };
-    let expected_role = slots::role_for_target_change(current_exposure, latest_target_exposure);
+    let expected_role = slots::role_for_target_change(current_exposure, latest_desired_exposure);
 
     if order.side != expected_side {
         return false;
@@ -153,16 +153,16 @@ fn active_lifecycle_matches_latest_target(
         return true;
     }
 
-    reduce_only_order_still_converges(order, current_exposure, latest_target_exposure)
+    reduce_only_order_still_converges(order, current_exposure, latest_desired_exposure)
 }
 
 fn reduce_only_order_still_converges(
     order: &crate::runtime::WorkingOrder,
     current_exposure: &Exposure,
-    latest_target_exposure: &Exposure,
+    latest_desired_exposure: &Exposure,
 ) -> bool {
     order.role == super::OrderRole::DecreaseInventory
         && current_exposure.0.abs() > f64::EPSILON
-        && latest_target_exposure.0.abs() > f64::EPSILON
-        && current_exposure.0.signum() != latest_target_exposure.0.signum()
+        && latest_desired_exposure.0.abs() > f64::EPSILON
+        && current_exposure.0.signum() != latest_desired_exposure.0.signum()
 }

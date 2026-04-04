@@ -126,7 +126,7 @@
 
 - 一行身份和生命周期：`id / symbol / venue / lifecycle`
 - 一行价格上下文：`reference / mark / index`
-- 一行仓位上下文：`current exposure / target exposure / delta`
+- 一行仓位上下文：`current exposure / desired exposure / delta`
 
 其中：
 

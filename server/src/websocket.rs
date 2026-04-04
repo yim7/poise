@@ -126,7 +126,7 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
-        ExecutionStateView, ExecutionStatusView, GridStatus, TrackStreamEvent, TrackStreamPayload,
+        ExecutionStateView, ExecutionStatusView, TrackStatus, TrackStreamEvent, TrackStreamPayload,
     };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcasts_grid_detail_changed_after_write_commit() {
+    async fn broadcasts_track_detail_changed_after_write_commit() {
         let repository = seeded_repository();
         let (url, service, _) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
@@ -252,12 +252,12 @@ mod tests {
             })
             .expect("should emit projected detail change");
         assert_eq!(detail.identity.id, "btc-core");
-        assert_eq!(detail.status.lifecycle.status, GridStatus::Paused);
+        assert_eq!(detail.status.lifecycle.status, TrackStatus::Paused);
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
     }
 
     #[tokio::test]
-    async fn broadcasts_grid_list_item_changed_after_effect_state_change() {
+    async fn broadcasts_track_list_item_changed_after_effect_state_change() {
         let repository = seeded_repository();
         repository.seed_pending_noop_effect();
         let (url, service, state) = spawn_server(repository).await;
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closes_socket_when_grid_read_model_is_missing_for_notification() {
+    async fn closes_socket_when_track_read_model_is_missing_for_notification() {
         let repository = seeded_repository();
         repository.remove_snapshot("btc-core");
         let (url, service, _) = spawn_server(repository).await;
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closes_socket_when_grid_read_model_load_fails() {
+    async fn closes_socket_when_track_read_model_load_fails() {
         let repository = seeded_repository();
         repository.set_load_snapshot_error("injected read failure");
         let (url, service, _) = spawn_server(repository).await;

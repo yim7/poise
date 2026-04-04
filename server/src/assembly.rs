@@ -81,7 +81,7 @@ fn validate_unique_track_ids(
     let mut known_track_ids = HashSet::new();
     for track_id in track_ids {
         if !known_track_ids.insert(track_id.as_str().to_string()) {
-            return Err(anyhow!("duplicate grid id `{}`", track_id.as_str()));
+            return Err(anyhow!("duplicate track id `{}`", track_id.as_str()));
         }
     }
     Ok(())
@@ -479,8 +479,8 @@ mod tests {
         let manager = manager_handle.read().await;
 
         assert_eq!(manager.list_tracks().len(), 2);
-        let grid = manager.get_track("btc-core").unwrap();
-        assert_eq!(grid.budget().max_notional, 3000.0);
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.budget().max_notional, 3000.0);
         assert!(
             std::path::Path::new(".data")
                 .join(&suffix)
@@ -495,7 +495,7 @@ mod tests {
     fn assemble_rejects_duplicate_track_ids() {
         let error =
             validate_unique_track_ids([TrackId::new("alpha"), TrackId::new("alpha")]).unwrap_err();
-        assert!(error.to_string().contains("duplicate grid id"));
+        assert!(error.to_string().contains("duplicate track id"));
     }
 
     #[test]
@@ -844,9 +844,9 @@ mod tests {
         let second = assemble_with_fake_ports(&config).await.unwrap();
         let manager_handle = second.state().write_service.manager();
         let manager = manager_handle.read().await;
-        let grid = manager.get_track("btc-core").unwrap();
+        let track = manager.get_track("btc-core").unwrap();
 
-        assert_eq!(grid.status(), &poise_engine::runtime::TrackStatus::Paused);
+        assert_eq!(track.status(), &poise_engine::runtime::TrackStatus::Paused);
 
         let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }

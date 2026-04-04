@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    ExecutionStatusView, GridCommandType, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
+    ExecutionStatusView, TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub enum View {
 
 #[derive(Debug, Clone)]
 pub struct App {
-    pub grids: Vec<TrackListItemView>,
+    pub tracks: Vec<TrackListItemView>,
     pub current_track: Option<TrackDetailView>,
     pub selected_index: usize,
     pub current_view: View,
@@ -28,11 +28,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mut grids: Vec<TrackListItemView>) -> Self {
-        grids.sort_by(|left, right| left.id.cmp(&right.id));
+    pub fn new(mut tracks: Vec<TrackListItemView>) -> Self {
+        tracks.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
-            grids,
+            tracks,
             current_track: None,
             selected_index: 0,
             current_view: View::Dashboard,
@@ -48,13 +48,13 @@ impl App {
     }
 
     pub fn selected_track_id(&self) -> Option<&str> {
-        self.grids
+        self.tracks
             .get(self.selected_index)
-            .map(|grid| grid.id.as_str())
+            .map(|track| track.id.as_str())
     }
 
-    pub fn selected_grid(&self) -> Option<&TrackListItemView> {
-        self.grids.get(self.selected_index)
+    pub fn selected_track(&self) -> Option<&TrackListItemView> {
+        self.tracks.get(self.selected_index)
     }
 
     pub fn current_track_detail(&self) -> Option<&TrackDetailView> {
@@ -67,8 +67,8 @@ impl App {
         self.current_track_detail()
             .map(|detail| detail.execution.execution_status)
             .or_else(|| {
-                self.selected_grid()
-                    .map(|grid| grid.execution.execution_status)
+                self.selected_track()
+                    .map(|track| track.execution.execution_status)
             })
     }
 
@@ -79,20 +79,20 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
-        if self.grids.is_empty() {
+        if self.tracks.is_empty() {
             return;
         }
 
-        self.selected_index = (self.selected_index + 1) % self.grids.len();
+        self.selected_index = (self.selected_index + 1) % self.tracks.len();
     }
 
     pub fn select_previous(&mut self) {
-        if self.grids.is_empty() {
+        if self.tracks.is_empty() {
             return;
         }
 
         self.selected_index = if self.selected_index == 0 {
-            self.grids.len() - 1
+            self.tracks.len() - 1
         } else {
             self.selected_index - 1
         };
@@ -122,20 +122,20 @@ impl App {
     }
 
     pub fn apply_track_list_item(&mut self, item: TrackListItemView) {
-        if let Some(existing) = self.grids.iter_mut().find(|grid| grid.id == item.id) {
+        if let Some(existing) = self.tracks.iter_mut().find(|track| track.id == item.id) {
             *existing = item;
             return;
         }
 
         let selected_id = self.selected_track_id().map(ToOwned::to_owned);
-        self.grids.push(item);
-        self.grids.sort_by(|left, right| left.id.cmp(&right.id));
+        self.tracks.push(item);
+        self.tracks.sort_by(|left, right| left.id.cmp(&right.id));
         if let Some(selected_id) = selected_id {
-            if let Some(index) = self.grids.iter().position(|grid| grid.id == selected_id) {
+            if let Some(index) = self.tracks.iter().position(|track| track.id == selected_id) {
                 self.selected_index = index;
             }
-        } else if !self.grids.is_empty() {
-            self.selected_index = self.selected_index.min(self.grids.len() - 1);
+        } else if !self.tracks.is_empty() {
+            self.selected_index = self.selected_index.min(self.tracks.len() - 1);
         }
     }
 
@@ -182,7 +182,7 @@ impl App {
         self.current_track_diagnostics_track_id = None;
     }
 
-    pub fn is_command_enabled(&self, command: GridCommandType) -> bool {
+    pub fn is_command_enabled(&self, command: TrackCommandType) -> bool {
         self.current_track_detail()
             .and_then(|detail| {
                 detail
@@ -289,14 +289,14 @@ mod tests {
     #[test]
     fn apply_track_list_item_updates_dashboard_item() {
         let mut app = App::new(track_list_items());
-        let mut updated = app.grids[0].clone();
+        let mut updated = app.tracks[0].clone();
         updated.reference_price = Some(102.5);
         updated.execution.state = ExecutionStateView::Paused;
 
         app.apply_track_list_item(updated);
 
-        assert_eq!(app.grids[0].reference_price, Some(102.5));
-        assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
+        assert_eq!(app.tracks[0].reference_price, Some(102.5));
+        assert_eq!(app.tracks[0].execution.state, ExecutionStateView::Paused);
     }
 
     #[test]
@@ -350,9 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn selected_execution_status_prefers_current_detail_and_falls_back_to_grid() {
+    fn selected_execution_status_prefers_current_detail_and_falls_back_to_track() {
         let mut app = App::new(track_list_items());
-        app.grids[0].execution.execution_status = ExecutionStatusView::Normal;
+        app.tracks[0].execution.execution_status = ExecutionStatusView::Normal;
 
         assert_eq!(
             app.selected_execution_status(),

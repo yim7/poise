@@ -165,8 +165,8 @@ Expected:
 - [x] **Step 5: 做最小实现，把规划收回执行器**
 
 要求：
-- `reconciler` 只返回高层 `target_exposure` 和事件
-- 执行器根据 `target_exposure`、`current_exposure`、`reference_price`、`executor_state` 生成 `DesiredOrders`
+- `reconciler` 只返回高层 `desired_exposure` 和事件
+- 执行器根据 `desired_exposure`、`current_exposure`、`reference_price`、`executor_state` 生成 `DesiredOrders`
 - 执行器先把 `DesiredOrders` 映射到具名 `slot`
 - 执行器对 `DesiredOrders` 与当前槽位工作集做 diff
 - `manager` 改为调用执行器并把 diff 结果翻成 effect

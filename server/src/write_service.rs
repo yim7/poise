@@ -62,7 +62,7 @@ pub struct TrackInstrument {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedSubmitExecution {
-    pub target_exposure: poise_core::types::Exposure,
+    pub desired_exposure: poise_core::types::Exposure,
 }
 
 #[derive(Debug)]
@@ -317,10 +317,10 @@ impl TrackWriteService {
             .filter_map(|effect| match effect.effect {
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 } => Some(poise_engine::executor::PendingSubmitHint {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 }),
                 _ => None,
             })
@@ -390,7 +390,7 @@ impl TrackWriteService {
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
     ) -> Result<()> {
         self.mutate_track_with_effect_status(
@@ -400,7 +400,7 @@ impl TrackWriteService {
                 manager.record_submit_receipt(
                     &TrackId::new(id),
                     request,
-                    target_exposure.clone(),
+                    desired_exposure.clone(),
                     receipt,
                 )?;
                 Ok(())
@@ -636,17 +636,17 @@ impl TrackWriteService {
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<Option<PreparedSubmitExecution>> {
         Ok(
             match self
-                .recover_submit_effect(id, effect_id, request, target_exposure, live_order)
+                .recover_submit_effect(id, effect_id, request, desired_exposure, live_order)
                 .await?
             {
                 SubmitRecoveryResolution::Proceed {
-                    target_exposure, ..
-                } => Some(PreparedSubmitExecution { target_exposure }),
+                    desired_exposure, ..
+                } => Some(PreparedSubmitExecution { desired_exposure }),
                 SubmitRecoveryResolution::Recovered { .. }
                 | SubmitRecoveryResolution::Superseded { .. }
                 | SubmitRecoveryResolution::AwaitExchangeState => None,
@@ -659,7 +659,7 @@ impl TrackWriteService {
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitRecoveryResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
@@ -674,7 +674,7 @@ impl TrackWriteService {
                 .recover_submit_effect(
                     &TrackId::new(id),
                     request,
-                    target_exposure.clone(),
+                    desired_exposure.clone(),
                     live_order,
                 )
                 .map_err(|error| {
@@ -950,7 +950,7 @@ fn restore_ready_pending_submit_effect(
 
     let TrackEffect::SubmitOrder {
         request,
-        target_exposure,
+        desired_exposure,
     } = &replacement_submit.effect
     else {
         return Err(anyhow!(
@@ -959,7 +959,7 @@ fn restore_ready_pending_submit_effect(
         ));
     };
 
-    manager.record_submit_request(&TrackId::new(id), request, target_exposure.clone())?;
+    manager.record_submit_request(&TrackId::new(id), request, desired_exposure.clone())?;
     Ok(())
 }
 
@@ -1346,7 +1346,7 @@ mod tests {
             sequence: 0,
             effect: TrackEffect::SubmitOrder {
                 request: request.clone(),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1361,14 +1361,14 @@ mod tests {
 
         let recover_service = service.clone();
         let recover_request = request.clone();
-        let recover_target_exposure = Exposure(6.0);
+        let recover_desired_exposure = Exposure(6.0);
         let recover_task = tokio::spawn(async move {
             recover_service
                 .recover_submit_effect(
                     "btc-core",
                     "btc-core:recovery:0",
                     &recover_request,
-                    recover_target_exposure,
+                    recover_desired_exposure,
                     None,
                 )
                 .await
@@ -1623,7 +1623,7 @@ mod tests {
         side: Side,
         price: f64,
         quantity: f64,
-        _target_exposure: Exposure,
+        _desired_exposure: Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -1642,7 +1642,7 @@ mod tests {
 
     fn working_order_from_submit_request(
         request: &OrderRequest,
-        target_exposure: Exposure,
+        desired_exposure: Exposure,
     ) -> WorkingOrder {
         working_order(
             None,
@@ -1650,7 +1650,7 @@ mod tests {
             request.side,
             request.price,
             request.quantity,
-            target_exposure,
+            desired_exposure,
             OrderStatus::Submitting,
         )
     }
@@ -1660,19 +1660,19 @@ mod tests {
         order: WorkingOrder,
         state: SlotState,
     ) {
-        let target_exposure = snapshot
+        let desired_exposure = snapshot
             .desired_exposure
             .clone()
             .unwrap_or_else(|| snapshot.current_exposure.clone());
         snapshot.executor_state = ExecutorState {
             active_round: Some(poise_engine::runtime::ExecutionRound {
-                target_exposure: target_exposure.clone(),
+                desired_exposure: desired_exposure.clone(),
                 mode: ExecutionMode::Passive,
                 started_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
             }),
             diagnostics: poise_engine::runtime::ExecutorDiagnostics {
                 mode: ExecutionMode::Passive,
-                inventory_gap: snapshot.current_exposure.delta(&target_exposure),
+                inventory_gap: snapshot.current_exposure.delta(&desired_exposure),
                 gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                 last_reprice_at: None,
                 last_execution_reason: None,
@@ -1698,13 +1698,13 @@ mod tests {
         let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
 
         let transition = service.observe_market("btc-core", 95.0).await.unwrap();
-        let (request, target_exposure) = match transition.effects.as_slice() {
+        let (request, desired_exposure) = match transition.effects.as_slice() {
             [
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 },
-            ] => (request.clone(), target_exposure.clone()),
+            ] => (request.clone(), desired_exposure.clone()),
             other => panic!("expected one submit effect, got {other:?}"),
         };
         let effect_id = repository.pending_effects()[0].effect_id.clone();
@@ -1714,7 +1714,7 @@ mod tests {
                 "btc-core",
                 &effect_id,
                 &request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
                 None,
             )
             .await
@@ -1732,7 +1732,7 @@ mod tests {
                 .and_then(|slot| slot.working_order),
             Some(working_order_from_submit_request(
                 &request,
-                target_exposure.clone()
+                desired_exposure.clone()
             ))
         );
         let manager_handle = service.manager();
@@ -1743,7 +1743,10 @@ mod tests {
                 .map(|snapshot| snapshot.executor_state)
                 .and_then(|state| state.slots.into_iter().next())
                 .and_then(|slot| slot.working_order),
-            Some(working_order_from_submit_request(&request, target_exposure))
+            Some(working_order_from_submit_request(
+                &request,
+                desired_exposure
+            ))
         );
     }
 
@@ -1796,7 +1799,7 @@ mod tests {
             sequence: 0,
             effect: TrackEffect::SubmitOrder {
                 request: request.clone(),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1837,19 +1840,19 @@ mod tests {
             &replacement.effect,
             TrackEffect::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             } if request.side == Side::Buy
                 && (request.price - 95.0).abs() < f64::EPSILON
                 && (request.quantity - snapshot.config.base_qty_per_unit() * 4.0).abs() < f64::EPSILON
-                && *target_exposure == Exposure(4.0)
+                && *desired_exposure == Exposure(4.0)
         ));
         let replacement_pending = match &replacement.effect {
             TrackEffect::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             } => Some(working_order_from_submit_request(
                 request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
             )),
             _ => None,
         };
@@ -1941,7 +1944,7 @@ mod tests {
             sequence: 1,
             effect: TrackEffect::SubmitOrder {
                 request: request.clone(),
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2047,7 +2050,7 @@ mod tests {
             sequence: 0,
             effect: TrackEffect::SubmitOrder {
                 request: unrelated_request,
-                target_exposure: Exposure(2.0),
+                desired_exposure: Exposure(2.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2077,7 +2080,7 @@ mod tests {
             sequence: 1,
             effect: TrackEffect::SubmitOrder {
                 request: expected_request.clone(),
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2153,7 +2156,7 @@ mod tests {
             sequence: 1,
             effect: TrackEffect::SubmitOrder {
                 request,
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2231,7 +2234,7 @@ mod tests {
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2323,7 +2326,7 @@ mod tests {
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2421,7 +2424,7 @@ mod tests {
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2488,7 +2491,7 @@ mod tests {
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2510,7 +2513,7 @@ mod tests {
                     quantity: 0.5,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(3.0),
+                desired_exposure: Exposure(3.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2553,7 +2556,7 @@ mod tests {
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2575,7 +2578,7 @@ mod tests {
                     quantity: 0.5,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(3.0),
+                desired_exposure: Exposure(3.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2684,7 +2687,7 @@ mod tests {
                     quantity: 0.4,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -2706,7 +2709,7 @@ mod tests {
                     quantity: 0.5,
                     reduce_only: false,
                 },
-                target_exposure: Exposure(3.0),
+                desired_exposure: Exposure(3.0),
             },
             status: EffectStatus::Pending,
             attempt_count: 0,

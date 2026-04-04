@@ -172,9 +172,9 @@ impl SqliteStorage {
         effect_status_update: Option<EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite> {
         let config_json =
-            serde_json::to_string(&state.config).context("failed to serialize grid config")?;
+            serde_json::to_string(&state.config).context("failed to serialize track config")?;
         let status_json =
-            serde_json::to_string(&state.status).context("failed to serialize grid status")?;
+            serde_json::to_string(&state.status).context("failed to serialize track status")?;
         let executor_state_json = serde_json::to_string(&state.executor_state)
             .context("failed to serialize executor state")?;
         let replacement_gate_reason_json = state
@@ -215,7 +215,7 @@ impl SqliteStorage {
                 config_json,
                 status,
                 current_exposure,
-                target_exposure,
+                desired_exposure,
                 manual_target_override,
                 executor_state_json,
                 replacement_gate_reason_json,
@@ -236,7 +236,6 @@ impl SqliteStorage {
                 config_json,
                 status_json,
                 state.current_exposure.0,
-                // Stored in legacy `target_exposure` column for backward compatibility.
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
                 state.manual_target_override.as_ref().map(|exposure| exposure.0),
                 executor_state_json,
@@ -252,7 +251,7 @@ impl SqliteStorage {
                 updated_at_text
             ],
         )
-        .context("failed to save grid snapshot")?;
+        .context("failed to save track snapshot")?;
 
         for event in events {
             let event_json =
@@ -275,7 +274,7 @@ impl SqliteStorage {
             let effect_id = format!("{id}:{batch_nonce}:{index}");
             let sequence = u32::try_from(index).context("effect sequence overflow")?;
             let effect_json =
-                serde_json::to_string(&effect).context("failed to serialize grid effect")?;
+                serde_json::to_string(&effect).context("failed to serialize track effect")?;
             tx.execute(
                 "INSERT INTO track_effects (
                     effect_id,
@@ -302,7 +301,7 @@ impl SqliteStorage {
                     updated_at_text
                 ],
             )
-            .context("failed to save grid effect")?;
+            .context("failed to save track effect")?;
 
             persisted_effects.push(PersistedTrackEffect {
                 effect_id,
@@ -335,7 +334,7 @@ impl SqliteStorage {
                         effect_status_update.effect_id
                     ],
                 )
-                .context("failed to update grid effect status in transition transaction")?;
+                .context("failed to update track effect status in transition transaction")?;
             ensure!(
                 changed == 1,
                 "effect status update affected {changed} rows in transition transaction"
@@ -358,7 +357,7 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT track_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -369,7 +368,7 @@ impl SqliteStorage {
                 Self::track_snapshot_from_row,
             )
             .optional()
-            .context("failed to load grid snapshot")?;
+            .context("failed to load track snapshot")?;
 
         Ok(snapshot)
     }
@@ -381,7 +380,7 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT track_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -392,7 +391,7 @@ impl SqliteStorage {
                 Self::stored_track_snapshot_from_row,
             )
             .optional()
-            .context("failed to load grid snapshot record")?;
+            .context("failed to load track snapshot record")?;
 
         Ok(snapshot)
     }
@@ -440,8 +439,6 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
-        // Read runtime `desired_exposure` from the legacy `target_exposure` column
-        // until the storage migration is performed.
         let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
         let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
         let out_of_band_since = out_of_band_since
@@ -527,7 +524,7 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT track_id, venue, symbol, config_json, status, current_exposure, target_exposure,
+                "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, realized_pnl_day,
                         realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -535,13 +532,13 @@ impl SqliteStorage {
                  FROM track_snapshots
                  ORDER BY track_id ASC",
             )
-            .context("failed to prepare grid snapshot list query")?;
+            .context("failed to prepare track snapshot list query")?;
 
         let snapshots = stmt
             .query_map([], Self::stored_track_snapshot_from_row)
-            .context("failed to query grid snapshots")?
+            .context("failed to query track snapshots")?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize grid snapshots")?;
+            .context("failed to deserialize track snapshots")?;
         Ok(snapshots)
     }
 
@@ -625,16 +622,16 @@ impl SqliteStorage {
                  ORDER BY updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC
                  LIMIT ?2",
             )
-            .context("failed to prepare recent grid effect query")?;
+            .context("failed to prepare recent track effect query")?;
 
         let mut effects = stmt
             .query_map(
                 params![track_id.as_str(), limit],
                 Self::persisted_effect_from_row,
             )
-            .context("failed to query recent grid effects")?
+            .context("failed to query recent track effects")?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize recent grid effects")?;
+            .context("failed to deserialize recent track effects")?;
         effects.reverse();
         Ok(effects)
     }
@@ -697,7 +694,7 @@ impl SqliteStorage {
                    )
                  ORDER BY ge.created_at ASC, ge.batch_id ASC, ge.sequence ASC, ge.effect_id ASC",
             )
-            .context("failed to prepare grid-scoped pending submit effect query")?;
+            .context("failed to prepare track-scoped pending submit effect query")?;
 
         let effects = stmt
             .query_map(
@@ -709,9 +706,9 @@ impl SqliteStorage {
                 ],
                 Self::persisted_effect_from_row,
             )
-            .context("failed to query grid-scoped pending submit effects")?
+            .context("failed to query track-scoped pending submit effects")?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize grid-scoped pending submit effects")?;
+            .context("failed to deserialize track-scoped pending submit effects")?;
 
         Ok(effects
             .into_iter()
@@ -1105,7 +1102,7 @@ mod tests {
             },
             executor_state: ExecutorState {
                 active_round: Some(ExecutionRound {
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                     mode: ExecutionMode::Passive,
                     started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
                         .unwrap()
@@ -1239,14 +1236,14 @@ mod tests {
             .unwrap();
     }
 
-    async fn persist_effect_batches_for_two_grids(
+    async fn persist_effect_batches_for_two_tracks(
         storage: &SqliteStorage,
     ) -> [PersistedTrackEffect; 2] {
         let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
         let submit_effect = TrackEffect::SubmitOrder {
             request: test_order_request(),
-            target_exposure: Exposure(6.0),
+            desired_exposure: Exposure(6.0),
         };
 
         let first_btc = storage
@@ -1314,7 +1311,7 @@ mod tests {
                 &[],
                 &[TrackEffect::SubmitOrder {
                     request: test_order_request(),
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 }],
             )
             .await
@@ -1373,7 +1370,7 @@ mod tests {
             .as_nanos();
         let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        env::temp_dir().join(format!("grid-storage-{timestamp}-{counter}.db"))
+        env::temp_dir().join(format!("track-storage-{timestamp}-{counter}.db"))
     }
 
     #[tokio::test]
@@ -1409,7 +1406,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_and_load_grid_runtime_snapshot_roundtrip() {
+    async fn save_transition_persists_desired_exposure_column() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let desired_exposure: Option<f64> = conn
+            .query_row(
+                "SELECT desired_exposure
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
+                params!["test-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(desired_exposure, Some(6.0));
+    }
+
+    #[tokio::test]
+    async fn save_and_load_track_runtime_snapshot_roundtrip() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
 
@@ -1473,7 +1494,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
-            target_exposure: Exposure(6.0),
+            desired_exposure: Exposure(6.0),
         }];
 
         let persisted = storage
@@ -1502,7 +1523,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
-            target_exposure: Exposure(6.0),
+            desired_exposure: Exposure(6.0),
         }];
 
         let persisted = storage
@@ -1555,7 +1576,7 @@ mod tests {
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
         ];
 
@@ -1590,7 +1611,7 @@ mod tests {
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
         ];
 
@@ -1621,7 +1642,7 @@ mod tests {
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
         ];
 
@@ -1647,7 +1668,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_pending_submit_effects_for_grid_returns_only_dispatchable_submit_effects() {
+    async fn list_pending_submit_effects_for_track_returns_only_dispatchable_submit_effects() {
         let storage = SqliteStorage::in_memory().unwrap();
         let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
@@ -1658,12 +1679,12 @@ mod tests {
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
         ];
         let eth_effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request_for_symbol("ETHUSDT"),
-            target_exposure: Exposure(3.0),
+            desired_exposure: Exposure(3.0),
         }];
 
         let btc_persisted = storage
@@ -1712,7 +1733,7 @@ mod tests {
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
             },
         ];
 
@@ -1740,7 +1761,7 @@ mod tests {
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
             },
         ];
         let unrelated_effects = vec![TrackEffect::SubmitOrder {
@@ -1748,7 +1769,7 @@ mod tests {
                 client_order_id: "other-batch".into(),
                 ..test_order_request_for_symbol("BTCUSDT")
             },
-            target_exposure: Exposure(2.0),
+            desired_exposure: Exposure(2.0),
         }];
 
         let replacement_persisted = storage
@@ -1845,7 +1866,7 @@ mod tests {
     async fn list_recent_track_effects_filters_by_track_id_and_limit() {
         let storage = SqliteStorage::in_memory().unwrap();
         let [oldest_btc_effect, newest_btc_effect] =
-            persist_effect_batches_for_two_grids(&storage).await;
+            persist_effect_batches_for_two_tracks(&storage).await;
 
         let effects = storage
             .list_recent_track_effects(&TrackId::new("btc-core"), 1)
@@ -2074,7 +2095,7 @@ mod tests {
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 reference_price REAL,
-                target_exposure REAL,
+                desired_exposure REAL,
                 pending_order_json TEXT,
                 replacement_gate_reason_json TEXT,
                 realized_pnl_day TEXT,
@@ -2095,7 +2116,7 @@ mod tests {
                 status,
                 current_exposure,
                 reference_price,
-                target_exposure,
+                desired_exposure,
                 pending_order_json,
                 replacement_gate_reason_json,
                 realized_pnl_day,
@@ -2106,7 +2127,7 @@ mod tests {
                 updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, 0, 0, 0, 0, NULL, ?8)",
             params![
-                "legacy-grid",
+                "legacy-track",
                 "binance",
                 "BTCUSDT",
                 serde_json::json!({
@@ -2128,7 +2149,7 @@ mod tests {
         .unwrap();
 
         let storage = SqliteStorage::from_connection(conn).unwrap();
-        let result = storage.load_track_state("legacy-grid").await;
+        let result = storage.load_track_state("legacy-track").await;
         assert!(result.is_err());
     }
 

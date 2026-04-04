@@ -115,7 +115,7 @@ Result: 25 passed; 0 failed; 76 filtered out。
 - `clear_all_working_orders`
 - `submit_pending_slot`（降为 `pub(super)`）
 
-连同辅助函数 `target_exposure_reached`。
+连同辅助函数 `desired_exposure_reached`。
 
 mod.rs 加 `mod recording;` 并 re-export 对外需要的符号。
 
@@ -317,7 +317,7 @@ fn restore_from_snapshot_detects_missing_field_via_round_trip() {
     let mut runtime = test_runtime();
     runtime.status = GridStatus::Active;
     runtime.current_exposure = Exposure(4.0);
-    runtime.target_exposure = Some(Exposure(6.0));
+    runtime.desired_exposure = Some(Exposure(6.0));
     runtime.reference_price = Some(96.0);
 
     let snapshot = runtime.snapshot();
@@ -344,7 +344,7 @@ pub struct GridRuntime {
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) status: GridStatus,
     pub(crate) current_exposure: Exposure,
-    pub(crate) target_exposure: Option<Exposure>,
+    pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) manual_target_override: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
@@ -545,7 +545,7 @@ pub struct GridReadModel {
 
     // Position
     pub current_exposure: f64,
-    pub target_exposure: Option<f64>,
+    pub desired_exposure: Option<f64>,
 
     // Risk / Statistics
     pub realized_pnl_cumulative: f64,

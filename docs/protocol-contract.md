@@ -182,7 +182,7 @@
   "items": [
     {
       "ts": "2026-04-03T02:26:47Z",
-      "message": "target exposure -3.9534 -> -3.7500",
+      "message": "desired exposure -3.9534 -> -3.7500",
       "level": "info"
     }
   ]
@@ -246,6 +246,6 @@
 - WebSocket 推送到达后，TUI 直接应用 `track_list_item_changed` / `track_detail_changed`，不再做旧快照兼容解析。
 - 客户端必须允许这些字段为空：
   - 列表：`items[].reference_price`、`items[].exposure.target`
-  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.target_exposure`、`statistics.stats_started_at`、`execution.replacement_gate`
+  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.desired_exposure`、`statistics.stats_started_at`、`execution.replacement_gate`
   - 详情槽位订单：`execution.slots[].order`
   - 命令描述：`available_commands[].disabled_reason`

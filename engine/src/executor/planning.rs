@@ -40,7 +40,7 @@ pub struct DesiredOrder {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
     pub role: OrderRole,
 }
 
@@ -57,7 +57,7 @@ pub struct SubmitIntentInput<'a> {
     pub base_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
     pub reference_price: f64,
     pub observed_at: DateTime<Utc>,
 }
@@ -73,7 +73,7 @@ pub struct ExecutorPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingSubmitHint {
     pub request: OrderRequest,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +109,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     let active_lifecycle = ActiveLifecycle::from_executor_state(executor_state);
     let round_decision = evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
         &submit_intent.current_exposure,
-        &submit_intent.target_exposure,
+        &submit_intent.desired_exposure,
         executor_state,
         None,
         submit_intent.min_rebalance_units,
@@ -169,7 +169,7 @@ pub(super) fn evaluate_submit_intent_with_active_lifecycle(
 ) -> SubmitIntentEvaluation {
     let round_decision = evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
         &input.current_exposure,
-        &input.target_exposure,
+        &input.desired_exposure,
         executor_state,
         None,
         input.min_rebalance_units,
@@ -182,7 +182,7 @@ pub(super) fn evaluate_submit_intent_with_active_lifecycle(
                 let request = desired_order_to_request(&input, &desired_order);
                 PendingSubmitHint {
                     request,
-                    target_exposure: desired_order.target_exposure,
+                    desired_exposure: desired_order.desired_exposure,
                 }
             },
         );
@@ -196,13 +196,13 @@ pub(super) fn evaluate_submit_intent_with_active_lifecycle(
 pub fn refresh_state(
     previous_state: &ExecutorState,
     current_exposure: &Exposure,
-    target_exposure: &Exposure,
+    desired_exposure: &Exposure,
     min_rebalance_units: f64,
     observed_at: DateTime<Utc>,
 ) -> ExecutorState {
     let round_decision = evaluate_round_policy(round_policy_input_from_state(
         current_exposure,
-        target_exposure,
+        desired_exposure,
         Some(previous_state),
         min_rebalance_units,
         observed_at,
@@ -248,7 +248,7 @@ pub(crate) fn round_decision_for_test(
     let active_lifecycle = ActiveLifecycle::from_executor_state(input.executor_state);
     evaluate_round_policy(round_policy_input_from_state_with_lifecycle(
         &input.submit_intent.current_exposure,
-        &input.submit_intent.target_exposure,
+        &input.submit_intent.desired_exposure,
         input.executor_state,
         None,
         input.submit_intent.min_rebalance_units,
@@ -279,8 +279,8 @@ fn desired_inventory_order_for_submit_intent(
                 round_decision
                     .active_round
                     .as_ref()
-                    .map(|round| &round.target_exposure)
-                    .unwrap_or(&input.target_exposure),
+                    .map(|round| &round.desired_exposure)
+                    .unwrap_or(&input.desired_exposure),
             )
         }
         RoundLifecycleDecision::ContinueRound => desired_inventory_order_for_preserved_round(
@@ -295,9 +295,9 @@ fn desired_inventory_order_for_submit_intent(
 
 fn desired_inventory_order_for_target(
     input: &SubmitIntentInput<'_>,
-    target_exposure: &Exposure,
+    desired_exposure: &Exposure,
 ) -> Option<DesiredOrder> {
-    let inventory_gap = input.current_exposure.delta(target_exposure);
+    let inventory_gap = input.current_exposure.delta(desired_exposure);
     let side = Side::from_exposure(&inventory_gap)?;
     let price = round_to_step(input.reference_price, input.exchange_rules.price_tick);
     let quantity = round_to_step(
@@ -316,8 +316,8 @@ fn desired_inventory_order_for_target(
         side,
         price,
         quantity,
-        target_exposure: target_exposure.clone(),
-        role: slots::role_for_target_change(&input.current_exposure, target_exposure),
+        desired_exposure: desired_exposure.clone(),
+        role: slots::role_for_target_change(&input.current_exposure, desired_exposure),
     })
 }
 
@@ -334,7 +334,7 @@ fn desired_inventory_order_for_preserved_round(
         .iter()
         .find(|slot| slot.slot == OrderSlot::new(INVENTORY_CORE_SLOT))?;
     let current_order = current_slot.working_order.as_ref()?;
-    let desired_order = desired_inventory_order_for_target(input, &active_round.target_exposure)?;
+    let desired_order = desired_inventory_order_for_target(input, &active_round.desired_exposure)?;
 
     match current_slot.state {
         SlotState::SubmitPending => {
@@ -427,7 +427,7 @@ fn diff_desired_orders(
             (
                 vec![ExecutionAction::SubmitOrder {
                     request: request.clone(),
-                    target_exposure: desired_order.target_exposure.clone(),
+                    desired_exposure: desired_order.desired_exposure.clone(),
                 }],
                 slots::with_inventory_core_slot(
                     sibling_slots,
@@ -472,7 +472,7 @@ fn diff_desired_orders(
                             },
                             ExecutionAction::SubmitOrder {
                                 request: request.clone(),
-                                target_exposure: desired_order.target_exposure.clone(),
+                                desired_exposure: desired_order.desired_exposure.clone(),
                             },
                         ],
                         slots::with_inventory_core_slot(sibling_slots, current_slot),

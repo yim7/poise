@@ -86,7 +86,7 @@ fn default_min_rebalance_units() -> f64 {
 /// - Concave: p=0.5, g(x) = 1 - √x
 ///
 /// target = -short_exposure_units + (long_exposure_units + short_exposure_units) * g(x)
-pub fn target_exposure(price: f64, config: &TrackConfig) -> Exposure {
+pub fn desired_exposure(price: f64, config: &TrackConfig) -> Exposure {
     let x =
         ((price - config.lower_price) / (config.upper_price - config.lower_price)).clamp(0.0, 1.0);
     let g = match config.shape_family {
@@ -113,7 +113,7 @@ pub fn band_status(price: f64, config: &TrackConfig) -> BandStatus {
         }
     } else {
         BandStatus::InBand {
-            target: target_exposure(price, config),
+            target: desired_exposure(price, config),
         }
     }
 }
@@ -212,32 +212,32 @@ mod tests {
     }
 
     #[test]
-    fn target_exposure_neutral_at_center() {
-        let exposure = target_exposure(100.0, &neutral_config());
+    fn desired_exposure_neutral_at_center() {
+        let exposure = desired_exposure(100.0, &neutral_config());
         assert!((exposure.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_full_long_at_lower() {
-        let exposure = target_exposure(90.0, &neutral_config());
+    fn desired_exposure_full_long_at_lower() {
+        let exposure = desired_exposure(90.0, &neutral_config());
         assert!((exposure.0 - 8.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_full_short_at_upper() {
-        let exposure = target_exposure(110.0, &neutral_config());
+    fn desired_exposure_full_short_at_upper() {
+        let exposure = desired_exposure(110.0, &neutral_config());
         assert!((exposure.0 + 8.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_long_only_zero_at_upper() {
-        let exposure = target_exposure(110.0, &long_only_config());
+    fn desired_exposure_long_only_zero_at_upper() {
+        let exposure = desired_exposure(110.0, &long_only_config());
         assert!((exposure.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_long_only_half_at_center() {
-        let exposure = target_exposure(100.0, &long_only_config());
+    fn desired_exposure_long_only_half_at_center() {
+        let exposure = desired_exposure(100.0, &long_only_config());
         assert!((exposure.0 - 4.0).abs() < 0.001);
     }
 
@@ -277,8 +277,8 @@ mod tests {
             shape_family: ShapeFamily::Convex,
             ..neutral_config()
         };
-        let linear_mid = target_exposure(95.0, &neutral_config());
-        let convex_mid = target_exposure(95.0, &config);
+        let linear_mid = desired_exposure(95.0, &neutral_config());
+        let convex_mid = desired_exposure(95.0, &config);
         assert!(convex_mid.0 > linear_mid.0);
     }
 

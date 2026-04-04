@@ -12,14 +12,14 @@ pub struct TargetReconcileResult {
     pub suppress_execution: bool,
 }
 
-pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReconcileResult {
-    if matches!(grid.status, TrackStatus::Terminated) {
+pub fn reconcile_target(track: &TrackRuntime, reference_price: f64) -> TargetReconcileResult {
+    if matches!(track.status, TrackStatus::Terminated) {
         let target = Exposure(0.0);
-        let delta = grid.current_exposure.delta(&target);
+        let delta = track.current_exposure.delta(&target);
         return TargetReconcileResult {
             events: (!delta.is_zero())
                 .then_some(DomainEvent::ExposureTargetChanged {
-                    from: grid.current_exposure.clone(),
+                    from: track.current_exposure.clone(),
                     to: target.clone(),
                 })
                 .into_iter()
@@ -30,12 +30,12 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
         };
     }
 
-    if let Some(target_override) = grid.manual_target_override.clone() {
-        let delta = grid.current_exposure.delta(&target_override);
+    if let Some(target_override) = track.manual_target_override.clone() {
+        let delta = track.current_exposure.delta(&target_override);
         return TargetReconcileResult {
             events: (!delta.is_zero())
                 .then_some(DomainEvent::ExposureTargetChanged {
-                    from: grid.current_exposure.clone(),
+                    from: track.current_exposure.clone(),
                     to: target_override.clone(),
                 })
                 .into_iter()
@@ -46,22 +46,22 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
         };
     }
 
-    let band = strategy::band_status(reference_price, &grid.config);
+    let band = strategy::band_status(reference_price, &track.config);
 
     let (target, new_status) = match &band {
-        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(grid)),
-        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(grid, *policy),
+        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(track)),
+        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(track, *policy),
     };
 
     let intent = ExposureIntent {
-        current: grid.current_exposure.clone(),
+        current: track.current_exposure.clone(),
         target: target.clone(),
-        unit_notional: grid.config.notional_per_unit,
-        realized_pnl_today: grid.risk_state.realized_pnl_today,
-        unrealized_pnl: grid.risk_state.unrealized_pnl,
+        unit_notional: track.config.notional_per_unit,
+        realized_pnl_today: track.risk_state.realized_pnl_today,
+        unrealized_pnl: track.risk_state.unrealized_pnl,
     };
 
-    let decision = risk::evaluate_risk(&intent, &grid.budget);
+    let decision = risk::evaluate_risk(&intent, &track.budget);
 
     let (approved_target, mut events) = match decision {
         RiskDecision::Allow(target) => (target, vec![]),
@@ -75,7 +75,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
         RiskDecision::Deny { reason } => {
             return TargetReconcileResult {
                 events: vec![DomainEvent::RiskDenied { reason }],
-                desired_exposure: grid.current_exposure.clone(),
+                desired_exposure: track.current_exposure.clone(),
                 new_status: None,
                 suppress_execution: true,
             };
@@ -89,7 +89,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
             ..
         }
     ) && approved_target.0.abs()
-        > grid.current_exposure.0.abs();
+        > track.current_exposure.0.abs();
 
     if would_increase_risk_out_of_band {
         return TargetReconcileResult {
@@ -101,20 +101,20 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     }
 
     if let Some(reason) = account_capacity_denial_reason(
-        &grid.current_exposure,
+        &track.current_exposure,
         &approved_target,
-        grid.config.notional_per_unit,
-        &grid.risk_state.account_capacity_constraint,
+        track.config.notional_per_unit,
+        &track.risk_state.account_capacity_constraint,
     ) {
         return TargetReconcileResult {
             events: vec![DomainEvent::RiskDenied { reason }],
-            desired_exposure: grid.current_exposure.clone(),
+            desired_exposure: track.current_exposure.clone(),
             new_status: None,
             suppress_execution: true,
         };
     }
 
-    let delta = grid.current_exposure.delta(&approved_target);
+    let delta = track.current_exposure.delta(&approved_target);
     if delta.is_zero() {
         return TargetReconcileResult {
             events,
@@ -125,7 +125,7 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     }
 
     events.push(DomainEvent::ExposureTargetChanged {
-        from: grid.current_exposure.clone(),
+        from: track.current_exposure.clone(),
         to: approved_target.clone(),
     });
 
@@ -137,8 +137,8 @@ pub fn reconcile_target(grid: &TrackRuntime, reference_price: f64) -> TargetReco
     }
 }
 
-fn resolve_in_band_status(grid: &TrackRuntime) -> Option<TrackStatus> {
-    match grid.status {
+fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
+    match track.status {
         TrackStatus::WaitingMarketData => Some(TrackStatus::Active),
         TrackStatus::Frozen | TrackStatus::Holding => Some(TrackStatus::Active),
         _ => None,
@@ -146,13 +146,13 @@ fn resolve_in_band_status(grid: &TrackRuntime) -> Option<TrackStatus> {
 }
 
 fn apply_out_of_band(
-    grid: &TrackRuntime,
+    track: &TrackRuntime,
     policy: OutOfBandPolicy,
 ) -> (Exposure, Option<TrackStatus>) {
-    let frozen_target = grid
+    let frozen_target = track
         .desired_exposure
         .clone()
-        .unwrap_or_else(|| grid.current_exposure.clone());
+        .unwrap_or_else(|| track.current_exposure.clone());
 
     match policy {
         OutOfBandPolicy::Freeze => (frozen_target, Some(TrackStatus::Frozen)),
@@ -255,11 +255,11 @@ mod tests {
 
     #[test]
     fn reconcile_target_suppresses_execution_when_exposure_unchanged() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(0.0);
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
 
-        let result = reconcile_target(&grid, 100.0);
+        let result = reconcile_target(&track, 100.0);
 
         assert!(result.suppress_execution);
         assert_eq!(result.desired_exposure, Exposure(0.0));
@@ -267,11 +267,11 @@ mod tests {
 
     #[test]
     fn reconcile_target_emits_event_when_exposure_changes() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(0.0);
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert!((result.desired_exposure.0 - 8.0).abs() < 0.001);
         assert!(!result.suppress_execution);
@@ -285,11 +285,11 @@ mod tests {
 
     #[test]
     fn reconcile_target_freezes_when_out_of_band() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(8.0);
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(8.0);
 
-        let result = reconcile_target(&grid, 85.0);
+        let result = reconcile_target(&track, 85.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::Frozen));
         assert!(result.suppress_execution);
@@ -297,9 +297,9 @@ mod tests {
 
     #[test]
     fn reconcile_target_activates_on_first_price() {
-        let grid = test_runtime();
+        let track = test_runtime();
 
-        let result = reconcile_target(&grid, 100.0);
+        let result = reconcile_target(&track, 100.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::Active));
         assert!(result.suppress_execution);
@@ -307,11 +307,11 @@ mod tests {
 
     #[test]
     fn reconcile_target_reactivates_after_reenter() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Frozen;
-        grid.current_exposure = Exposure(8.0);
+        let mut track = test_runtime();
+        track.status = TrackStatus::Frozen;
+        track.current_exposure = Exposure(8.0);
 
-        let result = reconcile_target(&grid, 100.0);
+        let result = reconcile_target(&track, 100.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::Active));
         assert!(!result.suppress_execution);
@@ -319,12 +319,12 @@ mod tests {
 
     #[test]
     fn reconcile_target_reduce_only_targets_zero() {
-        let mut grid = test_runtime();
-        grid.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(8.0);
+        let mut track = test_runtime();
+        track.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(8.0);
 
-        let result = reconcile_target(&grid, 85.0);
+        let result = reconcile_target(&track, 85.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::ReducingOnly));
         assert!(result.desired_exposure.0.abs() < 0.001);
@@ -332,12 +332,12 @@ mod tests {
 
     #[test]
     fn reconcile_target_terminate_targets_zero() {
-        let mut grid = test_runtime();
-        grid.config.out_of_band_policy = OutOfBandPolicy::Terminate;
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(8.0);
+        let mut track = test_runtime();
+        track.config.out_of_band_policy = OutOfBandPolicy::Terminate;
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(8.0);
 
-        let result = reconcile_target(&grid, 85.0);
+        let result = reconcile_target(&track, 85.0);
 
         assert_eq!(result.new_status, Some(TrackStatus::Terminated));
         assert!(result.desired_exposure.0.abs() < 0.001);
@@ -345,15 +345,15 @@ mod tests {
 
     #[test]
     fn reconcile_target_emits_risk_cap_event_when_budget_caps_target() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(0.0);
-        grid.budget = CapacityBudget {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
+        track.budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
@@ -365,15 +365,15 @@ mod tests {
 
     #[test]
     fn reconcile_target_keeps_risk_cap_event_when_cap_matches_current_exposure() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(4.0);
-        grid.budget = CapacityBudget {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(4.0);
+        track.budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert!(result.suppress_execution);
         assert_eq!(result.desired_exposure, Exposure(4.0));
@@ -392,13 +392,13 @@ mod tests {
 
     #[test]
     fn reconcile_target_uses_risk_state_pnl_to_cap_target() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(2.0);
-        grid.risk_state.realized_pnl_today = -100.0;
-        grid.risk_state.unrealized_pnl = -25.0;
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(2.0);
+        track.risk_state.realized_pnl_today = -100.0;
+        track.risk_state.unrealized_pnl = -25.0;
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(0.0));
         assert!(result.events.iter().any(|event| matches!(
@@ -410,13 +410,13 @@ mod tests {
 
     #[test]
     fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(4.0);
-        grid.desired_exposure = Some(Exposure(6.0));
-        grid.config.out_of_band_policy = OutOfBandPolicy::Freeze;
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(4.0);
+        track.desired_exposure = Some(Exposure(6.0));
+        track.config.out_of_band_policy = OutOfBandPolicy::Freeze;
 
-        let result = reconcile_target(&grid, 85.0);
+        let result = reconcile_target(&track, 85.0);
 
         assert_eq!(result.desired_exposure.0, 6.0);
         assert!(result.suppress_execution);
@@ -424,15 +424,15 @@ mod tests {
 
     #[test]
     fn reconcile_target_uses_budget_from_runtime() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(0.0);
-        grid.budget = CapacityBudget {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
+        track.budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
         };
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
@@ -444,19 +444,19 @@ mod tests {
 
     #[test]
     fn margin_guard_reconcile_denies_risk_increase_when_guard_is_active() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(1.0);
-        grid.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(1.0);
+        track.risk_state.account_capacity_constraint = AccountCapacityConstraint {
             increase_blocked: true,
             blocked_reason: Some("insufficient_margin".into()),
             max_increase_notional: Some(1_000.0),
         };
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.desired_exposure, grid.current_exposure);
+        assert_eq!(result.desired_exposure, track.current_exposure);
         assert_eq!(
             result.events,
             vec![DomainEvent::RiskDenied {
@@ -467,19 +467,19 @@ mod tests {
 
     #[test]
     fn margin_guard_reconcile_denies_when_required_notional_exceeds_available_capacity() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(1.0);
-        grid.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(1.0);
+        track.risk_state.account_capacity_constraint = AccountCapacityConstraint {
             increase_blocked: false,
             blocked_reason: None,
             max_increase_notional: Some(500.0),
         };
 
-        let result = reconcile_target(&grid, 90.0);
+        let result = reconcile_target(&track, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.desired_exposure, grid.current_exposure);
+        assert_eq!(result.desired_exposure, track.current_exposure);
         assert_eq!(
             result.events,
             vec![DomainEvent::RiskDenied {
@@ -490,17 +490,17 @@ mod tests {
 
     #[test]
     fn margin_guard_reconcile_allows_reduce_only_target() {
-        let mut grid = test_runtime();
-        grid.status = TrackStatus::Active;
-        grid.current_exposure = Exposure(5.0);
-        grid.manual_target_override = Some(Exposure(2.0));
-        grid.risk_state.account_capacity_constraint = AccountCapacityConstraint {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(5.0);
+        track.manual_target_override = Some(Exposure(2.0));
+        track.risk_state.account_capacity_constraint = AccountCapacityConstraint {
             increase_blocked: true,
             blocked_reason: Some("insufficient_margin".into()),
             max_increase_notional: Some(0.0),
         };
 
-        let result = reconcile_target(&grid, 100.0);
+        let result = reconcile_target(&track, 100.0);
 
         assert!(!result.suppress_execution);
         assert_eq!(result.desired_exposure, Exposure(2.0));

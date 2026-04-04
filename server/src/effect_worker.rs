@@ -115,9 +115,9 @@ impl EffectWorker {
         match persisted.effect {
             TrackEffect::SubmitOrder {
                 ref request,
-                ref target_exposure,
+                ref desired_exposure,
             } => {
-                self.execute_submit(&persisted, request.clone(), target_exposure.clone())
+                self.execute_submit(&persisted, request.clone(), desired_exposure.clone())
                     .await
             }
             TrackEffect::CancelOrder {
@@ -156,7 +156,7 @@ impl EffectWorker {
         &self,
         persisted: &PersistedTrackEffect,
         request: OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
         let preflight_decision = self
             .state
@@ -167,7 +167,7 @@ impl EffectWorker {
             .prepare_submit_execution(
                 persisted,
                 &request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
                 preflight_decision,
             )
             .await?
@@ -188,7 +188,7 @@ impl EffectWorker {
                         persisted.track_id.as_str(),
                         &persisted.effect_id,
                         &request,
-                        prepared_submit.target_exposure,
+                        prepared_submit.desired_exposure,
                         &receipt,
                     )
                     .await
@@ -271,7 +271,7 @@ impl EffectWorker {
         &self,
         persisted: &PersistedTrackEffect,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         preflight_decision: SubmitPreflightDecision,
     ) -> Result<Option<crate::write_service::PreparedSubmitExecution>> {
         let live_order = match preflight_decision {
@@ -292,7 +292,7 @@ impl EffectWorker {
                 persisted.track_id.as_str(),
                 &persisted.effect_id,
                 request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
                 live_order.as_ref(),
             )
             .await
@@ -545,9 +545,9 @@ mod tests {
         let expected_round_target = match transition.effects.as_slice() {
             [
                 TrackEffect::SubmitOrder {
-                    target_exposure, ..
+                    desired_exposure, ..
                 },
-            ] => target_exposure.clone(),
+            ] => desired_exposure.clone(),
             _ => panic!("expected a single submit effect"),
         };
 
@@ -574,11 +574,11 @@ mod tests {
             .expect("working order should be present after receipt");
 
         assert_eq!(
-            active_round["target_exposure"],
+            active_round["desired_exposure"],
             serde_json::json!(expected_round_target.0)
         );
         assert!(
-            !working_order.contains_key("target_exposure"),
+            !working_order.contains_key("desired_exposure"),
             "working order should not keep a target copy after writeback"
         );
     }
@@ -673,7 +673,7 @@ mod tests {
                         client_order_id: "BTCUSDT-skip".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -746,7 +746,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -948,7 +948,7 @@ mod tests {
                         quantity: 0.4,
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(4.0),
+                    desired_exposure: Exposure(4.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -1177,7 +1177,7 @@ mod tests {
                         client_order_id: "btc-core-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(4.0),
+                    desired_exposure: Exposure(4.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -1202,7 +1202,7 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(expected_round_target)
         );
     }
@@ -1429,7 +1429,7 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                     mode: ExecutionMode::Passive,
                     started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
                 }),
@@ -1475,7 +1475,7 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                     mode: ExecutionMode::Passive,
                     started_at: Utc.with_ymd_and_hms(2026, 3, 24, 7, 55, 0).unwrap(),
                 }),
@@ -1529,14 +1529,14 @@ mod tests {
             config: config.clone(),
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
-            desired_exposure: Some(poise_core::strategy::target_exposure(
+            desired_exposure: Some(poise_core::strategy::desired_exposure(
                 reference_price,
                 &config,
             )),
             manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
-                    target_exposure: poise_core::strategy::target_exposure(
+                    desired_exposure: poise_core::strategy::desired_exposure(
                         reference_price,
                         &config,
                     ),
@@ -1546,7 +1546,7 @@ mod tests {
                 diagnostics: poise_engine::runtime::ExecutorDiagnostics {
                     mode: ExecutionMode::Passive,
                     inventory_gap: Exposure(
-                        poise_core::strategy::target_exposure(reference_price, &config).0,
+                        poise_core::strategy::desired_exposure(reference_price, &config).0,
                     ),
                     gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()),
                     last_reprice_at: None,

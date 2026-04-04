@@ -328,7 +328,7 @@ async fn handle_action(client: &ApiClient, app: &mut App, action: Action) -> Res
     match action {
         Action::None => Ok(()),
         Action::OpenSelectedInstance | Action::RefreshSelectedInstance => {
-            refresh_selected_grid_detail(client, app).await?;
+            refresh_selected_track_detail(client, app).await?;
             app.show_instance_for_selected();
             Ok(())
         }
@@ -378,7 +378,7 @@ fn format_command_response(response: &TrackCommandAccepted) -> String {
     .to_ascii_lowercase()
 }
 
-async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Result<()> {
+async fn refresh_selected_track_detail(client: &ApiClient, app: &mut App) -> Result<()> {
     let track_id = app
         .selected_track_id()
         .context("no instance selected")?
@@ -478,9 +478,9 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     refreshed.set_debug_diagnostics_enabled(debug_diagnostics_enabled);
     if let Some(selected_track_id) = selected_track_id
         && let Some(index) = refreshed
-            .grids
+            .tracks
             .iter()
-            .position(|grid| grid.id == selected_track_id)
+            .position(|track| track.id == selected_track_id)
     {
         refreshed.selected_index = index;
     }
@@ -531,12 +531,12 @@ mod tests {
     use crate::app::App;
     use crate::input::Action;
     use crate::protocol::{
-        ExecutionStateView, GridCommandType, GridStatus, TrackCommandAccepted, TrackCommandRequest,
-        TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse,
+        ExecutionStateView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+        TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse, TrackStatus,
         TrackStreamEvent, TrackStreamPayload,
     };
 
-    const BTC_GRID_ID: &str = "btc-core";
+    const BTC_TRACK_ID: &str = "btc-core";
     const BTC_SYMBOL: &str = "BTCUSDT";
     const ETH_GRID_ID: &str = "eth-core";
     const ETH_SYMBOL: &str = "ETHUSDT";
@@ -566,14 +566,14 @@ mod tests {
             ExecutionStateView::Open
         };
         detail.available_commands = if symbol == ETH_SYMBOL {
-            vec![crate::protocol::GridCommandView {
-                command: GridCommandType::Resume,
+            vec![crate::protocol::TrackCommandView {
+                command: TrackCommandType::Resume,
                 enabled: true,
                 disabled_reason: None,
             }]
         } else {
-            vec![crate::protocol::GridCommandView {
-                command: GridCommandType::Pause,
+            vec![crate::protocol::TrackCommandView {
+                command: TrackCommandType::Pause,
                 enabled: true,
                 disabled_reason: None,
             }]
@@ -600,7 +600,7 @@ mod tests {
         requests: Arc<Mutex<Vec<String>>>,
     }
 
-    async fn list_projected_grids(
+    async fn list_projected_tracks(
         State(state): State<ProjectionStubState>,
     ) -> Json<TrackListResponse> {
         state.requests.lock().await.push("/tracks".into());
@@ -613,9 +613,9 @@ mod tests {
     ) -> Json<TrackDetailView> {
         state.requests.lock().await.push(format!("/tracks/{id}"));
         Json(match id.as_str() {
-            BTC_GRID_ID => detail_view(BTC_GRID_ID, BTC_SYMBOL),
+            BTC_TRACK_ID => detail_view(BTC_TRACK_ID, BTC_SYMBOL),
             ETH_GRID_ID => detail_view(ETH_GRID_ID, ETH_SYMBOL),
-            _ => panic!("unexpected grid id: {id}"),
+            _ => panic!("unexpected track id: {id}"),
         })
     }
 
@@ -643,7 +643,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/tracks", get(list_projected_grids))
+            .route("/tracks", get(list_projected_tracks))
             .route("/tracks/:id", get(get_projected_detail))
             .route(
                 "/debug/tracks/:id/diagnostics",
@@ -681,7 +681,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/tracks", get(list_projected_grids))
+            .route("/tracks", get(list_projected_tracks))
             .route("/tracks/:id", get(get_projected_detail))
             .route(
                 "/debug/tracks/:id/diagnostics",
@@ -710,7 +710,7 @@ mod tests {
             reference_price: detail.status.reference_price,
             exposure: crate::protocol::ExposureSummaryView {
                 current: detail.position.current_exposure,
-                target: detail.position.target_exposure,
+                target: detail.position.desired_exposure,
             },
             execution: crate::protocol::ExecutionBadgeView {
                 state: detail.execution.state,
@@ -724,14 +724,14 @@ mod tests {
     }
 
     fn stub_state() -> StubState {
-        let btc = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        let btc = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
         let eth = detail_view(ETH_GRID_ID, ETH_SYMBOL);
         StubState {
             list: Arc::new(Mutex::new(TrackListResponse {
                 items: vec![list_item_from_detail(&btc), list_item_from_detail(&eth)],
             })),
             details: Arc::new(Mutex::new(HashMap::from([
-                (BTC_GRID_ID.to_string(), btc),
+                (BTC_TRACK_ID.to_string(), btc),
                 (ETH_GRID_ID.to_string(), eth),
             ]))),
         }
@@ -756,12 +756,12 @@ mod tests {
         let mut details = state.details.lock().await;
         let detail = details.get_mut(&id).unwrap();
         match command.command {
-            GridCommandType::Pause => {
-                detail.status.lifecycle.status = GridStatus::Paused;
+            TrackCommandType::Pause => {
+                detail.status.lifecycle.status = TrackStatus::Paused;
                 detail.execution.state = ExecutionStateView::Paused;
             }
-            GridCommandType::Resume => {
-                detail.status.lifecycle.status = GridStatus::Active;
+            TrackCommandType::Resume => {
+                detail.status.lifecycle.status = TrackStatus::Active;
                 detail.execution.state = ExecutionStateView::Open;
             }
             _ => {}
@@ -903,7 +903,7 @@ mod tests {
         let client_order_id = params
             .get("newClientOrderId")
             .cloned()
-            .unwrap_or_else(|| "grid-order-test".to_string());
+            .unwrap_or_else(|| "track-order-test".to_string());
 
         Json(serde_json::json!({
             "orderId": 1001,
@@ -922,7 +922,7 @@ mod tests {
 
         Json(serde_json::json!({
             "orderId": order_id.parse::<u64>().unwrap_or(1001),
-            "clientOrderId": "grid-order-test",
+            "clientOrderId": "track-order-test",
             "status": "CANCELED"
         }))
     }
@@ -1031,9 +1031,9 @@ mod tests {
 
     #[test]
     fn derives_ws_url_from_base_url_with_path_prefix() {
-        let url = derive_ws_url("https://example.com/grid/api").unwrap();
+        let url = derive_ws_url("https://example.com/track/api").unwrap();
 
-        assert_eq!(url, "wss://example.com/grid/api/ws");
+        assert_eq!(url, "wss://example.com/track/api/ws");
     }
 
     #[test]
@@ -1046,8 +1046,8 @@ mod tests {
     #[test]
     fn formats_command_response_message() {
         let text = format_command_response(&TrackCommandAccepted {
-            track_id: BTC_GRID_ID.into(),
-            command: crate::protocol::GridCommandType::Pause,
+            track_id: BTC_TRACK_ID.into(),
+            command: crate::protocol::TrackCommandType::Pause,
             accepted: true,
         });
 
@@ -1060,11 +1060,14 @@ mod tests {
 
         let app = load_initial_state(&client).await.unwrap();
 
-        assert_eq!(app.grids.len(), 2);
-        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.tracks.len(), 2);
+        assert_eq!(
+            app.current_track.as_ref().unwrap().identity.id,
+            BTC_TRACK_ID
+        );
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/tracks".to_string(), format!("/tracks/{BTC_GRID_ID}")]
+            vec!["/tracks".to_string(), format!("/tracks/{BTC_TRACK_ID}")]
         );
     }
 
@@ -1077,7 +1080,7 @@ mod tests {
 
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/tracks".to_string(), format!("/tracks/{BTC_GRID_ID}")]
+            vec!["/tracks".to_string(), format!("/tracks/{BTC_TRACK_ID}")]
         );
 
         handle_action(&client, &mut app, Action::ToggleDiagnostics)
@@ -1088,8 +1091,8 @@ mod tests {
             state.requests.lock().await.clone(),
             vec![
                 "/tracks".to_string(),
-                format!("/tracks/{BTC_GRID_ID}"),
-                format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"),
+                format!("/tracks/{BTC_TRACK_ID}"),
+                format!("/debug/tracks/{BTC_TRACK_ID}/diagnostics"),
             ]
         );
     }
@@ -1104,14 +1107,17 @@ mod tests {
 
         sync_projected_state(&client, &mut app).await.unwrap();
 
-        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            app.current_track.as_ref().unwrap().identity.id,
+            BTC_TRACK_ID
+        );
         assert!(app.current_track_diagnostics().is_none());
         assert!(
             state
                 .requests
                 .lock()
                 .await
-                .contains(&format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"))
+                .contains(&format!("/debug/tracks/{BTC_TRACK_ID}/diagnostics"))
         );
     }
 
@@ -1122,7 +1128,7 @@ mod tests {
         app.current_view = View::Instance;
         app.show_instance_for_selected();
         app.set_debug_diagnostics_enabled(true);
-        app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
+        app.apply_track_detail(detail_view(BTC_TRACK_ID, BTC_SYMBOL));
         let mut stale_diagnostics: TrackDiagnosticsView = serde_json::from_str(include_str!(
             "../tests/fixtures/track_diagnostics_view.json"
         ))
@@ -1140,7 +1146,7 @@ mod tests {
         assert!(
             app.current_track_diagnostics().unwrap().items[0]
                 .message
-                .contains("target exposure")
+                .contains("desired exposure")
         );
     }
 
@@ -1149,13 +1155,13 @@ mod tests {
         let mut app = App::new(track_list_response().items);
         app.current_view = View::Instance;
         app.show_instance_for_selected();
-        app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
+        app.apply_track_detail(detail_view(BTC_TRACK_ID, BTC_SYMBOL));
 
         let (client, _) = spawn_projection_stub_server().await;
         handle_ws_event(&client, &mut app, track_list_item_changed_event()).await;
         handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
-        assert_eq!(app.grids[0].reference_price, Some(101.4));
+        assert_eq!(app.tracks[0].reference_price, Some(101.4));
         assert_eq!(
             app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
@@ -1172,8 +1178,11 @@ mod tests {
 
         let app = load_initial_state(&client).await.unwrap();
 
-        assert_eq!(app.grids.len(), 2);
-        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.tracks.len(), 2);
+        assert_eq!(
+            app.current_track.as_ref().unwrap().identity.id,
+            BTC_TRACK_ID
+        );
         assert_eq!(
             app.current_track
                 .as_ref()
@@ -1192,15 +1201,15 @@ mod tests {
         app.show_instance_for_selected();
 
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        let mut first = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        let mut first = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
         first.status.reference_price = Some(101.0);
-        let mut second = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        let mut second = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
         second.status.reference_price = Some(102.0);
         second.position.current_exposure = 3.0;
 
         sender
             .send(TrackStreamEvent {
-                track_id: BTC_GRID_ID.into(),
+                track_id: BTC_TRACK_ID.into(),
                 payload: TrackStreamPayload::TrackDetailChanged {
                     detail: Box::new(first),
                 },
@@ -1209,7 +1218,7 @@ mod tests {
             .unwrap();
         sender
             .send(TrackStreamEvent {
-                track_id: BTC_GRID_ID.into(),
+                track_id: BTC_TRACK_ID.into(),
                 payload: TrackStreamPayload::TrackDetailChanged {
                     detail: Box::new(second),
                 },
@@ -1268,7 +1277,7 @@ mod tests {
 
         assert_eq!(
             app.current_track_detail().unwrap().status.lifecycle.status,
-            GridStatus::Paused
+            TrackStatus::Paused
         );
         assert!(
             app.status_message()
@@ -1284,7 +1293,7 @@ mod tests {
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        assert_eq!(app.grids[0].lifecycle.status, GridStatus::Active);
+        assert_eq!(app.tracks[0].lifecycle.status, TrackStatus::Active);
 
         submit_selected_command(&client, &mut app, CommandKind::Pause)
             .await
@@ -1292,10 +1301,10 @@ mod tests {
 
         assert_eq!(
             app.current_track_detail().unwrap().status.lifecycle.status,
-            GridStatus::Paused
+            TrackStatus::Paused
         );
-        assert_eq!(app.grids[0].lifecycle.status, GridStatus::Paused);
-        assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
+        assert_eq!(app.tracks[0].lifecycle.status, TrackStatus::Paused);
+        assert_eq!(app.tracks[0].execution.state, ExecutionStateView::Paused);
     }
 
     #[tokio::test]
@@ -1304,7 +1313,7 @@ mod tests {
 
         let (app, ws_receiver) = bootstrap_runtime_state(&client, "ws://127.0.0.1:1/ws").await;
 
-        assert!(app.grids.is_empty());
+        assert!(app.tracks.is_empty());
         assert!(app.status_message().unwrap().contains("startup failed"));
         assert!(ws_receiver.is_none());
     }
@@ -1318,7 +1327,7 @@ mod tests {
         let ws_url = format!("ws://{bind_address}/ws");
 
         let (mut app, mut ws_receiver) = bootstrap_runtime_state(&client, &ws_url).await;
-        assert!(app.grids.is_empty());
+        assert!(app.tracks.is_empty());
         assert!(app.status_message().unwrap().contains("startup failed"));
 
         let (_, _, _, server) = spawn_stub_server_on(bind_address).await;
@@ -1326,14 +1335,17 @@ mod tests {
         for _ in 0..20 {
             maybe_load_initial_state(&client, &mut app).await;
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if app.grids.len() == 2 && app.current_track.is_some() {
+            if app.tracks.len() == 2 && app.current_track.is_some() {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert_eq!(app.grids.len(), 2);
-        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(app.tracks.len(), 2);
+        assert_eq!(
+            app.current_track.as_ref().unwrap().identity.id,
+            BTC_TRACK_ID
+        );
 
         server.abort();
         let _ = server.await;
@@ -1392,7 +1404,7 @@ mod tests {
             Some(100.0)
         );
 
-        let mut updated = detail_view(BTC_GRID_ID, BTC_SYMBOL);
+        let mut updated = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
         updated.status.reference_price = Some(111.5);
         updated.position.current_exposure = 4.5;
         replace_track_detail(&state, updated).await;
@@ -1419,7 +1431,7 @@ mod tests {
                 .and_then(|detail| detail.status.reference_price),
             Some(111.5)
         );
-        assert_eq!(app.grids[0].reference_price, Some(111.5));
+        assert_eq!(app.tracks[0].reference_price, Some(111.5));
 
         ws_server.abort();
         let _ = ws_server.await;
@@ -1436,7 +1448,7 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         let event = ws_receiver.as_mut().unwrap().recv().await.unwrap();
-        assert_eq!(event.track_id, BTC_GRID_ID);
+        assert_eq!(event.track_id, BTC_TRACK_ID);
         assert_eq!(app.status_message(), Some("websocket reconnected"));
     }
 
@@ -1568,7 +1580,7 @@ mod tests {
             .to_path_buf()
     }
 
-    fn grid_tui_binary_path() -> PathBuf {
+    fn track_tui_binary_path() -> PathBuf {
         let mut path = workspace_root().join("target").join("debug");
         path.push(if cfg!(windows) {
             "poise-tui.exe"
@@ -1578,7 +1590,7 @@ mod tests {
         path
     }
 
-    fn grid_server_binary_path() -> PathBuf {
+    fn track_server_binary_path() -> PathBuf {
         let mut path = workspace_root().join("target").join("debug");
         path.push(if cfg!(windows) {
             "poise-server.exe"
@@ -1588,8 +1600,8 @@ mod tests {
         path
     }
 
-    fn ensure_grid_server_binary() -> PathBuf {
-        let path = grid_server_binary_path();
+    fn ensure_track_server_binary() -> PathBuf {
+        let path = track_server_binary_path();
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -1601,8 +1613,8 @@ mod tests {
         path
     }
 
-    fn ensure_grid_tui_binary() -> PathBuf {
-        let path = grid_tui_binary_path();
+    fn ensure_track_tui_binary() -> PathBuf {
+        let path = track_tui_binary_path();
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -1749,7 +1761,7 @@ mod tests {
     #[tokio::test]
     async fn real_server_protocol_integration_covers_list_switch_and_ws_updates() {
         let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_grid_server_binary();
+        let server_binary = ensure_track_server_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
@@ -1809,19 +1821,26 @@ out_of_band_policy = "hold"
         let mut ws_receiver = Some(connect_ws(&ws_url).await.unwrap());
 
         let client = ApiClient::new(base_url);
-        wait_for_detail_price(&client, BTC_GRID_ID).await;
+        wait_for_detail_price(&client, BTC_TRACK_ID).await;
         wait_for_detail_price(&client, ETH_GRID_ID).await;
 
         let mut app = load_initial_state(&client).await.unwrap();
-        assert_eq!(app.grids.len(), 2);
-        assert!(app.grids.iter().all(|grid| grid.reference_price.is_some()));
+        assert_eq!(app.tracks.len(), 2);
+        assert!(
+            app.tracks
+                .iter()
+                .all(|track| track.reference_price.is_some())
+        );
 
         let action = crate::input::handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            app.current_track.as_ref().unwrap().identity.id,
+            BTC_TRACK_ID
+        );
 
         let action = crate::input::handle_key_event(
             &mut app,
@@ -1863,7 +1882,7 @@ out_of_band_policy = "hold"
     #[tokio::test]
     async fn real_server_starts_with_loopback_exchange_even_when_proxy_env_is_set() {
         let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_grid_server_binary();
+        let server_binary = ensure_track_server_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
@@ -1920,8 +1939,8 @@ notional_per_unit = 375.0
     #[tokio::test]
     async fn real_server_and_tui_binary_end_to_end_renders_and_exits() {
         let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_grid_server_binary();
-        let tui_binary = ensure_grid_tui_binary();
+        let server_binary = ensure_track_server_binary();
+        let tui_binary = ensure_track_tui_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();

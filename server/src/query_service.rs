@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn query_service_projects_desired_exposure_as_target_exposure_for_clients() {
+    fn query_service_projects_desired_exposure_for_clients() {
         let read_model = TrackReadModel::from_snapshot(
             TrackRuntimeSnapshot {
                 track_id: TrackId::new("btc-core"),
@@ -194,7 +194,7 @@ mod tests {
                 manual_target_override: None,
                 executor_state: ExecutorState {
                     active_round: Some(poise_engine::runtime::ExecutionRound {
-                        target_exposure: Exposure(4.0),
+                        desired_exposure: Exposure(4.0),
                         mode: ExecutionMode::Passive,
                         started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
                     }),
@@ -248,7 +248,7 @@ mod tests {
 
         assert_eq!(read_model.desired_exposure, Some(4.0));
         let projected = TrackProjector::new().project_detail(&read_model);
-        assert_eq!(projected.position.target_exposure, Some(4.0));
+        assert_eq!(projected.position.desired_exposure, Some(4.0));
     }
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
@@ -294,7 +294,7 @@ mod tests {
                         client_order_id: "client-1".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(4.0),
+                    desired_exposure: Exposure(4.0),
                 },
                 status: EffectStatus::Executing,
                 attempt_count: 1,
@@ -384,7 +384,7 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
-                    target_exposure: Exposure(4.0),
+                    desired_exposure: Exposure(4.0),
                     mode: ExecutionMode::Passive,
                     started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
                 }),

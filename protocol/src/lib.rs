@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GridStatus {
+pub enum TrackStatus {
     WaitingMarketData,
     Active,
     Frozen,
@@ -23,7 +23,7 @@ pub struct TrackListResponse {
 pub struct TrackListItemView {
     pub id: String,
     pub instrument: InstrumentView,
-    pub lifecycle: GridLifecycleView,
+    pub lifecycle: TrackLifecycleView,
     pub reference_price: Option<f64>,
     pub exposure: ExposureSummaryView,
     pub execution: ExecutionBadgeView,
@@ -38,8 +38,8 @@ pub struct InstrumentView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridLifecycleView {
-    pub status: GridStatus,
+pub struct TrackLifecycleView {
+    pub status: TrackStatus,
     pub updated_at: String,
 }
 
@@ -64,32 +64,32 @@ pub struct ExecutionBadgeView {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackDetailView {
-    pub identity: GridIdentityView,
-    pub status: GridStatusPanelView,
-    pub strategy: GridStrategyView,
-    pub market: GridMarketView,
-    pub position: GridPositionView,
+    pub identity: TrackIdentityView,
+    pub status: TrackStatusPanelView,
+    pub strategy: TrackStrategyView,
+    pub market: TrackMarketView,
+    pub position: TrackPositionView,
     #[serde(default)]
-    pub statistics: GridStatisticsView,
-    pub execution: GridExecutionView,
-    pub activity: Vec<GridActivityItemView>,
-    pub available_commands: Vec<GridCommandView>,
+    pub statistics: TrackStatisticsView,
+    pub execution: TrackExecutionView,
+    pub activity: Vec<TrackActivityItemView>,
+    pub available_commands: Vec<TrackCommandView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridIdentityView {
+pub struct TrackIdentityView {
     pub id: String,
     pub instrument: InstrumentView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridStatusPanelView {
-    pub lifecycle: GridLifecycleView,
+pub struct TrackStatusPanelView {
+    pub lifecycle: TrackLifecycleView,
     pub reference_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridStrategyView {
+pub struct TrackStrategyView {
     pub lower_price: f64,
     pub upper_price: f64,
     pub long_exposure_units: f64,
@@ -101,20 +101,20 @@ pub struct GridStrategyView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridMarketView {
+pub struct TrackMarketView {
     pub mark_price: Option<f64>,
     pub index_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridPositionView {
+pub struct TrackPositionView {
     pub current_exposure: f64,
     #[serde(default)]
-    pub target_exposure: Option<f64>,
+    pub desired_exposure: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct GridStatisticsView {
+pub struct TrackStatisticsView {
     pub total_pnl: f64,
     pub realized_pnl: f64,
     #[serde(default)]
@@ -126,7 +126,7 @@ pub struct GridStatisticsView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridExecutionView {
+pub struct TrackExecutionView {
     pub state: ExecutionStateView,
     #[serde(default)]
     pub execution_status: ExecutionStatusView,
@@ -193,7 +193,7 @@ pub enum ReplacementGateView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GridActivityItemView {
+pub struct TrackActivityItemView {
     pub ts: String,
     pub message: String,
     pub level: ActivityLevelView,
@@ -220,8 +220,8 @@ pub enum ActivityLevelView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridCommandView {
-    pub command: GridCommandType,
+pub struct TrackCommandView {
+    pub command: TrackCommandType,
     pub enabled: bool,
     #[serde(default)]
     pub disabled_reason: Option<String>,
@@ -229,19 +229,19 @@ pub struct GridCommandView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackCommandRequest {
-    pub command: GridCommandType,
+    pub command: TrackCommandType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackCommandAccepted {
     pub track_id: String,
-    pub command: GridCommandType,
+    pub command: TrackCommandType,
     pub accepted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GridCommandType {
+pub enum TrackCommandType {
     Pause,
     Resume,
     Terminate,
@@ -293,7 +293,7 @@ pub enum Side {
     Sell,
 }
 
-impl fmt::Display for GridStatus {
+impl fmt::Display for TrackStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::WaitingMarketData => "waiting",
@@ -348,7 +348,7 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDiagnosticsView,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDiagnosticsView,
         TrackListResponse, TrackStreamEvent, TrackStreamPayload,
     };
 
@@ -391,7 +391,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(response.track_id, "btc-core");
-        assert_eq!(response.command, GridCommandType::Pause);
+        assert_eq!(response.command, TrackCommandType::Pause);
         assert!(response.accepted);
     }
 
@@ -407,7 +407,7 @@ mod tests {
                         "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
                         "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                         "market":{"mark_price":64123.4,"index_price":64120.1},
-                        "position":{"current_exposure":0.5,"target_exposure":0.75},
+                        "position":{"current_exposure":0.5,"desired_exposure":0.75},
                         "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
                         "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
                         "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
@@ -423,6 +423,11 @@ mod tests {
             TrackStreamPayload::TrackDetailChanged { detail } => {
                 let detail_json = serde_json::to_value(&detail).unwrap();
                 assert_eq!(detail.identity.id, "btc-core");
+                assert_eq!(
+                    detail_json["position"]["desired_exposure"].as_f64(),
+                    Some(0.75)
+                );
+                assert_eq!(detail_json["position"].as_object().unwrap().len(), 2);
                 assert_eq!(
                     detail_json["strategy"]["long_exposure_units"].as_f64(),
                     Some(8.0)
@@ -448,7 +453,7 @@ mod tests {
     fn deserializes_track_command_request() {
         let request: TrackCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
 
-        assert_eq!(request.command, GridCommandType::Pause);
+        assert_eq!(request.command, TrackCommandType::Pause);
     }
 
     #[test]
@@ -458,7 +463,7 @@ mod tests {
                 "items":[
                     {
                         "ts":"2026-04-03T02:26:47Z",
-                        "message":"target exposure -3.9534 -> -3.7500",
+                        "message":"desired exposure -3.9534 -> -3.7500",
                         "level":"info"
                     }
                 ]
@@ -469,7 +474,7 @@ mod tests {
         assert_eq!(payload.items.len(), 1);
         assert_eq!(
             payload.items[0].message,
-            "target exposure -3.9534 -> -3.7500"
+            "desired exposure -3.9534 -> -3.7500"
         );
     }
 }

@@ -4,7 +4,7 @@
 
 **Goal:** 把 `min_rebalance_units` 从“停手阈值”改成“触发下一次执行动作的最小目标变化”，避免执行中频繁 supersede / cancel-replace，同时保持系统分轮逼近最新策略目标。
 
-**Architecture:** `reconciler` 继续只产出最新原始策略目标；executor 内新增单一的 `rebalance trigger` 抽象，统一拥有执行锚点选择和门槛比较语义；`planning` 与 `submit recovery` 只消费这个结果，不再各自实现一套规则。`manager` 继续保存最新 `target_exposure`，不把执行防抖上推到更外层。
+**Architecture:** `reconciler` 继续只产出最新原始策略目标；executor 内新增单一的 `rebalance trigger` 抽象，统一拥有执行锚点选择和门槛比较语义；`planning` 与 `submit recovery` 只消费这个结果，不再各自实现一套规则。`manager` 继续保存最新 `desired_exposure`，不把执行防抖上推到更外层。
 
 **Implementation constraint:** shared trigger 抽象和它的两个 engine 消费者必须在同一个 task / commit 内一起切换，不允许出现“planning 已切到新语义、submit recovery 仍停留旧语义”的中间态。
 
@@ -23,7 +23,7 @@
 - Modify: `engine/src/executor/mod.rs`
   增加 executor 级回归测试，锁住 `Empty / Working / SubmitPending` 三种状态下的新语义。
 - Modify: `engine/src/manager.rs`
-  补 manager 级行为测试，确认 `target_exposure` 仍保持最新原始策略目标，且生命周期结束后还能开启下一轮。
+  补 manager 级行为测试，确认 `desired_exposure` 仍保持最新原始策略目标，且生命周期结束后还能开启下一轮。
 - Modify: `server/src/runtime.rs`
   增加 runtime 级回归测试，锁住“重复 tick 不再产生 supersede storm”。
 - Modify: `README.md`
@@ -72,7 +72,7 @@ fn observe_market_keeps_latest_strategy_target_while_preserving_active_execution
 覆盖点：
 
 - `Empty` 时仍以 `current_exposure` 为锚点
-- `Working` / `SubmitPending` 时改用当前生命周期的 `target_exposure` 为锚点
+- `Working` / `SubmitPending` 时改用当前生命周期的 `desired_exposure` 为锚点
 - 小于门槛不触发下一次执行动作
 - 大于等于门槛才重新进入 planning
 - recovery 也必须使用同一份 trigger 决策，而不是继续比较“旧请求是否匹配最新计划请求”
@@ -107,7 +107,7 @@ Expected:
 
 - 由该模块单点拥有：
   - `Empty`：锚点 = `current_exposure`
-  - `SubmitPending / Working`：锚点 = slot 中记录的 `working_order.target_exposure`
+  - `SubmitPending / Working`：锚点 = slot 中记录的 `working_order.desired_exposure`
   - `trigger_delta` 计算
   - `min_rebalance_units` 比较与内部容差
 - `planning.rs` 只消费 `RebalanceTriggerDecision`
@@ -138,7 +138,7 @@ Expected:
 
 在 `engine/src/manager.rs`：
 
-- 保持 `track.target_exposure` 写入最新原始策略目标
+- 保持 `track.desired_exposure` 写入最新原始策略目标
 - 不新增 manager 侧旁路逻辑
 
 - [x] **Step 4: 跑 engine 回归**
@@ -153,7 +153,7 @@ Expected:
 
 - 新增测试通过
 - planning / recovery 都已改为消费 shared trigger 抽象
-- `target_exposure` 和 `ExposureTargetChanged` 语义保持不变
+- `desired_exposure` 和 `ExposureTargetChanged` 语义保持不变
 - 现有交易所 floor、replacement gate、submit pending 相关测试保持为绿
 
 - [x] **Step 5: Commit**

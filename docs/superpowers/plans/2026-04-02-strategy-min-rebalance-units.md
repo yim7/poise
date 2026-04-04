@@ -4,7 +4,7 @@
 
 > **Note:** 本计划记录的是第一版 `min_rebalance_units` 落地过程。针对“执行中频繁 supersede / cancel-replace”的后续语义调整，见 [2026-04-03-min-rebalance-execution-threshold.md](2026-04-03-min-rebalance-execution-threshold.md)。
 
-**Goal:** 为每个 track 增加策略级最小调仓单位 `min_rebalance_units`，抑制“交易所可下但策略上仍然太碎”的调仓，同时保持原始 `target_exposure`、`ExposureTargetChanged` 和现有 `Working / SubmitPending / Empty` 状态机语义不变。
+**Goal:** 为每个 track 增加策略级最小调仓单位 `min_rebalance_units`，抑制“交易所可下但策略上仍然太碎”的调仓，同时保持原始 `desired_exposure`、`ExposureTargetChanged` 和现有 `Working / SubmitPending / Empty` 状态机语义不变。
 
 **Architecture:** `reconciler` 继续只表达原始策略目标，不引入 deadband；策略级门槛落在 `executor planning`，与现有交易所 floor 串联成“两层门槛”。`manager` 只负责把配置传给 executor，并用回归测试锁住“目标仍保留、事件仍发出、旧 working 可 cancel、submit pending 不丢失”这几条边界。
 
@@ -23,7 +23,7 @@
 - Modify: `engine/src/executor/mod.rs`
   补 executor 级回归测试，锁住 `Empty / Working / SubmitPending` 三种 slot 在策略门槛和交易所 floor 下的行为。
 - Modify: `engine/src/manager.rs`
-  把 `min_rebalance_units` 传进 executor，并补 manager 级回归测试，锁住 `target_exposure` 和 `ExposureTargetChanged` 语义。
+  把 `min_rebalance_units` 传进 executor，并补 manager 级回归测试，锁住 `desired_exposure` 和 `ExposureTargetChanged` 语义。
 - Modify: `engine/src/reconciler.rs`
   只补必要的 `TrackConfig` struct literal 字段，不改变逻辑。
 - Modify: `engine/src/runtime.rs`
@@ -186,7 +186,7 @@ Expected: FAIL，原因是 planning 还没有策略级门槛判断。
 - 在 `desired_inventory_order(...)` 或紧邻它的唯一 helper 中先做：
 
 ```rust
-let inventory_gap = current_exposure.delta(target_exposure);
+let inventory_gap = current_exposure.delta(desired_exposure);
 if inventory_gap.0.abs() < min_rebalance_units {
     return None;
 }
@@ -237,7 +237,7 @@ Commit: `8b785ad`
 
 ```rust
 #[test]
-fn observe_market_keeps_strategy_target_while_suppressing_small_rebalance() { /* target_exposure 仍是原始策略目标 */ }
+fn observe_market_keeps_strategy_target_while_suppressing_small_rebalance() { /* desired_exposure 仍是原始策略目标 */ }
 
 #[test]
 fn observe_market_cancels_existing_working_order_when_small_rebalance_is_below_min_rebalance_units() { /* Working */ }
@@ -248,7 +248,7 @@ fn observe_market_keeps_submit_pending_slot_when_small_rebalance_is_below_min_re
 
 覆盖点：
 
-- `target_exposure` 保持原始策略目标
+- `desired_exposure` 保持原始策略目标
 - `ExposureTargetChanged` 仍照常发出
 - `Working` 下会 cancel
 - `SubmitPending` 不丢 slot
@@ -274,7 +274,7 @@ min_rebalance_units: track.config.min_rebalance_units,
 要求：
 
 - `reconciler::reconcile_target(...)` 不新增 deadband
-- `target_exposure` 和 `ExposureTargetChanged` 的语义保持不变
+- `desired_exposure` 和 `ExposureTargetChanged` 的语义保持不变
 - 不在 `manager` 新增执行状态机旁路判断
 - review follow-up：`submit recovery` 也必须使用同一份 `min_rebalance_units` 语义，但不能因为 below-threshold 把仍存在的 `SubmitPending` slot 清掉；当 slot 已被 sync 清掉时，pending effect 应正常 `Superseded`
 

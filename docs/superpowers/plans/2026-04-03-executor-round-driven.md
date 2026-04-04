@@ -4,9 +4,9 @@
 
 **Goal:** 把当前 tick-driven 的库存执行器改成 round-driven 执行器，拆开 `desired_exposure` 与当前执行承诺，收紧 `target` 和 round 有效性 owner，并让 `mode` 真正参与单槽位执行决策。
 
-**Architecture:** 第一阶段不引入 `lane`，继续保留单个 `inventory_core` slot。`reconciler` 只产出 `desired_exposure`，对外协议保留字段名 `target_exposure`，但它只投影 `desired_exposure`，不表示 `ExecutionRound.target_exposure`。`round_policy` 单点拥有 round 生命周期和 `mode` 变化，并通过共享 `RoundPolicyInput` 构造入口接收运行态摘要；`executor` 只负责应用 policy 结果并生成最终报价与 effect。`ExecutionRound.target_exposure` 是执行层 target 的唯一 owner，`WorkingOrder.target_exposure` 在同一 task 删除，避免双 owner。
+**Architecture:** 第一阶段不引入 `lane`，继续保留单个 `inventory_core` slot。`reconciler` 只产出 `desired_exposure`，对外协议保留字段名 `desired_exposure`，但它只投影 `desired_exposure`，不表示 `ExecutionRound.desired_exposure`。`round_policy` 单点拥有 round 生命周期和 `mode` 变化，并通过共享 `RoundPolicyInput` 构造入口接收运行态摘要；`executor` 只负责应用 policy 结果并生成最终报价与 effect。`ExecutionRound.desired_exposure` 是执行层 target 的唯一 owner，`WorkingOrder.desired_exposure` 在同一 task 删除，避免双 owner。
 
-**Implementation constraint:** `desired_exposure` 重命名必须与协议投影不变量一起落地；`round_policy` 与共享 `RoundPolicyInput` 构造必须先于 `active_round` 生效；`ExecutionRound.target_exposure` owner 切换和 `WorkingOrder.target_exposure` 删除必须在同一个 task 原子完成；整个过程不允许留下双 owner、双规则或双输入拼装入口的中间态。
+**Implementation constraint:** `desired_exposure` 重命名必须与协议投影不变量一起落地；`round_policy` 与共享 `RoundPolicyInput` 构造必须先于 `active_round` 生效；`ExecutionRound.desired_exposure` owner 切换和 `WorkingOrder.desired_exposure` 删除必须在同一个 task 原子完成；整个过程不允许留下双 owner、双规则或双输入拼装入口的中间态。
 
 **Tech Stack:** Rust workspace, Cargo tests, serde, chrono, Markdown
 
@@ -17,11 +17,11 @@
 - Create: `engine/src/executor/round_policy.rs`
   单点拥有 round 生命周期决策：`Start / Continue / Switch / Finish` 与 `mode` 变化，并定义 `RoundPolicyInput`、`RoundPolicySlotSummary` 和共享输入构造入口。
 - Modify: `engine/src/runtime.rs`
-  引入 `desired_exposure`、`ExecutionRound`、`ExecutorDiagnostics`，删除 `WorkingOrder.target_exposure`。
+  引入 `desired_exposure`、`ExecutionRound`、`ExecutorDiagnostics`，删除 `WorkingOrder.desired_exposure`。
 - Modify: `engine/src/snapshot.rs`
   持久化 `desired_exposure`、`active_round` 和新的 `ExecutorState` 结构，并兼容旧快照别名。
 - Modify: `engine/src/reconciler.rs`
-  保持只产出系统当前希望到达的目标，不再把外层字段称为 `target_exposure`。
+  保持只产出系统当前希望到达的目标，不再把外层字段称为 `desired_exposure`。
 - Modify: `engine/src/manager.rs`
   只串联 `desired_exposure -> round_policy -> executor planning`，不再隐含 round owner。
 - Modify: `engine/src/executor/planning.rs`
@@ -29,7 +29,7 @@
 - Modify: `engine/src/executor/recovery.rs`
   recovery 只消费共享 `round_policy`，不再单独维护 round 有效性判断。
 - Modify: `engine/src/executor/rebalance_trigger.rs`
-  迁移或删除依赖 `WorkingOrder.target_exposure` 的旧锚点逻辑，避免与 `ExecutionRound.target_exposure` 重复。
+  迁移或删除依赖 `WorkingOrder.desired_exposure` 的旧锚点逻辑，避免与 `ExecutionRound.desired_exposure` 重复。
 - Modify: `engine/src/executor/recording.rs`
   让订单事实吸收只记录交易所事实与执行角色，不再写 target owner 副本。
 - Modify: `engine/src/executor/slots.rs`
@@ -37,9 +37,9 @@
 - Modify: `engine/src/executor/mod.rs`
   增加 executor 级回归测试，锁住 round owner、policy owner 和 mode 行为。
 - Modify: `server/src/read_model.rs`
-  内部读取 `desired_exposure`，但第一阶段继续向外投影现有 `target_exposure` 协议字段，且该字段只表达系统当前希望达到的目标。
+  内部读取 `desired_exposure`，但第一阶段继续向外投影现有 `desired_exposure` 协议字段，且该字段只表达系统当前希望达到的目标。
 - Modify: `server/src/projector.rs`
-  保持现有协议和 UI 字段稳定，继续把 `desired_exposure` 投影为现有 `target_exposure` 展示语义，不把它解释成当前 round 锚点。
+  保持现有协议和 UI 字段稳定，继续把 `desired_exposure` 投影为现有 `desired_exposure` 展示语义，不把它解释成当前 round 锚点。
 - Modify: `server/src/query_service.rs`
   补查询回归，锁住外部协议未变但内部 owner 已切换。
 - Modify: `server/src/runtime.rs`
@@ -49,7 +49,7 @@
 - Modify: `docs/superpowers/plans/2026-04-03-executor-round-driven.md`
   执行时勾选任务并记录 commit SHA。
 
-### Task 1: 把外层 `target_exposure` 收紧成 `desired_exposure`，保持对外协议不变
+### Task 1: 把外层 `desired_exposure` 收紧成 `desired_exposure`，保持对外协议不变
 
 **Files:**
 - Modify: `engine/src/runtime.rs`
@@ -74,42 +74,42 @@
 
 ```rust
 #[test]
-fn snapshot_deserializes_legacy_target_exposure_into_desired_exposure() {}
+fn snapshot_deserializes_legacy_desired_exposure_into_desired_exposure() {}
 
 #[test]
 fn observe_market_updates_desired_exposure_without_changing_protocol_target_projection() {}
 
 #[test]
-fn query_service_projects_desired_exposure_as_target_exposure_for_clients() {}
+fn query_service_projects_desired_exposure_as_desired_exposure_for_clients() {}
 ```
 
 覆盖点：
 
-- 旧快照里的 `target_exposure` 能被新字段 `desired_exposure` 兼容读取
+- 旧快照里的 `desired_exposure` 能被新字段 `desired_exposure` 兼容读取
 - `TrackRuntime` 内部字段完成重命名
-- 外部协议里的 `target_exposure` 暂不改名，但它只表达当前系统希望达到的目标，不得表示 `ExecutionRound.target_exposure`
+- 外部协议里的 `desired_exposure` 暂不改名，但它只表达当前系统希望达到的目标，不得表示 `ExecutionRound.desired_exposure`
 
 - [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
-- `cargo test -p poise-engine runtime::tests::snapshot_deserializes_legacy_target_exposure_into_desired_exposure -- --exact --nocapture`
+- `cargo test -p poise-engine runtime::tests::snapshot_deserializes_legacy_desired_exposure_into_desired_exposure -- --exact --nocapture`
 - `cargo test -p poise-engine manager::tests::observe_market_updates_desired_exposure_without_changing_protocol_target_projection -- --exact --nocapture`
-- `cargo test -p poise-server query_service::tests::query_service_projects_desired_exposure_as_target_exposure_for_clients -- --exact --nocapture`
+- `cargo test -p poise-server query_service::tests::query_service_projects_desired_exposure_as_desired_exposure_for_clients -- --exact --nocapture`
 
 Expected:
 
-- 当前实现会失败，因为内部仍普遍使用 `target_exposure` 作为运行态字段名。
+- 当前实现会失败，因为内部仍普遍使用 `desired_exposure` 作为运行态字段名。
 
 - [x] **Step 3: 做最小实现，完成 `desired_exposure` 切换并保留 API 稳定**
 
 要求：
 
 - `TrackRuntime`、`TrackRuntimeSnapshot`、`TrackReadModel` 内部 owner 改成 `desired_exposure`
-- `TrackRuntimeSnapshot` 对旧字段增加 `serde(alias = "target_exposure")`
+- `TrackRuntimeSnapshot` 对旧字段增加 `serde(alias = "desired_exposure")`
 - `reconciler`、`manager`、query 层统一改为新名字
-- `server` 对外协议和现有 UI DTO 暂不改字段名，继续把 `desired_exposure` 投影为现有 `target_exposure`
-- 在 `read_model` / `projector` / `query_service` 明确固定这条不变量：协议层 `target_exposure` 只投影 `desired_exposure`
+- `server` 对外协议和现有 UI DTO 暂不改字段名，继续把 `desired_exposure` 投影为现有 `desired_exposure`
+- 在 `read_model` / `projector` / `query_service` 明确固定这条不变量：协议层 `desired_exposure` 只投影 `desired_exposure`
 - 快照字段改名会同步影响 `storage` 和依赖快照测试夹具的 `server` 模块，这些接线也在本 task 内一起完成
 - 本 task 内不引入 `ExecutionRound`，只完成外层 owner 的重命名与别名兼容
 
@@ -124,7 +124,7 @@ Run:
 Expected:
 
 - 内部重命名通过
-- 对外协议仍保持 `target_exposure`
+- 对外协议仍保持 `desired_exposure`
 - 旧快照兼容测试通过
 
 - [x] **Step 5: Commit**
@@ -288,8 +288,8 @@ async fn effect_worker_writeback_keeps_round_target_without_working_order_target
 - 空态下没有 `active_round`
 - 开始执行时会显式创建 `active_round`
 - 仅 `desired_exposure` 漂移时，不会自动重写当前 round target
-- `ExecutionRound.target_exposure` 成为执行层唯一 target owner
-- `WorkingOrder.target_exposure` 在同一个 task 内删除
+- `ExecutionRound.desired_exposure` 成为执行层唯一 target owner
+- `WorkingOrder.desired_exposure` 在同一个 task 内删除
 
 - [x] **Step 2: 运行定向测试，确认当前实现失败**
 
@@ -302,18 +302,18 @@ Run:
 
 Expected:
 
-- 当前实现会失败，因为还没有 `active_round`，且多个 executor 模块仍从 `WorkingOrder.target_exposure` 读锚点。
+- 当前实现会失败，因为还没有 `active_round`，且多个 executor 模块仍从 `WorkingOrder.desired_exposure` 读锚点。
 
-- [x] **Step 3: 做原子切换，引入 `ExecutionRound` 并删除 `WorkingOrder.target_exposure`**
+- [x] **Step 3: 做原子切换，引入 `ExecutionRound` 并删除 `WorkingOrder.desired_exposure`**
 
 要求：
 
 - 在 `engine/src/runtime.rs` 引入 `ExecutionRound` 和 `ExecutorDiagnostics`
 - 现有 `mode / inventory_gap / gap_started_at / last_reprice_at / last_execution_reason / recovery_anomaly` 收入 `ExecutorDiagnostics`
 - `ExecutorState` 新增 `active_round`
-- 从 `WorkingOrder` 删除 `target_exposure`
+- 从 `WorkingOrder` 删除 `desired_exposure`
 - `round_policy` 的输入在同一个 task 内把 `RoundPolicyInput.active_round` 从 `None` 过渡到真实 `active_round`
-- `recording`、`recovery`、`rebalance_trigger`、`slots`、`planning` 在同一个 task 内全部改为读取 `active_round.target_exposure`
+- `recording`、`recovery`、`rebalance_trigger`、`slots`、`planning` 在同一个 task 内全部改为读取 `active_round.desired_exposure`
 - 若发现“有非空 slot 但没有 `active_round`”，按 spec 视为 recovery anomaly，不允许从 slot/order 反推 target
 - 第一阶段继续保留单个 `inventory_core` slot，不做 lane
 
@@ -329,8 +329,8 @@ Run:
 Expected:
 
 - `ExecutorState` 新结构通过序列化和核心行为回归
-- 执行层 target owner 只剩 `active_round.target_exposure`
-- 不再存在 `WorkingOrder.target_exposure` 决策副本
+- 执行层 target owner 只剩 `active_round.desired_exposure`
+- 不再存在 `WorkingOrder.desired_exposure` 决策副本
 
 - [x] **Step 5: Commit**
 

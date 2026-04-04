@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
     TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
 };
 
@@ -79,7 +79,7 @@ impl ApiClient {
     pub async fn submit_command(
         &self,
         id: &str,
-        cmd: GridCommandType,
+        cmd: TrackCommandType,
     ) -> Result<TrackCommandAccepted> {
         let response = self
             .http
@@ -184,13 +184,13 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::protocol::{
-        GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
         TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
 
-    const BTC_GRID_ID: &str = "btc-core";
+    const BTC_TRACK_ID: &str = "btc-core";
 
     fn track_list_response() -> TrackListResponse {
         serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json")).unwrap()
@@ -229,7 +229,7 @@ mod tests {
     async fn get_track_diagnostics(
         axum::extract::Path(id): axum::extract::Path<String>,
     ) -> Json<TrackDiagnosticsView> {
-        assert_eq!(id, BTC_GRID_ID);
+        assert_eq!(id, BTC_TRACK_ID);
         Json(track_diagnostics_view())
     }
 
@@ -278,7 +278,7 @@ mod tests {
         let response = client.list_tracks().await.unwrap();
 
         assert_eq!(response.items.len(), 1);
-        assert_eq!(response.items[0].id, BTC_GRID_ID);
+        assert_eq!(response.items[0].id, BTC_TRACK_ID);
         assert_eq!(response.items[0].instrument.symbol, "BTCUSDT");
     }
 
@@ -287,13 +287,16 @@ mod tests {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let detail = client.get_track_detail(BTC_GRID_ID).await.unwrap();
+        let detail = client.get_track_detail(BTC_TRACK_ID).await.unwrap();
 
-        assert_eq!(detail.identity.id, BTC_GRID_ID);
+        assert_eq!(detail.identity.id, BTC_TRACK_ID);
         assert_eq!(detail.position.current_exposure, 3.5);
         assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
-        assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
+        assert_eq!(
+            detail.available_commands[0].command,
+            TrackCommandType::Pause
+        );
     }
 
     #[tokio::test]
@@ -301,10 +304,10 @@ mod tests {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let diagnostics = client.get_track_diagnostics(BTC_GRID_ID).await.unwrap();
+        let diagnostics = client.get_track_diagnostics(BTC_TRACK_ID).await.unwrap();
 
         assert_eq!(diagnostics.items.len(), 1);
-        assert!(diagnostics.items[0].message.contains("target exposure"));
+        assert!(diagnostics.items[0].message.contains("desired exposure"));
     }
 
     #[tokio::test]
@@ -313,13 +316,13 @@ mod tests {
         let client = ApiClient::new(base_url);
 
         let response = client
-            .submit_command(BTC_GRID_ID, GridCommandType::Pause)
+            .submit_command(BTC_TRACK_ID, TrackCommandType::Pause)
             .await
             .unwrap();
 
         assert!(response.accepted);
-        assert_eq!(response.track_id, BTC_GRID_ID);
-        assert_eq!(response.command, GridCommandType::Pause);
+        assert_eq!(response.track_id, BTC_TRACK_ID);
+        assert_eq!(response.command, TrackCommandType::Pause);
     }
 
     #[test]
@@ -337,7 +340,7 @@ mod tests {
 
         let event = receiver.recv().await.unwrap();
 
-        assert_eq!(event.track_id, BTC_GRID_ID);
+        assert_eq!(event.track_id, BTC_TRACK_ID);
         assert_eq!(event.payload, track_stream_event().payload);
     }
 

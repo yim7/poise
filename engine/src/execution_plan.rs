@@ -16,7 +16,7 @@ pub struct ExecutionPlan {
 pub enum ExecutionAction {
     SubmitOrder {
         request: OrderRequest,
-        target_exposure: Exposure,
+        desired_exposure: Exposure,
     },
     CancelOrder {
         instrument: Instrument,

@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_flow_serves_grid_list_and_detail() {
+    async fn startup_flow_serves_track_list_and_detail() {
         let suffix = unique_test_environment();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = listener.local_addr().unwrap();
