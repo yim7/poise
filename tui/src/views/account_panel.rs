@@ -88,3 +88,38 @@ fn signal_style(signal: RiskSignalView) -> ratatui::style::Style {
         RiskSignalView::Critical => Theme::status_alert(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use crate::app::App;
+
+    use super::render;
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn renders_unavailable_account_panel_when_summary_is_missing() {
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(vec![]);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), app.account_summary()))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("unavailable"));
+        assert!(text.contains("waiting for account summary"));
+    }
+}

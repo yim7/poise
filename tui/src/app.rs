@@ -162,6 +162,10 @@ impl App {
         self.account_summary = Some(summary);
     }
 
+    pub fn clear_account_summary(&mut self) {
+        self.account_summary = None;
+    }
+
     pub fn debug_diagnostics_enabled(&self) -> bool {
         self.debug_diagnostics_enabled
     }

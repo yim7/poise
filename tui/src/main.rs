@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::api_client::{ApiClient, connect_ws};
 use crate::app::{App, View};
 use crate::input::{Action, CommandKind, handle_key_event};
-use crate::protocol::{StreamEvent, TrackCommandAccepted};
+use crate::protocol::{AccountSummaryView, StreamEvent, TrackCommandAccepted};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -182,10 +182,14 @@ fn derive_ws_url(base_url: &str) -> Result<String> {
 }
 
 async fn load_initial_state(client: &ApiClient) -> Result<App> {
-    let account_summary = client.get_account_summary().await?;
+    let account_summary = load_account_summary_best_effort(client).await;
     let response = client.list_tracks().await?;
     let mut app = App::new(response.items);
-    app.apply_account_summary(account_summary);
+    if let Some(account_summary) = account_summary {
+        app.apply_account_summary(account_summary);
+    } else {
+        app.clear_account_summary();
+    }
     if let Some(track_id) = app.selected_track_id().map(ToOwned::to_owned) {
         let detail = client.get_track_detail(&track_id).await?;
         app.apply_track_detail(detail);
@@ -390,6 +394,16 @@ async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Resu
     Ok(())
 }
 
+async fn load_account_summary_best_effort(client: &ApiClient) -> Option<AccountSummaryView> {
+    match client.get_account_summary().await {
+        Ok(summary) => Some(summary),
+        Err(error) => {
+            tracing::warn!("failed to refresh account summary: {error}");
+            None
+        }
+    }
+}
+
 async fn refresh_selected_track_diagnostics(client: &ApiClient, app: &mut App) -> Result<()> {
     let track_id = app
         .selected_track_id()
@@ -475,10 +489,8 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     let should_load_diagnostics =
         debug_diagnostics_enabled && matches!(current_view, View::Instance);
 
-    let account_summary = client.get_account_summary().await?;
     let response = client.list_tracks().await?;
     let mut refreshed = App::new(response.items);
-    refreshed.apply_account_summary(account_summary);
     refreshed.set_debug_diagnostics_enabled(debug_diagnostics_enabled);
     if let Some(selected_track_id) = selected_track_id
         && let Some(index) = refreshed
@@ -495,6 +507,12 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
         if should_load_diagnostics {
             refresh_selected_track_diagnostics_best_effort(client, &mut refreshed).await;
         }
+    }
+
+    if let Some(account_summary) = load_account_summary_best_effort(client).await {
+        refreshed.apply_account_summary(account_summary);
+    } else {
+        refreshed.clear_account_summary();
     }
 
     refreshed.current_view = current_view;
@@ -616,6 +634,7 @@ mod tests {
     #[derive(Clone)]
     struct ProjectionStubState {
         requests: Arc<Mutex<Vec<String>>>,
+        account_summary_failures_left: Arc<Mutex<usize>>,
     }
 
     async fn list_projected_grids(
@@ -627,9 +646,14 @@ mod tests {
 
     async fn get_projected_account_summary(
         State(state): State<ProjectionStubState>,
-    ) -> Json<AccountSummaryView> {
+    ) -> Result<Json<AccountSummaryView>, StatusCode> {
         state.requests.lock().await.push("/account".into());
-        Json(account_summary_view())
+        let mut failures_left = state.account_summary_failures_left.lock().await;
+        if *failures_left > 0 {
+            *failures_left -= 1;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Ok(Json(account_summary_view()))
     }
 
     async fn get_projected_detail(
@@ -664,6 +688,7 @@ mod tests {
     async fn spawn_projection_stub_server() -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(0)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -703,6 +728,7 @@ mod tests {
     -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(0)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -713,6 +739,31 @@ mod tests {
             .route(
                 "/debug/tracks/:id/diagnostics",
                 get(get_failing_projected_diagnostics),
+            )
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (ApiClient::new(format!("http://{address}")), state)
+    }
+
+    async fn spawn_projection_stub_server_with_failing_account_summary(
+    ) -> (ApiClient, ProjectionStubState) {
+        let state = ProjectionStubState {
+            requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(1)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/account", get(get_projected_account_summary))
+            .route("/tracks", get(list_projected_grids))
+            .route("/tracks/:id", get(get_projected_detail))
+            .route(
+                "/debug/tracks/:id/diagnostics",
+                get(get_projected_diagnostics),
             )
             .with_state(state.clone());
 
@@ -1107,6 +1158,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_initial_state_keeps_tracks_when_account_summary_request_fails() {
+        let (client, state) = spawn_projection_stub_server_with_failing_account_summary().await;
+
+        let app = load_initial_state(&client).await.unwrap();
+
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn diagnostics_are_requested_only_after_debug_toggle() {
         let (client, state) = spawn_projection_stub_server().await;
         let mut app = load_initial_state(&client).await.unwrap();
@@ -1155,6 +1225,34 @@ mod tests {
                 .lock()
                 .await
                 .contains(&format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_projected_state_keeps_tracks_when_account_summary_request_fails() {
+        let (client, state) = spawn_projection_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        assert!(app.account_summary.is_some());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        *state.account_summary_failures_left.lock().await = 1;
+
+        sync_projected_state(&client, &mut app).await.unwrap();
+
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/account".to_string()
+            ]
         );
     }
 
