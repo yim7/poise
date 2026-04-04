@@ -156,7 +156,7 @@ fn market_lines(
 
     vec![
         Line::from(format!(
-            "reference/mark/index: {} / {} / {}",
+            "prices: ref {} | mark {} | index {}",
             format_optional_price(detail.status.reference_price),
             format_optional_price(detail.market.mark_price),
             format_optional_price(detail.market.index_price)
@@ -520,22 +520,18 @@ fn format_optional_price(value: Option<f64>) -> String {
 }
 
 fn format_exposure_line(
-    reference_price: Option<f64>,
+    _reference_price: Option<f64>,
     current: f64,
     target: Option<f64>,
 ) -> Line<'static> {
     let signal = exposure_signal(current, target);
     let annotation = instance_exposure_annotation(signal);
-    let reference_text = reference_price
-        .map(|value| format!("{value:.4}"))
-        .unwrap_or_else(|| "-".to_string());
     let target_text = target
         .map(|value| format!("{value:.4}"))
         .unwrap_or_else(|| "-".to_string());
 
     Line::from(vec![
-        Span::raw(format!("reference/exposure: {reference_text} / ")),
-        Span::raw(format!("{current:.4} → {target_text} ")),
+        Span::raw(format!("exposure: {current:.4} → {target_text} ")),
         Span::styled(annotation.text, annotation.style),
     ])
 }
@@ -817,6 +813,8 @@ mod tests {
         assert!(text.contains("total ↑ +1245.30"));
         assert!(text.contains("realized cumulative ↑ +980.10"));
         assert!(text.contains("execution stats since: 2026-03-26T09:45:00Z"));
+        assert!(text.contains("prices: ref 101.2500 | mark 101.3000 | index 101.2000"));
+        assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
         assert!(text.contains("units 8.0000/8.0000 | notional 375.0000"));
         assert!(text.contains("inventory_core opening increase_inventory buy 0.0100 @ 100.5000"));

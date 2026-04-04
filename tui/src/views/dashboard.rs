@@ -190,8 +190,7 @@ mod tests {
         assert!(text.contains("Dashboard"));
         assert!(text.contains("BTCUSDT"));
         assert!(text.contains("PnL"));
-        assert!(text.contains("3.5000"));
-        assert!(text.contains("long add"));
+        assert!(text.contains("3.5000 | ↑ +0.5000"));
         assert!(text.contains("↑ +1245.30"));
         assert!(text.contains("Execution"));
         assert!(text.contains("open"));
@@ -253,8 +252,7 @@ mod tests {
             .unwrap();
         let text = buffer_text(&terminal);
 
-        assert!(text.contains("3.5000"));
-        assert!(text.contains("long reduce"));
+        assert!(text.contains("3.5000 | ↓ -0.5000"));
         assert!(text.contains("↓ -245.30"));
     }
 

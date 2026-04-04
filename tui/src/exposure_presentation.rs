@@ -1,5 +1,5 @@
 use crate::signal::{
-    ExposureAction, ExposureSide, ExposureSignal, SignalDisplay, SignalKind, SignalTone,
+    ExposureAction, ExposureSignal, SignalDisplay, SignalKind, SignalTone,
 };
 use crate::theme::Theme;
 
@@ -7,7 +7,7 @@ pub fn dashboard_exposure_summary(current: f64, signal: ExposureSignal) -> Signa
     let text = if matches!(signal.action, ExposureAction::Unavailable) {
         format!("{current:.4} | target -")
     } else {
-        format!("{current:.4} | {}", format_exposure_phrase(signal))
+        format!("{current:.4} | {}", format_exposure_delta(signal))
     };
 
     SignalDisplay {
@@ -20,7 +20,7 @@ pub fn instance_exposure_annotation(signal: ExposureSignal) -> SignalDisplay {
     let text = if matches!(signal.action, ExposureAction::Unavailable) {
         "[target unavailable]".to_string()
     } else {
-        format!("[{}]", format_exposure_phrase(signal))
+        format!("[{}]", format_exposure_delta(signal))
     };
 
     SignalDisplay {
@@ -29,46 +29,13 @@ pub fn instance_exposure_annotation(signal: ExposureSignal) -> SignalDisplay {
     }
 }
 
-fn format_exposure_phrase(signal: ExposureSignal) -> String {
+fn format_exposure_delta(signal: ExposureSignal) -> String {
     match signal.action {
-        ExposureAction::Flip => format!(
-            "{}->{} {} {:.4}",
-            side_label(signal.current_side),
-            side_label(signal.target_side),
-            action_label(signal.action),
-            signal.magnitude
-        ),
-        ExposureAction::Add | ExposureAction::Hold => format!(
-            "{} {} {:.4}",
-            side_label(signal.target_side),
-            action_label(signal.action),
-            signal.magnitude
-        ),
-        ExposureAction::Reduce => format!(
-            "{} {} {:.4}",
-            side_label(signal.current_side),
-            action_label(signal.action),
-            signal.magnitude
-        ),
+        ExposureAction::Flip => format!("⇄ {:.4}", signal.magnitude),
+        ExposureAction::Add => format!("↑ +{:.4}", signal.magnitude),
+        ExposureAction::Reduce => format!("↓ -{:.4}", signal.magnitude),
+        ExposureAction::Hold => "→ 0.0000".to_string(),
         ExposureAction::Unavailable => "target unavailable".to_string(),
-    }
-}
-
-fn side_label(side: ExposureSide) -> &'static str {
-    match side {
-        ExposureSide::Long => "long",
-        ExposureSide::Short => "short",
-        ExposureSide::Flat => "flat",
-    }
-}
-
-fn action_label(action: ExposureAction) -> &'static str {
-    match action {
-        ExposureAction::Add => "add",
-        ExposureAction::Reduce => "reduce",
-        ExposureAction::Flip => "flip",
-        ExposureAction::Hold => "hold",
-        ExposureAction::Unavailable => "unavailable",
     }
 }
 
@@ -102,7 +69,7 @@ mod tests {
             },
         );
 
-        assert_eq!(display.text, "-5.6430 | short reduce 0.3100");
+        assert_eq!(display.text, "-5.6430 | ↓ -0.3100");
         assert_eq!(display.style.fg, Some(Color::LightYellow));
     }
 
@@ -116,7 +83,7 @@ mod tests {
             tone: SignalTone::Positive,
         });
 
-        assert_eq!(display.text, "[long add 0.5000]");
+        assert_eq!(display.text, "[↑ +0.5000]");
         assert_eq!(display.style.fg, Some(Color::Cyan));
     }
 
