@@ -2,7 +2,7 @@
 **/.DS_Store
 target/
 /.env
-/.data/
+**/.data/
 /.logs/
 /service/.data/
 /.worktrees/

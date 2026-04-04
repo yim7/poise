@@ -80,6 +80,9 @@
         "state": "open",
         "execution_status": "normal",
         "active_slot_count": 1
+      },
+      "pnl": {
+        "total_pnl": 1245.3
       }
     }
   ]
@@ -93,6 +96,7 @@
 - `lifecycle`：轨道生命周期状态与最近更新时间。
 - `reference_price`：当前策略参考价；当前 Binance 适配层使用 mark price 作为参考价输入。
 - `exposure`：当前和目标敞口摘要。
+- `pnl.total_pnl`：列表视图只暴露累计总盈亏摘要，不携带详情页里的拆分口径。
 - `execution.state`：执行面是否处于 `open / paused / closed`。
 - `execution.execution_status`：执行是否需要人工关注。当前稳定值为 `normal` 和 `attention_required`。
 - `execution.active_slot_count`：当前执行器中有多少个活跃槽位。它表达的是槽位工作集数量，不等于交易所原始 open orders 数量。
@@ -106,13 +110,16 @@
 - `strategy`
 - `market`
 - `position`
+- `pnl`
+- `execution_stats`
 - `execution`
 - `activity`
 - `available_commands`
 
 其中：
 
-- `statistics` 提供稳定累计统计，当前包含 `total_pnl`、`realized_pnl`、`max_inventory_gap_abs`、`max_gap_age_ms` 和 `stats_started_at`。
+- `pnl` 提供累计盈亏读模型，当前包含 `total_pnl`、`realized_pnl` 和 `unrealized_pnl`。
+- `execution_stats` 提供执行统计窗口读模型，当前包含 `max_inventory_gap_abs`、`max_gap_age_ms` 和 `stats_started_at`。
 - `execution` 提供执行摘要，当前包含：
   - `state`
   - `execution_status`
@@ -246,6 +253,6 @@
 - WebSocket 推送到达后，TUI 直接应用 `track_list_item_changed` / `track_detail_changed`，不再做旧快照兼容解析。
 - 客户端必须允许这些字段为空：
   - 列表：`items[].reference_price`、`items[].exposure.target`
-  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.desired_exposure`、`statistics.stats_started_at`、`execution.replacement_gate`
+  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.desired_exposure`、`execution_stats.stats_started_at`、`execution.replacement_gate`
   - 详情槽位订单：`execution.slots[].order`
   - 命令描述：`available_commands[].disabled_reason`

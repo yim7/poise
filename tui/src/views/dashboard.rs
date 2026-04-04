@@ -21,7 +21,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.exposure.current,
             crate::signal::exposure_signal(item.exposure.current, item.exposure.target),
         );
-        let total_pnl = pnl_signal(item.statistics.total_pnl);
+        let total_pnl = pnl_signal(item.pnl.total_pnl);
 
         Row::new(vec![
             Cell::from(item.id.clone()),
@@ -272,7 +272,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": -5.0, "target": -7.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
-                        "statistics": {"total_pnl": -245.3, "realized_pnl": -12.5}
+                        "pnl": {"total_pnl": -245.3}
                     }
                 ]
             }"#,
@@ -304,7 +304,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": -5.6430, "target": -5.3330},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 1},
-                        "statistics": {"total_pnl": 3.35, "realized_pnl": 0.0}
+                        "pnl": {"total_pnl": 3.35}
                     }
                 ]
             }"#,
@@ -336,7 +336,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": -5.6430, "target": -5.3330},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 1},
-                        "statistics": {"total_pnl": 3.35, "realized_pnl": 0.0}
+                        "pnl": {"total_pnl": 3.35}
                     }
                 ]
             }"#,
@@ -366,7 +366,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": -5.6430, "target": -5.3330},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 1},
-                        "statistics": {"total_pnl": 6.69, "realized_pnl": 0.0}
+                        "pnl": {"total_pnl": 6.69}
                     }
                 ]
             }"#,
@@ -399,7 +399,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": 3.5, "target": null},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
-                        "statistics": {"total_pnl": 0.0, "realized_pnl": 0.0}
+                        "pnl": {"total_pnl": 0.0}
                     }
                 ]
             }"#,

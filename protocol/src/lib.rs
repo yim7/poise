@@ -20,6 +20,7 @@ pub struct TrackListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackListItemView {
     pub id: String,
     pub instrument: InstrumentView,
@@ -27,8 +28,7 @@ pub struct TrackListItemView {
     pub reference_price: Option<f64>,
     pub exposure: ExposureSummaryView,
     pub execution: ExecutionBadgeView,
-    #[serde(default)]
-    pub statistics: TrackListStatisticsView,
+    pub pnl: TrackListPnlView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,8 @@ pub struct ExposureSummaryView {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct TrackListStatisticsView {
+#[serde(deny_unknown_fields)]
+pub struct TrackListPnlView {
     pub total_pnl: f64,
 }
 
@@ -63,14 +64,15 @@ pub struct ExecutionBadgeView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackDetailView {
     pub identity: TrackIdentityView,
     pub status: TrackStatusPanelView,
     pub strategy: TrackStrategyView,
     pub market: TrackMarketView,
     pub position: TrackPositionView,
-    #[serde(default)]
-    pub statistics: TrackStatisticsView,
+    pub pnl: TrackPnlView,
+    pub execution_stats: TrackExecutionStatsView,
     pub execution: TrackExecutionView,
     pub activity: Vec<TrackActivityItemView>,
     pub available_commands: Vec<TrackCommandView>,
@@ -114,14 +116,18 @@ pub struct TrackPositionView {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct TrackStatisticsView {
+#[serde(deny_unknown_fields)]
+pub struct TrackPnlView {
     pub total_pnl: f64,
     pub realized_pnl: f64,
-    #[serde(default)]
+    pub unrealized_pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackExecutionStatsView {
     pub max_inventory_gap_abs: f64,
-    #[serde(default)]
     pub max_gap_age_ms: i64,
-    #[serde(default)]
     pub stats_started_at: Option<String>,
 }
 
@@ -348,8 +354,8 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDiagnosticsView,
-        TrackListResponse, TrackStreamEvent, TrackStreamPayload,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackListResponse, TrackStreamEvent, TrackStreamPayload,
     };
 
     #[test]
@@ -364,7 +370,7 @@ mod tests {
                         "reference_price":64123.4,
                         "exposure":{"current":0.5,"target":0.75},
                         "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
-                        "statistics":{"total_pnl":1245.3}
+                        "pnl":{"total_pnl":1245.3}
                     }
                 ]
             }"#,
@@ -375,13 +381,10 @@ mod tests {
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].id, "btc-core");
         assert_eq!(
-            serialized["items"][0]["statistics"]["total_pnl"].as_f64(),
+            serialized["items"][0]["pnl"]["total_pnl"].as_f64(),
             Some(1245.3)
         );
-        assert_eq!(
-            serialized["items"][0]["statistics"].get("realized_pnl"),
-            None
-        );
+        assert_eq!(serialized["items"][0]["pnl"].get("realized_pnl"), None);
     }
 
     #[test]
@@ -408,7 +411,8 @@ mod tests {
                         "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                         "market":{"mark_price":64123.4,"index_price":64120.1},
                         "position":{"current_exposure":0.5,"desired_exposure":0.75},
-                        "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
+                        "pnl":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2},
+                        "execution_stats":{"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
                         "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
                         "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                         "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
@@ -426,6 +430,11 @@ mod tests {
                 assert_eq!(
                     detail_json["position"]["desired_exposure"].as_f64(),
                     Some(0.75)
+                );
+                assert_eq!(detail_json["pnl"]["unrealized_pnl"].as_f64(), Some(265.2));
+                assert_eq!(
+                    detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
+                    Some(0.0)
                 );
                 assert_eq!(detail_json["position"].as_object().unwrap().len(), 2);
                 assert_eq!(
@@ -447,6 +456,208 @@ mod tests {
             }
             _ => panic!("unexpected payload variant"),
         }
+    }
+
+    #[test]
+    fn rejects_track_detail_with_legacy_statistics_payload() {
+        let result = serde_json::from_str::<TrackDetailView>(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2,"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_detail_without_pnl() {
+        let result = serde_json::from_str::<TrackDetailView>(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_detail_without_execution_stats() {
+        let result = serde_json::from_str::<TrackDetailView>(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "pnl":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_detail_with_mixed_new_and_legacy_statistics_fields() {
+        let result = serde_json::from_str::<TrackDetailView>(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "pnl":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2},
+                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "statistics":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2,"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_list_response_with_legacy_statistics_field() {
+        let result = serde_json::from_str::<TrackListResponse>(
+            r#"{
+                "items":[
+                    {
+                        "id":"btc-core",
+                        "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
+                        "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                        "reference_price":64123.4,
+                        "exposure":{"current":0.5,"target":0.75},
+                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
+                        "statistics":{"total_pnl":1245.3}
+                    }
+                ]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_list_response_with_mixed_new_and_legacy_statistics_fields() {
+        let result = serde_json::from_str::<TrackListResponse>(
+            r#"{
+                "items":[
+                    {
+                        "id":"btc-core",
+                        "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
+                        "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                        "reference_price":64123.4,
+                        "exposure":{"current":0.5,"target":0.75},
+                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
+                        "pnl":{"total_pnl":1245.3},
+                        "statistics":{"total_pnl":1245.3}
+                    }
+                ]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_list_response_with_detail_pnl_fields_inside_list_pnl() {
+        let result = serde_json::from_str::<TrackListResponse>(
+            r#"{
+                "items":[
+                    {
+                        "id":"btc-core",
+                        "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
+                        "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                        "reference_price":64123.4,
+                        "exposure":{"current":0.5,"target":0.75},
+                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
+                        "pnl":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2}
+                    }
+                ]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_list_response_without_pnl() {
+        let result = serde_json::from_str::<TrackListResponse>(
+            r#"{
+                "items":[
+                    {
+                        "id":"btc-core",
+                        "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
+                        "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                        "reference_price":64123.4,
+                        "exposure":{"current":0.5,"target":0.75},
+                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1}
+                    }
+                ]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_detail_with_execution_stats_fields_inside_pnl() {
+        let result = serde_json::from_str::<TrackDetailView>(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "pnl":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2,"max_inventory_gap_abs":1.5},
+                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_track_detail_with_pnl_fields_inside_execution_stats() {
+        let result = serde_json::from_str::<TrackDetailView>(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "pnl":{"total_pnl":1245.3,"realized_pnl":980.1,"unrealized_pnl":265.2},
+                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z","realized_pnl":980.1},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

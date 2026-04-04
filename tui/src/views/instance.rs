@@ -30,19 +30,27 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .block(Block::default().title("Track").borders(Borders::ALL));
     frame.render_widget(status, sections.track);
 
-    if let Some(statistics_area) = sections.statistics {
-        let statistics = Paragraph::new(statistics_lines(detail, sections.mode))
-            .block(Block::default().title("Statistics").borders(Borders::ALL));
-        frame.render_widget(statistics, statistics_area);
+    if let Some(pnl_area) = sections.pnl {
+        let pnl = Paragraph::new(pnl_lines(detail))
+            .block(Block::default().title("PnL").borders(Borders::ALL));
+        frame.render_widget(pnl, pnl_area);
     }
 
-    let overview = Paragraph::new(market_lines(detail))
+    if let Some(execution_stats_area) = sections.execution_stats {
+        let execution_stats = Paragraph::new(execution_stats_lines(detail, sections.mode))
+            .block(Block::default().title("Execution Stats").borders(Borders::ALL));
+        frame.render_widget(execution_stats, execution_stats_area);
+    }
+
+    let overview = Paragraph::new(market_lines(detail, sections.mode))
         .block(Block::default().title("Market").borders(Borders::ALL));
     frame.render_widget(overview, sections.market);
 
-    let strategy = Paragraph::new(strategy_lines(detail, sections.mode))
-        .block(Block::default().title("Strategy").borders(Borders::ALL));
-    frame.render_widget(strategy, sections.strategy);
+    if let Some(strategy_area) = sections.strategy {
+        let strategy = Paragraph::new(strategy_lines(detail, sections.mode))
+            .block(Block::default().title("Strategy").borders(Borders::ALL));
+        frame.render_widget(strategy, strategy_area);
+    }
 
     let execution = Paragraph::new(execution_lines(&detail.execution, sections.mode))
         .block(Block::default().title("Execution").borders(Borders::ALL));
@@ -57,6 +65,10 @@ fn track_lines(
     detail: &crate::protocol::TrackDetailView,
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
+    if matches!(mode, DetailLayoutMode::Minimal) {
+        return vec![minimal_track_line(detail)];
+    }
+
     let lifecycle = detail.status.lifecycle.status.to_string();
     let execution_state = match detail.execution.state {
         ExecutionStateView::Open => "open",
@@ -89,32 +101,60 @@ fn track_lines(
     }
 
     let commands = status_command_hint(&detail.available_commands);
-    if matches!(mode, DetailLayoutMode::Minimal) {
-        if !commands.is_empty() {
-            lines.push(Line::from(commands));
-        } else {
-            lines.push(Line::from(format!(
-                "{} | updated {}",
-                detail.identity.instrument.venue,
-                detail.status.lifecycle.updated_at,
-            )));
-        }
-    } else {
-        lines.push(Line::from(format!(
-            "{} | updated {}",
-            detail.identity.instrument.venue,
-            detail.status.lifecycle.updated_at,
-        )));
+    lines.push(Line::from(format!(
+        "{} | updated {}",
+        detail.identity.instrument.venue,
+        detail.status.lifecycle.updated_at,
+    )));
 
-        if !commands.is_empty() {
-            lines.push(Line::from(commands));
-        }
+    if !commands.is_empty() {
+        lines.push(Line::from(commands));
     }
 
     lines
 }
 
-fn market_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
+fn minimal_track_line(detail: &crate::protocol::TrackDetailView) -> Line<'static> {
+    let lifecycle = detail.status.lifecycle.status.to_string();
+    let execution_state = match detail.execution.state {
+        ExecutionStateView::Open => "open",
+        ExecutionStateView::Paused => "paused",
+        ExecutionStateView::Closed => "closed",
+    };
+
+    if matches!(
+        detail.execution.execution_status,
+        ExecutionStatusView::AttentionRequired
+    ) {
+        Line::from(Span::styled(
+            format!(
+                "{lifecycle} | {execution_state} | ATTENTION | gap {:.4} | {}",
+                detail.execution.inventory_gap,
+                format_slot_count(detail.execution.active_slot_count)
+            ),
+            Theme::execution_attention(),
+        ))
+    } else {
+        Line::from(format!(
+            "{lifecycle} | {execution_state} | gap {:.4} | {}",
+            detail.execution.inventory_gap,
+            format_slot_count(detail.execution.active_slot_count)
+        ))
+    }
+}
+
+fn market_lines(
+    detail: &crate::protocol::TrackDetailView,
+    mode: DetailLayoutMode,
+) -> Vec<Line<'static>> {
+    if matches!(mode, DetailLayoutMode::Minimal) {
+        return vec![format_exposure_line(
+            detail.status.reference_price,
+            detail.position.current_exposure,
+            detail.position.desired_exposure,
+        )];
+    }
+
     vec![
         Line::from(format!(
             "reference/mark/index: {} / {} / {}",
@@ -135,21 +175,13 @@ fn strategy_lines(
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
     if matches!(mode, DetailLayoutMode::Minimal) {
-        vec![
-            Line::from(format!(
-                "band: {:.4} -> {:.4} | shape: {}",
-                detail.strategy.lower_price,
-                detail.strategy.upper_price,
-                detail.strategy.shape_family
-            )),
-            Line::from(format!(
-                "units {:.4}/{:.4} | notional {:.4} | min {:.4}",
-                detail.strategy.long_exposure_units,
-                detail.strategy.short_exposure_units,
-                detail.strategy.notional_per_unit,
-                detail.strategy.min_rebalance_units
-            )),
-        ]
+        vec![Line::from(format!(
+            "band {:.4}->{:.4} | shape {} | {}",
+            detail.strategy.lower_price,
+            detail.strategy.upper_price,
+            detail.strategy.shape_family,
+            detail.strategy.out_of_band_policy
+        ))]
     } else if matches!(mode, DetailLayoutMode::Compact) {
         vec![
             Line::from(format!(
@@ -160,12 +192,11 @@ fn strategy_lines(
                 detail.strategy.out_of_band_policy
             )),
             Line::from(format!(
-                "long/short units: {:.4} / {:.4}",
-                detail.strategy.long_exposure_units, detail.strategy.short_exposure_units
-            )),
-            Line::from(format!(
-                "notional per unit: {:.4} | min rebalance units: {:.4}",
-                detail.strategy.notional_per_unit, detail.strategy.min_rebalance_units
+                "units {:.4}/{:.4} | notional {:.4} | min {:.4}",
+                detail.strategy.long_exposure_units,
+                detail.strategy.short_exposure_units,
+                detail.strategy.notional_per_unit,
+                detail.strategy.min_rebalance_units
             )),
         ]
     } else {
@@ -175,51 +206,50 @@ fn strategy_lines(
                 detail.strategy.lower_price, detail.strategy.upper_price
             )),
             Line::from(format!(
-                "long/short units: {:.4} / {:.4}",
-                detail.strategy.long_exposure_units, detail.strategy.short_exposure_units
+                "units {:.4}/{:.4} | notional {:.4}",
+                detail.strategy.long_exposure_units,
+                detail.strategy.short_exposure_units,
+                detail.strategy.notional_per_unit
             )),
             Line::from(format!(
-                "notional per unit: {:.4} | min rebalance units: {:.4}",
-                detail.strategy.notional_per_unit, detail.strategy.min_rebalance_units
-            )),
-            Line::from(format!(
-                "shape: {} | out of band policy: {}",
-                detail.strategy.shape_family, detail.strategy.out_of_band_policy
+                "min rebalance {:.4} | shape {} | out of band {}",
+                detail.strategy.min_rebalance_units,
+                detail.strategy.shape_family,
+                detail.strategy.out_of_band_policy
             )),
         ]
     }
 }
 
-fn statistics_lines(
+fn pnl_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
+    vec![format_pnl_summary_line(
+        detail.pnl.total_pnl,
+        detail.pnl.realized_pnl,
+        detail.pnl.unrealized_pnl,
+    )]
+}
+
+fn execution_stats_lines(
     detail: &crate::protocol::TrackDetailView,
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
-    if matches!(mode, DetailLayoutMode::Compact) {
-        vec![Line::from(format!(
-            "total {} | realized {} | max gap {:.4} | age {} ms",
-            pnl_signal(detail.statistics.total_pnl).text,
-            pnl_signal(detail.statistics.realized_pnl).text,
-            detail.statistics.max_inventory_gap_abs,
-            detail.statistics.max_gap_age_ms
-        ))]
-    } else {
-        vec![
-            format_statistics_summary_line(
-                detail.statistics.total_pnl,
-                detail.statistics.realized_pnl,
-                detail.statistics.max_inventory_gap_abs,
-                detail.statistics.max_gap_age_ms,
-            ),
-            Line::from(format!(
-                "stats since: {}",
-                detail
-                    .statistics
-                    .stats_started_at
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string())
-            )),
-        ]
+    let mut lines = vec![Line::from(format!(
+        "max gap {:.4} | age {} ms",
+        detail.execution_stats.max_inventory_gap_abs, detail.execution_stats.max_gap_age_ms
+    ))];
+
+    if matches!(mode, DetailLayoutMode::Standard) {
+        lines.push(Line::from(format!(
+            "execution stats since: {}",
+            detail
+                .execution_stats
+                .stats_started_at
+                .clone()
+                .unwrap_or_else(|| "-".to_string())
+        )));
     }
+
+    lines
 }
 
 fn render_trace(
@@ -508,23 +538,18 @@ fn format_exposure_line(reference_price: Option<f64>, current: f64, target: Opti
     ])
 }
 
-fn format_statistics_summary_line(
-    total_pnl: f64,
-    realized_pnl: f64,
-    max_inventory_gap_abs: f64,
-    max_gap_age_ms: i64,
-) -> Line<'static> {
+fn format_pnl_summary_line(total_pnl: f64, realized_pnl: f64, unrealized_pnl: f64) -> Line<'static> {
     let total = pnl_signal(total_pnl);
+    let unrealized = pnl_signal(unrealized_pnl);
     let realized = pnl_signal(realized_pnl);
 
     Line::from(vec![
         Span::raw("total "),
         Span::styled(total.text, total.style),
-        Span::raw(" | realized "),
+        Span::raw(" | unrealized "),
+        Span::styled(unrealized.text, unrealized.style),
+        Span::raw(" | realized cumulative "),
         Span::styled(realized.text, realized.style),
-        Span::raw(format!(
-            " | max gap {max_inventory_gap_abs:.4} | age {max_gap_age_ms} ms"
-        )),
     ])
 }
 
@@ -687,7 +712,8 @@ mod tests {
         let text = render_text(detail);
 
         assert!(text.contains("Track"));
-        assert!(text.contains("Statistics"));
+        assert!(text.contains("PnL"));
+        assert!(text.contains("Execution Stats"));
         assert!(text.contains("Market"));
         assert!(text.contains("Strategy"));
         assert!(text.contains("Execution"));
@@ -695,8 +721,8 @@ mod tests {
         assert!(!text.contains("Overview"));
         assert!(!text.contains("Commands"));
         assert!(text.contains("commands: p pause"));
-        assert!(text.contains("min rebalance units"));
-        assert!(text.find("Statistics") < text.find("Market"));
+        assert!(text.contains("min rebalance"));
+        assert!(text.find("PnL") < text.find("Market"));
     }
 
     #[test]
@@ -772,10 +798,42 @@ mod tests {
         let text = render_text_with_size(detail, 100, 24);
 
         assert!(text.contains("Track"));
-        assert!(text.contains("Statistics"));
+        assert!(text.contains("PnL"));
+        assert!(text.contains("Execution Stats"));
         assert!(text.contains("Market"));
+        assert!(!text.contains("Trace"));
+        assert!(text.contains("total ↑ +1245.30 | unrealized ↑ +265.20"));
+        assert!(text.contains("max gap 1.5000 | age 120000 ms"));
+    }
+
+    #[test]
+    fn keeps_core_body_visible_before_compact_threshold() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+
+        let text = render_text_with_size(detail, 100, 22);
+
+        assert!(text.contains("Track"));
+        assert!(text.contains("PnL"));
+        assert!(text.contains("Market"));
+        assert!(text.contains("Strategy"));
+        assert!(text.contains("Execution"));
+        assert!(text.contains("no working slots") || text.contains("slot:"));
+        assert!(!text.contains("Execution Stats"));
+        assert!(!text.contains("Trace"));
+    }
+
+    #[test]
+    fn renders_trace_content_once_compact_height_can_show_panel_body() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+
+        let text = render_text_with_size(detail, 100, 27);
+
         assert!(text.contains("Trace"));
-        assert!(text.contains("total ↑ +1245.30 | realized ↑ +980.10"));
+        assert!(text.contains("Activity"));
     }
 
     #[test]
@@ -822,11 +880,13 @@ mod tests {
         let text = render_text_with_size(detail, 100, 16);
 
         assert!(text.contains("Track"));
+        assert!(text.contains("PnL"));
         assert!(text.contains("Market"));
         assert!(text.contains("Strategy"));
         assert!(text.contains("Execution"));
         assert!(!text.contains("Trace"));
-        assert!(!text.contains("Statistics"));
+        assert!(!text.contains("Execution Stats"));
+        assert!(text.contains("shape"));
     }
 
     #[test]
@@ -883,20 +943,21 @@ mod tests {
         assert!(text.contains("Track"));
         assert!(text.contains("Market"));
         assert!(text.contains("Strategy"));
-        assert!(text.contains("Statistics"));
+        assert!(text.contains("PnL"));
+        assert!(text.contains("Execution Stats"));
         assert!(text.contains("Execution"));
         assert!(text.contains("Trace"));
         assert!(text.contains("Activity"));
         assert!(!text.contains("Commands"));
         assert!(text.contains("commands: p pause"));
-        assert!(text.contains("total ↑ +1245.30 | realized ↑ +980.10 | max gap 1.5000 | age 120000 ms"));
-        assert!(text.contains("stats since: 2026-03-26T09:45:00Z"));
+        assert!(text.contains("total ↑ +1245.30 | unrealized ↑ +265.20 | realized cumulative ↑ +980.10"));
+        assert!(text.contains("max gap 1.5000 | age 120000 ms"));
+        assert!(text.contains("execution stats since: 2026-03-26T09:45:00Z"));
         assert!(text.contains("active | open | gap 0.5000 | age 60000 ms | slots 1"));
         assert!(text.contains("binance_futures | updated 2026-03-26T10:00:00Z"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
-        assert!(text.contains("long/short units: 8.0000 / 8.0000"));
-        assert!(text.contains("notional per unit: 375.0000 | min rebalance units: 0.5000"));
-        assert!(text.contains("shape: linear | out of band policy: freeze"));
+        assert!(text.contains("units 8.0000/8.0000 | notional 375.0000"));
+        assert!(text.contains("min rebalance 0.5000 | shape linear | out of band freeze"));
         assert!(text.contains("reference/exposure: 101.2500 / 3.5000 → 4.0000 [long add 0.5000]"));
         assert!(!text.contains("id/symbol/venue/lifecycle:"));
         assert!(!text.contains("execution status: normal"));
@@ -974,16 +1035,19 @@ mod tests {
     }
 
     #[test]
-    fn renders_statistics_with_explicit_separator_for_large_pnl_values() {
+    fn renders_pnl_and_execution_stats_with_explicit_separator_for_large_values() {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.statistics.total_pnl = -123456789.12;
-        detail.statistics.realized_pnl = 987654321.99;
+        detail.pnl.total_pnl = -123456789.12;
+        detail.pnl.realized_pnl = 987654321.99;
+        detail.pnl.unrealized_pnl = 42.5;
 
         let text = render_text(detail);
 
-        assert!(text.contains("total ↓ -123456789.12 | realized ↑ +987654321.99"));
+        assert!(text.contains(
+            "total ↓ -123456789.12 | unrealized ↑ +42.50 | realized cumulative ↑ +987654321.99"
+        ));
         assert!(text.contains("max gap 1.5000 | age 120000 ms"));
         assert!(!text.contains("-123456789.12↑ +987654321.99"));
     }

@@ -31,9 +31,12 @@
     "current_exposure": 3.5,
     "desired_exposure": 4.0
   },
-  "statistics": {
+  "pnl": {
     "total_pnl": 1245.3,
     "realized_pnl": 980.1,
+    "unrealized_pnl": 265.2
+  },
+  "execution_stats": {
     "max_inventory_gap_abs": 1.5,
     "max_gap_age_ms": 120000,
     "stats_started_at": "2026-03-26T09:45:00Z"

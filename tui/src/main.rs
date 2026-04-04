@@ -717,8 +717,8 @@ mod tests {
                 execution_status: detail.execution.execution_status,
                 active_slot_count: detail.execution.active_slot_count,
             },
-            statistics: crate::protocol::TrackListStatisticsView {
-                total_pnl: detail.statistics.total_pnl,
+            pnl: crate::protocol::TrackListPnlView {
+                total_pnl: detail.pnl.total_pnl,
             },
         }
     }
@@ -2015,7 +2015,7 @@ out_of_band_policy = "hold"
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
-            eth_view.contains("out of band policy: hold"),
+            eth_view.contains("out of band hold"),
             "eth view:\n{eth_view}"
         );
 

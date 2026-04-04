@@ -6,8 +6,8 @@ use poise_protocol::{
     InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
     TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView, TrackIdentityView,
-    TrackLifecycleView, TrackListItemView, TrackListStatisticsView, TrackMarketView,
-    TrackPositionView, TrackStatisticsView, TrackStatus as ProtocolTrackStatus,
+    TrackExecutionStatsView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
+    TrackMarketView, TrackPnlView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
     TrackStatusPanelView, TrackStrategyView,
 };
 
@@ -39,7 +39,7 @@ impl TrackProjector {
                 execution_status: project_execution_status(source),
                 active_slot_count: active_slot_count(source),
             },
-            statistics: TrackListStatisticsView {
+            pnl: TrackListPnlView {
                 total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
             },
         }
@@ -76,9 +76,12 @@ impl TrackProjector {
                 current_exposure: source.current_exposure,
                 desired_exposure: source.desired_exposure,
             },
-            statistics: TrackStatisticsView {
+            pnl: TrackPnlView {
                 total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
                 realized_pnl: source.realized_pnl_cumulative,
+                unrealized_pnl: source.unrealized_pnl,
+            },
+            execution_stats: TrackExecutionStatsView {
                 max_inventory_gap_abs: source.max_inventory_gap_abs,
                 max_gap_age_ms: source.max_gap_age_ms,
                 stats_started_at: Some(source.stats_started_at.to_rfc3339()),
@@ -327,8 +330,8 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
-        assert_eq!(item_json["statistics"]["total_pnl"].as_f64(), Some(1245.3));
-        assert_eq!(item_json["statistics"].get("realized_pnl"), None);
+        assert_eq!(item_json["pnl"]["total_pnl"].as_f64(), Some(1245.3));
+        assert_eq!(item_json["pnl"].get("realized_pnl"), None);
 
         let mut anomaly_source = source_with_submitting_effect();
         anomaly_source.has_recovery_anomaly = true;
@@ -600,15 +603,17 @@ mod tests {
     }
 
     #[test]
-    fn projects_execution_observability_statistics() {
+    fn projects_pnl_and_execution_stats() {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
+        let detail_json = serde_json::to_value(&detail).unwrap();
 
-        assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
-        assert!((detail.statistics.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
-        assert_eq!(detail.statistics.max_gap_age_ms, 120_000);
+        assert!((detail.pnl.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((detail.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert_eq!(detail_json["pnl"]["unrealized_pnl"].as_f64(), Some(265.2));
+        assert!((detail.execution_stats.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
+        assert_eq!(detail.execution_stats.max_gap_age_ms, 120_000);
         assert_eq!(
-            detail.statistics.stats_started_at.as_deref(),
+            detail.execution_stats.stats_started_at.as_deref(),
             Some("2026-03-26T09:45:00+00:00")
         );
     }

@@ -251,9 +251,19 @@ mod tests {
                 _ => None,
             })
             .expect("should emit projected detail change");
+        let detail_json = serde_json::to_value(detail).unwrap();
         assert_eq!(detail.identity.id, "btc-core");
         assert_eq!(detail.status.lifecycle.status, TrackStatus::Paused);
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
+        assert_eq!(
+            detail_json["pnl"]["unrealized_pnl"].as_f64(),
+            Some(detail.pnl.unrealized_pnl)
+        );
+        assert_eq!(
+            detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
+            Some(detail.execution_stats.max_inventory_gap_abs)
+        );
+        assert!(detail_json.get("statistics").is_none());
     }
 
     #[tokio::test]
@@ -278,9 +288,12 @@ mod tests {
                 _ => None,
             })
             .expect("should emit projected list item change");
+        let item_json = serde_json::to_value(item).unwrap();
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
+        assert_eq!(item_json["pnl"]["total_pnl"].as_f64(), Some(item.pnl.total_pnl));
+        assert!(item_json.get("statistics").is_none());
         assert!(
             events.iter().any(|event| matches!(
                 event.payload,

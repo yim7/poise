@@ -450,8 +450,23 @@ mod tests {
             payload_json["strategy"]["min_rebalance_units"].as_f64(),
             Some(0.5)
         );
-        assert!((payload.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((payload.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert!((payload.pnl.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((payload.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert!((payload.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+        assert_eq!(
+            payload_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
+            Some(payload.execution_stats.max_inventory_gap_abs)
+        );
+        assert_eq!(
+            payload_json["execution_stats"]["max_gap_age_ms"].as_i64(),
+            Some(0)
+        );
+        assert!(payload.execution_stats.stats_started_at.is_some());
+        assert_eq!(
+            payload_json["execution_stats"]["stats_started_at"].as_str(),
+            payload.execution_stats.stats_started_at.as_deref()
+        );
+        assert!(payload_json.get("statistics").is_none());
         assert_eq!(
             payload.execution.execution_status,
             ExecutionStatusView::Normal
