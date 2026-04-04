@@ -29,6 +29,19 @@ pub struct AccountMonitor {
 }
 
 impl AccountMonitor {
+    pub fn unavailable(
+        notifications: broadcast::Sender<ServerNotification>,
+        config: AccountMonitorConfig,
+    ) -> Self {
+        Self {
+            exchange: Arc::new(UnsupportedAccountSummaryExchange),
+            store: Arc::new(InMemoryAccountMonitorStore),
+            notifications,
+            config,
+            state: RwLock::new(InMemoryAccountMonitorState::default()),
+        }
+    }
+
     pub async fn restore(
         exchange: Arc<dyn ExchangePort>,
         store: Arc<dyn AccountMonitorStore>,
@@ -224,6 +237,97 @@ fn severity(signal: AccountRiskSignal) -> u8 {
         AccountRiskSignal::Normal => 0,
         AccountRiskSignal::Attention => 1,
         AccountRiskSignal::Critical => 2,
+    }
+}
+
+struct InMemoryAccountMonitorStore;
+
+#[async_trait::async_trait]
+impl AccountMonitorStore for InMemoryAccountMonitorStore {
+    async fn load_state(&self) -> Result<Option<StoredAccountMonitorState>> {
+        Ok(None)
+    }
+
+    async fn save_state(&self, _state: &StoredAccountMonitorState) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct UnsupportedAccountSummaryExchange;
+
+#[async_trait::async_trait]
+impl ExchangePort for UnsupportedAccountSummaryExchange {
+    async fn submit_order(
+        &self,
+        _req: poise_engine::ports::OrderRequest,
+    ) -> Result<poise_engine::ports::OrderReceipt> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn cancel_order(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+        _order_id: &str,
+    ) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn get_position(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+    ) -> Result<poise_engine::ports::Position> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn get_open_orders(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+    ) -> Result<Vec<poise_engine::ports::ExchangeOrder>> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn get_exchange_info(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+    ) -> Result<poise_engine::ports::ExchangeInfo> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn get_account_margin_snapshot(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+    ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
+    }
+
+    async fn get_server_time(&self) -> Result<DateTime<Utc>> {
+        Err(anyhow::anyhow!(
+            "account monitor is unavailable in this server state"
+        ))
     }
 }
 

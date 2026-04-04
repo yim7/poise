@@ -176,6 +176,10 @@ impl TrackWriteService {
         self.notifications.subscribe()
     }
 
+    pub fn notification_sender(&self) -> broadcast::Sender<ServerNotification> {
+        self.notifications.clone()
+    }
+
     pub fn set_account_margin_guard(&self, account_margin_guard: Arc<AccountMarginGuardStore>) {
         *self.account_margin_guard.lock().unwrap() = Some(account_margin_guard);
     }

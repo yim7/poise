@@ -14,9 +14,17 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
     let mut receiver = state.write_service.subscribe_notifications();
 
     loop {
-        let track_id = match receiver.recv().await {
-            Ok(ServerNotification::TrackChanged { track_id }) => track_id,
-            Ok(ServerNotification::AccountChanged) => continue,
+        match receiver.recv().await {
+            Ok(ServerNotification::TrackChanged { track_id }) => {
+                if !push_projected_updates(&mut socket, &state, track_id).await {
+                    break;
+                }
+            }
+            Ok(ServerNotification::AccountChanged) => {
+                if !push_account_summary(&mut socket, &state).await {
+                    break;
+                }
+            }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     "websocket notification stream lagged by {skipped} messages; closing socket for resync"
@@ -25,10 +33,6 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
                 break;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
-
-        if !push_projected_updates(&mut socket, &state, track_id).await {
-            break;
         }
     }
 }
@@ -89,6 +93,19 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
+async fn push_account_summary(socket: &mut WebSocket, state: &ServerState) -> bool {
+    let Some(summary) = state.account_monitor.current_summary().await else {
+        return true;
+    };
+    send_event(
+        socket,
+        StreamEvent::AccountSummaryChanged {
+            summary: state.account_projector.project_summary(&summary),
+        },
+    )
+    .await
+}
+
 async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> bool {
     let message = match serde_json::to_string(&event) {
         Ok(message) => message,
@@ -109,7 +126,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use axum::Router;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use futures_util::StreamExt;
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
@@ -117,17 +134,26 @@ mod tests {
     use poise_engine::command::TrackCommand;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
-        OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort,
+        AccountSummarySnapshot, ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
+        OrderReceipt, OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort,
+        StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
-    use poise_protocol::{ExecutionStateView, ExecutionStatusView, GridStatus, StreamEvent};
+    use poise_protocol::{
+        ExecutionStateView, ExecutionStatusView, GridStatus, RiskSignalView, StreamEvent,
+    };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::assembly::{ServerState, build_server_state};
+    use crate::account_monitor::AccountMonitor;
+    use crate::account_monitor_store::{
+        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    };
+    use crate::assembly::{
+        ServerState, build_server_state, build_server_state_with_account_monitor,
+    };
+    use crate::config::AccountMonitorConfig;
     use crate::effect_worker::EffectWorker;
     use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
@@ -180,6 +206,39 @@ mod tests {
         (format!("ws://{address}/ws"), service, state)
     }
 
+    async fn spawn_server_with_account_monitor(
+        repository: Arc<TestRepository>,
+        account_monitor: Arc<AccountMonitor>,
+    ) -> (String, Arc<TrackWriteService>, ServerState) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let service = Arc::new(TrackWriteService::new(
+            test_manager(),
+            state_repository.clone(),
+            notifications,
+        ));
+        let state = build_server_state_with_account_monitor(
+            Arc::clone(&service),
+            state_repository,
+            Arc::new(TrackQueryService::new(
+                repository.clone() as Arc<dyn TrackReadRepositoryPort>
+            )),
+            Arc::new(TrackProjector::new()),
+            account_monitor,
+        );
+        let app = Router::new()
+            .route("/ws", axum::routing::get(ws_handler))
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("ws://{address}/ws"), service, state)
+    }
+
     async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
         let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
@@ -193,6 +252,39 @@ mod tests {
         let repository = Arc::new(TestRepository::default());
         repository.seed_snapshot(test_manager().snapshot("btc-core").unwrap());
         repository
+    }
+
+    async fn seeded_account_monitor(
+        notifications: tokio::sync::broadcast::Sender<ServerNotification>,
+    ) -> Arc<AccountMonitor> {
+        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
+            poise_storage::sqlite::SqliteStorage::in_memory().unwrap(),
+        )));
+        account_store
+            .save_state(&StoredAccountMonitorState {
+                trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+                baseline_equity: 13_000.0,
+                baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+                last_observed_account_snapshot: Some(AccountSummarySnapshot {
+                    equity: 12_500.0,
+                    available: 9_000.0,
+                    unrealized_pnl: -350.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+                }),
+            })
+            .await
+            .unwrap();
+
+        Arc::new(
+            AccountMonitor::restore(
+                Arc::new(NoopExchange),
+                account_store,
+                notifications,
+                AccountMonitorConfig::default(),
+            )
+            .await
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -243,6 +335,32 @@ mod tests {
             event,
             StreamEvent::TrackDetailChanged { track_id, .. } if track_id == "btc-core"
         )));
+    }
+
+    #[tokio::test]
+    async fn broadcasts_account_summary_changed_after_account_notification() {
+        let repository = seeded_repository();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_monitor = seeded_account_monitor(notifications.clone()).await;
+        let (url, service, _) =
+            spawn_server_with_account_monitor(repository, account_monitor).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        service.emit_internal_notification(ServerNotification::AccountChanged);
+
+        let event = recv_event(&mut stream).await;
+
+        match event {
+            StreamEvent::AccountSummaryChanged { summary } => {
+                assert_eq!(summary.equity, Some(12_500.0));
+                assert_eq!(summary.available, Some(9_000.0));
+                assert_eq!(summary.unrealized_pnl, Some(-350.0));
+                assert_eq!(summary.risk_signal, RiskSignalView::Attention);
+                assert_eq!(summary.reason.as_deref(), Some("day_change -3.8%"));
+            }
+            other => panic!("expected account summary event, got {other:?}"),
+        }
     }
 
     #[tokio::test]

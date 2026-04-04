@@ -5,8 +5,8 @@ use axum::{Json, Router};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
-    GridCommandType, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-    TrackDiagnosticsView, TrackListResponse,
+    AccountSummaryView, GridCommandType, TrackCommandAccepted, TrackCommandRequest,
+    TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -29,6 +29,7 @@ struct HealthResponse {
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/account", get(get_account))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
         .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
@@ -87,6 +88,18 @@ async fn health(
             attention_required_count,
         }),
     ))
+}
+
+async fn get_account(
+    State(state): State<ServerState>,
+) -> Result<Json<AccountSummaryView>, (StatusCode, Json<ErrorResponse>)> {
+    let summary = state
+        .account_monitor
+        .current_summary()
+        .await
+        .map(|model| state.account_projector.project_summary(&model))
+        .unwrap_or_default();
+    Ok(Json(summary))
 }
 
 async fn get_track_detail(
@@ -195,7 +208,7 @@ mod tests {
     use anyhow::anyhow;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::{
@@ -203,19 +216,27 @@ mod tests {
         types::{ExchangeRules, Exposure},
     };
     use poise_engine::manager::TrackManager;
+    use poise_engine::ports::AccountSummarySnapshot;
     use poise_engine::ports::{
         ClockPort, OrderStatus, StateRepositoryPort, StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
-        ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, GridCommandType,
-        GridStatus, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-        TrackDiagnosticsView, TrackListResponse,
+        AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
+        GridCommandType, GridStatus, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
+        TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
-    use crate::assembly::{ServerState, build_server_state};
+    use crate::account_monitor::AccountMonitor;
+    use crate::account_monitor_store::{
+        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    };
+    use crate::assembly::{
+        ServerState, build_server_state, build_server_state_with_account_monitor,
+    };
+    use crate::config::AccountMonitorConfig;
     use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
@@ -239,6 +260,66 @@ mod tests {
     impl ClockPort for FakeClock {
         fn now(&self) -> chrono::DateTime<Utc> {
             Utc::now()
+        }
+    }
+
+    struct AccountSummaryOnlyExchange;
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::ExchangePort for AccountSummaryOnlyExchange {
+        async fn submit_order(
+            &self,
+            _req: poise_engine::ports::OrderRequest,
+        ) -> anyhow::Result<poise_engine::ports::OrderReceipt> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> anyhow::Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> anyhow::Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<poise_engine::ports::Position> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<Vec<poise_engine::ports::ExchangeOrder>> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_exchange_info(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<poise_engine::ports::ExchangeInfo> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<poise_engine::ports::AccountMarginSnapshot> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
+            Err(anyhow!("not used in tests"))
         }
     }
 
@@ -284,6 +365,72 @@ mod tests {
             state_repository,
             query_service,
             Arc::new(TrackProjector::new()),
+        )
+    }
+
+    async fn app_state_with_account_summary() -> ServerState {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = test_manager();
+        let mut snapshot = manager
+            .snapshot("btc-core")
+            .expect("seeded manager should expose runtime snapshot");
+        snapshot.risk.realized_pnl_cumulative = 980.1;
+        snapshot.risk.unrealized_pnl = 265.2;
+        repository
+            .save_transition(
+                "btc-core",
+                &snapshot,
+                &[DomainEvent::ExposureTargetChanged {
+                    from: Exposure(3.5),
+                    to: Exposure(4.0),
+                }],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
+        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let write_service = Arc::new(TrackWriteService::new(
+            manager,
+            state_repository.clone(),
+            notifications.clone(),
+        ));
+        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
+            SqliteStorage::in_memory().unwrap(),
+        )));
+        account_store
+            .save_state(&StoredAccountMonitorState {
+                trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+                baseline_equity: 13_000.0,
+                baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+                last_observed_account_snapshot: Some(AccountSummarySnapshot {
+                    equity: 12_500.0,
+                    available: 9_000.0,
+                    unrealized_pnl: -350.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+                }),
+            })
+            .await
+            .unwrap();
+        let account_monitor = Arc::new(
+            AccountMonitor::restore(
+                Arc::new(AccountSummaryOnlyExchange),
+                account_store,
+                notifications,
+                AccountMonitorConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        build_server_state_with_account_monitor(
+            write_service,
+            state_repository,
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
+            account_monitor,
         )
     }
 
@@ -474,6 +621,37 @@ mod tests {
                 .activity
                 .iter()
                 .any(|item| item.message.contains("client-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn get_account_returns_latest_summary() {
+        let response = router(app_state_with_account_summary().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/account")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: AccountSummaryView = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            payload,
+            AccountSummaryView {
+                equity: Some(12_500.0),
+                available: Some(9_000.0),
+                unrealized_pnl: Some(-350.0),
+                day_change_pct: Some(-3.8461538461538463),
+                risk_signal: RiskSignalView::Attention,
+                reason: Some("day_change -3.8%".to_string()),
+                day_base_at: Some("2026-04-04T00:00:01+00:00".to_string()),
+                updated_at: Some("2026-04-04T01:23:45+00:00".to_string()),
+            }
         );
     }
 

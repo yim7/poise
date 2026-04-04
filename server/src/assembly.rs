@@ -15,6 +15,9 @@ use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
+use crate::account_monitor::AccountMonitor;
+use crate::account_monitor_store::SqliteAccountMonitorStore;
+use crate::account_projector::AccountProjector;
 use crate::config::Config;
 use crate::debug_query_service::TrackDebugQueryService;
 use crate::projector::TrackProjector;
@@ -35,6 +38,8 @@ pub struct ServerState {
     pub debug_query_service: Arc<TrackDebugQueryService>,
     #[allow(dead_code)]
     pub projector: Arc<TrackProjector>,
+    pub account_monitor: Arc<AccountMonitor>,
+    pub account_projector: Arc<AccountProjector>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,
     pub submit_preflight: Arc<SubmitPreflight>,
@@ -229,8 +234,29 @@ async fn assemble_with_state_store(
     ));
     let query_service = Arc::new(TrackQueryService::new(read_repository));
     let projector = Arc::new(TrackProjector::new());
-    let server_state =
-        build_server_state(write_service, state_repository, query_service, projector);
+    let account_monitor = if let Some(sqlite_storage) = repositories.sqlite_storage() {
+        Arc::new(
+            AccountMonitor::restore(
+                exchange.clone(),
+                Arc::new(SqliteAccountMonitorStore::new(sqlite_storage)),
+                write_service.notification_sender(),
+                config.account_monitor.clone(),
+            )
+            .await?,
+        )
+    } else {
+        Arc::new(AccountMonitor::unavailable(
+            write_service.notification_sender(),
+            config.account_monitor.clone(),
+        ))
+    };
+    let server_state = build_server_state_with_account_monitor(
+        write_service,
+        state_repository,
+        query_service,
+        projector,
+        account_monitor,
+    );
 
     Ok(ServerPlatform {
         state: server_state.clone(),
@@ -336,6 +362,26 @@ pub(crate) fn build_server_state(
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
 ) -> ServerState {
+    let account_monitor = Arc::new(AccountMonitor::unavailable(
+        write_service.notification_sender(),
+        crate::config::AccountMonitorConfig::default(),
+    ));
+    build_server_state_with_account_monitor(
+        write_service,
+        state_repository,
+        query_service,
+        projector,
+        account_monitor,
+    )
+}
+
+pub(crate) fn build_server_state_with_account_monitor(
+    write_service: Arc<TrackWriteService>,
+    state_repository: Arc<dyn StateRepositoryPort>,
+    query_service: Arc<TrackQueryService>,
+    projector: Arc<TrackProjector>,
+    account_monitor: Arc<AccountMonitor>,
+) -> ServerState {
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     write_service.set_account_margin_guard(account_margin_guard.clone());
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
@@ -345,6 +391,8 @@ pub(crate) fn build_server_state(
         query_service,
         debug_query_service,
         projector,
+        account_monitor,
+        account_projector: Arc::new(AccountProjector::new()),
         account_margin_guard,
         reconcile_guards: Arc::new(TrackReconcileGuards::default()),
         submit_preflight: Arc::new(SubmitPreflight::new()),
