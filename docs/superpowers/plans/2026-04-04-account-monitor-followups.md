@@ -122,7 +122,7 @@ Task 1 code commit:
 - Test: `cargo test -p poise-tui tests::sync_projected_state_keeps_tracks_when_account_summary_request_fails -- --nocapture`
 - Test: `cargo test -p poise-tui views::dashboard::tests::renders_unavailable_account_panel_when_summary_is_missing -- --nocapture`
 
-- [ ] **Step 1: 先写失败测试，固定账户摘要失败时的降级行为**
+- [x] **Step 1: 先写失败测试，固定账户摘要失败时的降级行为**
 
 要求：
 - 在 `tui/src/main.rs` 增加启动测试，固定 `/account` 返回错误时：
@@ -132,7 +132,7 @@ Task 1 code commit:
 - 在 `tui/src/main.rs` 增加 resync 测试，固定 `sync_projected_state()` 中账户摘要失败不会让 track 刷新失败
 - 在 `tui/src/views/dashboard.rs` 或 `tui/src/views/account_panel.rs` 固定 `summary == None` 时渲染 `unavailable`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现把账户摘要失败当成整体失败**
+- [x] **Step 2: 运行定向测试，确认当前实现把账户摘要失败当成整体失败**
 
 Run:
 `cargo test -p poise-tui tests::load_initial_state_keeps_tracks_when_account_summary_request_fails -- --nocapture`
@@ -145,7 +145,7 @@ Expected:
   - `load_initial_state()` 仍然对 `get_account_summary()` 使用 `?`
   - `sync_projected_state()` 仍然对账户摘要失败直接返回错误
 
-- [ ] **Step 3: 实现账户摘要 best-effort 刷新**
+- [x] **Step 3: 实现账户摘要 best-effort 刷新**
 
 要求：
 - 在 `tui/src/main.rs` 抽出一个 best-effort 账户摘要读取辅助，例如：
@@ -159,7 +159,7 @@ async fn load_account_summary_best_effort(client: &ApiClient) -> Option<AccountS
 - 如有必要，在 `tui/src/app.rs` 增加 `clear_account_summary()`
 - `tui/src/views/account_panel.rs` 继续负责 `None => unavailable` 的唯一渲染分支，不把 fallback 判断扩散到 `dashboard.rs`
 
-- [ ] **Step 4: 跑 TUI 和跨包回归**
+- [x] **Step 4: 跑 TUI 和跨包回归**
 
 Run:
 `cargo test -p poise-tui`
@@ -170,7 +170,7 @@ Expected:
 - 跨包回归通过
 - 账户摘要 HTTP 失败时，track 主链路仍可启动、刷新和接收 WS 更新
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add tui/src/main.rs tui/src/app.rs tui/src/views/account_panel.rs
@@ -178,4 +178,4 @@ git commit -m "refactor: make tui account summary refresh best effort"
 ```
 
 Task 2 code commit:
-`<pending>`
+`86b0f15365495d83bcbe37c1d4f1520235a4f944`
