@@ -23,14 +23,14 @@
 
 当前系统已经能稳定计算：
 
-- 给定 `reference_price` 的 `target_exposure`
+- 给定 `reference_price` 的 `desired_exposure`
 - 当前 `current_exposure`
 - 基于风险和交易所规则的最小下单约束
 
 但执行层仍然是单笔订单模型：
 
 - `engine` 当前只维护一个 `pending_order`
-- `reconciler` 直接把 `target_exposure - current_exposure` 翻成单笔 `SubmitOrder`
+- `reconciler` 直接把 `desired_exposure - current_exposure` 翻成单笔 `SubmitOrder`
 - 启动恢复、回执吸收、替单门槛都围绕单个 `pending_order` 展开
 
 这会带来三个结构性问题：
@@ -69,11 +69,11 @@
 
 ### 3.1 `Inventory Policy`
 
-上层库存策略。输入价格、曲线参数、风控状态，输出 `target_exposure`。它只回答“目标库存是多少”，不回答“应该挂什么单”。
+上层库存策略。输入价格、曲线参数、风控状态，输出 `desired_exposure`。它只回答“目标库存是多少”，不回答“应该挂什么单”。
 
 ### 3.2 `Inventory Executor`
 
-下层执行器。输入 `target_exposure`、`current_exposure`、市场状态和执行状态，输出当前应维持的订单集合与执行动作。它只回答“怎样把实际库存往目标库存拉回去”。
+下层执行器。输入 `desired_exposure`、`current_exposure`、市场状态和执行状态，输出当前应维持的订单集合与执行动作。它只回答“怎样把实际库存往目标库存拉回去”。
 
 ### 3.3 `ExecutionMode`
 
@@ -129,7 +129,7 @@ pub struct ExecutionStats {
 
 做法：
 
-- `Inventory Policy` 继续输出 `target_exposure`
+- `Inventory Policy` 继续输出 `desired_exposure`
 - 执行器维护 `working_orders`
 - 执行器按 `Passive / Rebalance / CatchUp` 分层收敛库存偏差
 - 每轮先生成 `DesiredOrders`，再对比当前工作集生成 effect
@@ -172,7 +172,7 @@ pub struct ExecutionStats {
 
 当前 [`engine/src/reconciler.rs`](../../../engine/src/reconciler.rs) 直接产出单笔订单 effect。改造后它只负责：
 
-- 根据 `reference_price` 计算 `target_exposure`
+- 根据 `reference_price` 计算 `desired_exposure`
 - 应用风控裁剪
 - 更新高层运行状态和相关领域事件
 
@@ -189,7 +189,7 @@ pub struct ExecutionStats {
 ```rust
 pub struct GridRuntime {
     ...
-    pub target_exposure: Option<Exposure>,
+    pub desired_exposure: Option<Exposure>,
     pub executor_state: ExecutorState,
 }
 ```
@@ -315,7 +315,7 @@ pub struct WorkingOrder {
 
 新流程改成：
 
-1. `Inventory Policy` 输出 `target_exposure`
+1. `Inventory Policy` 输出 `desired_exposure`
 2. 执行器根据运行态计算 `inventory_gap`
 3. 执行器决定 `ExecutionMode`
 4. 执行器生成本轮 `DesiredOrders`
@@ -496,7 +496,7 @@ per-grid actor 也延后到下一阶段。
 1. 吸收 live position，更新 `current_exposure`
 2. 读取当前仍处于 pending 的 `submit effect`，提炼成 `pending_submit_hints`
 3. 吸收 live open orders，并由执行器负责重建 `slot -> working_order` 关系
-4. 基于最新 `target_exposure`、`current_exposure`、`reference_price` 重新规划 `DesiredOrders`
+4. 基于最新 `desired_exposure`、`current_exposure`、`reference_price` 重新规划 `DesiredOrders`
 5. 对比 `DesiredOrders` 与当前槽位工作集，并对仍在 pending 的提交 effect 做去重
 6. 生成需要的定点 `cancel / submit` effect
 
@@ -620,7 +620,7 @@ pub enum RecoveryResolution {
 
 拥有：
 
-- `target_exposure` 计算
+- `desired_exposure` 计算
 - `executor_state`
 - `slots`
 - 执行模式切换
@@ -691,7 +691,7 @@ pub enum RecoveryResolution {
 
 ## 9. 验收标准
 
-1. 当 `target_exposure` 与 `current_exposure` 存在偏差时，系统会持续维护槽位工作集，而不是只生成一次单笔挂单后停止收敛。
+1. 当 `desired_exposure` 与 `current_exposure` 存在偏差时，系统会持续维护槽位工作集，而不是只生成一次单笔挂单后停止收敛。
 2. 小偏差时进入 `Passive`，偏差扩大或超时未收敛时可升级到 `Rebalance`，再扩大或再超时可升级到 `CatchUp`。
 3. 部分成交、完全成交、撤单、拒单后，执行器会更新对应槽位及其 `working_order`，并基于新的库存偏差重新规划。
 4. 启动恢复时，系统先吸收 live position 和 live open orders，重建 `slot -> working_order` 关系，再重新规划，不再依赖单个 `pending_order` 锚点补丁。

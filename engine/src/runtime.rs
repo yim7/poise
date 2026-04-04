@@ -62,7 +62,7 @@ impl ExecutionStats {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRound {
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
     pub mode: ExecutionMode,
     pub started_at: DateTime<Utc>,
 }
@@ -428,7 +428,7 @@ mod tests {
 
     fn test_runtime() -> TrackRuntime {
         TrackRuntime::new(
-            TrackId::new("grid-1"),
+            TrackId::new("track-1"),
             Instrument::new(Venue::Binance, "BTCUSDT"),
             TrackConfig {
                 lower_price: 90.0,
@@ -477,7 +477,7 @@ mod tests {
 
         ExecutorState {
             active_round: Some(ExecutionRound {
-                target_exposure: Exposure(6.0),
+                desired_exposure: Exposure(6.0),
                 mode: ExecutionMode::Passive,
                 started_at,
             }),
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn margin_guard_snapshot_deserializes_missing_account_capacity_constraint_with_default() {
         let legacy_snapshot = json!({
-            "track_id": "grid-1",
+            "track_id": "track-1",
             "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
             "config": {
                 "lower_price": 90.0,
@@ -695,7 +695,7 @@ mod tests {
             },
             "status": "active",
             "current_exposure": 4.0,
-            "target_exposure": 6.0,
+            "desired_exposure": 6.0,
             "executor_state": {
                 "mode": "passive",
                 "inventory_gap": 2.0,
@@ -738,9 +738,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_deserializes_legacy_target_exposure_into_desired_exposure() {
-        let legacy_snapshot = json!({
-            "track_id": "grid-1",
+    fn snapshot_deserializes_desired_exposure() {
+        let snapshot = json!({
+            "track_id": "track-1",
             "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
             "config": {
                 "lower_price": 90.0,
@@ -753,7 +753,7 @@ mod tests {
             },
             "status": "active",
             "current_exposure": 4.0,
-            "target_exposure": 6.0,
+            "desired_exposure": 6.0,
             "executor_state": {
                 "mode": "passive",
                 "inventory_gap": 0.0,
@@ -787,7 +787,7 @@ mod tests {
             }
         });
 
-        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(snapshot).unwrap();
 
         assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
     }

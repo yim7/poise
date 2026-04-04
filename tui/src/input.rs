@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, View};
-use crate::protocol::GridCommandType;
+use crate::protocol::TrackCommandType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
@@ -10,10 +10,10 @@ pub enum CommandKind {
 }
 
 impl CommandKind {
-    pub fn as_track_command(self) -> GridCommandType {
+    pub fn as_track_command(self) -> TrackCommandType {
         match self {
-            Self::Pause => GridCommandType::Pause,
-            Self::Resume => GridCommandType::Resume,
+            Self::Pause => TrackCommandType::Pause,
+            Self::Resume => TrackCommandType::Resume,
         }
     }
 }
@@ -72,7 +72,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::Char('p') | KeyCode::Char('P') => {
-            if app.current_view == View::Instance && app.is_command_enabled(GridCommandType::Pause)
+            if app.current_view == View::Instance && app.is_command_enabled(TrackCommandType::Pause)
             {
                 Action::SubmitCommand(CommandKind::Pause)
             } else {
@@ -80,7 +80,8 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
             }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            if app.current_view == View::Instance && app.is_command_enabled(GridCommandType::Resume)
+            if app.current_view == View::Instance
+                && app.is_command_enabled(TrackCommandType::Resume)
             {
                 Action::SubmitCommand(CommandKind::Resume)
             } else {
@@ -103,7 +104,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::app::{App, View};
-    use crate::protocol::{GridCommandType, GridCommandView, TrackDetailView, TrackListResponse};
+    use crate::protocol::{TrackCommandType, TrackCommandView, TrackDetailView, TrackListResponse};
 
     use super::{Action, CommandKind, handle_key_event};
 
@@ -121,8 +122,8 @@ mod tests {
     fn detail_view() -> TrackDetailView {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
-        detail.available_commands.push(GridCommandView {
-            command: GridCommandType::Resume,
+        detail.available_commands.push(TrackCommandView {
+            command: TrackCommandType::Resume,
             enabled: true,
             disabled_reason: None,
         });

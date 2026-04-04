@@ -6,7 +6,7 @@
 
 ## 背景
 
-当前系统会在每个价格 tick 上重算。虽然存在 `pending_order target` 匹配时的 `NoOp` 抑制，但带内 `target_exposure` 是连续函数，轻微价格波动就可能让目标发生细小变化，进而触发撤旧换新。
+当前系统会在每个价格 tick 上重算。虽然存在 `pending_order target` 匹配时的 `NoOp` 抑制，但带内 `desired_exposure` 是连续函数，轻微价格波动就可能让目标发生细小变化，进而触发撤旧换新。
 
 这会带来两个问题：
 
@@ -40,7 +40,7 @@
 - `price` 按 `price_tick` 取整后相同
 - `quantity` 按 `quantity_step` 取整后相同
 
-这里不再依赖 `target_exposure` 的浮点完全相等。
+这里不再依赖 `desired_exposure` 的浮点完全相等。
 
 ### 3. 有 `pending_order`，但新旧方向相反
 

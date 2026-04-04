@@ -197,7 +197,7 @@ assert!(!text.contains("Diagnostics"));
 ```rust
 assert!(text.contains("Trace"));
 assert!(text.contains("Diagnostics"));
-assert!(text.contains("target exposure 3.5000 -> 4.0000"));
+assert!(text.contains("desired exposure 3.5000 -> 4.0000"));
 ```
 
 要求 diagnostics 只出现在 `Trace` 区，不新增独立主区块。

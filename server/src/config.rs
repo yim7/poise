@@ -125,7 +125,7 @@ mod tests {
     use super::{Config, default_bind_address, parse_config};
 
     #[test]
-    fn parses_config_file_with_grids_and_exchange() {
+    fn parses_config_file_with_tracks_and_exchange() {
         let config = parse_config(
             r#"
 environment = "test"
@@ -322,10 +322,10 @@ out_of_band_policy = "reduce_only"
         )
         .unwrap();
 
-        let grid = &config.tracks[0];
-        assert_eq!(grid.shape_family, ShapeFamily::Concave);
-        assert_eq!(grid.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
-        assert_eq!(grid.budget().max_notional, 3000.0);
+        let track = &config.tracks[0];
+        assert_eq!(track.shape_family, ShapeFamily::Concave);
+        assert_eq!(track.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
+        assert_eq!(track.budget().max_notional, 3000.0);
     }
 
     #[test]
@@ -425,15 +425,15 @@ notional_per_unit = 375.0
     #[test]
     fn parses_binance_testnet_example_config() {
         let config = parse_config(include_str!("../../configs/binance-testnet.demo.toml")).unwrap();
-        let grid = &config.tracks[0];
-        let equivalent_grid_step = (grid.upper_price - grid.lower_price)
-            / (grid.long_exposure_units + grid.short_exposure_units);
+        let track = &config.tracks[0];
+        let equivalent_track_step = (track.upper_price - track.lower_price)
+            / (track.long_exposure_units + track.short_exposure_units);
 
         assert_eq!(config.environment, "testnet");
         assert_eq!(config.tracks.len(), 1);
-        assert_eq!(grid.track_id().as_str(), "btc-core");
-        assert_eq!(grid.upper_price - grid.lower_price, 5500.0);
-        assert!((equivalent_grid_step - 137.5).abs() < f64::EPSILON);
+        assert_eq!(track.track_id().as_str(), "btc-core");
+        assert_eq!(track.upper_price - track.lower_price, 5500.0);
+        assert!((equivalent_track_step - 137.5).abs() < f64::EPSILON);
     }
 
     #[test]

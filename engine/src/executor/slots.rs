@@ -116,17 +116,17 @@ pub(super) fn slot_matches_order(
 pub(super) fn rebuild_slot_from_live_order(
     slot: &ExecutionSlot,
     live_order: &OrderObservation,
-    active_round_target_exposure: Option<&Exposure>,
+    active_round_desired_exposure: Option<&Exposure>,
     current_exposure: &Exposure,
 ) -> ExecutionSlot {
-    let target_exposure = active_round_target_exposure
+    let desired_exposure = active_round_desired_exposure
         .cloned()
         .unwrap_or_else(|| current_exposure.clone());
     let role = slot
         .working_order
         .as_ref()
         .map(|order| order.role.clone())
-        .unwrap_or_else(|| role_for_target_change(current_exposure, &target_exposure));
+        .unwrap_or_else(|| role_for_target_change(current_exposure, &desired_exposure));
 
     ExecutionSlot {
         slot: slot.slot.clone(),
@@ -157,9 +157,9 @@ pub(super) fn empty_slot(slot: &OrderSlot) -> ExecutionSlot {
 
 pub(super) fn role_for_target_change(
     current_exposure: &Exposure,
-    target_exposure: &Exposure,
+    desired_exposure: &Exposure,
 ) -> OrderRole {
-    if is_reduce_only_target_change(current_exposure, target_exposure) {
+    if is_reduce_only_target_change(current_exposure, desired_exposure) {
         OrderRole::DecreaseInventory
     } else {
         OrderRole::IncreaseInventory
@@ -174,9 +174,9 @@ pub(super) fn role_for_reduce_only(reduce_only: bool) -> OrderRole {
     }
 }
 
-fn is_reduce_only_target_change(current_exposure: &Exposure, target_exposure: &Exposure) -> bool {
+fn is_reduce_only_target_change(current_exposure: &Exposure, desired_exposure: &Exposure) -> bool {
     let current = current_exposure.0;
-    let target = target_exposure.0;
+    let target = desired_exposure.0;
 
     if current.abs() <= f64::EPSILON {
         return false;

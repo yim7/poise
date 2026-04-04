@@ -81,12 +81,12 @@ mod tests {
         assert_eq!(diagnostics.items.len(), 2);
         assert_eq!(
             diagnostics.items[0].message,
-            "target exposure 3.5000 -> 4.0000"
+            "desired exposure 3.5000 -> 4.0000"
         );
         assert_eq!(diagnostics.items[0].ts, "2026-03-26T10:01:00+00:00");
         assert_eq!(
             diagnostics.items[1].message,
-            "target exposure 4.0000 -> 4.5000"
+            "desired exposure 4.0000 -> 4.5000"
         );
         assert_eq!(diagnostics.items[1].ts, "2026-03-26T10:01:10+00:00");
     }
@@ -149,7 +149,7 @@ mod tests {
                             client_order_id: "client-1".into(),
                             reduce_only: false,
                         },
-                        target_exposure: Exposure(4.0),
+                        desired_exposure: Exposure(4.0),
                     },
                     status: EffectStatus::Failed,
                     attempt_count: 1,
@@ -215,7 +215,7 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
-                    target_exposure: Exposure(4.0),
+                    desired_exposure: Exposure(4.0),
                     mode: ExecutionMode::Passive,
                     started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
                 }),

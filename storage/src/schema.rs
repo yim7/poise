@@ -2,8 +2,6 @@ use anyhow::{Result, ensure};
 use rusqlite::Connection;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
-    // `target_exposure` is the legacy snapshot column name. It currently stores
-    // runtime `desired_exposure` and should be migrated in a dedicated schema change.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS track_snapshots (
             track_id TEXT PRIMARY KEY,
@@ -12,7 +10,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             config_json TEXT NOT NULL,
             status TEXT NOT NULL,
             current_exposure REAL NOT NULL,
-            target_exposure REAL,
+            desired_exposure REAL,
             manual_target_override REAL,
             executor_state_json TEXT,
             replacement_gate_reason_json TEXT,
@@ -58,6 +56,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    add_column_if_missing(conn, "track_snapshots", "desired_exposure", "REAL")?;
     add_column_if_missing(conn, "track_snapshots", "executor_state_json", "TEXT")?;
     add_column_if_missing(conn, "track_snapshots", "manual_target_override", "REAL")?;
     add_column_if_missing(
@@ -85,7 +84,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "config_json",
             "status",
             "current_exposure",
-            "target_exposure",
+            "desired_exposure",
             "manual_target_override",
             "executor_state_json",
             "replacement_gate_reason_json",
@@ -273,6 +272,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(columns.contains(&"track_id".to_string()));
+        assert!(columns.contains(&"desired_exposure".to_string()));
         assert!(!columns.contains(&"pending_order_json".to_string()));
     }
 
@@ -294,7 +294,7 @@ mod tests {
                 config_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
-                target_exposure REAL,
+                desired_exposure REAL,
                 executor_state_json TEXT,
                 realized_pnl_day TEXT,
                 realized_pnl_today REAL NOT NULL DEFAULT 0,
@@ -317,6 +317,7 @@ mod tests {
             .unwrap();
 
         assert!(columns.contains(&"replacement_gate_reason_json".to_string()));
+        assert!(columns.contains(&"desired_exposure".to_string()));
     }
 
     #[test]
@@ -345,7 +346,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(!columns.contains(&"target_exposure".to_string()));
+        assert!(columns.contains(&"desired_exposure".to_string()));
         assert!(!columns.contains(&"pending_order_json".to_string()));
         assert!(!columns.contains(&"realized_pnl_day".to_string()));
         assert!(!columns.contains(&"realized_pnl_today".to_string()));
@@ -365,7 +366,7 @@ mod tests {
                 config_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
-                target_exposure REAL,
+                desired_exposure REAL,
                 realized_pnl_day TEXT,
                 realized_pnl_today REAL NOT NULL DEFAULT 0,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,

@@ -380,14 +380,14 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
         let track = self
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         let next_state =
-            executor::record_submit_request(&track.executor_state, request, target_exposure);
+            executor::record_submit_request(&track.executor_state, request, desired_exposure);
         if next_state != track.executor_state {
             track.executor_state = next_state;
             track.replacement_gate_reason = None;
@@ -399,7 +399,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
     ) -> Result<()> {
         let track = self
@@ -409,7 +409,7 @@ impl TrackManager {
         let resolution = executor::record_submit_receipt(
             &track.executor_state,
             request,
-            target_exposure,
+            desired_exposure,
             receipt,
         );
         match resolution {
@@ -480,7 +480,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         request: &OrderRequest,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<executor::SubmitRecoveryPlan> {
         let live_order_observation = live_order.map(|order| OrderObservation {
@@ -504,7 +504,7 @@ impl TrackManager {
                 exchange_rules: &track.exchange_rules,
                 previous_state: &track.executor_state,
                 request,
-                target_exposure: &target_exposure,
+                desired_exposure: &desired_exposure,
                 current_exposure: &track.current_exposure,
                 live_order: live_order_observation.as_ref(),
                 current_plan,
@@ -647,7 +647,7 @@ impl TrackManager {
         let previous_state = track.executor_state.clone();
         let recovery = executor::recover_working_orders(executor::RecoveryInput {
             current_exposure: &track.current_exposure,
-            target_exposure: track.desired_exposure.as_ref(),
+            desired_exposure: track.desired_exposure.as_ref(),
             min_rebalance_units: track.config.min_rebalance_units,
             previous_state: Some(&previous_state),
             live_orders: &open_orders,
@@ -844,7 +844,7 @@ impl TrackManager {
     fn submit_intent_input<'a>(
         &self,
         track: &'a TrackRuntime,
-        target_exposure: poise_core::types::Exposure,
+        desired_exposure: poise_core::types::Exposure,
         reference_price: f64,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
@@ -855,7 +855,7 @@ impl TrackManager {
             base_qty_per_unit: track.config.base_qty_per_unit(),
             min_rebalance_units: track.config.min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
-            target_exposure,
+            desired_exposure,
             reference_price,
             observed_at,
         }
@@ -1056,7 +1056,7 @@ mod tests {
         side: poise_core::types::Side,
         price: f64,
         quantity: f64,
-        _target_exposure: poise_core::types::Exposure,
+        _desired_exposure: poise_core::types::Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -1093,7 +1093,7 @@ mod tests {
                 poise_core::types::Exposure(track.current_exposure.0 + signed_delta)
             });
             track.executor_state.active_round = Some(crate::runtime::ExecutionRound {
-                target_exposure: inferred_target,
+                desired_exposure: inferred_target,
                 mode: track.executor_state.diagnostics.mode.clone(),
                 started_at: track.executor_state.stats.started_at,
             });
@@ -1133,7 +1133,7 @@ mod tests {
                 poise_core::types::Exposure(track.current_exposure.0 + signed_delta)
             });
             track.executor_state.active_round = Some(crate::runtime::ExecutionRound {
-                target_exposure: inferred_target,
+                desired_exposure: inferred_target,
                 mode: track.executor_state.diagnostics.mode.clone(),
                 started_at: track.executor_state.stats.started_at,
             });
@@ -1147,7 +1147,7 @@ mod tests {
 
     fn working_order_from_submit_request(
         request: &OrderRequest,
-        _target_exposure: poise_core::types::Exposure,
+        _desired_exposure: poise_core::types::Exposure,
     ) -> WorkingOrder {
         WorkingOrder {
             order_id: None,
@@ -1236,7 +1236,7 @@ mod tests {
     fn passive_executor_state_with_matching_buy_order() -> ExecutorState {
         ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: poise_core::types::Exposure(4.0),
+                desired_exposure: poise_core::types::Exposure(4.0),
                 mode: ExecutionMode::Passive,
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
             }),
@@ -1863,7 +1863,7 @@ mod tests {
         track.current_exposure = poise_core::types::Exposure(2.0);
         track.config.notional_per_unit = 100.0;
         track.config.min_rebalance_units = 0.5;
-        let expected_target = poise_core::strategy::target_exposure(96.125, &track.config);
+        let expected_target = poise_core::strategy::desired_exposure(96.125, &track.config);
         seed_executor_slot(
             track,
             working_order(
@@ -1988,20 +1988,20 @@ mod tests {
             )
             .unwrap();
 
-        let (request, target_exposure) = match transition.effects.as_slice() {
+        let (request, desired_exposure) = match transition.effects.as_slice() {
             [
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 },
-            ] => (request, target_exposure),
+            ] => (request, desired_exposure),
             other => panic!("expected one submit effect, got {other:?}"),
         };
         assert_eq!(
             inventory_core_order_from_snapshot(&transition.snapshot),
             Some(&working_order_from_submit_request(
                 request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
             ))
         );
     }
@@ -2644,7 +2644,7 @@ mod tests {
             recovery.effects.as_slice(),
             [TrackEffect::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             }] if request.side == poise_core::types::Side::Buy
                 && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
                 && rounded_values_match(
@@ -2652,17 +2652,17 @@ mod tests {
                     test_config().base_qty_per_unit() * 4.0,
                     test_exchange_rules().quantity_step,
                 )
-                && *target_exposure == poise_core::types::Exposure(4.0)
+                && *desired_exposure == poise_core::types::Exposure(4.0)
         ));
         let replacement_pending = match recovery.effects.as_slice() {
             [
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 },
             ] => Some(working_order_from_submit_request(
                 request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
             )),
             _ => None,
         };
@@ -2687,7 +2687,7 @@ mod tests {
         track.current_exposure = poise_core::types::Exposure(0.0);
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         track.executor_state.active_round = Some(crate::runtime::ExecutionRound {
-            target_exposure: poise_core::types::Exposure(-2.0),
+            desired_exposure: poise_core::types::Exposure(-2.0),
             mode: ExecutionMode::Passive,
             started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
         });
@@ -2728,7 +2728,7 @@ mod tests {
             recovery.effects.as_slice(),
             [TrackEffect::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             }] if request.side == poise_core::types::Side::Buy
                 && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
                 && rounded_values_match(
@@ -2737,13 +2737,13 @@ mod tests {
                     test_exchange_rules().quantity_step,
                 )
                 && !request.reduce_only
-                && *target_exposure == poise_core::types::Exposure(4.0)
+                && *desired_exposure == poise_core::types::Exposure(4.0)
         ));
         let replacement_pending = match recovery.effects.as_slice() {
             [
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure: _,
+                    desired_exposure: _,
                 },
             ] => Some(WorkingOrder {
                 order_id: None,
@@ -2816,13 +2816,13 @@ mod tests {
             )
             .unwrap();
         let executor::SubmitRecoveryResolution::Proceed {
-            target_exposure, ..
+            desired_exposure, ..
         } = recovery.resolution
         else {
             panic!("matching rounded request should keep the pending submit proceeding");
         };
         assert!(recovery.effects.is_empty());
-        assert_eq!(target_exposure, poise_core::types::Exposure(4.0));
+        assert_eq!(desired_exposure, poise_core::types::Exposure(4.0));
         assert!(matches!(
             inventory_core_order(manager.get_track("btc-core").unwrap()),
             Some(WorkingOrder {
@@ -2844,7 +2844,7 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(poise_core::types::Exposure(4.0))
         );
     }
@@ -2887,7 +2887,7 @@ mod tests {
             )
             .unwrap();
         let executor::SubmitRecoveryResolution::Proceed {
-            target_exposure, ..
+            desired_exposure, ..
         } = recovery.resolution
         else {
             panic!(
@@ -2895,7 +2895,7 @@ mod tests {
             );
         };
         assert!(recovery.effects.is_empty());
-        assert_eq!(target_exposure, poise_core::types::Exposure(2.8));
+        assert_eq!(desired_exposure, poise_core::types::Exposure(2.8));
         assert!(matches!(
             inventory_core_order(manager.get_track("btc-core").unwrap()),
             Some(WorkingOrder {
@@ -2917,7 +2917,7 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(poise_core::types::Exposure(2.8))
         );
     }
@@ -3315,7 +3315,7 @@ mod tests {
                         quantity: 0.25,
                         reduce_only: false,
                     },
-                    target_exposure: poise_core::types::Exposure(6.0),
+                    desired_exposure: poise_core::types::Exposure(6.0),
                 }],
             )
             .unwrap();
@@ -3570,7 +3570,7 @@ mod tests {
         track.desired_exposure = Some(poise_core::types::Exposure(6.0));
         track.executor_state = ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: poise_core::types::Exposure(6.0),
+                desired_exposure: poise_core::types::Exposure(6.0),
                 mode: ExecutionMode::Passive,
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
             }),
@@ -3625,7 +3625,7 @@ mod tests {
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         track.executor_state = ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: poise_core::types::Exposure(4.0),
+                desired_exposure: poise_core::types::Exposure(4.0),
                 mode: ExecutionMode::Passive,
                 started_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
             }),
@@ -3761,20 +3761,20 @@ mod tests {
             )
             .unwrap();
 
-        let (request, target_exposure) = match transition.effects.as_slice() {
+        let (request, desired_exposure) = match transition.effects.as_slice() {
             [
                 TrackEffect::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 },
-            ] => (request, target_exposure),
+            ] => (request, desired_exposure),
             other => panic!("expected one submit effect, got {other:?}"),
         };
         assert_eq!(
             inventory_core_order_from_snapshot(&transition.snapshot),
             Some(&working_order_from_submit_request(
                 request,
-                target_exposure.clone(),
+                desired_exposure.clone(),
             ))
         );
     }

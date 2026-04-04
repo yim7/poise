@@ -133,7 +133,7 @@ x = clamp((price - lower_price) / (upper_price - lower_price), 0, 1)
 目标占用函数定义为：
 
 ```text
-target_exposure(price) =
+desired_exposure(price) =
     -short_capacity + (long_capacity + short_capacity) * g(x)
 ```
 
@@ -145,16 +145,16 @@ target_exposure(price) =
 
 因此有：
 
-- `price = lower_price` 时，`target_exposure = long_capacity`
-- `price = upper_price` 时，`target_exposure = -short_capacity`
+- `price = lower_price` 时，`desired_exposure = long_capacity`
+- `price = upper_price` 时，`desired_exposure = -short_capacity`
 
 ### 5.2 解释方式
 
 为了避免把容量和价格层数混淆，推荐对外这样解释：
 
-- `target_exposure > 0`：当前应占用若干多头容量
-- `target_exposure < 0`：当前应占用若干空头容量
-- `target_exposure = 0`：当前应回到中性占用
+- `desired_exposure > 0`：当前应占用若干多头容量
+- `desired_exposure < 0`：当前应占用若干空头容量
+- `desired_exposure = 0`：当前应回到中性占用
 
 示例：
 
@@ -333,19 +333,19 @@ short_capacity = N
 
 ### 9.1 策略层输出是理想值
 
-`target_exposure` 是关于价格的连续函数，输出是理想值。执行层负责：
+`desired_exposure` 是关于价格的连续函数，输出是理想值。执行层负责：
 
 - 把理想值量化到交易所允许的离散价格和数量精度
 - 在目标变化量小于阈值时不产生调仓动作（防抖 / 死区）
-- 在带内中心区域，价格微幅抖动会让 `target_exposure` 在微小正负值之间来回变化，执行层必须用死区过滤这类无效信号
+- 在带内中心区域，价格微幅抖动会让 `desired_exposure` 在微小正负值之间来回变化，执行层必须用死区过滤这类无效信号
 
 策略层不关心量化后的实际仓位是否与理想值精确相等。量化误差和防抖阈值完全属于执行层决策。
 
 ### 9.2 初始建仓语义
 
-策略启动时，市场价在带内，`target_exposure` 可能是一个非零值。
+策略启动时，市场价在带内，`desired_exposure` 可能是一个非零值。
 
-第一版采用瞬间对齐语义：策略一旦进入 `Active` 状态，执行层应立即朝 `target_exposure` 调整仓位，不等待价格首次穿越。
+第一版采用瞬间对齐语义：策略一旦进入 `Active` 状态，执行层应立即朝 `desired_exposure` 调整仓位，不等待价格首次穿越。
 
 这意味着启动时可能产生一笔较大的初始建仓单。执行层负责控制建仓节奏和滑点。
 

@@ -972,7 +972,7 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(Exposure(4.0))
         );
 
@@ -1039,7 +1039,7 @@ mod tests {
                             client_order_id: "startup-pending".into(),
                             reduce_only: false,
                         },
-                        target_exposure: Exposure(4.0),
+                        desired_exposure: Exposure(4.0),
                     },
                 ],
             )
@@ -1259,13 +1259,13 @@ mod tests {
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
-        let (first_request, first_target_exposure) = match first.effects.as_slice() {
+        let (first_request, first_desired_exposure) = match first.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
                     request,
-                    target_exposure,
+                    desired_exposure,
                 },
-            ] => (request.clone(), target_exposure.clone()),
+            ] => (request.clone(), desired_exposure.clone()),
             other => panic!("expected one submit effect, got {other:?}"),
         };
 
@@ -1304,8 +1304,8 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
-            Some(first_target_exposure.clone())
+                .map(|round| round.desired_exposure.clone()),
+            Some(first_desired_exposure.clone())
         );
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
     }
@@ -1340,12 +1340,12 @@ mod tests {
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
-        let first_target_exposure = match first.effects.as_slice() {
+        let first_desired_exposure = match first.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
-                    target_exposure, ..
+                    desired_exposure, ..
                 },
-            ] => target_exposure.clone(),
+            ] => desired_exposure.clone(),
             other => panic!("expected one submit effect, got {other:?}"),
         };
 
@@ -1385,8 +1385,8 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
-            Some(first_target_exposure.clone())
+                .map(|round| round.desired_exposure.clone()),
+            Some(first_desired_exposure.clone())
         );
         assert_eq!(order.order_id.as_deref(), Some("order-1"));
     }
@@ -1422,12 +1422,12 @@ mod tests {
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
-        let first_target_exposure = match first.effects.as_slice() {
+        let first_desired_exposure = match first.effects.as_slice() {
             [
                 ExecutionAction::SubmitOrder {
-                    target_exposure, ..
+                    desired_exposure, ..
                 },
-            ] => target_exposure.clone(),
+            ] => desired_exposure.clone(),
             other => panic!("expected one submit effect, got {other:?}"),
         };
 
@@ -1501,8 +1501,8 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
-            Some(first_target_exposure.clone())
+                .map(|round| round.desired_exposure.clone()),
+            Some(first_desired_exposure.clone())
         );
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
         assert!((order.quantity - remaining_quantity).abs() < 1e-9);
@@ -1859,7 +1859,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -1959,7 +1959,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -2309,7 +2309,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(4.0),
+                    desired_exposure: Exposure(4.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -2360,11 +2360,11 @@ mod tests {
             &replacement.effect,
             ExecutionAction::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             } if request.side == Side::Buy
                 && (request.price - 95.0).abs() < f64::EPSILON
                 && (request.quantity - test_config().base_qty_per_unit() * 2.0).abs() < f64::EPSILON
-                && *target_exposure == Exposure(4.0)
+                && *desired_exposure == Exposure(4.0)
         ));
     }
 
@@ -2406,7 +2406,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(3.0),
+                    desired_exposure: Exposure(3.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -2478,7 +2478,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -2571,7 +2571,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -2622,11 +2622,11 @@ mod tests {
             &replacement.effect,
             ExecutionAction::SubmitOrder {
                 request,
-                target_exposure,
+                desired_exposure,
             } if request.side == Side::Buy
                 && (request.price - 95.0).abs() < f64::EPSILON
                 && (request.quantity - test_config().base_qty_per_unit() * 4.0).abs() < f64::EPSILON
-                && *target_exposure == Exposure(4.0)
+                && *desired_exposure == Exposure(4.0)
         ));
     }
 
@@ -2670,7 +2670,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -2744,7 +2744,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -3043,7 +3043,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -3708,11 +3708,11 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             matches!(
                 &effect.effect,
-                ExecutionAction::SubmitOrder { request, target_exposure }
+                ExecutionAction::SubmitOrder { request, desired_exposure }
                     if request.client_order_id.starts_with("BTCUSDT-")
                         && (request.price - 95.0).abs() < f64::EPSILON
                         && (request.quantity - 7.5).abs() < f64::EPSILON
-                        && *target_exposure == Exposure(4.0)
+                        && *desired_exposure == Exposure(4.0)
             )
         }));
     }
@@ -3756,7 +3756,7 @@ mod tests {
                         client_order_id: "snapshot-1".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -3779,11 +3779,11 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             matches!(
                 &effect.effect,
-                ExecutionAction::SubmitOrder { request, target_exposure }
+                ExecutionAction::SubmitOrder { request, desired_exposure }
                     if request.client_order_id.starts_with("BTCUSDT-")
                         && (request.price - 95.0).abs() < f64::EPSILON
                         && (request.quantity - 15.0).abs() < f64::EPSILON
-                        && *target_exposure == Exposure(4.0)
+                        && *desired_exposure == Exposure(4.0)
             )
         }));
     }
@@ -3830,7 +3830,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -3854,13 +3854,13 @@ mod tests {
                 effect:
                     ExecutionAction::SubmitOrder {
                         request,
-                        target_exposure,
+                        desired_exposure,
                     },
                 ..
             }] if request.client_order_id == "BTCUSDT-reconcile"
                 && (request.price - 92.5).abs() < f64::EPSILON
                 && (request.quantity - 22.5).abs() < f64::EPSILON
-                && *target_exposure == Exposure(6.0)
+                && *desired_exposure == Exposure(6.0)
         ));
     }
 
@@ -3968,7 +3968,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -3991,7 +3991,7 @@ mod tests {
                 .executor_state
                 .active_round
                 .as_ref()
-                .map(|round| round.target_exposure.clone()),
+                .map(|round| round.desired_exposure.clone()),
             Some(Exposure(4.0))
         );
         assert_eq!(order.status, OrderStatus::Submitting);
@@ -4044,7 +4044,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -4509,7 +4509,7 @@ mod tests {
                         client_order_id: "BTCUSDT-reconcile".into(),
                         reduce_only: false,
                     },
-                    target_exposure: Exposure(6.0),
+                    desired_exposure: Exposure(6.0),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -5434,7 +5434,7 @@ mod tests {
         side: Side,
         price: f64,
         quantity: f64,
-        _target_exposure: Exposure,
+        _desired_exposure: Exposure,
         status: OrderStatus,
     ) -> WorkingOrder {
         WorkingOrder {
@@ -5452,19 +5452,19 @@ mod tests {
     }
 
     fn set_executor_state(snapshot: &mut TrackSnapshot, order: WorkingOrder, state: SlotState) {
-        let target_exposure = snapshot
+        let desired_exposure = snapshot
             .desired_exposure
             .clone()
             .unwrap_or_else(|| snapshot.current_exposure.clone());
         snapshot.executor_state = ExecutorState {
             active_round: Some(poise_engine::runtime::ExecutionRound {
-                target_exposure: target_exposure.clone(),
+                desired_exposure: desired_exposure.clone(),
                 mode: ExecutionMode::Passive,
                 started_at: test_server_time(),
             }),
             diagnostics: poise_engine::runtime::ExecutorDiagnostics {
                 mode: ExecutionMode::Passive,
-                inventory_gap: snapshot.current_exposure.delta(&target_exposure),
+                inventory_gap: snapshot.current_exposure.delta(&desired_exposure),
                 gap_started_at: Some(test_server_time()),
                 last_reprice_at: None,
                 last_execution_reason: None,

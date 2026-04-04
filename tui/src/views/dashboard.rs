@@ -10,7 +10,7 @@ use crate::theme::Theme;
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let header = Row::new(["ID", "Symbol", "Lifecycle", "Execution", "Exposure", "PnL"])
         .style(Theme::table_header());
-    let rows = app.grids.iter().map(|item| {
+    let rows = app.tracks.iter().map(|item| {
         let execution = format_execution_badge(
             item.execution.state,
             item.execution.execution_status,
@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     .block(Block::default().title("Dashboard").borders(Borders::ALL));
 
     let mut state = TableState::default();
-    if !app.grids.is_empty() {
+    if !app.tracks.is_empty() {
         state.select(Some(app.selected_index));
     }
     frame.render_stateful_widget(table, area, &mut state);

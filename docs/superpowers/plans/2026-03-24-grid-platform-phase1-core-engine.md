@@ -309,32 +309,32 @@ mod tests {
     }
 
     #[test]
-    fn target_exposure_neutral_at_center() {
-        let exposure = target_exposure(100.0, &neutral_config());
+    fn desired_exposure_neutral_at_center() {
+        let exposure = desired_exposure(100.0, &neutral_config());
         assert!((exposure.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_full_long_at_lower() {
-        let exposure = target_exposure(90.0, &neutral_config());
+    fn desired_exposure_full_long_at_lower() {
+        let exposure = desired_exposure(90.0, &neutral_config());
         assert!((exposure.0 - 8.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_full_short_at_upper() {
-        let exposure = target_exposure(110.0, &neutral_config());
+    fn desired_exposure_full_short_at_upper() {
+        let exposure = desired_exposure(110.0, &neutral_config());
         assert!((exposure.0 + 8.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_long_only_zero_at_upper() {
-        let exposure = target_exposure(110.0, &long_only_config());
+    fn desired_exposure_long_only_zero_at_upper() {
+        let exposure = desired_exposure(110.0, &long_only_config());
         assert!((exposure.0).abs() < 0.001);
     }
 
     #[test]
-    fn target_exposure_long_only_half_at_center() {
-        let exposure = target_exposure(100.0, &long_only_config());
+    fn desired_exposure_long_only_half_at_center() {
+        let exposure = desired_exposure(100.0, &long_only_config());
         assert!((exposure.0 - 4.0).abs() < 0.001);
     }
 
@@ -359,8 +359,8 @@ mod tests {
     #[test]
     fn convex_shape_slower_departure() {
         let config = GridConfig { shape_family: ShapeFamily::Convex, ..neutral_config() };
-        let linear_mid = target_exposure(95.0, &neutral_config());
-        let convex_mid = target_exposure(95.0, &config);
+        let linear_mid = desired_exposure(95.0, &neutral_config());
+        let convex_mid = desired_exposure(95.0, &config);
         // convex 在接近边缘时离开得更慢，所以 95 处 convex 的多头占用 > linear
         assert!(convex_mid.0 > linear_mid.0);
     }
@@ -420,7 +420,7 @@ pub fn validate_config(config: &GridConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub fn target_exposure(price: f64, config: &GridConfig) -> Exposure {
+pub fn desired_exposure(price: f64, config: &GridConfig) -> Exposure {
     let x = ((price - config.lower_price) / (config.upper_price - config.lower_price))
         .clamp(0.0, 1.0);
     let g = match config.shape_family {
@@ -444,7 +444,7 @@ pub fn band_status(price: f64, config: &GridConfig) -> BandStatus {
         }
     } else {
         BandStatus::InBand {
-            target: target_exposure(price, config),
+            target: desired_exposure(price, config),
         }
     }
 }
@@ -469,7 +469,7 @@ Expected: 全部 PASS
 - [ ] **Step 5: 提交**
 
 ```bash
-git add -A && git commit -m "feat(core): add strategy model - GridConfig, target_exposure, band_status"
+git add -A && git commit -m "feat(core): add strategy model - GridConfig, desired_exposure, band_status"
 ```
 
 ---
@@ -916,7 +916,7 @@ mod tests {
         // 价格在下沿，目标 exposure = 8.0，当前 0
         let result = reconcile(&instance, 90.0, &test_budget());
         assert!(result.plan.has_actions());
-        assert!((result.target_exposure.0 - 8.0).abs() < 0.001);
+        assert!((result.desired_exposure.0 - 8.0).abs() < 0.001);
     }
 
     #[test]
@@ -949,7 +949,7 @@ use crate::ports::OrderRequest;
 
 pub struct ReconcileResult {
     pub plan: ExecutionPlan,
-    pub target_exposure: Exposure,
+    pub desired_exposure: Exposure,
     pub new_status: Option<InstanceStatus>,
 }
 
@@ -986,7 +986,7 @@ pub fn reconcile(
         RiskDecision::Deny { reason } => {
             return ReconcileResult {
                 plan: ExecutionPlan::hold(reason),
-                target_exposure: instance.current_exposure.clone(),
+                desired_exposure: instance.current_exposure.clone(),
                 new_status: None,
             };
         }
@@ -996,7 +996,7 @@ pub fn reconcile(
     if delta.is_zero() {
         return ReconcileResult {
             plan: ExecutionPlan::noop(),
-            target_exposure: approved_target,
+            desired_exposure: approved_target,
             new_status,
         };
     }
@@ -1013,7 +1013,7 @@ pub fn reconcile(
 
     ReconcileResult {
         plan,
-        target_exposure: approved_target,
+        desired_exposure: approved_target,
         new_status,
     }
 }
@@ -1130,7 +1130,7 @@ impl InstanceManager {
             if let Some(new_status) = result.new_status {
                 self.instances.get_mut(&id).unwrap().status = new_status;
             }
-            self.instances.get_mut(&id).unwrap().current_exposure = result.target_exposure;
+            self.instances.get_mut(&id).unwrap().current_exposure = result.desired_exposure;
             self.instances.get_mut(&id).unwrap().last_price = Some(tick.last_price);
 
             all_events.extend(result.plan.events);

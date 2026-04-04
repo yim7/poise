@@ -23,7 +23,7 @@ pub enum RecoveryAnomaly {
 
 pub struct RecoveryInput<'a> {
     pub current_exposure: &'a Exposure,
-    pub target_exposure: Option<&'a Exposure>,
+    pub desired_exposure: Option<&'a Exposure>,
     pub min_rebalance_units: f64,
     pub previous_state: Option<&'a ExecutorState>,
     pub live_orders: &'a [OrderObservation],
@@ -46,7 +46,7 @@ pub struct SubmitRecoveryInput<'a> {
     pub exchange_rules: &'a ExchangeRules,
     pub previous_state: &'a ExecutorState,
     pub request: &'a OrderRequest,
-    pub target_exposure: &'a Exposure,
+    pub desired_exposure: &'a Exposure,
     pub current_exposure: &'a Exposure,
     pub live_order: Option<&'a OrderObservation>,
     pub current_plan: Option<SubmitIntentInput<'a>>,
@@ -56,7 +56,7 @@ pub struct SubmitRecoveryInput<'a> {
 pub enum SubmitRecoveryResolution {
     Proceed {
         state: ExecutorState,
-        target_exposure: Exposure,
+        desired_exposure: Exposure,
     },
     AwaitExchangeState,
     Recovered {
@@ -110,7 +110,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
             };
         }
 
-        if recording::target_exposure_reached(input.current_exposure, input.target_exposure) {
+        if recording::desired_exposure_reached(input.current_exposure, input.desired_exposure) {
             return SubmitRecoveryPlan {
                 resolution: SubmitRecoveryResolution::Recovered {
                     state: recording::clear_working_order_by_order_id(
@@ -154,11 +154,11 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         .and_then(|evaluation| evaluation.submit_hint.as_ref());
     let stale_effect_round_submit = input.current_plan.as_ref().and_then(|current_plan| {
         let active_round = input.previous_state.active_round.as_ref()?;
-        if active_round.target_exposure == *input.target_exposure {
+        if active_round.desired_exposure == *input.desired_exposure {
             return None;
         }
         let mut round_plan = current_plan.clone();
-        round_plan.target_exposure = active_round.target_exposure.clone();
+        round_plan.desired_exposure = active_round.desired_exposure.clone();
         evaluate_submit_intent_with_active_lifecycle(
             round_plan,
             active_lifecycle,
@@ -176,22 +176,22 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
                 .previous_state
                 .active_round
                 .as_ref()
-                .is_some_and(|round| round.target_exposure == *input.target_exposure)
+                .is_some_and(|round| round.desired_exposure == *input.desired_exposure)
                 && current_plan_submit.is_none()
                 && pending_submit_matches_request(slot, input.request, input.exchange_rules)
         });
 
     if matching_pending_submit_can_proceed {
-        let target_exposure = input
+        let desired_exposure = input
             .previous_state
             .active_round
             .as_ref()
-            .map(|round| round.target_exposure.clone())
-            .unwrap_or_else(|| input.target_exposure.clone());
+            .map(|round| round.desired_exposure.clone())
+            .unwrap_or_else(|| input.desired_exposure.clone());
         return SubmitRecoveryPlan {
             resolution: SubmitRecoveryResolution::Proceed {
                 state: input.previous_state.clone(),
-                target_exposure,
+                desired_exposure,
             },
             effects: vec![],
         };
@@ -210,12 +210,12 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
                     state: recording::record_submit_request(
                         &cleared_state,
                         &next_submit.request,
-                        next_submit.target_exposure.clone(),
+                        next_submit.desired_exposure.clone(),
                     ),
                 },
                 effects: vec![TrackEffect::SubmitOrder {
                     request: next_submit.request.clone(),
-                    target_exposure: next_submit.target_exposure.clone(),
+                    desired_exposure: next_submit.desired_exposure.clone(),
                 }],
             };
         }
@@ -227,21 +227,21 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         };
     }
 
-    let next_target_exposure = input
+    let next_desired_exposure = input
         .current_plan
         .as_ref()
         .and(current_plan_submit)
-        .map(|submit| submit.target_exposure.clone())
-        .unwrap_or_else(|| input.target_exposure.clone());
+        .map(|submit| submit.desired_exposure.clone())
+        .unwrap_or_else(|| input.desired_exposure.clone());
 
     SubmitRecoveryPlan {
         resolution: SubmitRecoveryResolution::Proceed {
             state: recording::record_submit_request(
                 input.previous_state,
                 input.request,
-                next_target_exposure.clone(),
+                next_desired_exposure.clone(),
             ),
-            target_exposure: next_target_exposure,
+            desired_exposure: next_desired_exposure,
         },
         effects: vec![],
     }
@@ -249,12 +249,12 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
 
 pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
     let desired_exposure = input
-        .target_exposure
+        .desired_exposure
         .or_else(|| {
             input
                 .previous_state
                 .and_then(|state| state.active_round.as_ref())
-                .map(|round| &round.target_exposure)
+                .map(|round| &round.desired_exposure)
         })
         .unwrap_or(input.current_exposure);
     let round_decision = evaluate_round_policy(round_policy_input_from_state(
@@ -352,7 +352,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
                     base_state
                         .active_round
                         .as_ref()
-                        .map(|round| &round.target_exposure),
+                        .map(|round| &round.desired_exposure),
                     input.current_exposure,
                 )
             })

@@ -272,7 +272,7 @@ pub struct GridRuntimeSnapshot {
     pub config: GridConfig,
     pub status: GridStatus,
     pub current_exposure: Exposure,
-    pub target_exposure: Option<Exposure>,
+    pub desired_exposure: Option<Exposure>,
     pub pending_order: Option<PendingOrder>,
     pub risk: RiskState,
     pub observed: ObservedState,

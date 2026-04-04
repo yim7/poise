@@ -24,7 +24,7 @@ pub struct RoundPolicySlotSummary {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundPolicyActiveRound<'a> {
-    pub target_exposure: &'a Exposure,
+    pub desired_exposure: &'a Exposure,
     pub mode: ExecutionMode,
     pub started_at: DateTime<Utc>,
 }
@@ -100,7 +100,7 @@ pub(super) fn round_policy_input_from_state_with_lifecycle<'a>(
                     .active_round
                     .as_ref()
                     .map(|active_round| RoundPolicyActiveRound {
-                        target_exposure: &active_round.target_exposure,
+                        desired_exposure: &active_round.desired_exposure,
                         mode: active_round.mode.clone(),
                         started_at: active_round.started_at,
                     })
@@ -159,11 +159,11 @@ pub fn evaluate_round_policy(input: RoundPolicyInput<'_>) -> RoundDecision {
     );
     let trigger_decision = evaluate_rebalance_trigger(RebalanceTriggerInput {
         current_exposure: input.current_exposure,
-        latest_target_exposure: input.desired_exposure,
-        active_round_target_exposure: input
+        latest_desired_exposure: input.desired_exposure,
+        active_round_desired_exposure: input
             .active_round
             .as_ref()
-            .map(|round| round.target_exposure),
+            .map(|round| round.desired_exposure),
         min_rebalance_units: input.min_rebalance_units,
         active_lifecycle: input.active_lifecycle,
     });
@@ -182,14 +182,14 @@ pub fn evaluate_round_policy(input: RoundPolicyInput<'_>) -> RoundDecision {
     let active_round = match lifecycle {
         RoundLifecycleDecision::ContinueRound => {
             input.active_round.map(|active_round| ExecutionRound {
-                target_exposure: active_round.target_exposure.clone(),
+                desired_exposure: active_round.desired_exposure.clone(),
                 mode: mode.clone(),
                 started_at: active_round.started_at,
             })
         }
         RoundLifecycleDecision::StartRound | RoundLifecycleDecision::SwitchRound => {
             Some(ExecutionRound {
-                target_exposure: input.desired_exposure.clone(),
+                desired_exposure: input.desired_exposure.clone(),
                 mode: mode.clone(),
                 started_at: input.observed_at,
             })

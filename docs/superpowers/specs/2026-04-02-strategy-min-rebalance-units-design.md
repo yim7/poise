@@ -4,8 +4,8 @@
 
 第一版 `min_rebalance_units` 已经落地，但当前语义是：
 
-- 当 `abs(target_exposure - current_exposure) < min_rebalance_units` 时，不再开始新的调仓
-- 一旦已经进入执行生命周期，执行器仍然会继续追逐每次最新的 `target_exposure`
+- 当 `abs(desired_exposure - current_exposure) < min_rebalance_units` 时，不再开始新的调仓
+- 一旦已经进入执行生命周期，执行器仍然会继续追逐每次最新的 `desired_exposure`
 
 这会带来一个明显副作用：
 
@@ -21,7 +21,7 @@
 
 - 避免执行过程中为了追求绝对精准调仓而频繁撤单重挂
 - 保持系统仍然逐步逼近最新策略目标，而不是永久停在旧目标
-- 保持 `target_exposure` 继续表达最新原始策略目标
+- 保持 `desired_exposure` 继续表达最新原始策略目标
 - 保持 `reconciler`、`manager`、`executor` 的知识边界清晰
 - 让“执行锚点 + 门槛比较”成为 executor 内的单一事实来源
 
@@ -63,7 +63,7 @@
 
 做法：
 
-- 继续把门槛定义为 `abs(target_exposure - current_exposure)`
+- 继续把门槛定义为 `abs(desired_exposure - current_exposure)`
 - 通过更大的固定阈值减少频繁调仓
 
 优点：
@@ -176,7 +176,7 @@ pub min_rebalance_units: f64
 executor planning 不再总是使用：
 
 - `current_exposure`
-- `latest target_exposure`
+- `latest desired_exposure`
 
 来判断是否值得进入下一次执行动作。
 
@@ -199,7 +199,7 @@ executor planning 不再总是使用：
 - `SubmitPending`
 - `Working`
 
-则执行锚点 = 当前 slot 已记录的 `working_order.target_exposure`
+则执行锚点 = 当前 slot 已记录的 `working_order.desired_exposure`
 
 此时语义是：
 
@@ -222,7 +222,7 @@ executor planning 不再总是使用：
 定义：
 
 ```text
-trigger_delta = abs(latest_target_exposure - execution_anchor)
+trigger_delta = abs(latest_desired_exposure - execution_anchor)
 ```
 
 规则固定为：
@@ -335,15 +335,15 @@ trigger_delta = abs(latest_target_exposure - execution_anchor)
 - 在活动生命周期内，如果 target 漂移还没超过策略门槛，系统不会因为最新 target 重新计算订单并触发交易所 floor 分支
 - 只有在确实值得开启下一次执行动作时，才重新生成针对最新目标的真实订单
 
-### 6. 与 `target_exposure` 的关系
+### 6. 与 `desired_exposure` 的关系
 
-`target_exposure` 的语义不变：
+`desired_exposure` 的语义不变：
 
 - 它仍然表示最新原始策略目标
 
 不允许因为当前执行生命周期被锚定就把：
 
-- `track.target_exposure`
+- `track.desired_exposure`
 - `ExposureTargetChanged`
 
 改写成“当前执行目标”。
@@ -395,7 +395,7 @@ trigger_delta = abs(latest_target_exposure - execution_anchor)
 
 继续只负责：
 
-- 保存最新 `target_exposure`
+- 保存最新 `desired_exposure`
 - 把最新策略目标传给 executor
 
 不新增执行中防抖旁路。
@@ -440,7 +440,7 @@ executor 统一拥有以下知识：
    - 如果 `< min_rebalance_units`
      - 停止继续调仓
 
-6. `target_exposure` 仍保持最新原始策略目标
+6. `desired_exposure` 仍保持最新原始策略目标
    - 不因执行锚点而被改写
 
 7. planning 与 recovery 使用同一份 trigger 决策来源

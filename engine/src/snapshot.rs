@@ -20,13 +20,11 @@ pub struct ObservedState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackRuntimeSnapshot {
-    #[serde(alias = "grid_id")]
     pub track_id: TrackId,
     pub instrument: Instrument,
     pub config: TrackConfig,
     pub status: TrackStatus,
     pub current_exposure: Exposure,
-    #[serde(alias = "target_exposure")]
     pub desired_exposure: Option<Exposure>,
     #[serde(default)]
     pub manual_target_override: Option<Exposure>,

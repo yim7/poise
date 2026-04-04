@@ -29,10 +29,10 @@ pub struct OrderObservationApplication {
 
 fn updated_active_round(
     previous_state: &ExecutorState,
-    target_exposure: poise_core::types::Exposure,
+    desired_exposure: poise_core::types::Exposure,
 ) -> ExecutionRound {
     ExecutionRound {
-        target_exposure,
+        desired_exposure,
         mode: previous_state
             .active_round
             .as_ref()
@@ -49,14 +49,14 @@ fn updated_active_round(
 pub fn record_submit_request(
     previous_state: &ExecutorState,
     request: &OrderRequest,
-    target_exposure: poise_core::types::Exposure,
+    desired_exposure: poise_core::types::Exposure,
 ) -> ExecutorState {
     let ((_, sibling_slots), _) =
         slots::split_inventory_core_slot_from_slots(&previous_state.slots);
     let mut state = previous_state.clone();
     state.active_round = Some(updated_active_round(
         previous_state,
-        target_exposure.clone(),
+        desired_exposure.clone(),
     ));
     state.slots = slots::with_inventory_core_slot(
         sibling_slots,
@@ -121,7 +121,7 @@ fn is_recent_terminal_order(
 pub fn record_submit_receipt(
     previous_state: &ExecutorState,
     request: &OrderRequest,
-    target_exposure: poise_core::types::Exposure,
+    desired_exposure: poise_core::types::Exposure,
     receipt: &OrderReceipt,
 ) -> SubmitReceiptResolution {
     let matching_indexes = previous_state
@@ -146,7 +146,7 @@ pub fn record_submit_receipt(
     };
 
     let mut state = previous_state.clone();
-    state.active_round = Some(updated_active_round(previous_state, target_exposure));
+    state.active_round = Some(updated_active_round(previous_state, desired_exposure));
     state.slots[*slot_index] = ExecutionSlot {
         slot: slot.slot.clone(),
         state: SlotState::Working,
@@ -384,23 +384,23 @@ pub(super) fn submit_pending_slot(
     }
 }
 
-pub(super) fn target_exposure_reached(
+pub(super) fn desired_exposure_reached(
     current_exposure: &poise_core::types::Exposure,
-    target_exposure: &poise_core::types::Exposure,
+    desired_exposure: &poise_core::types::Exposure,
 ) -> bool {
-    let delta = target_exposure.0 - current_exposure.0;
+    let delta = desired_exposure.0 - current_exposure.0;
     if delta.abs() <= f64::EPSILON {
         return true;
     }
 
-    if target_exposure.0.abs() <= f64::EPSILON {
+    if desired_exposure.0.abs() <= f64::EPSILON {
         return current_exposure.0.abs() <= f64::EPSILON;
     }
 
-    if target_exposure.0 >= 0.0 {
-        current_exposure.0 >= target_exposure.0
+    if desired_exposure.0 >= 0.0 {
+        current_exposure.0 >= desired_exposure.0
     } else {
-        current_exposure.0 <= target_exposure.0
+        current_exposure.0 <= desired_exposure.0
     }
 }
 
@@ -418,7 +418,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: Exposure(4.0),
+                desired_exposure: Exposure(4.0),
                 mode: crate::executor::ExecutionMode::Passive,
                 started_at: now,
             }),
@@ -490,7 +490,7 @@ mod tests {
             .expect("submit request should record a working order");
 
         assert!(
-            !order.contains_key("target_exposure"),
+            !order.contains_key("desired_exposure"),
             "working order should only keep exchange facts"
         );
     }
@@ -500,7 +500,7 @@ mod tests {
         let previous_state = working_state();
         let updated = updated_active_round(&previous_state, Exposure(6.0));
 
-        assert_eq!(updated.target_exposure, Exposure(6.0));
+        assert_eq!(updated.desired_exposure, Exposure(6.0));
         assert_eq!(
             updated.mode,
             previous_state
@@ -633,7 +633,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
         let previous_state = ExecutorState {
             active_round: Some(crate::runtime::ExecutionRound {
-                target_exposure: Exposure(2.0),
+                desired_exposure: Exposure(2.0),
                 mode: crate::executor::ExecutionMode::Passive,
                 started_at: now,
             }),

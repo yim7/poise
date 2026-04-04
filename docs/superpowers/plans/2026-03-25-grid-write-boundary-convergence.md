@@ -53,7 +53,7 @@ async fn save_transition_persists_snapshot_events_and_effects_atomically() {
     let snapshot = test_snapshot();
     let effects = vec![GridEffect::SubmitOrder {
         request: test_order_request(),
-        target_exposure: Exposure(6.0),
+        desired_exposure: Exposure(6.0),
     }];
 
     let persisted = storage

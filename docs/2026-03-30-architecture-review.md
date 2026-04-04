@@ -61,7 +61,7 @@
 
 **位置：** `engine/src/runtime.rs:123`
 
-`GridRuntime` 的 14 个字段全部 `pub`。`GridManager` 是预期的唯一 owner/mutator，但 pub 字段使得任何持有 `&mut GridRuntime` 的代码都能绕过 manager 直接改状态。状态修改的约束（如 pause 时必须同时清 `target_exposure`）只能靠人工保证。
+`GridRuntime` 的 14 个字段全部 `pub`。`GridManager` 是预期的唯一 owner/mutator，但 pub 字段使得任何持有 `&mut GridRuntime` 的代码都能绕过 manager 直接改状态。状态修改的约束（如 pause 时必须同时清 `desired_exposure`）只能靠人工保证。
 
 **复杂度问题：** Overexposure — 接口暴露了不应由外部直接修改的内部状态，不变量缺乏编译期保护。
 
@@ -108,7 +108,7 @@
 ## 正面设计信号
 
 - **端口抽象清晰：** `ExchangePort`、`MarketDataPort`、`StateRepositoryPort` 边界合理，测试中 fake 替换干净。
-- **纯函数领域逻辑：** `target_exposure()`、`band_status()`、`evaluate_risk()` 不依赖外部状态。
+- **纯函数领域逻辑：** `desired_exposure()`、`band_status()`、`evaluate_risk()` 不依赖外部状态。
 - **不可变状态转换模式：** executor 的 `plan()`、`record_submit_receipt()` 等接收旧状态返回新状态。
 - **依赖方向正确：** core → engine → storage/binance → server，无环。
 - **测试质量高：** 每个 crate 有充分单元测试，server 含并发集成测试（`BlockingPersistence`）。
