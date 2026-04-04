@@ -27,6 +27,7 @@ use ratatui::backend::CrosstermBackend;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8000";
 const INITIAL_LOAD_RETRY_DELAY: Duration = Duration::from_millis(500);
+const ACCOUNT_SUMMARY_REQUEST_TIMEOUT: Duration = Duration::from_millis(250);
 const WS_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -395,10 +396,22 @@ async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Resu
 }
 
 async fn load_account_summary_best_effort(client: &ApiClient) -> Option<AccountSummaryView> {
-    match client.get_account_summary().await {
-        Ok(summary) => Some(summary),
-        Err(error) => {
+    match tokio::time::timeout(
+        ACCOUNT_SUMMARY_REQUEST_TIMEOUT,
+        client.get_account_summary(),
+    )
+    .await
+    {
+        Ok(Ok(summary)) => Some(summary),
+        Ok(Err(error)) => {
             tracing::warn!("failed to refresh account summary: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                "failed to refresh account summary within {:?}",
+                ACCOUNT_SUMMARY_REQUEST_TIMEOUT
+            );
             None
         }
     }
@@ -509,16 +522,17 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
         }
     }
 
-    if let Some(account_summary) = load_account_summary_best_effort(client).await {
-        refreshed.apply_account_summary(account_summary);
-    } else {
-        refreshed.clear_account_summary();
-    }
-
     refreshed.current_view = current_view;
     refreshed.should_quit = should_quit;
     refreshed.mark_initial_load_complete();
     *app = refreshed;
+
+    if let Some(account_summary) = load_account_summary_best_effort(client).await {
+        app.apply_account_summary(account_summary);
+    } else {
+        app.clear_account_summary();
+    }
+
     Ok(())
 }
 
@@ -635,6 +649,7 @@ mod tests {
     struct ProjectionStubState {
         requests: Arc<Mutex<Vec<String>>>,
         account_summary_failures_left: Arc<Mutex<usize>>,
+        account_summary_delay: Arc<Mutex<Option<Duration>>>,
     }
 
     async fn list_projected_grids(
@@ -648,6 +663,10 @@ mod tests {
         State(state): State<ProjectionStubState>,
     ) -> Result<Json<AccountSummaryView>, StatusCode> {
         state.requests.lock().await.push("/account".into());
+        let delay = *state.account_summary_delay.lock().await;
+        if let Some(delay) = delay {
+            sleep(delay).await;
+        }
         let mut failures_left = state.account_summary_failures_left.lock().await;
         if *failures_left > 0 {
             *failures_left -= 1;
@@ -689,6 +708,7 @@ mod tests {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
             account_summary_failures_left: Arc::new(Mutex::new(0)),
+            account_summary_delay: Arc::new(Mutex::new(None)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -729,6 +749,7 @@ mod tests {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
             account_summary_failures_left: Arc::new(Mutex::new(0)),
+            account_summary_delay: Arc::new(Mutex::new(None)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -754,6 +775,34 @@ mod tests {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
             account_summary_failures_left: Arc::new(Mutex::new(1)),
+            account_summary_delay: Arc::new(Mutex::new(None)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/account", get(get_projected_account_summary))
+            .route("/tracks", get(list_projected_grids))
+            .route("/tracks/:id", get(get_projected_detail))
+            .route(
+                "/debug/tracks/:id/diagnostics",
+                get(get_projected_diagnostics),
+            )
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (ApiClient::new(format!("http://{address}")), state)
+    }
+
+    async fn spawn_projection_stub_server_with_slow_account_summary(
+        delay: Duration,
+    ) -> (ApiClient, ProjectionStubState) {
+        let state = ProjectionStubState {
+            requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(0)),
+            account_summary_delay: Arc::new(Mutex::new(Some(delay))),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1178,6 +1227,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_initial_state_does_not_wait_for_slow_account_summary() {
+        let (client, state) =
+            spawn_projection_stub_server_with_slow_account_summary(Duration::from_secs(1)).await;
+
+        let app = tokio::time::timeout(
+            Duration::from_millis(500),
+            load_initial_state(&client),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(app.current_view, View::Dashboard);
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn diagnostics_are_requested_only_after_debug_toggle() {
         let (client, state) = spawn_projection_stub_server().await;
         let mut app = load_initial_state(&client).await.unwrap();
@@ -1241,6 +1317,39 @@ mod tests {
 
         sync_projected_state(&client, &mut app).await.unwrap();
 
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/account".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_projected_state_does_not_wait_for_slow_account_summary() {
+        let (client, state) =
+            spawn_projection_stub_server_with_slow_account_summary(Duration::from_secs(1)).await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            sync_projected_state(&client, &mut app),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(app.current_view, View::Instance);
         assert!(app.account_summary.is_none());
         assert_eq!(app.grids.len(), 2);
         assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
