@@ -381,7 +381,7 @@ Task 3 code commit:
 - Test: `cargo test -p poise-tui views::dashboard::tests::renders_account_panel_with_attention_signal -- --nocapture`
 - Test: `cargo test -p poise-tui tests::handle_ws_event_applies_account_summary_changed -- --nocapture`
 
-- [ ] **Step 1: 先写失败测试，固定 TUI 启动顺序、账户状态和渲染结果**
+- [x] **Step 1: 先写失败测试，固定 TUI 启动顺序、账户状态和渲染结果**
 
 要求：
 - 在 `tui/src/api_client.rs` 固定 `GET /account`
@@ -393,7 +393,7 @@ Task 3 code commit:
 - 在 `tui/src/views/dashboard.rs` 固定 `Dashboard` 顶部出现 `Account` 区块
 - 在 `tui/src/main.rs` 或 `tui/src/app.rs` 固定 `AccountSummaryChanged` 事件会更新面板状态
 
-- [ ] **Step 2: 运行定向测试，确认 TUI 还没有账户面板**
+- [x] **Step 2: 运行定向测试，确认 TUI 还没有账户面板**
 
 Run:
 `cargo test -p poise-tui api_client::tests::gets_account_summary -- --nocapture`
@@ -409,7 +409,7 @@ Expected:
   - `Dashboard` 还只有表格
   - 账户事件还没有接到 UI 更新
 
-- [ ] **Step 3: 实现 TUI 账户面板**
+- [x] **Step 3: 实现 TUI 账户面板**
 
 要求：
 - `ApiClient` 新增 `get_account_summary()`
@@ -422,7 +422,7 @@ Expected:
   - `unavailable` fallback
 - `dashboard.rs` 只负责布局，把账户区块和表格拼起来
 
-- [ ] **Step 4: 跑 TUI 包和跨包回归**
+- [x] **Step 4: 跑 TUI 包和跨包回归**
 
 Run:
 `cargo test -p poise-tui`
@@ -433,7 +433,7 @@ Expected:
 - 所有受影响包回归通过
 - 账户监控面板可以通过 HTTP bootstrap 和 WebSocket 增量更新稳定显示
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add tui/src/api_client.rs tui/src/app.rs tui/src/main.rs tui/src/views/dashboard.rs tui/src/views/mod.rs tui/src/views/account_panel.rs tui/tests/fixtures/account_summary_view.json tui/tests/fixtures/ws_account_summary_changed.json
@@ -441,4 +441,7 @@ git commit -m "feat: add dashboard account monitor panel"
 ```
 
 Task 4 code commit:
-`<pending>`
+`9a56cfb`
+
+补充：
+- 为了让 `poise-tui` 的端到端测试能编译真实 `poise-server` 二进制，本 task 一并把 `server/Cargo.toml` 中的 `async-trait` 提升到了运行时依赖。
