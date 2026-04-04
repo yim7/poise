@@ -10,8 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-    TrackDiagnosticsView, TrackListResponse,
+    AccountSummaryView, GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
+    TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -52,6 +52,17 @@ impl ApiClient {
             .context("failed to request track list")?;
 
         decode_json(response, "list tracks").await
+    }
+
+    pub async fn get_account_summary(&self) -> Result<AccountSummaryView> {
+        let response = self
+            .http
+            .get(self.endpoint("/account"))
+            .send()
+            .await
+            .context("failed to request account summary")?;
+
+        decode_json(response, "get account summary").await
     }
 
     pub async fn get_track_detail(&self, id: &str) -> Result<TrackDetailView> {
@@ -184,8 +195,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::protocol::{
-        GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-        TrackDiagnosticsView, TrackListResponse,
+        AccountSummaryView, GridCommandType, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
@@ -207,11 +218,22 @@ mod tests {
         .unwrap()
     }
 
+    fn account_summary_view() -> AccountSummaryView {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/account_summary_view.json"
+        ))
+        .unwrap()
+    }
+
     fn track_diagnostics_view() -> TrackDiagnosticsView {
         serde_json::from_str(include_str!(
             "../tests/fixtures/track_diagnostics_view.json"
         ))
         .unwrap()
+    }
+
+    async fn get_account_summary() -> Json<AccountSummaryView> {
+        Json(account_summary_view())
     }
 
     async fn list_tracks() -> Json<TrackListResponse> {
@@ -257,6 +279,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/account", get(get_account_summary))
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
             .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
@@ -280,6 +303,19 @@ mod tests {
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].id, BTC_GRID_ID);
         assert_eq!(response.items[0].instrument.symbol, "BTCUSDT");
+    }
+
+    #[tokio::test]
+    async fn gets_account_summary() {
+        let (base_url, _) = spawn_stub_server().await;
+        let client = ApiClient::new(base_url);
+
+        let summary = client.get_account_summary().await.unwrap();
+
+        assert_eq!(summary.equity, Some(12_500.0));
+        assert_eq!(summary.available, Some(9_000.0));
+        assert_eq!(summary.risk_signal, crate::protocol::RiskSignalView::Attention);
+        assert_eq!(summary.reason.as_deref(), Some("day_change -2.8%"));
     }
 
     #[tokio::test]

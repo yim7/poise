@@ -66,6 +66,10 @@ impl App {
             .filter(|detail| self.selected_track_id() == Some(detail.identity.id.as_str()))
     }
 
+    pub fn account_summary(&self) -> Option<&AccountSummaryView> {
+        self.account_summary.as_ref()
+    }
+
     pub fn selected_execution_status(&self) -> Option<ExecutionStatusView> {
         self.current_track_detail()
             .map(|detail| detail.execution.execution_status)

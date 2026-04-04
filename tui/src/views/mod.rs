@@ -1,3 +1,4 @@
+pub mod account_panel;
 pub mod dashboard;
 pub mod help;
 pub mod instance;

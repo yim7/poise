@@ -1,13 +1,21 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::app::App;
 use crate::protocol::{ExecutionStateView, ExecutionStatusView};
 use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
 use crate::theme::Theme;
+use crate::views::account_panel;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(area);
+
+    account_panel::render(frame, sections[0], app.account_summary());
+
     let header = Row::new(["ID", "Symbol", "Lifecycle", "Execution", "Exposure", "PnL"])
         .style(Theme::table_header());
     let rows = app.grids.iter().map(|item| {
@@ -50,7 +58,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if !app.grids.is_empty() {
         state.select(Some(app.selected_index));
     }
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, sections[1], &mut state);
 }
 
 fn format_exposure_summary(current: f64, target: Option<f64>) -> SignalDisplay {
@@ -100,7 +108,7 @@ mod tests {
     use ratatui::style::Color;
 
     use crate::app::App;
-    use crate::protocol::ExecutionStatusView;
+    use crate::protocol::{AccountSummaryView, ExecutionStatusView};
 
     use super::render;
 
@@ -143,6 +151,13 @@ mod tests {
         }
 
         Vec::new()
+    }
+
+    fn account_summary_view() -> AccountSummaryView {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/account_summary_view.json"
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -229,5 +244,31 @@ mod tests {
         assert!(text.contains("3.5000"));
         assert!(text.contains("↓ -0.5000"));
         assert!(text.contains("↓ -245.30"));
+    }
+
+    #[test]
+    fn renders_account_panel_with_attention_signal() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let mut app = App::new(response.items);
+        app.account_summary = Some(account_summary_view());
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("Account"));
+        assert!(text.contains("12,500.00"));
+        assert!(text.contains("attention"));
+        assert!(
+            background_colors_for_substring(&terminal, "attention")
+                .iter()
+                .any(|bg| *bg != Color::Reset)
+        );
     }
 }

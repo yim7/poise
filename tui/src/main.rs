@@ -182,8 +182,10 @@ fn derive_ws_url(base_url: &str) -> Result<String> {
 }
 
 async fn load_initial_state(client: &ApiClient) -> Result<App> {
+    let account_summary = client.get_account_summary().await?;
     let response = client.list_tracks().await?;
     let mut app = App::new(response.items);
+    app.apply_account_summary(account_summary);
     if let Some(track_id) = app.selected_track_id().map(ToOwned::to_owned) {
         let detail = client.get_track_detail(&track_id).await?;
         app.apply_track_detail(detail);
@@ -473,8 +475,10 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     let should_load_diagnostics =
         debug_diagnostics_enabled && matches!(current_view, View::Instance);
 
+    let account_summary = client.get_account_summary().await?;
     let response = client.list_tracks().await?;
     let mut refreshed = App::new(response.items);
+    refreshed.apply_account_summary(account_summary);
     refreshed.set_debug_diagnostics_enabled(debug_diagnostics_enabled);
     if let Some(selected_track_id) = selected_track_id
         && let Some(index) = refreshed
@@ -531,9 +535,9 @@ mod tests {
     use crate::app::App;
     use crate::input::Action;
     use crate::protocol::{
-        ExecutionStateView, GridCommandType, GridStatus, StreamEvent, TrackCommandAccepted,
-        TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
-        TrackListResponse,
+        AccountSummaryView, ExecutionStateView, GridCommandType, GridStatus, RiskSignalView,
+        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackDiagnosticsView, TrackListItemView, TrackListResponse,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -595,6 +599,20 @@ mod tests {
         .unwrap()
     }
 
+    fn account_summary_view() -> AccountSummaryView {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/account_summary_view.json"
+        ))
+        .unwrap()
+    }
+
+    fn account_summary_changed_event() -> StreamEvent {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_account_summary_changed.json"
+        ))
+        .unwrap()
+    }
+
     #[derive(Clone)]
     struct ProjectionStubState {
         requests: Arc<Mutex<Vec<String>>>,
@@ -605,6 +623,13 @@ mod tests {
     ) -> Json<TrackListResponse> {
         state.requests.lock().await.push("/tracks".into());
         Json(track_list_response())
+    }
+
+    async fn get_projected_account_summary(
+        State(state): State<ProjectionStubState>,
+    ) -> Json<AccountSummaryView> {
+        state.requests.lock().await.push("/account".into());
+        Json(account_summary_view())
     }
 
     async fn get_projected_detail(
@@ -643,6 +668,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/account", get(get_projected_account_summary))
             .route("/tracks", get(list_projected_grids))
             .route("/tracks/:id", get(get_projected_detail))
             .route(
@@ -681,6 +707,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/account", get(get_projected_account_summary))
             .route("/tracks", get(list_projected_grids))
             .route("/tracks/:id", get(get_projected_detail))
             .route(
@@ -739,6 +766,10 @@ mod tests {
 
     async fn list_tracks(State(state): State<StubState>) -> Json<TrackListResponse> {
         Json(state.list.lock().await.clone())
+    }
+
+    async fn get_account_summary() -> Json<AccountSummaryView> {
+        Json(account_summary_view())
     }
 
     async fn get_track_detail(
@@ -949,6 +980,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/account", get(get_account_summary))
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
             .route("/tracks/:id/commands", post(submit_command))
@@ -972,6 +1004,7 @@ mod tests {
         let state = stub_state();
         let listener = TcpListener::bind(address).await.unwrap();
         let app = Router::new()
+            .route("/account", get(get_account_summary))
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
             .route("/tracks/:id/commands", post(submit_command))
@@ -1055,16 +1088,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_initial_state_fetches_list_then_selected_detail() {
+    async fn load_initial_state_fetches_account_before_tracks() {
         let (client, state) = spawn_projection_stub_server().await;
 
         let app = load_initial_state(&client).await.unwrap();
 
+        assert_eq!(app.account_summary.as_ref().unwrap().equity, Some(12_500.0));
         assert_eq!(app.grids.len(), 2);
         assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/tracks".to_string(), format!("/tracks/{BTC_GRID_ID}")]
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
         );
     }
 
@@ -1077,7 +1115,11 @@ mod tests {
 
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/tracks".to_string(), format!("/tracks/{BTC_GRID_ID}")]
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
         );
 
         handle_action(&client, &mut app, Action::ToggleDiagnostics)
@@ -1087,6 +1129,7 @@ mod tests {
         assert_eq!(
             state.requests.lock().await.clone(),
             vec![
+                "/account".to_string(),
                 "/tracks".to_string(),
                 format!("/tracks/{BTC_GRID_ID}"),
                 format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"),
@@ -1164,6 +1207,24 @@ mod tests {
             track_detail_changed_event(),
             StreamEvent::TrackDetailChanged { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_ws_event_applies_account_summary_changed() {
+        let (client, _) = spawn_projection_stub_server().await;
+        let mut app = App::new(track_list_response().items);
+
+        handle_ws_event(&client, &mut app, account_summary_changed_event()).await;
+
+        assert_eq!(app.account_summary.as_ref().unwrap().equity, Some(12_420.0));
+        assert_eq!(
+            app.account_summary.as_ref().unwrap().risk_signal,
+            RiskSignalView::Attention
+        );
+        assert_eq!(
+            app.account_summary.as_ref().unwrap().reason.as_deref(),
+            Some("available 18.0%")
+        );
     }
 
     #[tokio::test]

@@ -33,6 +33,13 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    pub fn status_attention() -> Style {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn table_header() -> Style {
         Style::default()
             .fg(Color::Yellow)
