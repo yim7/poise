@@ -1,66 +1,61 @@
 {
+  "type": "track_detail_changed",
   "track_id": "btc-core",
-  "payload": {
-    "type": "track_detail_changed",
-    "detail": {
-      "identity": {
-        "id": "btc-core",
-        "instrument": {
-          "venue": "binance_futures",
-          "symbol": "BTCUSDT"
-        }
+  "detail": {
+    "identity": {
+      "id": "btc-core",
+      "instrument": {
+        "venue": "binance_futures",
+        "symbol": "BTCUSDT"
+      }
+    },
+    "status": {
+      "lifecycle": {
+        "status": "active",
+        "updated_at": "2026-03-26T10:03:00Z"
       },
-      "status": {
-        "lifecycle": {
-          "status": "active",
-          "updated_at": "2026-03-26T10:03:00Z"
-        },
-        "reference_price": 101.5
-      },
-      "strategy": {
-        "lower_price": 90.0,
-        "upper_price": 110.0,
-        "long_exposure_units": 8.0,
-        "short_exposure_units": 8.0,
-        "notional_per_unit": 375.0,
-        "min_rebalance_units": 0.5,
-        "shape_family": "linear",
-        "out_of_band_policy": "freeze"
-      },
-      "market": {
-        "mark_price": 101.5,
-        "index_price": 101.45
-      },
-      "position": {
-        "current_exposure": 3.7,
-        "desired_exposure": 4.0
-      },
-      "pnl": {
-        "total_pnl": 1245.3,
-        "realized_pnl": 980.1,
-        "unrealized_pnl": 265.2
-      },
-      "execution_stats": {
-        "max_inventory_gap_abs": 1.5,
-        "max_gap_age_ms": 120000,
-        "stats_started_at": "2026-03-26T09:45:00Z"
-      },
-      "execution": {
-        "state": "open",
-        "execution_status": "normal",
-        "inventory_gap": 0.3,
-        "gap_age_ms": 45000,
-        "active_slot_count": 0,
-        "slots": []
-      },
-      "activity": [],
-      "available_commands": [
-        {
-          "command": "pause",
-          "enabled": true,
-          "disabled_reason": null
-        }
-      ]
-    }
+      "reference_price": 101.5
+    },
+    "strategy": {
+      "lower_price": 90.0,
+      "upper_price": 110.0,
+      "long_exposure_units": 8.0,
+      "short_exposure_units": 8.0,
+      "notional_per_unit": 375.0,
+      "min_rebalance_units": 0.5,
+      "shape_family": "linear",
+      "out_of_band_policy": "freeze"
+    },
+    "market": {
+      "mark_price": 101.5,
+      "index_price": 101.45
+    },
+    "position": {
+      "current_exposure": 3.7,
+      "target_exposure": 4.0
+    },
+    "statistics": {
+      "total_pnl": 1245.3,
+      "realized_pnl": 980.1,
+      "max_inventory_gap_abs": 1.5,
+      "max_gap_age_ms": 120000,
+      "stats_started_at": "2026-03-26T09:45:00Z"
+    },
+    "execution": {
+      "state": "open",
+      "execution_status": "normal",
+      "inventory_gap": 0.3,
+      "gap_age_ms": 45000,
+      "active_slot_count": 0,
+      "slots": []
+    },
+    "activity": [],
+    "available_commands": [
+      {
+        "command": "pause",
+        "enabled": true,
+        "disabled_reason": null
+      }
+    ]
   }
 }

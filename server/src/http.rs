@@ -5,8 +5,8 @@ use axum::{Json, Router};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
-    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-    TrackDiagnosticsView, TrackListResponse,
+    AccountSummaryView, GridCommandType, TrackCommandAccepted, TrackCommandRequest,
+    TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -29,6 +29,7 @@ struct HealthResponse {
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/account", get(get_account))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
         .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
@@ -89,6 +90,18 @@ async fn health(
     ))
 }
 
+async fn get_account(
+    State(state): State<ServerState>,
+) -> Result<Json<AccountSummaryView>, (StatusCode, Json<ErrorResponse>)> {
+    let summary = state
+        .account_monitor
+        .current_summary()
+        .await
+        .map(|model| state.account_projector.project_summary(&model))
+        .unwrap_or_default();
+    Ok(Json(summary))
+}
+
 async fn get_track_detail(
     Path(id): Path<String>,
     State(state): State<ServerState>,
@@ -142,13 +155,13 @@ async fn submit_command(
 }
 
 fn map_command(
-    command: TrackCommandType,
+    command: GridCommandType,
 ) -> Result<TrackCommand, (StatusCode, Json<ErrorResponse>)> {
     match command {
-        TrackCommandType::Pause => Ok(TrackCommand::Pause),
-        TrackCommandType::Resume => Ok(TrackCommand::Resume),
-        TrackCommandType::Terminate => Ok(TrackCommand::Terminate),
-        TrackCommandType::Flatten => Ok(TrackCommand::Flatten),
+        GridCommandType::Pause => Ok(TrackCommand::Pause),
+        GridCommandType::Resume => Ok(TrackCommand::Resume),
+        GridCommandType::Terminate => Ok(TrackCommand::Terminate),
+        GridCommandType::Flatten => Ok(TrackCommand::Flatten),
     }
 }
 
@@ -195,7 +208,7 @@ mod tests {
     use anyhow::anyhow;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::{
@@ -203,20 +216,28 @@ mod tests {
         types::{ExchangeRules, Exposure},
     };
     use poise_engine::manager::TrackManager;
+    use poise_engine::ports::AccountSummarySnapshot;
     use poise_engine::ports::{
         ClockPort, OrderStatus, StateRepositoryPort, StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
-        ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView, TrackCommandAccepted,
-        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackListResponse, TrackStatus,
+        AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
+        GridCommandType, GridStatus, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
+        TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
-    use crate::assembly::{ServerState, build_server_state};
-    use crate::notifications::TrackInternalNotification;
+    use crate::account_monitor::AccountMonitor;
+    use crate::account_monitor_store::{
+        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    };
+    use crate::assembly::{
+        ServerState, build_server_state, build_server_state_with_account_monitor,
+    };
+    use crate::config::AccountMonitorConfig;
+    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
@@ -239,6 +260,69 @@ mod tests {
     impl ClockPort for FakeClock {
         fn now(&self) -> chrono::DateTime<Utc> {
             Utc::now()
+        }
+    }
+
+    struct AccountSummaryOnlyExchange;
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for AccountSummaryOnlyExchange {
+        async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
+            Err(anyhow!("not used in tests"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::ExchangePort for AccountSummaryOnlyExchange {
+        async fn submit_order(
+            &self,
+            _req: poise_engine::ports::OrderRequest,
+        ) -> anyhow::Result<poise_engine::ports::OrderReceipt> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> anyhow::Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> anyhow::Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<poise_engine::ports::Position> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<Vec<poise_engine::ports::ExchangeOrder>> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_exchange_info(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<poise_engine::ports::ExchangeInfo> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_account_margin_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<poise_engine::ports::AccountMarginSnapshot> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
+            Err(anyhow!("not used in tests"))
         }
     }
 
@@ -269,7 +353,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
         let write_service = Arc::new(TrackWriteService::new(
@@ -284,6 +368,72 @@ mod tests {
             state_repository,
             query_service,
             Arc::new(TrackProjector::new()),
+        )
+    }
+
+    async fn app_state_with_account_summary() -> ServerState {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = test_manager();
+        let mut snapshot = manager
+            .snapshot("btc-core")
+            .expect("seeded manager should expose runtime snapshot");
+        snapshot.risk.realized_pnl_cumulative = 980.1;
+        snapshot.risk.unrealized_pnl = 265.2;
+        repository
+            .save_transition(
+                "btc-core",
+                &snapshot,
+                &[DomainEvent::ExposureTargetChanged {
+                    from: Exposure(3.5),
+                    to: Exposure(4.0),
+                }],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
+        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let write_service = Arc::new(TrackWriteService::new(
+            manager,
+            state_repository.clone(),
+            notifications.clone(),
+        ));
+        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
+            SqliteStorage::in_memory().unwrap(),
+        )));
+        account_store
+            .save_state(&StoredAccountMonitorState {
+                trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+                baseline_equity: 13_000.0,
+                baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+                last_observed_account_snapshot: Some(AccountSummarySnapshot {
+                    equity: 12_500.0,
+                    available: 9_000.0,
+                    unrealized_pnl: -350.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+                }),
+            })
+            .await
+            .unwrap();
+        let account_monitor = Arc::new(
+            AccountMonitor::restore(
+                Arc::new(AccountSummaryOnlyExchange),
+                account_store,
+                notifications,
+                AccountMonitorConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        build_server_state_with_account_monitor(
+            write_service,
+            state_repository,
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
+            account_monitor,
         )
     }
 
@@ -321,11 +471,11 @@ mod tests {
                 ),
             )
             .unwrap();
-        let track = manager
+        let grid = manager
             .get_track("btc-core")
-            .expect("track should still exist")
+            .expect("grid should still exist")
             .clone();
-        let mut snapshot = track.snapshot();
+        let mut snapshot = grid.snapshot();
         let slot_order = snapshot
             .executor_state
             .slots
@@ -339,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_tracks_returns_track_list_response() {
+    async fn list_grids_returns_grid_list_response() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -450,23 +600,21 @@ mod tests {
             payload_json["strategy"]["min_rebalance_units"].as_f64(),
             Some(0.5)
         );
-        assert!((payload.pnl.realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((payload.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
-        assert!((payload.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+        assert!((payload.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((payload.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert_eq!(
-            payload_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
-            Some(payload.execution_stats.max_inventory_gap_abs)
+            payload_json["statistics"]["max_inventory_gap_abs"].as_f64(),
+            Some(payload.statistics.max_inventory_gap_abs)
         );
         assert_eq!(
-            payload_json["execution_stats"]["max_gap_age_ms"].as_i64(),
+            payload_json["statistics"]["max_gap_age_ms"].as_i64(),
             Some(0)
         );
-        assert!(payload.execution_stats.stats_started_at.is_some());
+        assert!(payload.statistics.stats_started_at.is_some());
         assert_eq!(
-            payload_json["execution_stats"]["stats_started_at"].as_str(),
-            payload.execution_stats.stats_started_at.as_deref()
+            payload_json["statistics"]["stats_started_at"].as_str(),
+            payload.statistics.stats_started_at.as_deref()
         );
-        assert!(payload_json.get("statistics").is_none());
         assert_eq!(
             payload.execution.execution_status,
             ExecutionStatusView::Normal
@@ -493,6 +641,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_account_returns_latest_summary() {
+        let response = router(app_state_with_account_summary().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/account")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: AccountSummaryView = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            payload,
+            AccountSummaryView {
+                equity: Some(12_500.0),
+                available: Some(9_000.0),
+                unrealized_pnl: Some(-350.0),
+                day_change_pct: Some(-3.8461538461538463),
+                risk_signal: RiskSignalView::Attention,
+                reason: Some("day_change -3.8%".to_string()),
+                day_base_at: Some("2026-04-04T00:00:01+00:00".to_string()),
+                updated_at: Some("2026-04-04T01:23:45+00:00".to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn submit_command_accepts_typed_command() {
         let response = router(app_state().await)
             .oneshot(
@@ -502,7 +681,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Pause,
+                            command: GridCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -517,7 +696,7 @@ mod tests {
 
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
-        assert_eq!(payload.command, TrackCommandType::Pause);
+        assert_eq!(payload.command, GridCommandType::Pause);
     }
 
     #[tokio::test]
@@ -530,7 +709,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Flatten,
+                            command: GridCommandType::Flatten,
                         })
                         .unwrap(),
                     ))
@@ -544,7 +723,7 @@ mod tests {
         let payload: TrackCommandAccepted = serde_json::from_slice(&body).unwrap();
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
-        assert_eq!(payload.command, TrackCommandType::Flatten);
+        assert_eq!(payload.command, GridCommandType::Flatten);
     }
 
     #[tokio::test]
@@ -557,7 +736,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Terminate,
+                            command: GridCommandType::Terminate,
                         })
                         .unwrap(),
                     ))
@@ -571,11 +750,11 @@ mod tests {
         let payload: TrackCommandAccepted = serde_json::from_slice(&body).unwrap();
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
-        assert_eq!(payload.command, TrackCommandType::Terminate);
+        assert_eq!(payload.command, GridCommandType::Terminate);
     }
 
     #[tokio::test]
-    async fn resume_command_rejects_non_paused_track() {
+    async fn resume_command_rejects_non_paused_grid() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -584,7 +763,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Resume,
+                            command: GridCommandType::Resume,
                         })
                         .unwrap(),
                     ))
@@ -605,7 +784,7 @@ mod tests {
                 .snapshot("btc-core")
                 .expect("seeded manager should expose runtime snapshot"),
         );
-        let (notifications, _) = tokio::sync::broadcast::channel::<TrackInternalNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackReadRepositoryPort>
@@ -630,7 +809,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Pause,
+                            command: GridCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -652,7 +831,7 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload.status.lifecycle.status, TrackStatus::Active);
+        assert_eq!(payload.status.lifecycle.status, GridStatus::Active);
     }
 
     #[tokio::test]
@@ -668,7 +847,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Pause,
+                            command: GridCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -689,17 +868,13 @@ mod tests {
             .unwrap();
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
-        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["status"]["lifecycle"]["status"], "paused");
-        assert_eq!(
-            payload["position"]["desired_exposure"],
-            serde_json::Value::Null
-        );
-        assert_eq!(payload["position"].as_object().unwrap().len(), 2);
+        let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.status.lifecycle.status, GridStatus::Paused);
+        assert_eq!(payload.position.target_exposure, None);
     }
 
     #[tokio::test]
-    async fn resume_command_reactivates_paused_track() {
+    async fn resume_command_reactivates_paused_grid() {
         let app = router(app_state().await);
 
         let pause = app
@@ -711,7 +886,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Pause,
+                            command: GridCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -730,7 +905,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: TrackCommandType::Resume,
+                            command: GridCommandType::Resume,
                         })
                         .unwrap(),
                     ))
@@ -752,11 +927,11 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload.status.lifecycle.status, TrackStatus::Active);
+        assert_eq!(payload.status.lifecycle.status, GridStatus::Active);
     }
 
     #[tokio::test]
-    async fn get_track_detail_returns_404_for_missing_track() {
+    async fn get_grid_detail_returns_404_for_missing_grid() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -790,7 +965,7 @@ mod tests {
             payload
                 .items
                 .iter()
-                .any(|item| item.message.contains("desired exposure"))
+                .any(|item| item.message.contains("target exposure"))
         );
     }
 

@@ -19,7 +19,7 @@ use tokio::time::{Instant, MissedTickBehavior, sleep};
 
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
-use crate::notifications::TrackInternalNotification;
+use crate::notifications::ServerNotification;
 use crate::order_outcome::{
     ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
 };
@@ -32,6 +32,7 @@ pub struct ServerRuntime {
     market_data: Arc<dyn MarketDataPort>,
     recovery_retry_interval: Duration,
     audit_interval: Duration,
+    account_refresh_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -124,6 +125,8 @@ pub struct RuntimeHandles {
     pub effect_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub recovery_task: JoinHandle<()>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub account_task: JoinHandle<()>,
 }
 
 const STARTUP_RETRY_ATTEMPTS: usize = 5;
@@ -172,6 +175,7 @@ impl ServerRuntime {
             HashMap::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
+            Duration::from_secs(5),
         )
     }
 
@@ -188,6 +192,7 @@ impl ServerRuntime {
             market_data,
             account_margin_snapshots,
             recovery_retry_interval,
+            Duration::from_secs(5),
             Duration::from_secs(5),
         )
     }
@@ -207,6 +212,27 @@ impl ServerRuntime {
             HashMap::new(),
             recovery_retry_interval,
             audit_interval,
+            Duration::from_secs(5),
+        )
+    }
+
+    #[cfg(test)]
+    fn with_reconcile_and_account_refresh_intervals(
+        state: ServerState,
+        exchange: Arc<dyn ExchangePort>,
+        market_data: Arc<dyn MarketDataPort>,
+        recovery_retry_interval: Duration,
+        audit_interval: Duration,
+        account_refresh_interval: Duration,
+    ) -> Self {
+        Self::with_reconcile_intervals_and_account_margin_snapshots(
+            state,
+            exchange,
+            market_data,
+            HashMap::new(),
+            recovery_retry_interval,
+            audit_interval,
+            account_refresh_interval,
         )
     }
 
@@ -217,6 +243,7 @@ impl ServerRuntime {
         account_margin_snapshots: HashMap<Instrument, AccountMarginSnapshot>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
+        account_refresh_interval: Duration,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         state
@@ -228,6 +255,7 @@ impl ServerRuntime {
             market_data,
             recovery_retry_interval,
             audit_interval,
+            account_refresh_interval,
             shutdown_tx,
         }
     }
@@ -252,6 +280,7 @@ impl ServerRuntime {
                     .map(|effect| effect.effect_id),
             )
             .await;
+        let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task =
@@ -263,6 +292,7 @@ impl ServerRuntime {
             user_task,
             effect_task,
             recovery_task,
+            account_task,
         })
     }
 
@@ -310,9 +340,11 @@ impl ServerRuntime {
         handles.market_task.abort();
         handles.user_task.abort();
         handles.recovery_task.abort();
+        handles.account_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.recovery_task.await;
+        let _ = handles.account_task.await;
 
         tracing::info!("shutdown complete");
     }
@@ -538,10 +570,9 @@ impl ServerRuntime {
                     }
                     notification = notifications.recv() => {
                         match notification {
-                            Ok(TrackInternalNotification::TrackWriteCommitted {
-                                track_id,
-                                recovery_anomaly_active,
-                            }) => {
+                            Ok(ServerNotification::TrackChanged { track_id }) => {
+                                let recovery_anomaly_active =
+                                    load_recovery_anomaly_active(&state, track_id.as_str()).await;
                                 update_recovery_tracking(
                                     &mut tracked,
                                     &instruments,
@@ -549,12 +580,18 @@ impl ServerRuntime {
                                     recovery_anomaly_active,
                                     retry_interval,
                                 );
-                            }
-                            Ok(TrackInternalNotification::TrackEffectStateChanged { track_id }) => {
                                 if let Err(error) = reconcile_submit_preflight_state(&state).await {
                                     tracing::warn!(
-                                        "failed to reconcile submit preflight state after effect state change for {}: {}",
+                                        "failed to reconcile submit preflight state after track change for {}: {}",
                                         track_id.as_str(),
+                                        error.message()
+                                    );
+                                }
+                            }
+                            Ok(ServerNotification::AccountChanged) => {
+                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
+                                    tracing::warn!(
+                                        "failed to reconcile submit preflight state after account change: {}",
                                         error.message()
                                     );
                                 }
@@ -572,6 +609,30 @@ impl ServerRuntime {
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn spawn_account_task(&self, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        let state = self.state.clone();
+        let refresh_interval = self.account_refresh_interval;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(refresh_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if let Err(error) = state.account_monitor.refresh_once().await {
+                            tracing::warn!("account monitor refresh failed: {error}");
                         }
                     }
                 }
@@ -879,6 +940,23 @@ async fn seed_recovery_tracking(
     tracked
 }
 
+async fn load_recovery_anomaly_active(state: &ServerState, track_id: &str) -> bool {
+    match state.state_repository.load_track_state(track_id).await {
+        Ok(Some(snapshot)) => snapshot
+            .executor_state
+            .diagnostics
+            .recovery_anomaly
+            .is_some(),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                "failed to load runtime snapshot for recovery tracking on `{track_id}`: {error}"
+            );
+            false
+        }
+    }
+}
+
 fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {
     match error.downcast::<TrackMutationError>() {
         Ok(error) => error,
@@ -943,7 +1021,14 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
-    use crate::assembly::{ServerState, build_server_state};
+    use crate::account_monitor::AccountMonitor;
+    use crate::account_monitor_store::{
+        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    };
+    use crate::assembly::{
+        ServerState, build_server_state, build_server_state_with_account_monitor,
+    };
+    use crate::config::AccountMonitorConfig;
     use crate::effect_worker::EffectWorker;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
@@ -1005,6 +1090,31 @@ mod tests {
                 .load(Ordering::SeqCst),
             2
         );
+
+        shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn account_monitor_task_triggers_immediate_refresh_and_periodic_refresh() {
+        let fixture = runtime_fixture_with_account_refresh_interval(
+            None,
+            btc_position(0.0, 0.0),
+            vec![],
+            test_budget(),
+            Duration::from_millis(25),
+        )
+        .await;
+
+        let handles = fixture.runtime.start().await.unwrap();
+
+        wait_until(|| {
+            fixture
+                .exchange
+                .get_account_summary_calls
+                .load(Ordering::SeqCst)
+                >= 3
+        })
+        .await;
 
         shutdown(handles).await;
     }
@@ -1522,6 +1632,7 @@ mod tests {
             test_budget(),
             Duration::from_secs(60),
             Duration::from_secs(60),
+            Duration::from_secs(5),
             clock.clone() as Arc<dyn ClockPort>,
         )
         .await;
@@ -3073,7 +3184,7 @@ mod tests {
                 .unwrap();
             if matches!(
                 event,
-                crate::notifications::TrackInternalNotification::TrackEffectStateChanged { .. }
+                crate::notifications::ServerNotification::TrackChanged { .. }
             ) {
                 saw_effect_state_changed = true;
                 break;
@@ -3112,7 +3223,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
         worker.run_once().await.unwrap();
 
@@ -3122,7 +3233,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::TrackInternalNotification::TrackEffectStateChanged { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
     }
 
@@ -3475,7 +3586,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
 
         shutdown(handles).await;
@@ -3640,7 +3751,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::TrackInternalNotification::TrackWriteCommitted { .. }
+            crate::notifications::ServerNotification::TrackChanged { .. }
         ));
 
         shutdown(handles).await;
@@ -4297,6 +4408,7 @@ mod tests {
             user_task,
             effect_task,
             recovery_task,
+            account_task,
         } = fixture.runtime.start().await.unwrap();
         market_task.abort();
         let _ = market_task.await;
@@ -4364,6 +4476,8 @@ mod tests {
 
         recovery_task.abort();
         let _ = recovery_task.await;
+        account_task.abort();
+        let _ = account_task.await;
         user_task.abort();
         let _ = user_task.await;
     }
@@ -4406,6 +4520,7 @@ mod tests {
             user_task,
             effect_task,
             recovery_task,
+            account_task,
         } = fixture.runtime.start().await.unwrap();
         market_task.abort();
         let _ = market_task.await;
@@ -4446,6 +4561,8 @@ mod tests {
 
         recovery_task.abort();
         let _ = recovery_task.await;
+        account_task.abort();
+        let _ = account_task.await;
         user_task.abort();
         let _ = user_task.await;
     }
@@ -4477,6 +4594,7 @@ mod tests {
             user_task,
             effect_task,
             recovery_task,
+            account_task,
         } = fixture.runtime.start().await.unwrap();
         market_task.abort();
         let _ = market_task.await;
@@ -4558,6 +4676,8 @@ mod tests {
 
         recovery_task.abort();
         let _ = recovery_task.await;
+        account_task.abort();
+        let _ = account_task.await;
         user_task.abort();
         let _ = user_task.await;
     }
@@ -4576,6 +4696,7 @@ mod tests {
             vec![],
             test_budget(),
             Duration::from_millis(50),
+            Duration::from_secs(5),
             Duration::from_secs(5),
             clock.clone() as Arc<dyn ClockPort>,
         )
@@ -5050,6 +5171,25 @@ mod tests {
         .await
     }
 
+    async fn runtime_fixture_with_account_refresh_interval(
+        restored_snapshot: Option<TrackSnapshot>,
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        budget: CapacityBudget,
+        account_refresh_interval: Duration,
+    ) -> RuntimeFixture {
+        runtime_fixture_with_intervals_and_account_refresh(
+            restored_snapshot,
+            position,
+            open_orders,
+            budget,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            account_refresh_interval,
+        )
+        .await
+    }
+
     async fn runtime_fixture_with_intervals(
         restored_snapshot: Option<TrackSnapshot>,
         position: Position,
@@ -5058,6 +5198,27 @@ mod tests {
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> RuntimeFixture {
+        runtime_fixture_with_intervals_and_account_refresh(
+            restored_snapshot,
+            position,
+            open_orders,
+            budget,
+            recovery_retry_interval,
+            audit_interval,
+            Duration::from_secs(5),
+        )
+        .await
+    }
+
+    async fn runtime_fixture_with_intervals_and_account_refresh(
+        restored_snapshot: Option<TrackSnapshot>,
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        budget: CapacityBudget,
+        recovery_retry_interval: Duration,
+        audit_interval: Duration,
+        account_refresh_interval: Duration,
+    ) -> RuntimeFixture {
         runtime_fixture_with_clock_and_recovery_retry_interval(
             restored_snapshot,
             position,
@@ -5065,6 +5226,7 @@ mod tests {
             budget,
             recovery_retry_interval,
             audit_interval,
+            account_refresh_interval,
             Arc::new(FixedClock(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
             )),
@@ -5079,6 +5241,7 @@ mod tests {
         budget: CapacityBudget,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
+        account_refresh_interval: Duration,
         clock: Arc<dyn ClockPort>,
     ) -> RuntimeFixture {
         let exchange = Arc::new(FakeExchange::new(position, open_orders));
@@ -5112,22 +5275,27 @@ mod tests {
             persistence.clone(),
             events.clone(),
         ));
-        let state = build_server_state(
+        let account_monitor =
+            build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events.clone())
+                .await;
+        let state = build_server_state_with_account_monitor(
             write_service,
             persistence.clone(),
             Arc::new(TrackQueryService::new(
                 persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
             Arc::new(TrackProjector::new()),
+            account_monitor,
         );
 
         RuntimeFixture {
-            runtime: ServerRuntime::with_reconcile_intervals(
+            runtime: ServerRuntime::with_reconcile_and_account_refresh_intervals(
                 state.clone(),
                 exchange.clone() as Arc<dyn ExchangePort>,
                 market_data as Arc<dyn MarketDataPort>,
                 recovery_retry_interval,
                 audit_interval,
+                account_refresh_interval,
             ),
             state,
             exchange,
@@ -5172,11 +5340,13 @@ mod tests {
             state_repository.clone(),
             events.clone(),
         ));
-        build_server_state(
+        let account_monitor = build_test_account_monitor(exchange, events).await;
+        build_server_state_with_account_monitor(
             write_service,
             state_repository,
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
+            account_monitor,
         )
     }
 
@@ -5216,11 +5386,13 @@ mod tests {
             state_repository.clone(),
             events.clone(),
         ));
-        build_server_state(
+        let account_monitor = build_test_account_monitor(exchange, events).await;
+        build_server_state_with_account_monitor(
             write_service,
             state_repository,
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
+            account_monitor,
         )
     }
 
@@ -5235,10 +5407,41 @@ mod tests {
         handles.user_task.abort();
         handles.effect_task.abort();
         handles.recovery_task.abort();
+        handles.account_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.effect_task.await;
         let _ = handles.recovery_task.await;
+        let _ = handles.account_task.await;
+    }
+
+    async fn build_test_account_monitor(
+        exchange: Arc<dyn ExchangePort>,
+        notifications: broadcast::Sender<crate::notifications::ServerNotification>,
+    ) -> Arc<AccountMonitor> {
+        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
+            poise_storage::sqlite::SqliteStorage::in_memory().unwrap(),
+        )));
+        account_store
+            .save_state(&StoredAccountMonitorState {
+                trading_day: chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap(),
+                baseline_equity: 1_000_000.0,
+                baseline_captured_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                last_observed_account_snapshot: None,
+            })
+            .await
+            .unwrap();
+
+        Arc::new(
+            AccountMonitor::restore(
+                exchange,
+                account_store,
+                notifications,
+                AccountMonitorConfig::default(),
+            )
+            .await
+            .unwrap(),
+        )
     }
 
     async fn wait_until<F>(condition: F)
@@ -5562,6 +5765,7 @@ mod tests {
         get_server_time_calls: AtomicUsize,
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
+        get_account_summary_calls: AtomicUsize,
         server_time_failures_remaining: AtomicUsize,
         position_failures_remaining: AtomicUsize,
         open_orders_failures_remaining: AtomicUsize,
@@ -5598,6 +5802,7 @@ mod tests {
                 get_server_time_calls: AtomicUsize::new(0),
                 get_position_calls: AtomicUsize::new(0),
                 get_open_orders_calls: AtomicUsize::new(0),
+                get_account_summary_calls: AtomicUsize::new(0),
                 server_time_failures_remaining: AtomicUsize::new(0),
                 position_failures_remaining: AtomicUsize::new(0),
                 open_orders_failures_remaining: AtomicUsize::new(0),
@@ -5669,6 +5874,20 @@ mod tests {
 
         fn set_open_orders(&self, open_orders: Vec<ExchangeOrder>) {
             *self.open_orders.lock().unwrap() = open_orders;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for FakeExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            self.get_account_summary_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: Utc::now(),
+            })
         }
     }
 

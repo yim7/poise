@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::api_client::{ApiClient, connect_ws};
 use crate::app::{App, View};
 use crate::input::{Action, CommandKind, handle_key_event};
-use crate::protocol::{TrackCommandAccepted, TrackStreamEvent, TrackStreamPayload};
+use crate::protocol::{AccountSummaryView, StreamEvent, TrackCommandAccepted};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -28,6 +28,7 @@ use ratatui::backend::CrosstermBackend;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8000";
 const INITIAL_LOAD_RETRY_DELAY: Duration = Duration::from_millis(500);
+const ACCOUNT_SUMMARY_REQUEST_TIMEOUT: Duration = Duration::from_millis(250);
 const WS_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -183,8 +184,14 @@ fn derive_ws_url(base_url: &str) -> Result<String> {
 }
 
 async fn load_initial_state(client: &ApiClient) -> Result<App> {
+    let account_summary = load_account_summary_best_effort(client).await;
     let response = client.list_tracks().await?;
     let mut app = App::new(response.items);
+    if let Some(account_summary) = account_summary {
+        app.apply_account_summary(account_summary);
+    } else {
+        app.clear_account_summary();
+    }
     if let Some(track_id) = app.selected_track_id().map(ToOwned::to_owned) {
         let detail = client.get_track_detail(&track_id).await?;
         app.apply_track_detail(detail);
@@ -196,7 +203,7 @@ async fn load_initial_state(client: &ApiClient) -> Result<App> {
 async fn bootstrap_runtime_state(
     client: &ApiClient,
     ws_url: &str,
-) -> (App, Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>) {
+) -> (App, Option<tokio::sync::mpsc::Receiver<StreamEvent>>) {
     let mut app = match load_initial_state(client).await {
         Ok(app) => app,
         Err(error) => {
@@ -227,7 +234,7 @@ async fn run_loop(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) -> Result<()> {
     loop {
         maybe_load_initial_state(client, app).await;
@@ -281,7 +288,7 @@ async fn process_ws_event(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) {
     if ws_receiver.is_none() {
         maybe_reconnect_websocket(client, ws_url, app, ws_receiver).await;
@@ -315,7 +322,7 @@ async fn maybe_reconnect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) {
     if !app.should_retry_websocket() {
         return;
@@ -328,7 +335,7 @@ async fn handle_action(client: &ApiClient, app: &mut App, action: Action) -> Res
     match action {
         Action::None => Ok(()),
         Action::OpenSelectedInstance | Action::RefreshSelectedInstance => {
-            refresh_selected_track_detail(client, app).await?;
+            refresh_selected_grid_detail(client, app).await?;
             app.show_instance_for_selected();
             Ok(())
         }
@@ -378,7 +385,7 @@ fn format_command_response(response: &TrackCommandAccepted) -> String {
     .to_ascii_lowercase()
 }
 
-async fn refresh_selected_track_detail(client: &ApiClient, app: &mut App) -> Result<()> {
+async fn refresh_selected_grid_detail(client: &ApiClient, app: &mut App) -> Result<()> {
     let track_id = app
         .selected_track_id()
         .context("no instance selected")?
@@ -387,6 +394,28 @@ async fn refresh_selected_track_detail(client: &ApiClient, app: &mut App) -> Res
     app.apply_track_detail(detail);
     refresh_selected_track_diagnostics_best_effort(client, app).await;
     Ok(())
+}
+
+async fn load_account_summary_best_effort(client: &ApiClient) -> Option<AccountSummaryView> {
+    match tokio::time::timeout(
+        ACCOUNT_SUMMARY_REQUEST_TIMEOUT,
+        client.get_account_summary(),
+    )
+    .await
+    {
+        Ok(Ok(summary)) => Some(summary),
+        Ok(Err(error)) => {
+            tracing::warn!("failed to refresh account summary: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                "failed to refresh account summary within {:?}",
+                ACCOUNT_SUMMARY_REQUEST_TIMEOUT
+            );
+            None
+        }
+    }
 }
 
 async fn refresh_selected_track_diagnostics(client: &ApiClient, app: &mut App) -> Result<()> {
@@ -411,16 +440,17 @@ async fn refresh_selected_track_diagnostics_best_effort(client: &ApiClient, app:
     }
 }
 
-async fn handle_ws_event(client: &ApiClient, app: &mut App, event: TrackStreamEvent) {
-    match event.payload {
-        TrackStreamPayload::TrackListItemChanged { item } => app.apply_track_list_item(item),
-        TrackStreamPayload::TrackDetailChanged { detail } => {
+async fn handle_ws_event(client: &ApiClient, app: &mut App, event: StreamEvent) {
+    match event {
+        StreamEvent::TrackListItemChanged { item, .. } => app.apply_track_list_item(item),
+        StreamEvent::TrackDetailChanged { detail, .. } => {
             let selected_matches = app.selected_track_id() == Some(detail.identity.id.as_str());
             app.apply_track_detail(*detail);
             if selected_matches {
                 refresh_selected_track_diagnostics_best_effort(client, app).await;
             }
         }
+        StreamEvent::AccountSummaryChanged { summary } => app.apply_account_summary(summary),
     }
 }
 
@@ -428,7 +458,7 @@ async fn reconnect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
 ) {
     app.set_status_message("websocket disconnected, reconnecting");
     connect_websocket(client, ws_url, app, ws_receiver, "websocket reconnected").await;
@@ -438,7 +468,7 @@ async fn connect_websocket(
     client: &ApiClient,
     ws_url: &str,
     app: &mut App,
-    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<TrackStreamEvent>>,
+    ws_receiver: &mut Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
     success_message: &str,
 ) {
     *ws_receiver = match connect_ws(ws_url).await {
@@ -478,9 +508,9 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     refreshed.set_debug_diagnostics_enabled(debug_diagnostics_enabled);
     if let Some(selected_track_id) = selected_track_id
         && let Some(index) = refreshed
-            .tracks
+            .grids
             .iter()
-            .position(|track| track.id == selected_track_id)
+            .position(|grid| grid.id == selected_track_id)
     {
         refreshed.selected_index = index;
     }
@@ -497,6 +527,13 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
     refreshed.should_quit = should_quit;
     refreshed.mark_initial_load_complete();
     *app = refreshed;
+
+    if let Some(account_summary) = load_account_summary_best_effort(client).await {
+        app.apply_account_summary(account_summary);
+    } else {
+        app.clear_account_summary();
+    }
+
     Ok(())
 }
 
@@ -531,12 +568,12 @@ mod tests {
     use crate::app::App;
     use crate::input::Action;
     use crate::protocol::{
-        ExecutionStateView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse, TrackStatus,
-        TrackStreamEvent, TrackStreamPayload,
+        AccountSummaryView, ExecutionStateView, GridCommandType, GridStatus, RiskSignalView,
+        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
+        TrackDiagnosticsView, TrackListItemView, TrackListResponse,
     };
 
-    const BTC_TRACK_ID: &str = "btc-core";
+    const BTC_GRID_ID: &str = "btc-core";
     const BTC_SYMBOL: &str = "BTCUSDT";
     const ETH_GRID_ID: &str = "eth-core";
     const ETH_SYMBOL: &str = "ETHUSDT";
@@ -566,14 +603,14 @@ mod tests {
             ExecutionStateView::Open
         };
         detail.available_commands = if symbol == ETH_SYMBOL {
-            vec![crate::protocol::TrackCommandView {
-                command: TrackCommandType::Resume,
+            vec![crate::protocol::GridCommandView {
+                command: GridCommandType::Resume,
                 enabled: true,
                 disabled_reason: None,
             }]
         } else {
-            vec![crate::protocol::TrackCommandView {
-                command: TrackCommandType::Pause,
+            vec![crate::protocol::GridCommandView {
+                command: GridCommandType::Pause,
                 enabled: true,
                 disabled_reason: None,
             }]
@@ -581,16 +618,30 @@ mod tests {
         detail
     }
 
-    fn track_list_item_changed_event() -> TrackStreamEvent {
+    fn track_list_item_changed_event() -> StreamEvent {
         serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_list_item_changed.json"
         ))
         .unwrap()
     }
 
-    fn track_detail_changed_event() -> TrackStreamEvent {
+    fn track_detail_changed_event() -> StreamEvent {
         serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
+        ))
+        .unwrap()
+    }
+
+    fn account_summary_view() -> AccountSummaryView {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/account_summary_view.json"
+        ))
+        .unwrap()
+    }
+
+    fn account_summary_changed_event() -> StreamEvent {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_account_summary_changed.json"
         ))
         .unwrap()
     }
@@ -598,13 +649,31 @@ mod tests {
     #[derive(Clone)]
     struct ProjectionStubState {
         requests: Arc<Mutex<Vec<String>>>,
+        account_summary_failures_left: Arc<Mutex<usize>>,
+        account_summary_delay: Arc<Mutex<Option<Duration>>>,
     }
 
-    async fn list_projected_tracks(
+    async fn list_projected_grids(
         State(state): State<ProjectionStubState>,
     ) -> Json<TrackListResponse> {
         state.requests.lock().await.push("/tracks".into());
         Json(track_list_response())
+    }
+
+    async fn get_projected_account_summary(
+        State(state): State<ProjectionStubState>,
+    ) -> Result<Json<AccountSummaryView>, StatusCode> {
+        state.requests.lock().await.push("/account".into());
+        let delay = *state.account_summary_delay.lock().await;
+        if let Some(delay) = delay {
+            sleep(delay).await;
+        }
+        let mut failures_left = state.account_summary_failures_left.lock().await;
+        if *failures_left > 0 {
+            *failures_left -= 1;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Ok(Json(account_summary_view()))
     }
 
     async fn get_projected_detail(
@@ -613,9 +682,9 @@ mod tests {
     ) -> Json<TrackDetailView> {
         state.requests.lock().await.push(format!("/tracks/{id}"));
         Json(match id.as_str() {
-            BTC_TRACK_ID => detail_view(BTC_TRACK_ID, BTC_SYMBOL),
+            BTC_GRID_ID => detail_view(BTC_GRID_ID, BTC_SYMBOL),
             ETH_GRID_ID => detail_view(ETH_GRID_ID, ETH_SYMBOL),
-            _ => panic!("unexpected track id: {id}"),
+            _ => panic!("unexpected grid id: {id}"),
         })
     }
 
@@ -639,11 +708,14 @@ mod tests {
     async fn spawn_projection_stub_server() -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(0)),
+            account_summary_delay: Arc::new(Mutex::new(None)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/tracks", get(list_projected_tracks))
+            .route("/account", get(get_projected_account_summary))
+            .route("/tracks", get(list_projected_grids))
             .route("/tracks/:id", get(get_projected_detail))
             .route(
                 "/debug/tracks/:id/diagnostics",
@@ -677,15 +749,71 @@ mod tests {
     -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(0)),
+            account_summary_delay: Arc::new(Mutex::new(None)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/tracks", get(list_projected_tracks))
+            .route("/account", get(get_projected_account_summary))
+            .route("/tracks", get(list_projected_grids))
             .route("/tracks/:id", get(get_projected_detail))
             .route(
                 "/debug/tracks/:id/diagnostics",
                 get(get_failing_projected_diagnostics),
+            )
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (ApiClient::new(format!("http://{address}")), state)
+    }
+
+    async fn spawn_projection_stub_server_with_failing_account_summary(
+    ) -> (ApiClient, ProjectionStubState) {
+        let state = ProjectionStubState {
+            requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(1)),
+            account_summary_delay: Arc::new(Mutex::new(None)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/account", get(get_projected_account_summary))
+            .route("/tracks", get(list_projected_grids))
+            .route("/tracks/:id", get(get_projected_detail))
+            .route(
+                "/debug/tracks/:id/diagnostics",
+                get(get_projected_diagnostics),
+            )
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (ApiClient::new(format!("http://{address}")), state)
+    }
+
+    async fn spawn_projection_stub_server_with_slow_account_summary(
+        delay: Duration,
+    ) -> (ApiClient, ProjectionStubState) {
+        let state = ProjectionStubState {
+            requests: Arc::new(Mutex::new(vec![])),
+            account_summary_failures_left: Arc::new(Mutex::new(0)),
+            account_summary_delay: Arc::new(Mutex::new(Some(delay))),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/account", get(get_projected_account_summary))
+            .route("/tracks", get(list_projected_grids))
+            .route("/tracks/:id", get(get_projected_detail))
+            .route(
+                "/debug/tracks/:id/diagnostics",
+                get(get_projected_diagnostics),
             )
             .with_state(state.clone());
 
@@ -710,28 +838,28 @@ mod tests {
             reference_price: detail.status.reference_price,
             exposure: crate::protocol::ExposureSummaryView {
                 current: detail.position.current_exposure,
-                target: detail.position.desired_exposure,
+                target: detail.position.target_exposure,
             },
             execution: crate::protocol::ExecutionBadgeView {
                 state: detail.execution.state,
                 execution_status: detail.execution.execution_status,
                 active_slot_count: detail.execution.active_slot_count,
             },
-            pnl: crate::protocol::TrackListPnlView {
-                total_pnl: detail.pnl.total_pnl,
+            statistics: crate::protocol::TrackListStatisticsView {
+                total_pnl: detail.statistics.total_pnl,
             },
         }
     }
 
     fn stub_state() -> StubState {
-        let btc = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
+        let btc = detail_view(BTC_GRID_ID, BTC_SYMBOL);
         let eth = detail_view(ETH_GRID_ID, ETH_SYMBOL);
         StubState {
             list: Arc::new(Mutex::new(TrackListResponse {
                 items: vec![list_item_from_detail(&btc), list_item_from_detail(&eth)],
             })),
             details: Arc::new(Mutex::new(HashMap::from([
-                (BTC_TRACK_ID.to_string(), btc),
+                (BTC_GRID_ID.to_string(), btc),
                 (ETH_GRID_ID.to_string(), eth),
             ]))),
         }
@@ -739,6 +867,10 @@ mod tests {
 
     async fn list_tracks(State(state): State<StubState>) -> Json<TrackListResponse> {
         Json(state.list.lock().await.clone())
+    }
+
+    async fn get_account_summary() -> Json<AccountSummaryView> {
+        Json(account_summary_view())
     }
 
     async fn get_track_detail(
@@ -756,12 +888,12 @@ mod tests {
         let mut details = state.details.lock().await;
         let detail = details.get_mut(&id).unwrap();
         match command.command {
-            TrackCommandType::Pause => {
-                detail.status.lifecycle.status = TrackStatus::Paused;
+            GridCommandType::Pause => {
+                detail.status.lifecycle.status = GridStatus::Paused;
                 detail.execution.state = ExecutionStateView::Paused;
             }
-            TrackCommandType::Resume => {
-                detail.status.lifecycle.status = TrackStatus::Active;
+            GridCommandType::Resume => {
+                detail.status.lifecycle.status = GridStatus::Active;
                 detail.execution.state = ExecutionStateView::Open;
             }
             _ => {}
@@ -903,7 +1035,7 @@ mod tests {
         let client_order_id = params
             .get("newClientOrderId")
             .cloned()
-            .unwrap_or_else(|| "track-order-test".to_string());
+            .unwrap_or_else(|| "grid-order-test".to_string());
 
         Json(serde_json::json!({
             "orderId": 1001,
@@ -922,7 +1054,7 @@ mod tests {
 
         Json(serde_json::json!({
             "orderId": order_id.parse::<u64>().unwrap_or(1001),
-            "clientOrderId": "track-order-test",
+            "clientOrderId": "grid-order-test",
             "status": "CANCELED"
         }))
     }
@@ -949,6 +1081,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/account", get(get_account_summary))
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
             .route("/tracks/:id/commands", post(submit_command))
@@ -972,6 +1105,7 @@ mod tests {
         let state = stub_state();
         let listener = TcpListener::bind(address).await.unwrap();
         let app = Router::new()
+            .route("/account", get(get_account_summary))
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
             .route("/tracks/:id/commands", post(submit_command))
@@ -1031,9 +1165,9 @@ mod tests {
 
     #[test]
     fn derives_ws_url_from_base_url_with_path_prefix() {
-        let url = derive_ws_url("https://example.com/track/api").unwrap();
+        let url = derive_ws_url("https://example.com/grid/api").unwrap();
 
-        assert_eq!(url, "wss://example.com/track/api/ws");
+        assert_eq!(url, "wss://example.com/grid/api/ws");
     }
 
     #[test]
@@ -1046,8 +1180,8 @@ mod tests {
     #[test]
     fn formats_command_response_message() {
         let text = format_command_response(&TrackCommandAccepted {
-            track_id: BTC_TRACK_ID.into(),
-            command: crate::protocol::TrackCommandType::Pause,
+            track_id: BTC_GRID_ID.into(),
+            command: crate::protocol::GridCommandType::Pause,
             accepted: true,
         });
 
@@ -1055,19 +1189,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_initial_state_fetches_list_then_selected_detail() {
+    async fn load_initial_state_fetches_account_before_tracks() {
         let (client, state) = spawn_projection_stub_server().await;
 
         let app = load_initial_state(&client).await.unwrap();
 
-        assert_eq!(app.tracks.len(), 2);
-        assert_eq!(
-            app.current_track.as_ref().unwrap().identity.id,
-            BTC_TRACK_ID
-        );
+        assert_eq!(app.account_summary.as_ref().unwrap().equity, Some(12_500.0));
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/tracks".to_string(), format!("/tracks/{BTC_TRACK_ID}")]
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_initial_state_keeps_tracks_when_account_summary_request_fails() {
+        let (client, state) = spawn_projection_stub_server_with_failing_account_summary().await;
+
+        let app = load_initial_state(&client).await.unwrap();
+
+        assert_eq!(app.current_view, View::Dashboard);
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_initial_state_does_not_wait_for_slow_account_summary() {
+        let (client, state) =
+            spawn_projection_stub_server_with_slow_account_summary(Duration::from_secs(1)).await;
+
+        let app = tokio::time::timeout(
+            Duration::from_millis(500),
+            load_initial_state(&client),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(app.current_view, View::Dashboard);
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
         );
     }
 
@@ -1080,7 +1263,11 @@ mod tests {
 
         assert_eq!(
             state.requests.lock().await.clone(),
-            vec!["/tracks".to_string(), format!("/tracks/{BTC_TRACK_ID}")]
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}")
+            ]
         );
 
         handle_action(&client, &mut app, Action::ToggleDiagnostics)
@@ -1090,9 +1277,10 @@ mod tests {
         assert_eq!(
             state.requests.lock().await.clone(),
             vec![
+                "/account".to_string(),
                 "/tracks".to_string(),
-                format!("/tracks/{BTC_TRACK_ID}"),
-                format!("/debug/tracks/{BTC_TRACK_ID}/diagnostics"),
+                format!("/tracks/{BTC_GRID_ID}"),
+                format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"),
             ]
         );
     }
@@ -1107,17 +1295,75 @@ mod tests {
 
         sync_projected_state(&client, &mut app).await.unwrap();
 
-        assert_eq!(
-            app.current_track.as_ref().unwrap().identity.id,
-            BTC_TRACK_ID
-        );
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert!(app.current_track_diagnostics().is_none());
         assert!(
             state
                 .requests
                 .lock()
                 .await
-                .contains(&format!("/debug/tracks/{BTC_TRACK_ID}/diagnostics"))
+                .contains(&format!("/debug/tracks/{BTC_GRID_ID}/diagnostics"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_projected_state_keeps_tracks_when_account_summary_request_fails() {
+        let (client, state) = spawn_projection_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        assert!(app.account_summary.is_some());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        *state.account_summary_failures_left.lock().await = 1;
+
+        sync_projected_state(&client, &mut app).await.unwrap();
+
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/account".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_projected_state_does_not_wait_for_slow_account_summary() {
+        let (client, state) =
+            spawn_projection_stub_server_with_slow_account_summary(Duration::from_secs(1)).await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            sync_projected_state(&client, &mut app),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(app.current_view, View::Instance);
+        assert!(app.account_summary.is_none());
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
+        assert_eq!(
+            state.requests.lock().await.clone(),
+            vec![
+                "/account".to_string(),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/tracks".to_string(),
+                format!("/tracks/{BTC_GRID_ID}"),
+                "/account".to_string()
+            ]
         );
     }
 
@@ -1128,7 +1374,7 @@ mod tests {
         app.current_view = View::Instance;
         app.show_instance_for_selected();
         app.set_debug_diagnostics_enabled(true);
-        app.apply_track_detail(detail_view(BTC_TRACK_ID, BTC_SYMBOL));
+        app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
         let mut stale_diagnostics: TrackDiagnosticsView = serde_json::from_str(include_str!(
             "../tests/fixtures/track_diagnostics_view.json"
         ))
@@ -1146,7 +1392,7 @@ mod tests {
         assert!(
             app.current_track_diagnostics().unwrap().items[0]
                 .message
-                .contains("desired exposure")
+                .contains("target exposure")
         );
     }
 
@@ -1155,21 +1401,39 @@ mod tests {
         let mut app = App::new(track_list_response().items);
         app.current_view = View::Instance;
         app.show_instance_for_selected();
-        app.apply_track_detail(detail_view(BTC_TRACK_ID, BTC_SYMBOL));
+        app.apply_track_detail(detail_view(BTC_GRID_ID, BTC_SYMBOL));
 
         let (client, _) = spawn_projection_stub_server().await;
         handle_ws_event(&client, &mut app, track_list_item_changed_event()).await;
         handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
-        assert_eq!(app.tracks[0].reference_price, Some(101.4));
+        assert_eq!(app.grids[0].reference_price, Some(101.4));
         assert_eq!(
             app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
         );
         assert!(matches!(
-            track_detail_changed_event().payload,
-            TrackStreamPayload::TrackDetailChanged { .. }
+            track_detail_changed_event(),
+            StreamEvent::TrackDetailChanged { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_ws_event_applies_account_summary_changed() {
+        let (client, _) = spawn_projection_stub_server().await;
+        let mut app = App::new(track_list_response().items);
+
+        handle_ws_event(&client, &mut app, account_summary_changed_event()).await;
+
+        assert_eq!(app.account_summary.as_ref().unwrap().equity, Some(12_420.0));
+        assert_eq!(
+            app.account_summary.as_ref().unwrap().risk_signal,
+            RiskSignalView::Attention
+        );
+        assert_eq!(
+            app.account_summary.as_ref().unwrap().reason.as_deref(),
+            Some("available 18.0%")
+        );
     }
 
     #[tokio::test]
@@ -1178,11 +1442,8 @@ mod tests {
 
         let app = load_initial_state(&client).await.unwrap();
 
-        assert_eq!(app.tracks.len(), 2);
-        assert_eq!(
-            app.current_track.as_ref().unwrap().identity.id,
-            BTC_TRACK_ID
-        );
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
         assert_eq!(
             app.current_track
                 .as_ref()
@@ -1201,27 +1462,23 @@ mod tests {
         app.show_instance_for_selected();
 
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        let mut first = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
+        let mut first = detail_view(BTC_GRID_ID, BTC_SYMBOL);
         first.status.reference_price = Some(101.0);
-        let mut second = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
+        let mut second = detail_view(BTC_GRID_ID, BTC_SYMBOL);
         second.status.reference_price = Some(102.0);
         second.position.current_exposure = 3.0;
 
         sender
-            .send(TrackStreamEvent {
-                track_id: BTC_TRACK_ID.into(),
-                payload: TrackStreamPayload::TrackDetailChanged {
-                    detail: Box::new(first),
-                },
+            .send(StreamEvent::TrackDetailChanged {
+                track_id: BTC_GRID_ID.into(),
+                detail: Box::new(first),
             })
             .await
             .unwrap();
         sender
-            .send(TrackStreamEvent {
-                track_id: BTC_TRACK_ID.into(),
-                payload: TrackStreamPayload::TrackDetailChanged {
-                    detail: Box::new(second),
-                },
+            .send(StreamEvent::TrackDetailChanged {
+                track_id: BTC_GRID_ID.into(),
+                detail: Box::new(second),
             })
             .await
             .unwrap();
@@ -1277,7 +1534,7 @@ mod tests {
 
         assert_eq!(
             app.current_track_detail().unwrap().status.lifecycle.status,
-            TrackStatus::Paused
+            GridStatus::Paused
         );
         assert!(
             app.status_message()
@@ -1293,7 +1550,7 @@ mod tests {
         app.current_view = View::Instance;
         app.show_instance_for_selected();
 
-        assert_eq!(app.tracks[0].lifecycle.status, TrackStatus::Active);
+        assert_eq!(app.grids[0].lifecycle.status, GridStatus::Active);
 
         submit_selected_command(&client, &mut app, CommandKind::Pause)
             .await
@@ -1301,10 +1558,10 @@ mod tests {
 
         assert_eq!(
             app.current_track_detail().unwrap().status.lifecycle.status,
-            TrackStatus::Paused
+            GridStatus::Paused
         );
-        assert_eq!(app.tracks[0].lifecycle.status, TrackStatus::Paused);
-        assert_eq!(app.tracks[0].execution.state, ExecutionStateView::Paused);
+        assert_eq!(app.grids[0].lifecycle.status, GridStatus::Paused);
+        assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
     }
 
     #[tokio::test]
@@ -1313,7 +1570,7 @@ mod tests {
 
         let (app, ws_receiver) = bootstrap_runtime_state(&client, "ws://127.0.0.1:1/ws").await;
 
-        assert!(app.tracks.is_empty());
+        assert!(app.grids.is_empty());
         assert!(app.status_message().unwrap().contains("startup failed"));
         assert!(ws_receiver.is_none());
     }
@@ -1327,7 +1584,7 @@ mod tests {
         let ws_url = format!("ws://{bind_address}/ws");
 
         let (mut app, mut ws_receiver) = bootstrap_runtime_state(&client, &ws_url).await;
-        assert!(app.tracks.is_empty());
+        assert!(app.grids.is_empty());
         assert!(app.status_message().unwrap().contains("startup failed"));
 
         let (_, _, _, server) = spawn_stub_server_on(bind_address).await;
@@ -1335,17 +1592,14 @@ mod tests {
         for _ in 0..20 {
             maybe_load_initial_state(&client, &mut app).await;
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
-            if app.tracks.len() == 2 && app.current_track.is_some() {
+            if app.grids.len() == 2 && app.current_track.is_some() {
                 break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert_eq!(app.tracks.len(), 2);
-        assert_eq!(
-            app.current_track.as_ref().unwrap().identity.id,
-            BTC_TRACK_ID
-        );
+        assert_eq!(app.grids.len(), 2);
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
 
         server.abort();
         let _ = server.await;
@@ -1404,7 +1658,7 @@ mod tests {
             Some(100.0)
         );
 
-        let mut updated = detail_view(BTC_TRACK_ID, BTC_SYMBOL);
+        let mut updated = detail_view(BTC_GRID_ID, BTC_SYMBOL);
         updated.status.reference_price = Some(111.5);
         updated.position.current_exposure = 4.5;
         replace_track_detail(&state, updated).await;
@@ -1431,7 +1685,7 @@ mod tests {
                 .and_then(|detail| detail.status.reference_price),
             Some(111.5)
         );
-        assert_eq!(app.tracks[0].reference_price, Some(111.5));
+        assert_eq!(app.grids[0].reference_price, Some(111.5));
 
         ws_server.abort();
         let _ = ws_server.await;
@@ -1448,7 +1702,10 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         let event = ws_receiver.as_mut().unwrap().recv().await.unwrap();
-        assert_eq!(event.track_id, BTC_TRACK_ID);
+        assert!(matches!(
+            event,
+            StreamEvent::TrackDetailChanged { ref track_id, .. } if track_id == BTC_GRID_ID
+        ));
         assert_eq!(app.status_message(), Some("websocket reconnected"));
     }
 
@@ -1580,7 +1837,7 @@ mod tests {
             .to_path_buf()
     }
 
-    fn track_tui_binary_path() -> PathBuf {
+    fn grid_tui_binary_path() -> PathBuf {
         let mut path = workspace_root().join("target").join("debug");
         path.push(if cfg!(windows) {
             "poise-tui.exe"
@@ -1590,7 +1847,7 @@ mod tests {
         path
     }
 
-    fn track_server_binary_path() -> PathBuf {
+    fn grid_server_binary_path() -> PathBuf {
         let mut path = workspace_root().join("target").join("debug");
         path.push(if cfg!(windows) {
             "poise-server.exe"
@@ -1600,8 +1857,8 @@ mod tests {
         path
     }
 
-    fn ensure_track_server_binary() -> PathBuf {
-        let path = track_server_binary_path();
+    fn ensure_grid_server_binary() -> PathBuf {
+        let path = grid_server_binary_path();
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -1613,8 +1870,8 @@ mod tests {
         path
     }
 
-    fn ensure_track_tui_binary() -> PathBuf {
-        let path = track_tui_binary_path();
+    fn ensure_grid_tui_binary() -> PathBuf {
+        let path = grid_tui_binary_path();
         let status = Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -1761,7 +2018,7 @@ mod tests {
     #[tokio::test]
     async fn real_server_protocol_integration_covers_list_switch_and_ws_updates() {
         let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_track_server_binary();
+        let server_binary = ensure_grid_server_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
@@ -1821,26 +2078,19 @@ out_of_band_policy = "hold"
         let mut ws_receiver = Some(connect_ws(&ws_url).await.unwrap());
 
         let client = ApiClient::new(base_url);
-        wait_for_detail_price(&client, BTC_TRACK_ID).await;
+        wait_for_detail_price(&client, BTC_GRID_ID).await;
         wait_for_detail_price(&client, ETH_GRID_ID).await;
 
         let mut app = load_initial_state(&client).await.unwrap();
-        assert_eq!(app.tracks.len(), 2);
-        assert!(
-            app.tracks
-                .iter()
-                .all(|track| track.reference_price.is_some())
-        );
+        assert_eq!(app.grids.len(), 2);
+        assert!(app.grids.iter().all(|grid| grid.reference_price.is_some()));
 
         let action = crate::input::handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         handle_action(&client, &mut app, action).await.unwrap();
-        assert_eq!(
-            app.current_track.as_ref().unwrap().identity.id,
-            BTC_TRACK_ID
-        );
+        assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);
 
         let action = crate::input::handle_key_event(
             &mut app,
@@ -1882,7 +2132,7 @@ out_of_band_policy = "hold"
     #[tokio::test]
     async fn real_server_starts_with_loopback_exchange_even_when_proxy_env_is_set() {
         let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_track_server_binary();
+        let server_binary = ensure_grid_server_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
@@ -1939,8 +2189,8 @@ notional_per_unit = 375.0
     #[tokio::test]
     async fn real_server_and_tui_binary_end_to_end_renders_and_exits() {
         let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_track_server_binary();
-        let tui_binary = ensure_track_tui_binary();
+        let server_binary = ensure_grid_server_binary();
+        let tui_binary = ensure_grid_tui_binary();
         let temp_dir = tempfile::tempdir().unwrap();
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
@@ -2007,15 +2257,15 @@ out_of_band_policy = "hold"
         assert!(dashboard.contains("ETHUSDT"), "dashboard:\n{dashboard}");
 
         session.send_keys(&["Enter"]);
-        let btc_view = wait_for_pane_text(&session, "Market").await;
-        assert!(btc_view.contains("Market"), "btc view:\n{btc_view}");
+        let btc_view = wait_for_pane_text(&session, "Overview").await;
+        assert!(btc_view.contains("Overview"), "btc view:\n{btc_view}");
         assert!(btc_view.contains("BTCUSDT"), "btc view:\n{btc_view}");
 
         session.send_keys(&["]"]);
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
-            eth_view.contains("out of band hold"),
+            eth_view.contains("out of band policy: hold"),
             "eth view:\n{eth_view}"
         );
 

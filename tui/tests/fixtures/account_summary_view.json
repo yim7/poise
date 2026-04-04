@@ -1,0 +1,10 @@
+{
+  "equity": 12500.0,
+  "available": 9000.0,
+  "unrealized_pnl": -350.0,
+  "day_change_pct": -2.8,
+  "risk_signal": "attention",
+  "reason": "day_change -2.8%",
+  "day_base_at": "2026-04-04T00:00:01Z",
+  "updated_at": "2026-04-04T08:30:00Z"
+}

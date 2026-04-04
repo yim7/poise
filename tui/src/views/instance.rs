@@ -8,14 +8,11 @@ use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-    ExecutionStatusView, ReplacementGateView, TrackCommandType, TrackCommandView,
-    TrackExecutionView,
+    ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, ReplacementGateView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
-use crate::views::instance_layout::{
-    DetailLayoutMode, resolve_detail_layout, resolve_trace_layout,
-};
+use crate::views::instance_layout::{DetailLayoutMode, resolve_detail_layout, resolve_trace_layout};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(detail) = app.current_track_detail().or(app.current_track.as_ref()) else {
@@ -26,49 +23,38 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let sections = resolve_detail_layout(area);
 
-    let status = Paragraph::new(track_lines(detail, sections.mode))
-        .block(Block::default().title("Track").borders(Borders::ALL));
-    frame.render_widget(status, sections.track);
+    let status = Paragraph::new(status_lines(detail))
+        .block(Block::default().title("Status").borders(Borders::ALL));
+    frame.render_widget(status, sections.status);
 
-    if let Some(pnl_area) = sections.pnl {
-        let pnl = Paragraph::new(pnl_lines(detail))
-            .block(Block::default().title("PnL").borders(Borders::ALL));
-        frame.render_widget(pnl, pnl_area);
-    }
+    let overview = Paragraph::new(overview_lines(detail, sections.mode))
+        .block(Block::default().title("Overview").borders(Borders::ALL));
+    frame.render_widget(overview, sections.overview);
 
-    if let Some(execution_stats_area) = sections.execution_stats {
-        let execution_stats = Paragraph::new(execution_stats_lines(detail, sections.mode))
-            .block(Block::default().title("Execution Stats").borders(Borders::ALL));
-        frame.render_widget(execution_stats, execution_stats_area);
-    }
+    let strategy = Paragraph::new(strategy_lines(detail, sections.mode))
+        .block(Block::default().title("Strategy").borders(Borders::ALL));
+    frame.render_widget(strategy, sections.strategy);
 
-    let overview = Paragraph::new(market_lines(detail, sections.mode))
-        .block(Block::default().title("Market").borders(Borders::ALL));
-    frame.render_widget(overview, sections.market);
-
-    if let Some(strategy_area) = sections.strategy {
-        let strategy = Paragraph::new(strategy_lines(detail, sections.mode))
-            .block(Block::default().title("Strategy").borders(Borders::ALL));
-        frame.render_widget(strategy, strategy_area);
-    }
-
-    let execution = Paragraph::new(execution_lines(&detail.execution, sections.mode))
-        .block(Block::default().title("Execution").borders(Borders::ALL));
+    let execution = Paragraph::new(execution_lines(
+        &detail.execution,
+        detail.market.mark_price,
+        detail.market.index_price,
+    ))
+    .block(Block::default().title("Execution").borders(Borders::ALL));
     frame.render_widget(execution, sections.execution);
+
+    if let Some(statistics_area) = sections.statistics {
+        let statistics = Paragraph::new(statistics_lines(detail, sections.mode))
+            .block(Block::default().title("Statistics").borders(Borders::ALL));
+        frame.render_widget(statistics, statistics_area);
+    }
 
     if let Some(trace_area) = sections.trace {
         render_trace(frame, trace_area, detail, app);
     }
 }
 
-fn track_lines(
-    detail: &crate::protocol::TrackDetailView,
-    mode: DetailLayoutMode,
-) -> Vec<Line<'static>> {
-    if matches!(mode, DetailLayoutMode::Minimal) {
-        return vec![minimal_track_line(detail)];
-    }
-
+fn status_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
     let lifecycle = detail.status.lifecycle.status.to_string();
     let execution_state = match detail.execution.state {
         ExecutionStateView::Open => "open",
@@ -82,31 +68,29 @@ fn track_lines(
         ExecutionStatusView::AttentionRequired
     ) {
         let reason_summary = attention_summary(&detail.execution.attention_reasons);
-        let slot_count = format_slot_count(detail.execution.active_slot_count);
         lines.push(Line::from(Span::styled(
             format!(
-                "{lifecycle} | {execution_state} | ATTENTION REQUIRED | {reason_summary} | gap {:.4} | age {} ms | {slot_count}",
-                detail.execution.inventory_gap,
-                detail.execution.gap_age_ms,
+                "! ATTENTION REQUIRED | {reason_summary} | gap {:.4} | age {} ms",
+                detail.execution.inventory_gap, detail.execution.gap_age_ms
             ),
             Theme::execution_attention(),
         )));
     } else {
         lines.push(Line::from(format!(
-            "{lifecycle} | {execution_state} | gap {:.4} | age {} ms | {}",
-            detail.execution.inventory_gap,
-            detail.execution.gap_age_ms,
-            format_slot_count(detail.execution.active_slot_count)
+            "{lifecycle} | {execution_state} | gap {:.4} | {} active slot",
+            detail.execution.inventory_gap, detail.execution.active_slot_count
         )));
     }
 
-    let commands = status_command_hint(&detail.available_commands);
     lines.push(Line::from(format!(
-        "{} | updated {}",
+        "{} / {} / {} | updated {}",
+        detail.identity.id,
+        detail.identity.instrument.symbol,
         detail.identity.instrument.venue,
-        detail.status.lifecycle.updated_at,
+        detail.status.lifecycle.updated_at
     )));
 
+    let commands = status_command_hint(&detail.available_commands);
     if !commands.is_empty() {
         lines.push(Line::from(commands));
     }
@@ -114,48 +98,18 @@ fn track_lines(
     lines
 }
 
-fn minimal_track_line(detail: &crate::protocol::TrackDetailView) -> Line<'static> {
-    let lifecycle = detail.status.lifecycle.status.to_string();
-    let execution_state = match detail.execution.state {
-        ExecutionStateView::Open => "open",
-        ExecutionStateView::Paused => "paused",
-        ExecutionStateView::Closed => "closed",
-    };
-
-    if matches!(
-        detail.execution.execution_status,
-        ExecutionStatusView::AttentionRequired
-    ) {
-        Line::from(Span::styled(
-            format!(
-                "{lifecycle} | {execution_state} | ATTENTION | gap {:.4} | {}",
-                detail.execution.inventory_gap,
-                format_slot_count(detail.execution.active_slot_count)
-            ),
-            Theme::execution_attention(),
-        ))
-    } else {
-        Line::from(format!(
-            "{lifecycle} | {execution_state} | gap {:.4} | {}",
-            detail.execution.inventory_gap,
-            format_slot_count(detail.execution.active_slot_count)
-        ))
-    }
-}
-
-fn market_lines(
+fn overview_lines(
     detail: &crate::protocol::TrackDetailView,
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
-    if matches!(mode, DetailLayoutMode::Minimal) {
-        return vec![format_exposure_line(
-            detail.status.reference_price,
-            detail.position.current_exposure,
-            detail.position.desired_exposure,
-        )];
-    }
-
-    vec![
+    let mut lines = vec![
+        Line::from(format!(
+            "id/symbol/venue/lifecycle: {} / {} / {} / {}",
+            detail.identity.id,
+            detail.identity.instrument.symbol,
+            detail.identity.instrument.venue,
+            detail.status.lifecycle.status
+        )),
         Line::from(format!(
             "reference/mark/index: {} / {} / {}",
             format_optional_price(detail.status.reference_price),
@@ -165,24 +119,26 @@ fn market_lines(
         format_exposure_line(
             detail.status.reference_price,
             detail.position.current_exposure,
-            detail.position.desired_exposure,
+            detail.position.target_exposure,
         ),
-    ]
+    ];
+
+    if matches!(mode, DetailLayoutMode::Minimal) {
+        lines.push(Line::from(format!(
+            "stats: total {} | realized {}",
+            pnl_signal(detail.statistics.total_pnl).text,
+            pnl_signal(detail.statistics.realized_pnl).text
+        )));
+    }
+
+    lines
 }
 
 fn strategy_lines(
     detail: &crate::protocol::TrackDetailView,
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
-    if matches!(mode, DetailLayoutMode::Minimal) {
-        vec![Line::from(format!(
-            "band {:.4}->{:.4} | shape {} | {}",
-            detail.strategy.lower_price,
-            detail.strategy.upper_price,
-            detail.strategy.shape_family,
-            detail.strategy.out_of_band_policy
-        ))]
-    } else if matches!(mode, DetailLayoutMode::Compact) {
+    if matches!(mode, DetailLayoutMode::Compact | DetailLayoutMode::Minimal) {
         vec![
             Line::from(format!(
                 "band: {:.4} -> {:.4} | shape: {} | out of band: {}",
@@ -192,11 +148,12 @@ fn strategy_lines(
                 detail.strategy.out_of_band_policy
             )),
             Line::from(format!(
-                "units {:.4}/{:.4} | notional {:.4} | min {:.4}",
-                detail.strategy.long_exposure_units,
-                detail.strategy.short_exposure_units,
-                detail.strategy.notional_per_unit,
-                detail.strategy.min_rebalance_units
+                "long/short units: {:.4} / {:.4}",
+                detail.strategy.long_exposure_units, detail.strategy.short_exposure_units
+            )),
+            Line::from(format!(
+                "notional per unit: {:.4} | min rebalance units: {:.4}",
+                detail.strategy.notional_per_unit, detail.strategy.min_rebalance_units
             )),
         ]
     } else {
@@ -206,50 +163,52 @@ fn strategy_lines(
                 detail.strategy.lower_price, detail.strategy.upper_price
             )),
             Line::from(format!(
-                "units {:.4}/{:.4} | notional {:.4}",
-                detail.strategy.long_exposure_units,
-                detail.strategy.short_exposure_units,
-                detail.strategy.notional_per_unit
+                "long/short units: {:.4} / {:.4}",
+                detail.strategy.long_exposure_units, detail.strategy.short_exposure_units
             )),
             Line::from(format!(
-                "min rebalance {:.4} | shape {} | out of band {}",
-                detail.strategy.min_rebalance_units,
-                detail.strategy.shape_family,
-                detail.strategy.out_of_band_policy
+                "notional per unit: {:.4} | min rebalance units: {:.4}",
+                detail.strategy.notional_per_unit, detail.strategy.min_rebalance_units
+            )),
+            Line::from(format!(
+                "shape: {} | out of band policy: {}",
+                detail.strategy.shape_family, detail.strategy.out_of_band_policy
             )),
         ]
     }
 }
 
-fn pnl_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
-    vec![format_pnl_summary_line(
-        detail.pnl.total_pnl,
-        detail.pnl.realized_pnl,
-        detail.pnl.unrealized_pnl,
-    )]
-}
-
-fn execution_stats_lines(
+fn statistics_lines(
     detail: &crate::protocol::TrackDetailView,
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(format!(
-        "max gap {:.4} | age {} ms",
-        detail.execution_stats.max_inventory_gap_abs, detail.execution_stats.max_gap_age_ms
-    ))];
-
-    if matches!(mode, DetailLayoutMode::Standard) {
-        lines.push(Line::from(format!(
-            "execution stats since: {}",
-            detail
-                .execution_stats
-                .stats_started_at
-                .clone()
-                .unwrap_or_else(|| "-".to_string())
-        )));
+    if matches!(mode, DetailLayoutMode::Compact) {
+        vec![Line::from(format!(
+            "stats: total {} | realized {} | max gap {:.4} | age {} ms",
+            pnl_signal(detail.statistics.total_pnl).text,
+            pnl_signal(detail.statistics.realized_pnl).text,
+            detail.statistics.max_inventory_gap_abs,
+            detail.statistics.max_gap_age_ms
+        ))]
+    } else {
+        vec![
+            Line::from("Total PnL | Realized PnL | Max Gap | Max Gap Age"),
+            format_statistics_line(
+                detail.statistics.total_pnl,
+                detail.statistics.realized_pnl,
+                detail.statistics.max_inventory_gap_abs,
+                detail.statistics.max_gap_age_ms,
+            ),
+            Line::from(format!(
+                "stats since: {}",
+                detail
+                    .statistics
+                    .stats_started_at
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string())
+            )),
+        ]
     }
-
-    lines
 }
 
 fn render_trace(
@@ -268,10 +227,7 @@ fn render_trace(
 
     let trace_layout = resolve_trace_layout(inner, app.debug_diagnostics_enabled());
 
-    let activity = Paragraph::new(trace_activity_lines(
-        detail,
-        trace_layout.activity.max_entries,
-    ));
+    let activity = Paragraph::new(trace_activity_lines(detail, trace_layout.activity.max_entries));
     frame.render_widget(activity, trace_layout.activity.area);
 
     if let Some(diagnostics_area) = trace_layout.diagnostics {
@@ -358,20 +314,50 @@ fn attention_summary(attention_reasons: &[String]) -> String {
     }
 }
 
-fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Vec<Line<'static>> {
-    let slot_details = execution
-        .slots
-        .iter()
-        .map(format_slot_detail)
-        .collect::<Vec<_>>();
+fn execution_lines(
+    execution: &GridExecutionView,
+    mark_price: Option<f64>,
+    index_price: Option<f64>,
+) -> Vec<Line<'static>> {
+    let state = match execution.state {
+        ExecutionStateView::Open => "open",
+        ExecutionStateView::Paused => "paused",
+        ExecutionStateView::Closed => "closed",
+    };
+    let execution_status = match execution.execution_status {
+        ExecutionStatusView::Normal => "normal",
+        ExecutionStatusView::AttentionRequired => "attention_required",
+    };
+    let slots = if execution.slots.is_empty() {
+        "none".to_string()
+    } else {
+        execution
+            .slots
+            .iter()
+            .map(|slot| {
+                let order = slot
+                    .order
+                    .as_ref()
+                    .map(|order| {
+                        format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price)
+                    })
+                    .unwrap_or_else(|| "no order".to_string());
+                format!(
+                    "{} {} {} {}",
+                    slot.label,
+                    format_slot_phase(slot.phase),
+                    format_slot_intent(slot.intent),
+                    order
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     let replacement_gate = execution
         .replacement_gate
         .as_ref()
-        .map(format_replacement_gate);
-
-    if matches!(mode, DetailLayoutMode::Minimal) {
-        return minimal_execution_lines(execution, &slot_details, replacement_gate.as_deref());
-    }
+        .map(format_replacement_gate)
+        .unwrap_or_else(|| "-".to_string());
 
     let mut lines = Vec::new();
 
@@ -379,6 +365,10 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
         execution.execution_status,
         ExecutionStatusView::AttentionRequired
     ) {
+        lines.push(Line::from(Span::styled(
+            "! ATTENTION REQUIRED",
+            Theme::execution_attention(),
+        )));
         if execution.attention_reasons.is_empty() {
             lines.push(Line::from("alerts: unresolved execution anomaly"));
         } else {
@@ -389,107 +379,24 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
         }
     }
 
-    if lines.is_empty() && slot_details.is_empty() && replacement_gate.is_none() {
-        return vec![Line::from("no working slots")];
-    }
-
-    if matches!(mode, DetailLayoutMode::Compact) {
-        let execution_summary =
-            format_compact_execution_summary(execution, replacement_gate.as_deref());
-        if let Some(summary) = execution_summary {
-            lines.push(Line::from(summary));
-        }
-    } else {
-        if !slot_details.is_empty() {
-            lines.push(Line::from(format!("slots: {}", slot_details.join(" | "))));
-        } else if !lines.is_empty() {
-            lines.push(Line::from("slots: none"));
-        }
-
-        if let Some(replacement_gate) = replacement_gate {
-            lines.push(Line::from(format!("replacement gate: {replacement_gate}")));
-        }
-    }
+    lines.extend([
+        Line::from(format!("state: {state}")),
+        Line::from(format!("execution status: {execution_status}")),
+        Line::from(format!(
+            "mark/index: {}/{}",
+            format_optional_price(mark_price),
+            format_optional_price(index_price)
+        )),
+        Line::from(format!(
+            "inventory gap / age: {:.4} / {} ms",
+            execution.inventory_gap, execution.gap_age_ms
+        )),
+        Line::from(format!("active slots: {}", execution.active_slot_count)),
+        Line::from(format!("slots: {slots}")),
+        Line::from(format!("replacement gate: {replacement_gate}")),
+    ]);
 
     lines
-}
-
-fn minimal_execution_lines(
-    execution: &TrackExecutionView,
-    slot_details: &[String],
-    replacement_gate: Option<&str>,
-) -> Vec<Line<'static>> {
-    if matches!(
-        execution.execution_status,
-        ExecutionStatusView::AttentionRequired
-    ) {
-        return vec![Line::from(format!(
-            "alerts: {}",
-            attention_summary(&execution.attention_reasons)
-        ))];
-    }
-
-    if let Some(summary) = format_compact_execution_summary(execution, replacement_gate) {
-        return vec![Line::from(summary)];
-    }
-
-    if slot_details.is_empty() && replacement_gate.is_none() {
-        return vec![Line::from("no working slots")];
-    }
-
-    vec![Line::from("execution detail unavailable")]
-}
-
-fn format_compact_execution_summary(
-    execution: &TrackExecutionView,
-    replacement_gate: Option<&str>,
-) -> Option<String> {
-    let slots = compact_slot_summary(execution);
-
-    match (slots.as_deref(), replacement_gate) {
-        (None, None) => None,
-        (Some(slots), None) => Some(slots.to_string()),
-        (None, Some(replacement_gate)) => Some(format!("gate: {replacement_gate}")),
-        (Some(slots), Some(replacement_gate)) => {
-            Some(format!("{slots} | gate: {replacement_gate}"))
-        }
-    }
-}
-
-fn compact_slot_summary(execution: &TrackExecutionView) -> Option<String> {
-    match execution.slots.as_slice() {
-        [] => None,
-        [slot] => Some(format!("slot: {}", compact_slot_label(slot))),
-        slots => Some(format!("slots {} | {}", slots.len(), compact_slot_label(&slots[0]))),
-    }
-}
-
-fn format_slot_count(count: u32) -> String {
-    format!("slots {count}")
-}
-
-fn format_slot_detail(slot: &poise_protocol::ExecutionSlotView) -> String {
-    let order = slot
-        .order
-        .as_ref()
-        .map(|order| format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price))
-        .unwrap_or_else(|| "no order".to_string());
-    format!(
-        "{} {} {} {}",
-        slot.label,
-        format_slot_phase(slot.phase),
-        format_slot_intent(slot.intent),
-        order
-    )
-}
-
-fn compact_slot_label(slot: &poise_protocol::ExecutionSlotView) -> String {
-    let order = slot
-        .order
-        .as_ref()
-        .map(|order| format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price))
-        .unwrap_or_else(|| "no order".to_string());
-    format!("{} {order}", slot.label)
 }
 
 fn format_slot_phase(value: ExecutionSlotPhaseView) -> &'static str {
@@ -522,8 +429,13 @@ fn format_optional_price(value: Option<f64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn format_exposure_line(reference_price: Option<f64>, current: f64, target: Option<f64>) -> Line<'static> {
-    let signal = instance_exposure_annotation(exposure_signal(current, target));
+fn format_exposure_line(
+    reference_price: Option<f64>,
+    current: f64,
+    target: Option<f64>,
+) -> Line<'static> {
+    let signal = exposure_signal(current, target);
+    let annotation = instance_exposure_annotation(signal);
     let reference_text = reference_price
         .map(|value| format!("{value:.4}"))
         .unwrap_or_else(|| "-".to_string());
@@ -534,34 +446,38 @@ fn format_exposure_line(reference_price: Option<f64>, current: f64, target: Opti
     Line::from(vec![
         Span::raw(format!("reference/exposure: {reference_text} / ")),
         Span::raw(format!("{current:.4} → {target_text} ")),
-        Span::styled(signal.text, signal.style),
+        Span::styled(annotation.text, annotation.style),
     ])
 }
 
-fn format_pnl_summary_line(total_pnl: f64, realized_pnl: f64, unrealized_pnl: f64) -> Line<'static> {
+fn format_statistics_line(
+    total_pnl: f64,
+    realized_pnl: f64,
+    max_inventory_gap_abs: f64,
+    max_gap_age_ms: i64,
+) -> Line<'static> {
     let total = pnl_signal(total_pnl);
-    let unrealized = pnl_signal(unrealized_pnl);
     let realized = pnl_signal(realized_pnl);
 
     Line::from(vec![
-        Span::raw("total "),
         Span::styled(total.text, total.style),
-        Span::raw(" | unrealized "),
-        Span::styled(unrealized.text, unrealized.style),
-        Span::raw(" | realized cumulative "),
+        Span::raw(" | "),
         Span::styled(realized.text, realized.style),
+        Span::raw(format!(
+            " | {max_inventory_gap_abs:.4} | {max_gap_age_ms} ms"
+        )),
     ])
 }
 
-fn status_command_hint(commands: &[TrackCommandView]) -> String {
+fn status_command_hint(commands: &[GridCommandView]) -> String {
     let hints = commands
         .iter()
         .filter(|command| command.enabled)
         .filter_map(|command| match command.command {
-            TrackCommandType::Pause => Some("p pause".to_string()),
-            TrackCommandType::Resume => Some("r resume".to_string()),
-            TrackCommandType::Terminate => Some("t terminate".to_string()),
-            TrackCommandType::Flatten => Some("f flatten".to_string()),
+            GridCommandType::Pause => Some("p pause".to_string()),
+            GridCommandType::Resume => Some("r resume".to_string()),
+            GridCommandType::Terminate => Some("t terminate".to_string()),
+            GridCommandType::Flatten => Some("f flatten".to_string()),
         })
         .collect::<Vec<_>>();
 
@@ -592,7 +508,7 @@ mod tests {
 
     use crate::app::{App, View};
     use crate::protocol::{
-        ExecutionStatusView, TrackCommandType, TrackCommandView, TrackDetailView,
+        ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView,
         TrackDiagnosticsView,
     };
 
@@ -711,18 +627,15 @@ mod tests {
 
         let text = render_text(detail);
 
-        assert!(text.contains("Track"));
-        assert!(text.contains("PnL"));
-        assert!(text.contains("Execution Stats"));
-        assert!(text.contains("Market"));
+        assert!(text.contains("Status"));
+        assert!(text.contains("Overview"));
         assert!(text.contains("Strategy"));
         assert!(text.contains("Execution"));
+        assert!(text.contains("Statistics"));
         assert!(text.contains("Trace"));
-        assert!(!text.contains("Overview"));
         assert!(!text.contains("Commands"));
         assert!(text.contains("commands: p pause"));
-        assert!(text.contains("min rebalance"));
-        assert!(text.find("PnL") < text.find("Market"));
+        assert!(text.contains("min rebalance units"));
     }
 
     #[test]
@@ -736,10 +649,10 @@ mod tests {
         assert!(default_text.contains("Activity"));
         assert!(!default_text.contains("Diagnostics"));
 
-        let debug_text = render_text_with_debug(detail, Some(diagnostics_view()), 100, 32);
+        let debug_text = render_text_with_debug(detail, Some(diagnostics_view()), 100, 36);
         assert!(debug_text.contains("Trace"));
         assert!(debug_text.contains("Diagnostics"));
-        assert!(debug_text.contains("desired exposure 3.5000 -> 4.0000"));
+        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
     }
 
     #[test]
@@ -781,12 +694,13 @@ mod tests {
             })
             .collect();
 
-        let debug_text = render_text_with_debug(detail, Some(diagnostics_view()), 100, 32);
+        let debug_text = render_text_with_debug(detail, Some(diagnostics_view()), 100, 36);
 
         assert!(debug_text.contains("Activity"));
         assert!(debug_text.contains("activity 4"));
+        assert!(!debug_text.contains("activity 1"));
         assert!(debug_text.contains("Diagnostics"));
-        assert!(debug_text.contains("desired exposure 3.5000 -> 4.0000"));
+        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
     }
 
     #[test]
@@ -797,78 +711,9 @@ mod tests {
 
         let text = render_text_with_size(detail, 100, 24);
 
-        assert!(text.contains("Track"));
-        assert!(text.contains("PnL"));
-        assert!(text.contains("Execution Stats"));
-        assert!(text.contains("Market"));
-        assert!(!text.contains("Trace"));
-        assert!(text.contains("total ↑ +1245.30 | unrealized ↑ +265.20"));
-        assert!(text.contains("max gap 1.5000 | age 120000 ms"));
-    }
-
-    #[test]
-    fn keeps_core_body_visible_before_compact_threshold() {
-        let detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-
-        let text = render_text_with_size(detail, 100, 22);
-
-        assert!(text.contains("Track"));
-        assert!(text.contains("PnL"));
-        assert!(text.contains("Market"));
-        assert!(text.contains("Strategy"));
-        assert!(text.contains("Execution"));
-        assert!(text.contains("no working slots") || text.contains("slot:"));
-        assert!(!text.contains("Execution Stats"));
-        assert!(!text.contains("Trace"));
-    }
-
-    #[test]
-    fn renders_trace_content_once_compact_height_can_show_panel_body() {
-        let detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-
-        let text = render_text_with_size(detail, 100, 27);
-
+        assert!(text.contains("Status"));
         assert!(text.contains("Trace"));
-        assert!(text.contains("Activity"));
-    }
-
-    #[test]
-    fn renders_compact_execution_without_hiding_alerts_slots_and_gate() {
-        let mut detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
-        detail.execution.attention_reasons = vec!["market data stale".to_string()];
-
-        let text = render_text_with_size(detail, 100, 24);
-
-        assert!(text.contains("alerts: market data stale"));
-        assert!(text.contains("slot: inventory_core buy 0.0100 @ 100.5000"));
-        assert!(text.contains("9.0 bps < 13.0 bps"));
-    }
-
-    #[test]
-    fn keeps_execution_summary_visible_with_multiple_slots_in_compact_layout() {
-        let mut detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
-        detail.execution.attention_reasons = vec!["market data stale".to_string()];
-        let mut hedge_slot = detail.execution.slots[0].clone();
-        hedge_slot.label = "hedge_tail".to_string();
-        hedge_slot.order.as_mut().unwrap().quantity = 0.02;
-        detail.execution.slots.push(hedge_slot);
-        detail.execution.active_slot_count = detail.execution.slots.len() as u32;
-
-        let text = render_text_with_size(detail, 90, 24);
-
-        assert!(text.contains("alerts: market data stale"));
-        assert!(text.contains("slots 2"));
-        assert!(text.contains("9.0 bps < 13.0 bps"));
+        assert!(text.contains("stats:"));
     }
 
     #[test]
@@ -879,126 +724,55 @@ mod tests {
 
         let text = render_text_with_size(detail, 100, 16);
 
-        assert!(text.contains("Track"));
-        assert!(text.contains("PnL"));
-        assert!(text.contains("Market"));
+        assert!(text.contains("Status"));
+        assert!(text.contains("Overview"));
         assert!(text.contains("Strategy"));
         assert!(text.contains("Execution"));
         assert!(!text.contains("Trace"));
-        assert!(!text.contains("Execution Stats"));
-        assert!(text.contains("shape"));
+        assert!(!text.contains("Statistics"));
     }
 
     #[test]
-    fn preserves_minimal_execution_body_at_height_boundary() {
+    fn renders_grid_detail_execution_activity_and_commands() {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.execution.active_slot_count = 0;
-        detail.execution.slots.clear();
-        detail.execution.replacement_gate = None;
-
-        let text = render_text_with_size(detail, 100, 15);
-
-        assert!(text.contains("Execution"));
-        assert!(text.contains("no working slots"));
-    }
-
-    #[test]
-    fn preserves_minimal_execution_body_across_boundary_heights() {
-        let mut detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-        detail.execution.active_slot_count = 0;
-        detail.execution.slots.clear();
-        detail.execution.replacement_gate = None;
-
-        for height in [16, 19, 20] {
-            let text = render_text_with_size(detail.clone(), 100, height);
-            assert!(text.contains("Execution"), "missing execution block at height {height}");
-            assert!(
-                text.contains("no working slots"),
-                "missing execution body at height {height}"
-            );
-        }
-    }
-
-    #[test]
-    fn renders_track_detail_execution_activity_and_commands() {
-        let mut detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-        detail.available_commands.push(TrackCommandView {
-            command: TrackCommandType::Resume,
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Resume,
             enabled: false,
-            disabled_reason: Some("track is not paused".to_string()),
+            disabled_reason: Some("grid is not paused".to_string()),
         });
-        detail.available_commands.push(TrackCommandView {
-            command: TrackCommandType::Flatten,
+        detail.available_commands.push(GridCommandView {
+            command: GridCommandType::Flatten,
             enabled: false,
             disabled_reason: Some("no position to flatten".to_string()),
         });
         let text = render_text(detail);
 
-        assert!(text.contains("Track"));
-        assert!(text.contains("Market"));
+        assert!(text.contains("Overview"));
         assert!(text.contains("Strategy"));
-        assert!(text.contains("PnL"));
-        assert!(text.contains("Execution Stats"));
+        assert!(text.contains("Statistics"));
         assert!(text.contains("Execution"));
         assert!(text.contains("Trace"));
         assert!(text.contains("Activity"));
         assert!(!text.contains("Commands"));
         assert!(text.contains("commands: p pause"));
-        assert!(text.contains("total ↑ +1245.30 | unrealized ↑ +265.20 | realized cumulative ↑ +980.10"));
-        assert!(text.contains("max gap 1.5000 | age 120000 ms"));
-        assert!(text.contains("execution stats since: 2026-03-26T09:45:00Z"));
-        assert!(text.contains("active | open | gap 0.5000 | age 60000 ms | slots 1"));
-        assert!(text.contains("binance_futures | updated 2026-03-26T10:00:00Z"));
+        assert!(text.contains("Total PnL"));
+        assert!(text.contains("↑ +1245.30"));
+        assert!(text.contains("↑ +980.10"));
+        assert!(text.contains("stats since: 2026-03-26T09:45:00Z"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
-        assert!(text.contains("units 8.0000/8.0000 | notional 375.0000"));
-        assert!(text.contains("min rebalance 0.5000 | shape linear | out of band freeze"));
-        assert!(text.contains("reference/exposure: 101.2500 / 3.5000 → 4.0000 [long add 0.5000]"));
-        assert!(!text.contains("id/symbol/venue/lifecycle:"));
-        assert!(!text.contains("execution status: normal"));
-        assert!(!text.contains("inventory gap / age: 0.5000 / 60000 ms"));
-        assert!(!text.contains("active slots: 1"));
-        assert!(!text.contains("mark/index: 100.5000/100.0000"));
+        assert!(text.contains("long/short units: 8.0000 / 8.0000"));
+        assert!(text.contains("notional per unit: 375.0000 | min rebalance units: 0.5000"));
+        assert!(text.contains("shape: linear | out of band policy: freeze"));
+        assert!(text.contains("execution status: normal"));
+        assert!(text.contains("inventory gap / age: 0.5000 / 60000 ms"));
+        assert!(text.contains("active slots: 1"));
         assert!(text.contains("inventory_core opening increase_inventory buy 0.0100 @ 100.5000"));
         assert!(text.contains("replacement gate"));
         assert!(text.contains("9.0 bps < 13.0 bps"));
         assert!(!text.contains("Diagnostics"));
         assert!(!text.contains("client-1"));
-    }
-
-    #[test]
-    fn renders_execution_as_single_empty_state_when_no_slots_or_alerts_exist() {
-        let mut detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-        detail.execution.active_slot_count = 0;
-        detail.execution.slots.clear();
-        detail.execution.replacement_gate = None;
-
-        let text = render_text(detail);
-
-        assert!(text.contains("Execution"));
-        assert!(text.contains("no working slots"));
-        assert!(!text.contains("slots: none"));
-        assert!(!text.contains("replacement gate: -"));
-    }
-
-    #[test]
-    fn renders_unavailable_target_without_hold_wording() {
-        let mut detail: TrackDetailView =
-            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
-                .unwrap();
-        detail.position.desired_exposure = None;
-
-        let text = render_text(detail);
-
-        assert!(text.contains("reference/exposure: 101.2500 / 3.5000 → - [target unavailable]"));
-        assert!(!text.contains("hold 0.0000"));
     }
 
     #[test]
@@ -1022,7 +796,7 @@ mod tests {
             .unwrap();
         let default_text = buffer_text(&terminal);
         assert!(!default_text.contains("Diagnostics"));
-        assert!(!default_text.contains("desired exposure 3.5000 -> 4.0000"));
+        assert!(!default_text.contains("target exposure 3.5000 -> 4.0000"));
 
         app.toggle_debug_diagnostics();
         app.apply_track_diagnostics(diagnostics_view());
@@ -1031,25 +805,22 @@ mod tests {
             .unwrap();
         let debug_text = buffer_text(&terminal);
         assert!(debug_text.contains("Diagnostics"));
-        assert!(debug_text.contains("desired exposure 3.5000 -> 4.0000"));
+        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
     }
 
     #[test]
-    fn renders_pnl_and_execution_stats_with_explicit_separator_for_large_values() {
+    fn renders_statistics_with_explicit_separator_for_large_pnl_values() {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.pnl.total_pnl = -123456789.12;
-        detail.pnl.realized_pnl = 987654321.99;
-        detail.pnl.unrealized_pnl = 42.5;
+        detail.statistics.total_pnl = -123456789.12;
+        detail.statistics.realized_pnl = 987654321.99;
 
         let text = render_text(detail);
 
-        assert!(text.contains(
-            "total ↓ -123456789.12 | unrealized ↑ +42.50 | realized cumulative ↑ +987654321.99"
-        ));
-        assert!(text.contains("max gap 1.5000 | age 120000 ms"));
-        assert!(!text.contains("-123456789.12↑ +987654321.99"));
+        assert!(text.contains("Total PnL | Realized PnL"));
+        assert!(text.contains("↓ -123456789.12 | ↑ +987654321.99"));
+        assert!(!text.contains("-123456789.12+987654321.99"));
     }
 
     #[test]
@@ -1094,11 +865,12 @@ mod tests {
         let terminal = render_terminal(detail, 100, 36);
         let text = buffer_text(&terminal);
 
-        assert!(text.contains("ATTENTION REQUIRED | recovery anomaly: unknown_live_order"));
-        assert!(text.contains("gap 0.5000"));
+        assert!(text.contains(
+            "! ATTENTION REQUIRED | recovery anomaly: unknown_live_order | gap 0.5000 | age 60000 ms"
+        ));
         assert!(text.contains("recovery anomaly: unknown_live_order"));
         assert!(
-            background_colors_for_substring(&terminal, "ATTENTION REQUIRED")
+            background_colors_for_substring(&terminal, "! ATTENTION REQUIRED")
                 .iter()
                 .any(|bg| *bg != Color::Reset)
         );
@@ -1118,8 +890,8 @@ mod tests {
 
         let text = render_text_with_size(detail, 100, 36);
 
-        assert!(text.contains("active | open | ATTENTION REQUIRED | 3 reasons"));
-        assert!(text.contains("gap 0.5000 | age 60000 ms | slots 1"));
+        assert!(text.contains("! ATTENTION REQUIRED | 3 reasons"));
+        assert!(text.contains("gap 0.5000 | age 60000 ms"));
         assert!(text.contains("alerts: recovery anomaly: duplicate_live_orders | market data stale | insufficient account margin"));
     }
 }

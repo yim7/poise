@@ -1,3 +1,4 @@
+pub mod account_panel;
 pub mod dashboard;
 pub mod help;
 pub mod instance;
@@ -24,7 +25,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         .split(frame.area());
 
     let header = Paragraph::new(render_status_line(app))
-        .block(Block::default().borders(Borders::ALL).title("Context"));
+        .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(header, areas[0]);
 
     match app.current_view {
@@ -53,10 +54,10 @@ fn render_status_line(app: &App) -> Line<'static> {
         Theme::status_context(),
     ));
 
-    if let Some(track) = app.selected_track() {
+    if let Some(grid) = app.selected_grid() {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
-            format!("{} / {}", track.id, track.instrument.symbol),
+            format!("{} / {}", grid.id, grid.instrument.symbol),
             Theme::status_context(),
         ));
     }
@@ -116,7 +117,7 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Poise"));
-        assert!(text.contains("Context"));
+        assert!(text.contains("Status"));
         assert!(text.contains("Keys"));
     }
 
@@ -139,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_view_context_even_without_selected_track() {
+    fn renders_view_context_even_without_selected_grid() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let app = App::new(vec![]);

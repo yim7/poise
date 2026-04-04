@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn query_service_projects_desired_exposure_for_clients() {
+    fn query_service_projects_desired_exposure_as_target_exposure_for_clients() {
         let read_model = TrackReadModel::from_snapshot(
             TrackRuntimeSnapshot {
                 track_id: TrackId::new("btc-core"),
@@ -248,7 +248,7 @@ mod tests {
 
         assert_eq!(read_model.desired_exposure, Some(4.0));
         let projected = TrackProjector::new().project_detail(&read_model);
-        assert_eq!(projected.position.desired_exposure, Some(4.0));
+        assert_eq!(projected.position.target_exposure, Some(4.0));
     }
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {

@@ -20,7 +20,7 @@
         "execution_status": "normal",
         "active_slot_count": 1
       },
-      "pnl": {
+      "statistics": {
         "total_pnl": 1245.3
       }
     }
