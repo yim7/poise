@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-    ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView, ReplacementGateView,
+    ExecutionStatusView, TrackCommandType, TrackCommandView, TrackExecutionView, ReplacementGateView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
@@ -150,7 +150,7 @@ fn market_lines(
         return vec![format_exposure_line(
             detail.status.reference_price,
             detail.position.current_exposure,
-            detail.position.target_exposure,
+            detail.position.desired_exposure,
         )];
     }
 
@@ -164,7 +164,7 @@ fn market_lines(
         format_exposure_line(
             detail.status.reference_price,
             detail.position.current_exposure,
-            detail.position.target_exposure,
+            detail.position.desired_exposure,
         ),
     ]
 }
@@ -353,7 +353,7 @@ fn attention_summary(attention_reasons: &[String]) -> String {
 }
 
 fn execution_lines(
-    execution: &GridExecutionView,
+    execution: &TrackExecutionView,
     mode: DetailLayoutMode,
 ) -> Vec<Line<'static>> {
     let slot_details = execution
@@ -412,7 +412,7 @@ fn execution_lines(
 }
 
 fn minimal_execution_lines(
-    execution: &GridExecutionView,
+    execution: &TrackExecutionView,
     slot_details: &[String],
     replacement_gate: Option<&str>,
 ) -> Vec<Line<'static>> {
@@ -438,7 +438,7 @@ fn minimal_execution_lines(
 }
 
 fn format_compact_execution_summary(
-    execution: &GridExecutionView,
+    execution: &TrackExecutionView,
     replacement_gate: Option<&str>,
 ) -> Option<String> {
     let slots = compact_slot_summary(execution);
@@ -453,7 +453,7 @@ fn format_compact_execution_summary(
     }
 }
 
-fn compact_slot_summary(execution: &GridExecutionView) -> Option<String> {
+fn compact_slot_summary(execution: &TrackExecutionView) -> Option<String> {
     match execution.slots.as_slice() {
         [] => None,
         [slot] => Some(format!("slot: {}", compact_slot_label(slot))),
@@ -555,15 +555,15 @@ fn format_pnl_summary_line(total_pnl: f64, realized_pnl: f64, unrealized_pnl: f6
     ])
 }
 
-fn status_command_hint(commands: &[GridCommandView]) -> String {
+fn status_command_hint(commands: &[TrackCommandView]) -> String {
     let hints = commands
         .iter()
         .filter(|command| command.enabled)
         .filter_map(|command| match command.command {
-            GridCommandType::Pause => Some("p pause".to_string()),
-            GridCommandType::Resume => Some("r resume".to_string()),
-            GridCommandType::Terminate => Some("t terminate".to_string()),
-            GridCommandType::Flatten => Some("f flatten".to_string()),
+            TrackCommandType::Pause => Some("p pause".to_string()),
+            TrackCommandType::Resume => Some("r resume".to_string()),
+            TrackCommandType::Terminate => Some("t terminate".to_string()),
+            TrackCommandType::Flatten => Some("f flatten".to_string()),
         })
         .collect::<Vec<_>>();
 
@@ -592,7 +592,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use crate::app::{App, View};
     use crate::protocol::{
-        ExecutionStatusView, GridCommandType, GridCommandView, TrackDetailView,
+        ExecutionStatusView, TrackCommandType, TrackCommandView, TrackDetailView,
         TrackDiagnosticsView,
     };
 
@@ -706,7 +706,7 @@ mod tests {
         let debug_text = render_text_with_debug(detail, Some(diagnostics_view()), 100, 36);
         assert!(debug_text.contains("Trace"));
         assert!(debug_text.contains("Diagnostics"));
-        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
+        assert!(debug_text.contains("desired exposure 3.5000 -> 4.0000"));
     }
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
         assert!(debug_text.contains("activity 4"));
         assert!(debug_text.contains("activity 1"));
         assert!(debug_text.contains("Diagnostics"));
-        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
+        assert!(debug_text.contains("desired exposure 3.5000 -> 4.0000"));
     }
 
     #[test]
@@ -789,17 +789,17 @@ mod tests {
     }
 
     #[test]
-    fn renders_grid_detail_execution_activity_and_commands() {
+    fn renders_track_detail_execution_activity_and_commands() {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.available_commands.push(GridCommandView {
-            command: GridCommandType::Resume,
+        detail.available_commands.push(TrackCommandView {
+            command: TrackCommandType::Resume,
             enabled: false,
-            disabled_reason: Some("grid is not paused".to_string()),
+            disabled_reason: Some("track is not paused".to_string()),
         });
-        detail.available_commands.push(GridCommandView {
-            command: GridCommandType::Flatten,
+        detail.available_commands.push(TrackCommandView {
+            command: TrackCommandType::Flatten,
             enabled: false,
             disabled_reason: Some("no position to flatten".to_string()),
         });
@@ -847,7 +847,7 @@ mod tests {
             .unwrap();
         let default_text = buffer_text(&terminal);
         assert!(!default_text.contains("Diagnostics"));
-        assert!(!default_text.contains("target exposure 3.5000 -> 4.0000"));
+        assert!(!default_text.contains("desired exposure 3.5000 -> 4.0000"));
 
         app.toggle_debug_diagnostics();
         app.apply_track_diagnostics(diagnostics_view());
@@ -856,7 +856,7 @@ mod tests {
             .unwrap();
         let debug_text = buffer_text(&terminal);
         assert!(debug_text.contains("Diagnostics"));
-        assert!(debug_text.contains("target exposure 3.5000 -> 4.0000"));
+        assert!(debug_text.contains("desired exposure 3.5000 -> 4.0000"));
     }
 
     #[test]

@@ -29,7 +29,7 @@
   },
   "position": {
     "current_exposure": 3.5,
-    "target_exposure": 4.0
+    "desired_exposure": 4.0
   },
   "pnl": {
     "total_pnl": 1245.3,

@@ -1131,7 +1131,7 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         };
-        let state = test_state_with_grid(
+        let state = test_state_with_track(
             repository.clone(),
             exchange.clone(),
             config.clone(),
@@ -1361,7 +1361,7 @@ mod tests {
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
     ) -> crate::assembly::ServerState {
-        test_state_with_grid(
+        test_state_with_track(
             repository,
             exchange,
             test_config(),
@@ -1377,7 +1377,7 @@ mod tests {
         .await
     }
 
-    async fn test_state_with_grid(
+    async fn test_state_with_track(
         repository: Arc<MemoryRepository>,
         _exchange: Arc<FakeExchange>,
         config: TrackConfig,

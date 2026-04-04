@@ -5,7 +5,7 @@ use axum::{Json, Router};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
-    AccountSummaryView, GridCommandType, TrackCommandAccepted, TrackCommandRequest,
+    AccountSummaryView, TrackCommandType, TrackCommandAccepted, TrackCommandRequest,
     TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
@@ -155,13 +155,13 @@ async fn submit_command(
 }
 
 fn map_command(
-    command: GridCommandType,
+    command: TrackCommandType,
 ) -> Result<TrackCommand, (StatusCode, Json<ErrorResponse>)> {
     match command {
-        GridCommandType::Pause => Ok(TrackCommand::Pause),
-        GridCommandType::Resume => Ok(TrackCommand::Resume),
-        GridCommandType::Terminate => Ok(TrackCommand::Terminate),
-        GridCommandType::Flatten => Ok(TrackCommand::Flatten),
+        TrackCommandType::Pause => Ok(TrackCommand::Pause),
+        TrackCommandType::Resume => Ok(TrackCommand::Resume),
+        TrackCommandType::Terminate => Ok(TrackCommand::Terminate),
+        TrackCommandType::Flatten => Ok(TrackCommand::Flatten),
     }
 }
 
@@ -223,7 +223,7 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
-        GridCommandType, GridStatus, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackStatus, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
         TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
@@ -471,11 +471,11 @@ mod tests {
                 ),
             )
             .unwrap();
-        let grid = manager
+        let track = manager
             .get_track("btc-core")
-            .expect("grid should still exist")
+            .expect("track should still exist")
             .clone();
-        let mut snapshot = grid.snapshot();
+        let mut snapshot = track.snapshot();
         let slot_order = snapshot
             .executor_state
             .slots
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_grids_returns_grid_list_response() {
+    async fn list_tracks_returns_track_list_response() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -682,7 +682,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Pause,
+                            command: TrackCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -697,7 +697,7 @@ mod tests {
 
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
-        assert_eq!(payload.command, GridCommandType::Pause);
+        assert_eq!(payload.command, TrackCommandType::Pause);
     }
 
     #[tokio::test]
@@ -710,7 +710,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Flatten,
+                            command: TrackCommandType::Flatten,
                         })
                         .unwrap(),
                     ))
@@ -724,7 +724,7 @@ mod tests {
         let payload: TrackCommandAccepted = serde_json::from_slice(&body).unwrap();
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
-        assert_eq!(payload.command, GridCommandType::Flatten);
+        assert_eq!(payload.command, TrackCommandType::Flatten);
     }
 
     #[tokio::test]
@@ -737,7 +737,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Terminate,
+                            command: TrackCommandType::Terminate,
                         })
                         .unwrap(),
                     ))
@@ -751,11 +751,11 @@ mod tests {
         let payload: TrackCommandAccepted = serde_json::from_slice(&body).unwrap();
         assert!(payload.accepted);
         assert_eq!(payload.track_id, "btc-core");
-        assert_eq!(payload.command, GridCommandType::Terminate);
+        assert_eq!(payload.command, TrackCommandType::Terminate);
     }
 
     #[tokio::test]
-    async fn resume_command_rejects_non_paused_grid() {
+    async fn resume_command_rejects_non_paused_track() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -764,7 +764,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Resume,
+                            command: TrackCommandType::Resume,
                         })
                         .unwrap(),
                     ))
@@ -810,7 +810,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Pause,
+                            command: TrackCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -832,7 +832,7 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload.status.lifecycle.status, GridStatus::Active);
+        assert_eq!(payload.status.lifecycle.status, TrackStatus::Active);
     }
 
     #[tokio::test]
@@ -848,7 +848,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Pause,
+                            command: TrackCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -870,12 +870,12 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload.status.lifecycle.status, GridStatus::Paused);
-        assert_eq!(payload.position.target_exposure, None);
+        assert_eq!(payload.status.lifecycle.status, TrackStatus::Paused);
+        assert_eq!(payload.position.desired_exposure, None);
     }
 
     #[tokio::test]
-    async fn resume_command_reactivates_paused_grid() {
+    async fn resume_command_reactivates_paused_track() {
         let app = router(app_state().await);
 
         let pause = app
@@ -887,7 +887,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Pause,
+                            command: TrackCommandType::Pause,
                         })
                         .unwrap(),
                     ))
@@ -906,7 +906,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&TrackCommandRequest {
-                            command: GridCommandType::Resume,
+                            command: TrackCommandType::Resume,
                         })
                         .unwrap(),
                     ))
@@ -928,11 +928,11 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload.status.lifecycle.status, GridStatus::Active);
+        assert_eq!(payload.status.lifecycle.status, TrackStatus::Active);
     }
 
     #[tokio::test]
-    async fn get_grid_detail_returns_404_for_missing_grid() {
+    async fn get_track_detail_returns_404_for_missing_track() {
         let response = router(app_state().await)
             .oneshot(
                 Request::builder()
@@ -966,7 +966,7 @@ mod tests {
             payload
                 .items
                 .iter()
-                .any(|item| item.message.contains("target exposure"))
+                .any(|item| item.message.contains("desired exposure"))
         );
     }
 

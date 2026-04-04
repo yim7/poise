@@ -136,7 +136,7 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(1);
 const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
-struct RecoveryTrackedGrid {
+struct RecoveryTrackedTrack {
     instrument: poise_engine::track::Instrument,
     next_retry_at: Instant,
 }
@@ -888,7 +888,7 @@ fn should_cancel_unknown_live_orders(
 }
 
 fn update_recovery_tracking(
-    tracked: &mut std::collections::HashMap<String, RecoveryTrackedGrid>,
+    tracked: &mut std::collections::HashMap<String, RecoveryTrackedTrack>,
     instruments: &[crate::write_service::TrackInstrument],
     track_id: &str,
     recovery_anomaly_active: bool,
@@ -909,7 +909,7 @@ fn update_recovery_tracking(
 
     tracked
         .entry(track_id.to_string())
-        .or_insert_with(|| RecoveryTrackedGrid {
+        .or_insert_with(|| RecoveryTrackedTrack {
             instrument,
             next_retry_at: Instant::now() + retry_interval,
         });
@@ -919,7 +919,7 @@ async fn seed_recovery_tracking(
     state: &ServerState,
     instruments: &[crate::write_service::TrackInstrument],
     retry_interval: Duration,
-) -> std::collections::HashMap<String, RecoveryTrackedGrid> {
+) -> std::collections::HashMap<String, RecoveryTrackedTrack> {
     let mut tracked = std::collections::HashMap::new();
     for track in instruments {
         let Ok(Some(snapshot)) = state.state_repository.load_track_state(&track.id).await else {

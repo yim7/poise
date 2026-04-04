@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    AccountSummaryView, GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
+    AccountSummaryView, TrackCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
     TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 
@@ -90,7 +90,7 @@ impl ApiClient {
     pub async fn submit_command(
         &self,
         id: &str,
-        cmd: GridCommandType,
+        cmd: TrackCommandType,
     ) -> Result<TrackCommandAccepted> {
         let response = self
             .http
@@ -195,7 +195,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::protocol::{
-        AccountSummaryView, GridCommandType, StreamEvent, TrackCommandAccepted,
+        AccountSummaryView, TrackCommandType, StreamEvent, TrackCommandAccepted,
         TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
 
@@ -331,7 +331,7 @@ mod tests {
         assert!((detail.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
         assert!((detail.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
         assert!((detail.execution_stats.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
-        assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
+        assert_eq!(detail.available_commands[0].command, TrackCommandType::Pause);
     }
 
     #[tokio::test]
@@ -342,7 +342,7 @@ mod tests {
         let diagnostics = client.get_track_diagnostics(BTC_GRID_ID).await.unwrap();
 
         assert_eq!(diagnostics.items.len(), 1);
-        assert_eq!(diagnostics.items[0].message, "target exposure 3.5000 -> 4.0000");
+        assert_eq!(diagnostics.items[0].message, "desired exposure 3.5000 -> 4.0000");
     }
 
     #[tokio::test]
@@ -351,13 +351,13 @@ mod tests {
         let client = ApiClient::new(base_url);
 
         let response = client
-            .submit_command(BTC_GRID_ID, GridCommandType::Pause)
+            .submit_command(BTC_GRID_ID, TrackCommandType::Pause)
             .await
             .unwrap();
 
         assert!(response.accepted);
         assert_eq!(response.track_id, BTC_GRID_ID);
-        assert_eq!(response.command, GridCommandType::Pause);
+        assert_eq!(response.command, TrackCommandType::Pause);
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub fn classify_track_events(source: &TrackReadModel) -> Vec<PresentedEvent> {
 fn project_domain_event_message(event: &DomainEvent) -> String {
     match event {
         DomainEvent::ExposureTargetChanged { from, to } => {
-            format!("target exposure {:.4} -> {:.4}", from.0, to.0)
+            format!("desired exposure {:.4} -> {:.4}", from.0, to.0)
         }
         DomainEvent::BandBreached { boundary, price } => {
             format!("band breached {:?} at {:.4}", boundary, price)
@@ -94,7 +94,7 @@ fn project_effect_message(effect: &poise_engine::ports::PersistedTrackEffect) ->
                 .clone()
                 .unwrap_or_else(|| "submit order failed".into()),
             EffectStatus::Succeeded => "submit order succeeded".into(),
-            EffectStatus::Superseded => "submit order superseded by newer grid state".into(),
+            EffectStatus::Superseded => "submit order superseded by newer track state".into(),
             EffectStatus::Executing => "submit order executing".into(),
             EffectStatus::Pending => "submit order pending".into(),
         },

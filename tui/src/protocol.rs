@@ -1,8 +1,8 @@
 #[allow(unused_imports)]
 pub use poise_protocol::{
     AccountSummaryView, ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView,
-    ExecutionStateView, ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView,
-    GridStatus, ReplacementGateView, RiskSignalView, StreamEvent, TrackCommandAccepted,
+    ExecutionStateView, ExecutionStatusView, TrackCommandType, TrackCommandView, TrackExecutionView,
+    TrackStatus, ReplacementGateView, RiskSignalView, StreamEvent, TrackCommandAccepted,
     TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackExecutionStatsView,
     TrackListItemView, TrackListPnlView, TrackListResponse, TrackPnlView,
 };
@@ -13,13 +13,13 @@ pub use poise_protocol::{ExecutionBadgeView, ExposureSummaryView};
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityLevelView, ExecutionStateView, ExecutionStatusView, GridCommandType, StreamEvent,
+        ActivityLevelView, ExecutionStateView, ExecutionStatusView, TrackCommandType, StreamEvent,
         TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackDiagnosticsView,
         TrackListResponse,
     };
 
     #[test]
-    fn deserializes_grid_list_response() {
+    fn deserializes_track_list_response() {
         let response: TrackListResponse =
             serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json"))
                 .unwrap();
@@ -31,7 +31,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_grid_detail_view() {
+    fn deserializes_track_detail_view() {
         let detail: TrackDetailView =
             serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
         let detail_json = serde_json::to_value(&detail).unwrap();
@@ -67,7 +67,7 @@ mod tests {
         assert_eq!(detail.execution.active_slot_count, 1);
         assert_eq!(detail.execution.slots.len(), 1);
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);
-        assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
+        assert_eq!(detail.available_commands[0].command, TrackCommandType::Pause);
         assert!(!detail.available_commands.is_empty());
     }
 
@@ -81,19 +81,19 @@ mod tests {
         assert_eq!(diagnostics.items.len(), 1);
         assert_eq!(
             diagnostics.items[0].message,
-            "target exposure 3.5000 -> 4.0000"
+            "desired exposure 3.5000 -> 4.0000"
         );
     }
 
     #[test]
-    fn rejects_grid_detail_view_without_pnl_and_execution_stats() {
+    fn rejects_track_detail_view_without_pnl_and_execution_stats() {
         let result = serde_json::from_str::<TrackDetailView>(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                 "market":{"mark_price":64123.4,"index_price":64120.1},
-                "position":{"current_exposure":0.5,"target_exposure":0.75},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
                 "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
                     "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_grid_stream_list_item_changed() {
+    fn deserializes_track_stream_list_item_changed() {
         let event: StreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_list_item_changed.json"
         ))
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_grid_stream_detail_changed() {
+    fn deserializes_track_stream_detail_changed() {
         let event: StreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
         ))
@@ -153,14 +153,14 @@ mod tests {
                     detail_json["strategy"]["min_rebalance_units"].as_f64(),
                     Some(0.5)
                 );
-                assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
+                assert_eq!(detail.available_commands[0].command, TrackCommandType::Pause);
             }
             other => panic!("unexpected event variant: {other:?}"),
         }
     }
 
     #[test]
-    fn rejects_grid_stream_detail_changed_without_pnl_and_execution_stats() {
+    fn rejects_track_stream_detail_changed_without_pnl_and_execution_stats() {
         let result = serde_json::from_str::<StreamEvent>(
             r#"{
                 "type":"track_detail_changed",
@@ -170,7 +170,7 @@ mod tests {
                     "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
                     "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                     "market":{"mark_price":64123.4,"index_price":64120.1},
-                    "position":{"current_exposure":0.5,"target_exposure":0.75},
+                    "position":{"current_exposure":0.5,"desired_exposure":0.75},
                     "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
                     "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
                     "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
@@ -182,20 +182,20 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_grid_command_request() {
+    fn deserializes_track_command_request() {
         let request: TrackCommandRequest = serde_json::from_str(r#"{"command":"pause"}"#).unwrap();
 
-        assert_eq!(request.command, GridCommandType::Pause);
+        assert_eq!(request.command, TrackCommandType::Pause);
     }
 
     #[test]
-    fn deserializes_grid_command_accepted() {
+    fn deserializes_track_command_accepted() {
         let response: TrackCommandAccepted =
             serde_json::from_str(r#"{"track_id":"btc-core","command":"pause","accepted":true}"#)
                 .unwrap();
 
         assert_eq!(response.track_id, "btc-core");
-        assert_eq!(response.command, GridCommandType::Pause);
+        assert_eq!(response.command, TrackCommandType::Pause);
         assert!(response.accepted);
     }
 }

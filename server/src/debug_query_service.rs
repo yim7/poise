@@ -81,12 +81,12 @@ mod tests {
         assert_eq!(diagnostics.items.len(), 2);
         assert_eq!(
             diagnostics.items[0].message,
-            "target exposure 3.5000 -> 4.0000"
+            "desired exposure 3.5000 -> 4.0000"
         );
         assert_eq!(diagnostics.items[0].ts, "2026-03-26T10:01:00+00:00");
         assert_eq!(
             diagnostics.items[1].message,
-            "target exposure 4.0000 -> 4.5000"
+            "desired exposure 4.0000 -> 4.5000"
         );
         assert_eq!(diagnostics.items[1].ts, "2026-03-26T10:01:10+00:00");
     }

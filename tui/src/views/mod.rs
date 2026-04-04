@@ -54,10 +54,10 @@ fn render_status_line(app: &App) -> Line<'static> {
         Theme::status_context(),
     ));
 
-    if let Some(grid) = app.selected_grid() {
+    if let Some(track) = app.selected_track() {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
-            format!("{} / {}", grid.id, grid.instrument.symbol),
+            format!("{} / {}", track.id, track.instrument.symbol),
             Theme::status_context(),
         ));
     }
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_view_context_even_without_selected_grid() {
+    fn renders_view_context_even_without_selected_track() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let app = App::new(vec![]);
