@@ -199,7 +199,7 @@ Task 1 code commit:
 - Test: `cargo test -p poise-server account_monitor::tests::marks_equity_below_zero_as_critical -- --nocapture`
 - Test: `cargo test -p poise-server account_projector::tests::projects_account_read_model_to_summary_view -- --nocapture`
 
-- [ ] **Step 1: 先写失败测试，固定配置默认值、账户摘要映射和持久化模型**
+- [x] **Step 1: 先写失败测试，固定配置默认值、账户摘要映射和持久化模型**
 
 要求：
 - 在 `server/src/config.rs` 固定：
@@ -216,7 +216,7 @@ Task 1 code commit:
   - `reason` 至少包含 `equity <= 0`
 - 在 `server/src/account_projector.rs` 固定 server 内部 `AccountReadModel` 到 `AccountSummaryView` 的投影，不让 `AccountMonitor` 直接依赖协议 DTO
 
-- [ ] **Step 2: 运行定向测试，确认这些边界尚未存在**
+- [x] **Step 2: 运行定向测试，确认这些边界尚未存在**
 
 Run:
 `cargo test -p poise-server config::tests::defaults_account_monitor_thresholds -- --nocapture`
@@ -234,7 +234,7 @@ Expected:
   - server 还没有账户监控 store、内部读模型和 projector
   - `AccountMonitor` 模块还不存在
 
-- [ ] **Step 3: 实现账户监控的基础边界**
+- [x] **Step 3: 实现账户监控的基础边界**
 
 要求：
 - 在 `engine/src/ports.rs` 新增：
@@ -261,7 +261,7 @@ Expected:
   - 摘要 diff 判定
   - 变化时持久化与 `AccountChanged` 发布条件
 
-- [ ] **Step 4: 跑基础边界回归**
+- [x] **Step 4: 跑基础边界回归**
 
 Run:
 `cargo test -p poise-binance`
@@ -276,7 +276,7 @@ Expected:
 - `AccountMonitor` 单元测试通过，抓取、diff、持久化和通知条件都封在模块内部
 - `AccountProjector` 测试通过，协议 DTO 适配停留在边界层
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/config.rs engine/src/ports.rs exchanges/binance/src/types.rs exchanges/binance/src/rest.rs exchanges/binance/src/adapter.rs storage/src/schema.rs storage/src/sqlite.rs server/src/account_monitor_store.rs server/src/account_read_model.rs server/src/account_projector.rs server/src/state_bootstrap.rs server/src/account_monitor.rs server/src/main.rs
@@ -284,7 +284,7 @@ git commit -m "feat: add account monitor state and exchange summary support"
 ```
 
 Task 2 code commit:
-`<pending>`
+`6f5735a`
 
 ---
 
