@@ -1,5 +1,12 @@
-use anyhow::{Result, ensure};
-use rusqlite::Connection;
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OptionalExtension};
+
+const ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT: &str =
+    "account_monitor_state_snapshot_completeness";
+const ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CHECK: &str = "((last_observed_equity IS NULL AND last_observed_available IS NULL AND \
+      last_observed_unrealized_pnl IS NULL AND last_observed_at IS NULL) OR \
+      (last_observed_equity IS NOT NULL AND last_observed_available IS NOT NULL AND \
+      last_observed_unrealized_pnl IS NOT NULL AND last_observed_at IS NOT NULL))";
 
 pub fn initialize(conn: &Connection) -> Result<()> {
     // `target_exposure` is the legacy snapshot column name. It currently stores
@@ -65,7 +72,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             last_observed_equity REAL,
             last_observed_available REAL,
             last_observed_unrealized_pnl REAL,
-            last_observed_at TEXT
+            last_observed_at TEXT,
+            CONSTRAINT account_monitor_state_snapshot_completeness CHECK (
+                (last_observed_equity IS NULL AND last_observed_available IS NULL AND last_observed_unrealized_pnl IS NULL AND last_observed_at IS NULL)
+                OR
+                (last_observed_equity IS NOT NULL AND last_observed_available IS NOT NULL AND last_observed_unrealized_pnl IS NOT NULL AND last_observed_at IS NOT NULL)
+            )
         );",
     )?;
 
@@ -154,6 +166,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "last_observed_at",
         ],
     )?;
+    ensure_account_monitor_state_snapshot_completeness_constraint(conn)?;
 
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_track_events_created_at
@@ -168,6 +181,61 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_follow_up_retirements_track
          ON follow_up_retirements(track_id, updated_at, batch_id, blocked_sequence, closed_order_id);",
     )?;
+    Ok(())
+}
+
+fn ensure_account_monitor_state_snapshot_completeness_constraint(conn: &Connection) -> Result<()> {
+    let table_sql = table_sql(conn, "account_monitor_state")?.unwrap_or_default();
+    if table_sql.contains(ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT) {
+        return Ok(());
+    }
+
+    let replacement_table = "account_monitor_state__new";
+    let migration = format!(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE {replacement_table} (
+             singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+             trading_day TEXT NOT NULL,
+             baseline_equity REAL NOT NULL,
+             baseline_captured_at TEXT NOT NULL,
+             last_observed_equity REAL,
+             last_observed_available REAL,
+             last_observed_unrealized_pnl REAL,
+             last_observed_at TEXT,
+             CONSTRAINT {ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT}
+             CHECK ({ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CHECK})
+         );
+         INSERT INTO {replacement_table} (
+             singleton_key,
+             trading_day,
+             baseline_equity,
+             baseline_captured_at,
+             last_observed_equity,
+             last_observed_available,
+             last_observed_unrealized_pnl,
+             last_observed_at
+         )
+         SELECT
+             singleton_key,
+             trading_day,
+             baseline_equity,
+             baseline_captured_at,
+             last_observed_equity,
+             last_observed_available,
+             last_observed_unrealized_pnl,
+             last_observed_at
+         FROM account_monitor_state;
+         DROP TABLE account_monitor_state;
+         ALTER TABLE {replacement_table} RENAME TO account_monitor_state;
+         COMMIT;"
+    );
+
+    if let Err(error) = conn.execute_batch(&migration) {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return Err(anyhow::Error::new(error))
+            .context("failed to migrate account_monitor_state snapshot completeness constraint");
+    }
+
     Ok(())
 }
 
@@ -207,6 +275,16 @@ fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns)
+}
+
+fn table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT sql
+         FROM sqlite_master
+         WHERE type = 'table' AND name = ?1",
+    )?;
+    let sql = stmt.query_row([table], |row| row.get(0)).optional()?;
+    Ok(sql)
 }
 
 #[cfg(test)]
@@ -465,5 +543,105 @@ mod tests {
         .unwrap();
 
         assert!(initialize(&conn).is_err());
+    }
+
+    #[test]
+    fn initialize_upgrades_account_monitor_state_table_to_enforce_snapshot_completeness() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_monitor_state (
+                singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                trading_day TEXT NOT NULL,
+                baseline_equity REAL NOT NULL,
+                baseline_captured_at TEXT NOT NULL,
+                last_observed_equity REAL,
+                last_observed_available REAL,
+                last_observed_unrealized_pnl REAL,
+                last_observed_at TEXT
+            );
+
+            INSERT INTO account_monitor_state (
+                singleton_key,
+                trading_day,
+                baseline_equity,
+                baseline_captured_at,
+                last_observed_equity,
+                last_observed_available,
+                last_observed_unrealized_pnl,
+                last_observed_at
+            ) VALUES (
+                1,
+                '2026-04-04',
+                12500.5,
+                '2026-04-04T00:01:02+00:00',
+                12450.0,
+                9800.0,
+                -120.0,
+                '2026-04-04T01:02:03+00:00'
+            );",
+        )
+        .unwrap();
+
+        initialize(&conn).unwrap();
+
+        let error = conn
+            .execute(
+                "UPDATE account_monitor_state
+                 SET last_observed_available = NULL
+                 WHERE singleton_key = 1",
+                [],
+            )
+            .expect_err("partial snapshot row should violate completeness constraint");
+
+        assert!(
+            error.to_string().contains("CHECK constraint failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn initialize_rejects_legacy_account_monitor_state_with_partial_snapshot_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_monitor_state (
+                singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                trading_day TEXT NOT NULL,
+                baseline_equity REAL NOT NULL,
+                baseline_captured_at TEXT NOT NULL,
+                last_observed_equity REAL,
+                last_observed_available REAL,
+                last_observed_unrealized_pnl REAL,
+                last_observed_at TEXT
+            );
+
+            INSERT INTO account_monitor_state (
+                singleton_key,
+                trading_day,
+                baseline_equity,
+                baseline_captured_at,
+                last_observed_equity,
+                last_observed_available,
+                last_observed_unrealized_pnl,
+                last_observed_at
+            ) VALUES (
+                1,
+                '2026-04-04',
+                12500.5,
+                '2026-04-04T00:01:02+00:00',
+                12450.0,
+                NULL,
+                -120.0,
+                '2026-04-04T01:02:03+00:00'
+            );",
+        )
+        .unwrap();
+
+        let error = initialize(&conn).expect_err("partial legacy snapshot row should be rejected");
+        let rendered = format!("{error:#}");
+
+        assert!(
+            rendered.contains("account_monitor_state"),
+            "unexpected error: {rendered}"
+        );
     }
 }

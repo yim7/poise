@@ -1569,6 +1569,22 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         {
             let conn = storage.conn.lock().unwrap();
+            conn.execute("DROP TABLE account_monitor_state", [])
+                .unwrap();
+            conn.execute(
+                "CREATE TABLE account_monitor_state (
+                    singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                    trading_day TEXT NOT NULL,
+                    baseline_equity REAL NOT NULL,
+                    baseline_captured_at TEXT NOT NULL,
+                    last_observed_equity REAL,
+                    last_observed_available REAL,
+                    last_observed_unrealized_pnl REAL,
+                    last_observed_at TEXT
+                )",
+                [],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO account_monitor_state (
                     singleton_key,
