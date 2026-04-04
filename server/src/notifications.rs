@@ -1,12 +1,8 @@
 use poise_engine::track::TrackId;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrackInternalNotification {
-    TrackWriteCommitted {
-        track_id: TrackId,
-        recovery_anomaly_active: bool,
-    },
-    TrackEffectStateChanged {
-        track_id: TrackId,
-    },
+pub enum ServerNotification {
+    TrackChanged { track_id: TrackId },
+    AccountChanged,
 }

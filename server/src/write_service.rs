@@ -20,7 +20,7 @@ use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
-use crate::notifications::TrackInternalNotification;
+use crate::notifications::ServerNotification;
 use crate::runtime::AccountMarginGuardStore;
 
 pub type SharedManager = Arc<RwLock<TrackManager>>;
@@ -50,7 +50,7 @@ pub struct TrackWriteService {
     manager: SharedManager,
     repository: Arc<dyn StateRepositoryPort>,
     mutation_guards: Arc<TrackMutationGuards>,
-    notifications: broadcast::Sender<TrackInternalNotification>,
+    notifications: broadcast::Sender<ServerNotification>,
     account_margin_guard: Arc<StdMutex<Option<Arc<AccountMarginGuardStore>>>>,
 }
 
@@ -156,7 +156,7 @@ impl TrackWriteService {
     pub fn new(
         manager: TrackManager,
         repository: Arc<dyn StateRepositoryPort>,
-        notifications: broadcast::Sender<TrackInternalNotification>,
+        notifications: broadcast::Sender<ServerNotification>,
     ) -> Self {
         Self {
             manager: Arc::new(RwLock::new(manager)),
@@ -172,15 +172,19 @@ impl TrackWriteService {
         Arc::clone(&self.manager)
     }
 
-    pub fn subscribe_notifications(&self) -> broadcast::Receiver<TrackInternalNotification> {
+    pub fn subscribe_notifications(&self) -> broadcast::Receiver<ServerNotification> {
         self.notifications.subscribe()
+    }
+
+    pub fn notification_sender(&self) -> broadcast::Sender<ServerNotification> {
+        self.notifications.clone()
     }
 
     pub fn set_account_margin_guard(&self, account_margin_guard: Arc<AccountMarginGuardStore>) {
         *self.account_margin_guard.lock().unwrap() = Some(account_margin_guard);
     }
 
-    pub(crate) fn emit_internal_notification(&self, notification: TrackInternalNotification) {
+    pub(crate) fn emit_internal_notification(&self, notification: ServerNotification) {
         let _ = self.notifications.send(notification);
     }
 
@@ -900,18 +904,8 @@ impl TrackWriteService {
             return Err(TrackMutationError::Persistence(error));
         }
 
-        if has_track_write {
-            self.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
-                track_id: TrackId::new(id),
-                recovery_anomaly_active: next_snapshot
-                    .executor_state
-                    .diagnostics
-                    .recovery_anomaly
-                    .is_some(),
-            });
-        }
-        if has_effect_status_update {
-            self.emit_internal_notification(TrackInternalNotification::TrackEffectStateChanged {
+        if has_track_write || has_effect_status_update {
+            self.emit_internal_notification(ServerNotification::TrackChanged {
                 track_id: TrackId::new(id),
             });
         }
@@ -1017,7 +1011,7 @@ mod tests {
 
     use crate::write_service::FollowUpRetirementRequest;
 
-    use crate::notifications::TrackInternalNotification;
+    use crate::notifications::ServerNotification;
 
     use super::TrackWriteService;
 
@@ -1045,9 +1039,8 @@ mod tests {
         let notification = receiver.recv().await.unwrap();
         assert_eq!(
             notification,
-            TrackInternalNotification::TrackWriteCommitted {
+            ServerNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
-                recovery_anomaly_active: false,
             }
         );
     }
@@ -1145,9 +1138,8 @@ mod tests {
         let notification = receiver.recv().await.unwrap();
         assert_eq!(
             notification,
-            TrackInternalNotification::TrackWriteCommitted {
+            ServerNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
-                recovery_anomaly_active: false,
             }
         );
     }
@@ -1186,9 +1178,8 @@ mod tests {
 
         assert_eq!(
             receiver.recv().await.unwrap(),
-            TrackInternalNotification::TrackWriteCommitted {
+            ServerNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
-                recovery_anomaly_active: true,
             }
         );
     }

@@ -10,8 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use url::{Host, Url};
 
 use crate::protocol::{
-    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-    TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
+    AccountSummaryView, GridCommandType, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
+    TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct ApiClient {
 
 #[derive(Debug)]
 enum WsMessageOutcome {
-    Event(TrackStreamEvent),
+    Event(StreamEvent),
     Closed,
     Ignore,
 }
@@ -54,6 +54,17 @@ impl ApiClient {
         decode_json(response, "list tracks").await
     }
 
+    pub async fn get_account_summary(&self) -> Result<AccountSummaryView> {
+        let response = self
+            .http
+            .get(self.endpoint("/account"))
+            .send()
+            .await
+            .context("failed to request account summary")?;
+
+        decode_json(response, "get account summary").await
+    }
+
     pub async fn get_track_detail(&self, id: &str) -> Result<TrackDetailView> {
         let response = self
             .http
@@ -79,7 +90,7 @@ impl ApiClient {
     pub async fn submit_command(
         &self,
         id: &str,
-        cmd: TrackCommandType,
+        cmd: GridCommandType,
     ) -> Result<TrackCommandAccepted> {
         let response = self
             .http
@@ -110,7 +121,7 @@ fn should_bypass_proxy(base_url: &str) -> bool {
     }
 }
 
-pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<TrackStreamEvent>> {
+pub async fn connect_ws(url: &str) -> Result<mpsc::Receiver<StreamEvent>> {
     let (stream, _) = connect_async(url)
         .await
         .with_context(|| format!("failed to connect websocket `{url}`"))?;
@@ -154,7 +165,7 @@ fn decode_ws_message(message: Message) -> Result<WsMessageOutcome> {
     }
 }
 
-fn decode_ws_event_text(text: &str) -> Result<TrackStreamEvent> {
+fn decode_ws_event_text(text: &str) -> Result<StreamEvent> {
     serde_json::from_str(text).context("invalid websocket event json")
 }
 
@@ -184,13 +195,13 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::protocol::{
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackListResponse, TrackStreamEvent,
+        AccountSummaryView, GridCommandType, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
 
     use super::{ApiClient, connect_ws, should_bypass_proxy};
 
-    const BTC_TRACK_ID: &str = "btc-core";
+    const BTC_GRID_ID: &str = "btc-core";
 
     fn track_list_response() -> TrackListResponse {
         serde_json::from_str(include_str!("../tests/fixtures/track_list_response.json")).unwrap()
@@ -200,9 +211,16 @@ mod tests {
         serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap()
     }
 
-    fn track_stream_event() -> TrackStreamEvent {
+    fn track_stream_event() -> StreamEvent {
         serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
+        ))
+        .unwrap()
+    }
+
+    fn account_summary_view() -> AccountSummaryView {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/account_summary_view.json"
         ))
         .unwrap()
     }
@@ -212,6 +230,10 @@ mod tests {
             "../tests/fixtures/track_diagnostics_view.json"
         ))
         .unwrap()
+    }
+
+    async fn get_account_summary() -> Json<AccountSummaryView> {
+        Json(account_summary_view())
     }
 
     async fn list_tracks() -> Json<TrackListResponse> {
@@ -229,7 +251,7 @@ mod tests {
     async fn get_track_diagnostics(
         axum::extract::Path(id): axum::extract::Path<String>,
     ) -> Json<TrackDiagnosticsView> {
-        assert_eq!(id, BTC_TRACK_ID);
+        assert_eq!(id, BTC_GRID_ID);
         Json(track_diagnostics_view())
     }
 
@@ -257,6 +279,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/account", get(get_account_summary))
             .route("/tracks", get(list_tracks))
             .route("/tracks/:id", get(get_track_detail))
             .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
@@ -278,8 +301,21 @@ mod tests {
         let response = client.list_tracks().await.unwrap();
 
         assert_eq!(response.items.len(), 1);
-        assert_eq!(response.items[0].id, BTC_TRACK_ID);
+        assert_eq!(response.items[0].id, BTC_GRID_ID);
         assert_eq!(response.items[0].instrument.symbol, "BTCUSDT");
+    }
+
+    #[tokio::test]
+    async fn gets_account_summary() {
+        let (base_url, _) = spawn_stub_server().await;
+        let client = ApiClient::new(base_url);
+
+        let summary = client.get_account_summary().await.unwrap();
+
+        assert_eq!(summary.equity, Some(12_500.0));
+        assert_eq!(summary.available, Some(9_000.0));
+        assert_eq!(summary.risk_signal, crate::protocol::RiskSignalView::Attention);
+        assert_eq!(summary.reason.as_deref(), Some("day_change -2.8%"));
     }
 
     #[tokio::test]
@@ -287,16 +323,13 @@ mod tests {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let detail = client.get_track_detail(BTC_TRACK_ID).await.unwrap();
+        let detail = client.get_track_detail(BTC_GRID_ID).await.unwrap();
 
-        assert_eq!(detail.identity.id, BTC_TRACK_ID);
+        assert_eq!(detail.identity.id, BTC_GRID_ID);
         assert_eq!(detail.position.current_exposure, 3.5);
         assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
-        assert_eq!(
-            detail.available_commands[0].command,
-            TrackCommandType::Pause
-        );
+        assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
     }
 
     #[tokio::test]
@@ -304,10 +337,10 @@ mod tests {
         let (base_url, _) = spawn_stub_server().await;
         let client = ApiClient::new(base_url);
 
-        let diagnostics = client.get_track_diagnostics(BTC_TRACK_ID).await.unwrap();
+        let diagnostics = client.get_track_diagnostics(BTC_GRID_ID).await.unwrap();
 
         assert_eq!(diagnostics.items.len(), 1);
-        assert!(diagnostics.items[0].message.contains("desired exposure"));
+        assert_eq!(diagnostics.items[0].message, "target exposure 3.5000 -> 4.0000");
     }
 
     #[tokio::test]
@@ -316,13 +349,13 @@ mod tests {
         let client = ApiClient::new(base_url);
 
         let response = client
-            .submit_command(BTC_TRACK_ID, TrackCommandType::Pause)
+            .submit_command(BTC_GRID_ID, GridCommandType::Pause)
             .await
             .unwrap();
 
         assert!(response.accepted);
-        assert_eq!(response.track_id, BTC_TRACK_ID);
-        assert_eq!(response.command, TrackCommandType::Pause);
+        assert_eq!(response.track_id, BTC_GRID_ID);
+        assert_eq!(response.command, GridCommandType::Pause);
     }
 
     #[test]
@@ -340,8 +373,7 @@ mod tests {
 
         let event = receiver.recv().await.unwrap();
 
-        assert_eq!(event.track_id, BTC_TRACK_ID);
-        assert_eq!(event.payload, track_stream_event().payload);
+        assert_eq!(event, track_stream_event());
     }
 
     #[test]

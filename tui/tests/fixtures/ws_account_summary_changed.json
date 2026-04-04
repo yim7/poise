@@ -1,0 +1,13 @@
+{
+  "type": "account_summary_changed",
+  "summary": {
+    "equity": 12420.0,
+    "available": 2235.6,
+    "unrealized_pnl": -512.4,
+    "day_change_pct": -4.4,
+    "risk_signal": "attention",
+    "reason": "available 18.0%",
+    "day_base_at": "2026-04-04T00:00:01Z",
+    "updated_at": "2026-04-04T09:00:00Z"
+  }
+}

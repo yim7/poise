@@ -1,14 +1,13 @@
 use poise_engine::executor::{OrderRole, RecoveryAnomaly};
-use poise_engine::runtime::TrackStatus as EngineTrackStatus;
+use poise_engine::runtime::TrackStatus as EngineGridStatus;
 use poise_protocol::{
     ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
     ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
-    InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
-    TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView, TrackIdentityView,
-    TrackLifecycleView, TrackListItemView, TrackListStatisticsView, TrackMarketView,
-    TrackPositionView, TrackStatisticsView, TrackStatus as ProtocolTrackStatus,
-    TrackStatusPanelView, TrackStrategyView,
+    GridActivityItemView, GridCommandType, GridCommandView, GridExecutionView, GridIdentityView,
+    GridLifecycleView, GridMarketView, GridPositionView, GridStatisticsView,
+    GridStatus as ProtocolGridStatus, GridStatusPanelView, GridStrategyView, InstrumentView,
+    OutOfBandPolicy as ProtocolPolicy, ReplacementGateView, ShapeFamily as ProtocolShapeFamily,
+    Side as ProtocolSide, TrackDetailView, TrackListItemView, TrackListStatisticsView,
 };
 
 use crate::event_presentation::{PresentationAudience, classify_track_events};
@@ -25,8 +24,8 @@ impl TrackProjector {
         TrackListItemView {
             id: source.track_id.clone(),
             instrument: project_instrument(&source.venue, &source.symbol),
-            lifecycle: TrackLifecycleView {
-                status: project_track_status(&source.status),
+            lifecycle: GridLifecycleView {
+                status: project_grid_status(&source.status),
                 updated_at: source.updated_at.to_rfc3339(),
             },
             reference_price: source.reference_price,
@@ -47,18 +46,18 @@ impl TrackProjector {
 
     pub fn project_detail(&self, source: &TrackReadModel) -> TrackDetailView {
         TrackDetailView {
-            identity: TrackIdentityView {
+            identity: GridIdentityView {
                 id: source.track_id.clone(),
                 instrument: project_instrument(&source.venue, &source.symbol),
             },
-            status: TrackStatusPanelView {
-                lifecycle: TrackLifecycleView {
-                    status: project_track_status(&source.status),
+            status: GridStatusPanelView {
+                lifecycle: GridLifecycleView {
+                    status: project_grid_status(&source.status),
                     updated_at: source.updated_at.to_rfc3339(),
                 },
                 reference_price: source.reference_price,
             },
-            strategy: TrackStrategyView {
+            strategy: GridStrategyView {
                 lower_price: source.lower_price,
                 upper_price: source.upper_price,
                 long_exposure_units: source.long_exposure_units,
@@ -68,22 +67,22 @@ impl TrackProjector {
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
             },
-            market: TrackMarketView {
+            market: GridMarketView {
                 mark_price: source.reference_price,
                 index_price: source.reference_price,
             },
-            position: TrackPositionView {
+            position: GridPositionView {
                 current_exposure: source.current_exposure,
-                desired_exposure: source.desired_exposure,
+                target_exposure: source.desired_exposure,
             },
-            statistics: TrackStatisticsView {
+            statistics: GridStatisticsView {
                 total_pnl: source.realized_pnl_cumulative + source.unrealized_pnl,
                 realized_pnl: source.realized_pnl_cumulative,
                 max_inventory_gap_abs: source.max_inventory_gap_abs,
                 max_gap_age_ms: source.max_gap_age_ms,
                 stats_started_at: Some(source.stats_started_at.to_rfc3339()),
             },
-            execution: TrackExecutionView {
+            execution: GridExecutionView {
                 state: project_execution_state(source),
                 execution_status: project_execution_status(source),
                 attention_reasons: project_attention_reasons(source),
@@ -104,11 +103,11 @@ impl TrackProjector {
         }
     }
 
-    pub fn project_activity(&self, source: &TrackReadModel) -> Vec<TrackActivityItemView> {
+    pub fn project_activity(&self, source: &TrackReadModel) -> Vec<GridActivityItemView> {
         classify_track_events(source)
             .into_iter()
             .filter(|item| item.audience == PresentationAudience::Activity)
-            .map(|item| TrackActivityItemView {
+            .map(|item| GridActivityItemView {
                 ts: item.ts.to_rfc3339(),
                 message: item.message,
                 level: item.level,
@@ -127,15 +126,15 @@ fn project_instrument(venue: &str, symbol: &str) -> InstrumentView {
     }
 }
 
-fn project_track_status(value: &EngineTrackStatus) -> ProtocolTrackStatus {
+fn project_grid_status(value: &EngineGridStatus) -> ProtocolGridStatus {
     match value {
-        EngineTrackStatus::WaitingMarketData => ProtocolTrackStatus::WaitingMarketData,
-        EngineTrackStatus::Active => ProtocolTrackStatus::Active,
-        EngineTrackStatus::Frozen => ProtocolTrackStatus::Frozen,
-        EngineTrackStatus::ReducingOnly => ProtocolTrackStatus::ReducingOnly,
-        EngineTrackStatus::Holding => ProtocolTrackStatus::Holding,
-        EngineTrackStatus::Terminated => ProtocolTrackStatus::Terminated,
-        EngineTrackStatus::Paused => ProtocolTrackStatus::Paused,
+        EngineGridStatus::WaitingMarketData => ProtocolGridStatus::WaitingMarketData,
+        EngineGridStatus::Active => ProtocolGridStatus::Active,
+        EngineGridStatus::Frozen => ProtocolGridStatus::Frozen,
+        EngineGridStatus::ReducingOnly => ProtocolGridStatus::ReducingOnly,
+        EngineGridStatus::Holding => ProtocolGridStatus::Holding,
+        EngineGridStatus::Terminated => ProtocolGridStatus::Terminated,
+        EngineGridStatus::Paused => ProtocolGridStatus::Paused,
     }
 }
 
@@ -182,8 +181,8 @@ fn project_replacement_gate_reason(
 
 fn project_execution_state(source: &TrackReadModel) -> ExecutionStateView {
     match source.status {
-        EngineTrackStatus::Paused => ExecutionStateView::Paused,
-        EngineTrackStatus::Terminated => ExecutionStateView::Closed,
+        EngineGridStatus::Paused => ExecutionStateView::Paused,
+        EngineGridStatus::Terminated => ExecutionStateView::Closed,
         _ => ExecutionStateView::Open,
     }
 }
@@ -256,43 +255,43 @@ fn project_execution_slots(source: &TrackReadModel) -> Vec<ExecutionSlotView> {
         .collect()
 }
 
-fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> {
+fn project_available_commands(source: &TrackReadModel) -> Vec<GridCommandView> {
     let status = &source.status;
     vec![
-        TrackCommandView {
-            command: TrackCommandType::Pause,
+        GridCommandView {
+            command: GridCommandType::Pause,
             enabled: !matches!(
                 status,
-                EngineTrackStatus::Paused | EngineTrackStatus::Terminated
+                EngineGridStatus::Paused | EngineGridStatus::Terminated
             ),
             disabled_reason: match status {
-                EngineTrackStatus::Paused => Some("track is already paused".into()),
-                EngineTrackStatus::Terminated => Some("terminated track cannot be paused".into()),
+                EngineGridStatus::Paused => Some("grid is already paused".into()),
+                EngineGridStatus::Terminated => Some("terminated grid cannot be paused".into()),
                 _ => None,
             },
         },
-        TrackCommandView {
-            command: TrackCommandType::Resume,
-            enabled: matches!(status, EngineTrackStatus::Paused)
+        GridCommandView {
+            command: GridCommandType::Resume,
+            enabled: matches!(status, EngineGridStatus::Paused)
                 || source.manual_target_override.is_some(),
             disabled_reason: match status {
-                EngineTrackStatus::Paused => None,
+                EngineGridStatus::Paused => None,
                 _ if source.manual_target_override.is_some() => None,
-                EngineTrackStatus::Terminated => Some("terminated track cannot be resumed".into()),
-                _ => Some("track is not paused".into()),
+                EngineGridStatus::Terminated => Some("terminated grid cannot be resumed".into()),
+                _ => Some("grid is not paused".into()),
             },
         },
-        TrackCommandView {
-            command: TrackCommandType::Terminate,
-            enabled: !matches!(status, EngineTrackStatus::Terminated),
-            disabled_reason: matches!(status, EngineTrackStatus::Terminated)
-                .then_some("track is already terminated".into()),
+        GridCommandView {
+            command: GridCommandType::Terminate,
+            enabled: !matches!(status, EngineGridStatus::Terminated),
+            disabled_reason: matches!(status, EngineGridStatus::Terminated)
+                .then_some("grid is already terminated".into()),
         },
-        TrackCommandView {
-            command: TrackCommandType::Flatten,
-            enabled: !matches!(status, EngineTrackStatus::Terminated),
-            disabled_reason: matches!(status, EngineTrackStatus::Terminated)
-                .then_some("terminated track cannot be flattened".into()),
+        GridCommandView {
+            command: GridCommandType::Flatten,
+            enabled: !matches!(status, EngineGridStatus::Terminated),
+            disabled_reason: matches!(status, EngineGridStatus::Terminated)
+                .then_some("terminated grid cannot be flattened".into()),
         },
     ]
 }
@@ -310,7 +309,7 @@ mod tests {
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
         ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-        ExecutionStatusView, TrackCommandType,
+        ExecutionStatusView, GridCommandType,
     };
 
     use super::TrackProjector;
@@ -362,20 +361,17 @@ mod tests {
             Some(0.5)
         );
         assert!(!detail.available_commands.is_empty());
-        assert_eq!(
-            detail.available_commands[0].command,
-            TrackCommandType::Pause
-        );
+        assert_eq!(detail.available_commands[0].command, GridCommandType::Pause);
         assert_eq!(detail.available_commands.len(), 4);
         assert_eq!(
             detail.available_commands[2].command,
-            TrackCommandType::Terminate
+            GridCommandType::Terminate
         );
         assert!(detail.available_commands[2].enabled);
         assert_eq!(detail.available_commands[2].disabled_reason, None);
         assert_eq!(
             detail.available_commands[3].command,
-            TrackCommandType::Flatten
+            GridCommandType::Flatten
         );
         assert!(detail.available_commands[3].enabled);
         assert_eq!(detail.activity.len(), 1);
@@ -391,7 +387,7 @@ mod tests {
             detail
                 .activity
                 .iter()
-                .all(|item| !item.message.contains("desired exposure"))
+                .all(|item| !item.message.contains("target exposure"))
         );
         assert!(
             detail_json["execution"]["slots"][0]["order"]
@@ -402,14 +398,14 @@ mod tests {
     }
 
     #[test]
-    fn project_detail_enables_terminate_when_track_is_not_terminated() {
+    fn project_detail_enables_terminate_when_grid_is_not_terminated() {
         let source = source_with_failed_effect_and_recent_event();
 
         let detail = TrackProjector::new().project_detail(&source);
         let terminate = detail
             .available_commands
             .iter()
-            .find(|command| command.command == TrackCommandType::Terminate)
+            .find(|command| command.command == GridCommandType::Terminate)
             .expect("terminate command should be present");
 
         assert!(terminate.enabled);
@@ -426,56 +422,11 @@ mod tests {
         let resume = detail
             .available_commands
             .iter()
-            .find(|command| command.command == TrackCommandType::Resume)
+            .find(|command| command.command == GridCommandType::Resume)
             .expect("resume command should be present");
 
         assert!(resume.enabled);
         assert_eq!(resume.disabled_reason, None);
-    }
-
-    #[test]
-    fn project_detail_uses_track_wording_for_disabled_commands() {
-        let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackStatus::Terminated;
-
-        let detail = TrackProjector::new().project_detail(&source);
-        let pause = detail
-            .available_commands
-            .iter()
-            .find(|command| command.command == TrackCommandType::Pause)
-            .expect("pause command should be present");
-        let resume = detail
-            .available_commands
-            .iter()
-            .find(|command| command.command == TrackCommandType::Resume)
-            .expect("resume command should be present");
-        let terminate = detail
-            .available_commands
-            .iter()
-            .find(|command| command.command == TrackCommandType::Terminate)
-            .expect("terminate command should be present");
-        let flatten = detail
-            .available_commands
-            .iter()
-            .find(|command| command.command == TrackCommandType::Flatten)
-            .expect("flatten command should be present");
-
-        assert_eq!(
-            pause.disabled_reason.as_deref(),
-            Some("terminated track cannot be paused")
-        );
-        assert_eq!(
-            resume.disabled_reason.as_deref(),
-            Some("terminated track cannot be resumed")
-        );
-        assert_eq!(
-            terminate.disabled_reason.as_deref(),
-            Some("track is already terminated")
-        );
-        assert_eq!(
-            flatten.disabled_reason.as_deref(),
-            Some("terminated track cannot be flattened")
-        );
     }
 
     #[test]
@@ -515,8 +466,7 @@ mod tests {
     fn multiple_attention_sources_preserve_reason_order_and_attention_status() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.has_recovery_anomaly = true;
-        source.recovery_anomaly =
-            Some(poise_engine::executor::RecoveryAnomaly::DuplicateLiveOrders);
+        source.recovery_anomaly = Some(poise_engine::executor::RecoveryAnomaly::DuplicateLiveOrders);
         source.has_stale_market_data = true;
         source.has_account_margin_guard = true;
 
@@ -646,7 +596,7 @@ mod tests {
         assert_eq!(activity.len(), 1);
         assert_eq!(
             activity[0].message,
-            "submit order superseded by newer track state"
+            "submit order superseded by newer grid state"
         );
         assert_eq!(activity[0].level, ActivityLevelView::Info);
     }

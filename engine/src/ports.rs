@@ -110,6 +110,14 @@ pub struct AccountMarginSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountSummarySnapshot {
+    pub equity: f64,
+    pub available: f64,
+    pub unrealized_pnl: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UserDataPayload {
     OrderUpdate(ExchangeOrder),
     PositionUpdate(Position),
@@ -133,7 +141,12 @@ impl UserDataEvent {
 // ── Port traits ──
 
 #[async_trait]
-pub trait ExchangePort: Send + Sync {
+pub trait AccountSummaryPort: Send + Sync {
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
+}
+
+#[async_trait]
+pub trait ExchangePort: AccountSummaryPort + Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
     async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()>;
     async fn cancel_all(&self, instrument: &Instrument) -> Result<()>;

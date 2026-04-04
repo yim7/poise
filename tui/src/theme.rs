@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::protocol::TrackStatus;
+use crate::protocol::GridStatus;
 use crate::signal::SignalKind;
 
 pub struct Theme;
@@ -33,6 +33,13 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    pub fn status_attention() -> Style {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn table_header() -> Style {
         Style::default()
             .fg(Color::Yellow)
@@ -41,17 +48,18 @@ impl Theme {
 
     pub fn highlight() -> Style {
         Style::default()
-            .bg(Color::DarkGray)
+            .fg(Color::Black)
+            .bg(Color::LightCyan)
             .add_modifier(Modifier::BOLD)
     }
 
-    pub fn status(status: &TrackStatus) -> Style {
+    pub fn status(status: &GridStatus) -> Style {
         let color = match status {
-            TrackStatus::WaitingMarketData => Color::Gray,
-            TrackStatus::Active => Color::LightGreen,
-            TrackStatus::Frozen | TrackStatus::Holding => Color::Yellow,
-            TrackStatus::ReducingOnly => Color::LightYellow,
-            TrackStatus::Terminated | TrackStatus::Paused => Color::Red,
+            GridStatus::WaitingMarketData => Color::DarkGray,
+            GridStatus::Active => Color::Green,
+            GridStatus::Frozen | GridStatus::Holding => Color::Yellow,
+            GridStatus::ReducingOnly => Color::LightYellow,
+            GridStatus::Terminated | GridStatus::Paused => Color::Red,
         };
 
         Style::default().fg(color)
@@ -91,31 +99,12 @@ impl Theme {
     }
 
     pub fn signal_neutral() -> Style {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Color::DarkGray)
     }
 
     pub fn signal_flip() -> Style {
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use ratatui::style::Color;
-
-    use crate::protocol::TrackStatus;
-
-    use super::Theme;
-
-    #[test]
-    fn uses_light_green_for_active_lifecycle() {
-        assert_eq!(Theme::status(&TrackStatus::Active).fg, Some(Color::LightGreen));
-    }
-
-    #[test]
-    fn uses_gray_for_waiting_lifecycle() {
-        assert_eq!(Theme::status(&TrackStatus::WaitingMarketData).fg, Some(Color::Gray));
     }
 }

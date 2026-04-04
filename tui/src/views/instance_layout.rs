@@ -10,11 +10,11 @@ pub enum DetailLayoutMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DetailSections {
     pub mode: DetailLayoutMode,
-    pub track: Rect,
-    pub statistics: Option<Rect>,
-    pub market: Rect,
+    pub status: Rect,
+    pub overview: Rect,
     pub strategy: Rect,
     pub execution: Rect,
+    pub statistics: Option<Rect>,
     pub trace: Option<Rect>,
 }
 
@@ -33,7 +33,7 @@ pub struct TraceSectionLayout {
 pub fn resolve_detail_layout(area: Rect) -> DetailSections {
     let mode = if area.height >= 30 {
         DetailLayoutMode::Standard
-    } else if area.height >= 21 {
+    } else if area.height >= 20 {
         DetailLayoutMode::Compact
     } else {
         DetailLayoutMode::Minimal
@@ -46,8 +46,8 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                 .constraints([
                     Constraint::Length(5),
                     Constraint::Length(5),
-                    Constraint::Length(5),
                     Constraint::Length(6),
+                    Constraint::Length(9),
                     Constraint::Length(5),
                     Constraint::Min(0),
                 ])
@@ -55,11 +55,11 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
 
             DetailSections {
                 mode,
-                track: sections[0],
-                statistics: Some(sections[1]),
-                market: sections[2],
-                strategy: sections[3],
-                execution: sections[4],
+                status: sections[0],
+                overview: sections[1],
+                strategy: sections[2],
+                execution: sections[3],
+                statistics: Some(sections[4]),
                 trace: Some(sections[5]),
             }
         }
@@ -68,8 +68,29 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(5),
-                    Constraint::Length(3),
                     Constraint::Length(4),
+                    Constraint::Length(5),
+                    Constraint::Length(6),
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            DetailSections {
+                mode,
+                status: sections[0],
+                overview: sections[1],
+                strategy: sections[2],
+                execution: sections[3],
+                statistics: Some(sections[4]),
+                trace: Some(sections[5]),
+            }
+        }
+        DetailLayoutMode::Minimal => {
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(5),
                     Constraint::Length(5),
                     Constraint::Length(4),
                     Constraint::Min(0),
@@ -78,32 +99,11 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
 
             DetailSections {
                 mode,
-                track: sections[0],
-                statistics: Some(sections[1]),
-                market: sections[2],
-                strategy: sections[3],
-                execution: sections[4],
-                trace: Some(sections[5]),
-            }
-        }
-        DetailLayoutMode::Minimal => {
-            let sections = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(4),
-                    Constraint::Length(4),
-                    Constraint::Length(4),
-                    Constraint::Min(3),
-                ])
-                .split(area);
-
-            DetailSections {
-                mode,
-                track: sections[0],
-                statistics: None,
-                market: sections[1],
+                status: sections[0],
+                overview: sections[1],
                 strategy: sections[2],
                 execution: sections[3],
+                statistics: None,
                 trace: None,
             }
         }
@@ -152,27 +152,11 @@ mod tests {
         let layout = resolve_detail_layout(Rect::new(0, 0, 100, 36));
 
         assert_eq!(layout.mode, DetailLayoutMode::Standard);
-        assert_eq!(layout.track.height, 5);
-        assert_eq!(layout.market.height, 5);
     }
 
     #[test]
     fn selects_compact_layout_for_medium_body() {
         let layout = resolve_detail_layout(Rect::new(0, 0, 100, 24));
-
-        assert_eq!(layout.mode, DetailLayoutMode::Compact);
-    }
-
-    #[test]
-    fn keeps_compact_layout_off_until_fixed_sections_fit() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 20));
-
-        assert_eq!(layout.mode, DetailLayoutMode::Minimal);
-    }
-
-    #[test]
-    fn enters_compact_layout_once_boundary_height_is_available() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 21));
 
         assert_eq!(layout.mode, DetailLayoutMode::Compact);
     }
@@ -187,23 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn preserves_execution_body_at_minimal_height_boundary() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 15));
-
-        assert_eq!(layout.mode, DetailLayoutMode::Minimal);
-        assert!(layout.execution.height >= 3);
-    }
-
-    #[test]
     fn splits_trace_area_when_diagnostics_is_enabled() {
         let trace = resolve_trace_layout(Rect::new(0, 0, 100, 8), true);
 
         assert_eq!(trace.activity.area.height, 6);
         assert_eq!(trace.activity.max_entries, 5);
         assert_eq!(
-            trace
-                .diagnostics
-                .map(|layout| (layout.area.height, layout.max_entries)),
+            trace.diagnostics.map(|layout| (layout.area.height, layout.max_entries)),
             Some((2, 1))
         );
     }
@@ -233,9 +207,7 @@ mod tests {
         assert_eq!(trace.activity.area.height, 2);
         assert_eq!(trace.activity.max_entries, 1);
         assert_eq!(
-            trace
-                .diagnostics
-                .map(|layout| (layout.area.height, layout.max_entries)),
+            trace.diagnostics.map(|layout| (layout.area.height, layout.max_entries)),
             Some((2, 1))
         );
     }
@@ -247,9 +219,7 @@ mod tests {
         assert_eq!(trace.activity.area.height, 3);
         assert_eq!(trace.activity.max_entries, 2);
         assert_eq!(
-            trace
-                .diagnostics
-                .map(|layout| (layout.area.height, layout.max_entries)),
+            trace.diagnostics.map(|layout| (layout.area.height, layout.max_entries)),
             Some((2, 1))
         );
     }

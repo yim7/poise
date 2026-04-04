@@ -15,6 +15,9 @@ use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
+use crate::account_monitor::AccountMonitor;
+use crate::account_monitor_store::SqliteAccountMonitorStore;
+use crate::account_projector::AccountProjector;
 use crate::config::Config;
 use crate::debug_query_service::TrackDebugQueryService;
 use crate::projector::TrackProjector;
@@ -35,6 +38,8 @@ pub struct ServerState {
     pub debug_query_service: Arc<TrackDebugQueryService>,
     #[allow(dead_code)]
     pub projector: Arc<TrackProjector>,
+    pub account_monitor: Arc<AccountMonitor>,
+    pub account_projector: Arc<AccountProjector>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,
     pub submit_preflight: Arc<SubmitPreflight>,
@@ -229,8 +234,30 @@ async fn assemble_with_state_store(
     ));
     let query_service = Arc::new(TrackQueryService::new(read_repository));
     let projector = Arc::new(TrackProjector::new());
-    let server_state =
-        build_server_state(write_service, state_repository, query_service, projector);
+    let account_monitor = if let Some(sqlite_storage) = repositories.sqlite_storage() {
+        let account_summary: Arc<dyn poise_engine::ports::AccountSummaryPort> = exchange.clone();
+        Arc::new(
+            AccountMonitor::restore(
+                account_summary,
+                Arc::new(SqliteAccountMonitorStore::new(sqlite_storage)),
+                write_service.notification_sender(),
+                config.account_monitor.clone(),
+            )
+            .await?,
+        )
+    } else {
+        Arc::new(AccountMonitor::unavailable(
+            write_service.notification_sender(),
+            config.account_monitor.clone(),
+        ))
+    };
+    let server_state = build_server_state_with_account_monitor(
+        write_service,
+        state_repository,
+        query_service,
+        projector,
+        account_monitor,
+    );
 
     Ok(ServerPlatform {
         state: server_state.clone(),
@@ -336,6 +363,26 @@ pub(crate) fn build_server_state(
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
 ) -> ServerState {
+    let account_monitor = Arc::new(AccountMonitor::unavailable(
+        write_service.notification_sender(),
+        crate::config::AccountMonitorConfig::default(),
+    ));
+    build_server_state_with_account_monitor(
+        write_service,
+        state_repository,
+        query_service,
+        projector,
+        account_monitor,
+    )
+}
+
+pub(crate) fn build_server_state_with_account_monitor(
+    write_service: Arc<TrackWriteService>,
+    state_repository: Arc<dyn StateRepositoryPort>,
+    query_service: Arc<TrackQueryService>,
+    projector: Arc<TrackProjector>,
+    account_monitor: Arc<AccountMonitor>,
+) -> ServerState {
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     write_service.set_account_margin_guard(account_margin_guard.clone());
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
@@ -345,6 +392,8 @@ pub(crate) fn build_server_state(
         query_service,
         debug_query_service,
         projector,
+        account_monitor,
+        account_projector: Arc::new(AccountProjector::new()),
         account_margin_guard,
         reconcile_guards: Arc::new(TrackReconcileGuards::default()),
         submit_preflight: Arc::new(SubmitPreflight::new()),
@@ -368,7 +417,7 @@ mod tests {
         StateRepositoryPort, TrackReadRepositoryPort, TrackSnapshot,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_protocol::{TrackStreamEvent, TrackStreamPayload};
+    use poise_protocol::StreamEvent;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -414,6 +463,7 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
@@ -472,6 +522,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let platform = assemble_with_fake_ports(&config).await.unwrap();
@@ -554,6 +605,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -588,6 +640,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -626,6 +679,7 @@ mod tests {
                 api_key: Some("demo-key".into()),
                 api_secret: Some("demo-secret".into()),
             },
+            account_monitor: Default::default(),
         };
 
         let error = validate_exchange_runtime_config(&config).unwrap_err();
@@ -664,6 +718,7 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
 
         let platform = super::assemble_with_components(
@@ -713,6 +768,7 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
 
         let result = super::assemble_with_components(
@@ -776,12 +832,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        let payload: TrackStreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
-
-        assert_eq!(payload.track_id, "btc-core");
+        let payload: StreamEvent = serde_json::from_str(message.to_text().unwrap()).unwrap();
         assert!(matches!(
-            payload.payload,
-            TrackStreamPayload::TrackListItemChanged { .. }
+            payload,
+            StreamEvent::TrackListItemChanged { ref track_id, .. } if track_id == "btc-core"
         ));
 
         server.abort();
@@ -822,6 +876,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let first = assemble_with_fake_ports(&config).await.unwrap();
@@ -1035,6 +1090,18 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for FakeExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
     impl ExchangePort for FakeExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Err(anyhow!("not used in tests"))
@@ -1083,6 +1150,18 @@ mod tests {
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for FlakyExchangeInfoExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: chrono::Utc::now(),
+            })
         }
     }
 
@@ -1137,6 +1216,18 @@ mod tests {
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Err(anyhow!("not used in tests"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for LimitedMarginExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: self.max_increase_notional,
+                available: self.max_increase_notional,
+                unrealized_pnl: 0.0,
+                observed_at: chrono::Utc::now(),
+            })
         }
     }
 

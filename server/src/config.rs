@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
 use poise_engine::track::{Instrument, TrackId, Venue};
@@ -12,6 +12,8 @@ pub struct Config {
     pub tracks: Vec<TrackDefinition>,
     #[serde(default)]
     pub exchange: ExchangeConfig,
+    #[serde(default)]
+    pub account_monitor: AccountMonitorConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -42,6 +44,22 @@ pub struct ExchangeConfig {
     pub api_secret: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AccountMonitorConfig {
+    #[serde(default = "default_day_change_attention_pct")]
+    pub day_change_attention_pct: f64,
+    #[serde(default = "default_day_change_critical_pct")]
+    pub day_change_critical_pct: f64,
+    #[serde(default = "default_available_ratio_attention_pct")]
+    pub available_ratio_attention_pct: f64,
+    #[serde(default = "default_available_ratio_critical_pct")]
+    pub available_ratio_critical_pct: f64,
+    #[serde(default = "default_unrealized_loss_attention_pct")]
+    pub unrealized_loss_attention_pct: f64,
+    #[serde(default = "default_unrealized_loss_critical_pct")]
+    pub unrealized_loss_critical_pct: f64,
+}
+
 pub fn load_config(path: &str) -> Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file `{path}`"))?;
@@ -54,6 +72,7 @@ pub fn parse_config(input: &str) -> Result<Config> {
         validate_config(&track.track_config())
             .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
     }
+    config.account_monitor.validate()?;
     Ok(config)
 }
 
@@ -62,6 +81,19 @@ impl Config {
         std::path::Path::new(".data")
             .join(&self.environment)
             .join("poise-server.sqlite")
+    }
+}
+
+impl Default for AccountMonitorConfig {
+    fn default() -> Self {
+        Self {
+            day_change_attention_pct: default_day_change_attention_pct(),
+            day_change_critical_pct: default_day_change_critical_pct(),
+            available_ratio_attention_pct: default_available_ratio_attention_pct(),
+            available_ratio_critical_pct: default_available_ratio_critical_pct(),
+            unrealized_loss_attention_pct: default_unrealized_loss_attention_pct(),
+            unrealized_loss_critical_pct: default_unrealized_loss_critical_pct(),
+        }
     }
 }
 
@@ -102,6 +134,31 @@ impl TrackDefinition {
     }
 }
 
+impl AccountMonitorConfig {
+    fn validate(&self) -> Result<()> {
+        validate_threshold_pair(
+            "day_change_attention_pct",
+            self.day_change_attention_pct,
+            "day_change_critical_pct",
+            self.day_change_critical_pct,
+        )?;
+        validate_threshold_pair(
+            "available_ratio_attention_pct",
+            self.available_ratio_attention_pct,
+            "available_ratio_critical_pct",
+            self.available_ratio_critical_pct,
+        )?;
+        validate_threshold_pair(
+            "unrealized_loss_attention_pct",
+            self.unrealized_loss_attention_pct,
+            "unrealized_loss_critical_pct",
+            self.unrealized_loss_critical_pct,
+        )?;
+
+        Ok(())
+    }
+}
+
 fn default_bind_address() -> String {
     "127.0.0.1:8000".to_string()
 }
@@ -118,11 +175,50 @@ fn default_min_rebalance_units() -> f64 {
     poise_core::strategy::DEFAULT_MIN_REBALANCE_UNITS
 }
 
+fn default_day_change_attention_pct() -> f64 {
+    -3.0
+}
+
+fn default_day_change_critical_pct() -> f64 {
+    -5.0
+}
+
+fn default_available_ratio_attention_pct() -> f64 {
+    30.0
+}
+
+fn default_available_ratio_critical_pct() -> f64 {
+    15.0
+}
+
+fn default_unrealized_loss_attention_pct() -> f64 {
+    -5.0
+}
+
+fn default_unrealized_loss_critical_pct() -> f64 {
+    -10.0
+}
+
+fn validate_threshold_pair(
+    attention_name: &str,
+    attention: f64,
+    critical_name: &str,
+    critical: f64,
+) -> Result<()> {
+    ensure!(attention.is_finite(), "{attention_name} must be finite");
+    ensure!(critical.is_finite(), "{critical_name} must be finite");
+    ensure!(
+        attention >= critical,
+        "{attention_name} must be greater than or equal to {critical_name}"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 
-    use super::{Config, default_bind_address, parse_config};
+    use super::{AccountMonitorConfig, Config, default_bind_address, parse_config};
 
     #[test]
     fn parses_config_file_with_tracks_and_exchange() {
@@ -389,6 +485,7 @@ notional_per_unit = 375.0
             bind_address: default_bind_address(),
             tracks: vec![],
             exchange: Default::default(),
+            account_monitor: Default::default(),
         };
 
         assert_eq!(
@@ -460,5 +557,53 @@ notional_per_unit = 375.0
         assert!(raw.contains("max_notional ="));
         assert!(raw.contains("daily_loss_limit ="));
         assert!(raw.contains("stop_loss_pct ="));
+    }
+
+    #[test]
+    fn defaults_account_monitor_thresholds() {
+        let config = parse_config(
+            r#"
+environment = "paper"
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.account_monitor, AccountMonitorConfig::default());
+    }
+
+    #[test]
+    fn rejects_inverted_account_monitor_thresholds() {
+        let error = parse_config(
+            r#"
+environment = "paper"
+
+[account_monitor]
+day_change_attention_pct = -6.0
+day_change_critical_pct = -5.0
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("day_change_attention_pct"));
     }
 }

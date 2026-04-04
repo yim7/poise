@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    ExecutionStatusView, TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
+    AccountSummaryView, ExecutionStatusView, GridCommandType, TrackDetailView,
+    TrackDiagnosticsView, TrackListItemView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +14,8 @@ pub enum View {
 
 #[derive(Debug, Clone)]
 pub struct App {
-    pub tracks: Vec<TrackListItemView>,
+    pub account_summary: Option<AccountSummaryView>,
+    pub grids: Vec<TrackListItemView>,
     pub current_track: Option<TrackDetailView>,
     pub selected_index: usize,
     pub current_view: View,
@@ -28,11 +30,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mut tracks: Vec<TrackListItemView>) -> Self {
-        tracks.sort_by(|left, right| left.id.cmp(&right.id));
+    pub fn new(mut grids: Vec<TrackListItemView>) -> Self {
+        grids.sort_by(|left, right| left.id.cmp(&right.id));
 
         Self {
-            tracks,
+            account_summary: None,
+            grids,
             current_track: None,
             selected_index: 0,
             current_view: View::Dashboard,
@@ -48,13 +51,13 @@ impl App {
     }
 
     pub fn selected_track_id(&self) -> Option<&str> {
-        self.tracks
+        self.grids
             .get(self.selected_index)
-            .map(|track| track.id.as_str())
+            .map(|grid| grid.id.as_str())
     }
 
-    pub fn selected_track(&self) -> Option<&TrackListItemView> {
-        self.tracks.get(self.selected_index)
+    pub fn selected_grid(&self) -> Option<&TrackListItemView> {
+        self.grids.get(self.selected_index)
     }
 
     pub fn current_track_detail(&self) -> Option<&TrackDetailView> {
@@ -63,12 +66,16 @@ impl App {
             .filter(|detail| self.selected_track_id() == Some(detail.identity.id.as_str()))
     }
 
+    pub fn account_summary(&self) -> Option<&AccountSummaryView> {
+        self.account_summary.as_ref()
+    }
+
     pub fn selected_execution_status(&self) -> Option<ExecutionStatusView> {
         self.current_track_detail()
             .map(|detail| detail.execution.execution_status)
             .or_else(|| {
-                self.selected_track()
-                    .map(|track| track.execution.execution_status)
+                self.selected_grid()
+                    .map(|grid| grid.execution.execution_status)
             })
     }
 
@@ -79,20 +86,20 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
-        if self.tracks.is_empty() {
+        if self.grids.is_empty() {
             return;
         }
 
-        self.selected_index = (self.selected_index + 1) % self.tracks.len();
+        self.selected_index = (self.selected_index + 1) % self.grids.len();
     }
 
     pub fn select_previous(&mut self) {
-        if self.tracks.is_empty() {
+        if self.grids.is_empty() {
             return;
         }
 
         self.selected_index = if self.selected_index == 0 {
-            self.tracks.len() - 1
+            self.grids.len() - 1
         } else {
             self.selected_index - 1
         };
@@ -122,20 +129,20 @@ impl App {
     }
 
     pub fn apply_track_list_item(&mut self, item: TrackListItemView) {
-        if let Some(existing) = self.tracks.iter_mut().find(|track| track.id == item.id) {
+        if let Some(existing) = self.grids.iter_mut().find(|grid| grid.id == item.id) {
             *existing = item;
             return;
         }
 
         let selected_id = self.selected_track_id().map(ToOwned::to_owned);
-        self.tracks.push(item);
-        self.tracks.sort_by(|left, right| left.id.cmp(&right.id));
+        self.grids.push(item);
+        self.grids.sort_by(|left, right| left.id.cmp(&right.id));
         if let Some(selected_id) = selected_id {
-            if let Some(index) = self.tracks.iter().position(|track| track.id == selected_id) {
+            if let Some(index) = self.grids.iter().position(|grid| grid.id == selected_id) {
                 self.selected_index = index;
             }
-        } else if !self.tracks.is_empty() {
-            self.selected_index = self.selected_index.min(self.tracks.len() - 1);
+        } else if !self.grids.is_empty() {
+            self.selected_index = self.selected_index.min(self.grids.len() - 1);
         }
     }
 
@@ -149,6 +156,14 @@ impl App {
         if should_refresh_current {
             self.current_track = Some(detail);
         }
+    }
+
+    pub fn apply_account_summary(&mut self, summary: AccountSummaryView) {
+        self.account_summary = Some(summary);
+    }
+
+    pub fn clear_account_summary(&mut self) {
+        self.account_summary = None;
     }
 
     pub fn debug_diagnostics_enabled(&self) -> bool {
@@ -182,7 +197,7 @@ impl App {
         self.current_track_diagnostics_track_id = None;
     }
 
-    pub fn is_command_enabled(&self, command: TrackCommandType) -> bool {
+    pub fn is_command_enabled(&self, command: GridCommandType) -> bool {
         self.current_track_detail()
             .and_then(|detail| {
                 detail
@@ -231,8 +246,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        ExecutionStateView, ExecutionStatusView, TrackDetailView, TrackDiagnosticsView,
-        TrackListItemView, TrackStreamEvent, TrackStreamPayload,
+        AccountSummaryView, ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent,
+        TrackDetailView, TrackDiagnosticsView, TrackListItemView,
     };
 
     use super::{App, View};
@@ -289,14 +304,14 @@ mod tests {
     #[test]
     fn apply_track_list_item_updates_dashboard_item() {
         let mut app = App::new(track_list_items());
-        let mut updated = app.tracks[0].clone();
+        let mut updated = app.grids[0].clone();
         updated.reference_price = Some(102.5);
         updated.execution.state = ExecutionStateView::Paused;
 
         app.apply_track_list_item(updated);
 
-        assert_eq!(app.tracks[0].reference_price, Some(102.5));
-        assert_eq!(app.tracks[0].execution.state, ExecutionStateView::Paused);
+        assert_eq!(app.grids[0].reference_price, Some(102.5));
+        assert_eq!(app.grids[0].execution.state, ExecutionStateView::Paused);
     }
 
     #[test]
@@ -333,12 +348,12 @@ mod tests {
         app.show_instance_for_selected();
         app.apply_track_detail(detail_view("btc-core"));
 
-        let event: TrackStreamEvent = serde_json::from_str(include_str!(
+        let event: StreamEvent = serde_json::from_str(include_str!(
             "../tests/fixtures/ws_track_detail_changed.json"
         ))
         .unwrap();
-        let TrackStreamPayload::TrackDetailChanged { detail } = event.payload else {
-            panic!("unexpected payload variant");
+        let StreamEvent::TrackDetailChanged { detail, .. } = event else {
+            panic!("unexpected event variant");
         };
 
         app.apply_track_detail(*detail);
@@ -350,9 +365,9 @@ mod tests {
     }
 
     #[test]
-    fn selected_execution_status_prefers_current_detail_and_falls_back_to_track() {
+    fn selected_execution_status_prefers_current_detail_and_falls_back_to_grid() {
         let mut app = App::new(track_list_items());
-        app.tracks[0].execution.execution_status = ExecutionStatusView::Normal;
+        app.grids[0].execution.execution_status = ExecutionStatusView::Normal;
 
         assert_eq!(
             app.selected_execution_status(),
@@ -397,5 +412,35 @@ mod tests {
 
         app.set_debug_diagnostics_enabled(false);
         assert!(app.current_track_diagnostics().is_none());
+    }
+
+    #[test]
+    fn apply_account_summary_event_updates_state() {
+        let mut app = App::new(track_list_items());
+
+        app.apply_account_summary(AccountSummaryView {
+            equity: Some(12_500.0),
+            available: Some(9_000.0),
+            unrealized_pnl: Some(-350.0),
+            day_change_pct: Some(-2.75),
+            risk_signal: RiskSignalView::Attention,
+            reason: Some("day_change -2.75%".to_string()),
+            day_base_at: Some("2026-04-04T00:00:01Z".to_string()),
+            updated_at: Some("2026-04-04T01:23:45Z".to_string()),
+        });
+
+        assert_eq!(
+            app.account_summary,
+            Some(AccountSummaryView {
+                equity: Some(12_500.0),
+                available: Some(9_000.0),
+                unrealized_pnl: Some(-350.0),
+                day_change_pct: Some(-2.75),
+                risk_signal: RiskSignalView::Attention,
+                reason: Some("day_change -2.75%".to_string()),
+                day_base_at: Some("2026-04-04T00:00:01Z".to_string()),
+                updated_at: Some("2026-04-04T01:23:45Z".to_string()),
+            })
+        );
     }
 }

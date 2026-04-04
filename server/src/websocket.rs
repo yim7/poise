@@ -1,10 +1,10 @@
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use poise_protocol::{TrackStreamEvent, TrackStreamPayload};
+use poise_protocol::StreamEvent;
 
 use crate::assembly::ServerState;
-use crate::notifications::TrackInternalNotification;
+use crate::notifications::ServerNotification;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -14,9 +14,17 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
     let mut receiver = state.write_service.subscribe_notifications();
 
     loop {
-        let track_id = match receiver.recv().await {
-            Ok(TrackInternalNotification::TrackWriteCommitted { track_id, .. })
-            | Ok(TrackInternalNotification::TrackEffectStateChanged { track_id }) => track_id,
+        match receiver.recv().await {
+            Ok(ServerNotification::TrackChanged { track_id }) => {
+                if !push_projected_updates(&mut socket, &state, track_id).await {
+                    break;
+                }
+            }
+            Ok(ServerNotification::AccountChanged) => {
+                if !push_account_summary(&mut socket, &state).await {
+                    break;
+                }
+            }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     "websocket notification stream lagged by {skipped} messages; closing socket for resync"
@@ -25,10 +33,6 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
                 break;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
-
-        if !push_projected_updates(&mut socket, &state, track_id).await {
-            break;
         }
     }
 }
@@ -66,15 +70,13 @@ async fn push_projected_updates(
     let list_item = state.projector.project_list_item(&source);
     let detail = state.projector.project_detail(&source);
     let events = [
-        TrackStreamEvent {
+        StreamEvent::TrackListItemChanged {
             track_id: track_id_text.clone(),
-            payload: TrackStreamPayload::TrackListItemChanged { item: list_item },
+            item: list_item,
         },
-        TrackStreamEvent {
+        StreamEvent::TrackDetailChanged {
             track_id: track_id_text,
-            payload: TrackStreamPayload::TrackDetailChanged {
-                detail: Box::new(detail),
-            },
+            detail: Box::new(detail),
         },
     ];
 
@@ -91,7 +93,20 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
-async fn send_event(socket: &mut WebSocket, event: TrackStreamEvent) -> bool {
+async fn push_account_summary(socket: &mut WebSocket, state: &ServerState) -> bool {
+    let Some(summary) = state.account_monitor.current_summary().await else {
+        return true;
+    };
+    send_event(
+        socket,
+        StreamEvent::AccountSummaryChanged {
+            summary: state.account_projector.project_summary(&summary),
+        },
+    )
+    .await
+}
+
+async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> bool {
     let message = match serde_json::to_string(&event) {
         Ok(message) => message,
         Err(error) => {
@@ -111,7 +126,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use axum::Router;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use futures_util::StreamExt;
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
@@ -119,21 +134,28 @@ mod tests {
     use poise_engine::command::TrackCommand;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
-        OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort,
+        AccountSummarySnapshot, ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
+        OrderReceipt, OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort,
+        StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
-        ExecutionStateView, ExecutionStatusView, TrackStatus, TrackStreamEvent, TrackStreamPayload,
+        ExecutionStateView, ExecutionStatusView, GridStatus, RiskSignalView, StreamEvent,
     };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::assembly::{ServerState, build_server_state};
+    use crate::account_monitor::AccountMonitor;
+    use crate::account_monitor_store::{
+        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    };
+    use crate::assembly::{
+        ServerState, build_server_state, build_server_state_with_account_monitor,
+    };
+    use crate::config::AccountMonitorConfig;
     use crate::effect_worker::EffectWorker;
-    use crate::notifications::TrackInternalNotification;
+    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
@@ -184,7 +206,40 @@ mod tests {
         (format!("ws://{address}/ws"), service, state)
     }
 
-    async fn recv_event(stream: &mut ClientStream) -> TrackStreamEvent {
+    async fn spawn_server_with_account_monitor(
+        repository: Arc<TestRepository>,
+        account_monitor: Arc<AccountMonitor>,
+    ) -> (String, Arc<TrackWriteService>, ServerState) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let service = Arc::new(TrackWriteService::new(
+            test_manager(),
+            state_repository.clone(),
+            notifications,
+        ));
+        let state = build_server_state_with_account_monitor(
+            Arc::clone(&service),
+            state_repository,
+            Arc::new(TrackQueryService::new(
+                repository.clone() as Arc<dyn TrackReadRepositoryPort>
+            )),
+            Arc::new(TrackProjector::new()),
+            account_monitor,
+        );
+        let app = Router::new()
+            .route("/ws", axum::routing::get(ws_handler))
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("ws://{address}/ws"), service, state)
+    }
+
+    async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
         let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -199,6 +254,39 @@ mod tests {
         repository
     }
 
+    async fn seeded_account_monitor(
+        notifications: tokio::sync::broadcast::Sender<ServerNotification>,
+    ) -> Arc<AccountMonitor> {
+        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
+            poise_storage::sqlite::SqliteStorage::in_memory().unwrap(),
+        )));
+        account_store
+            .save_state(&StoredAccountMonitorState {
+                trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+                baseline_equity: 13_000.0,
+                baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+                last_observed_account_snapshot: Some(AccountSummarySnapshot {
+                    equity: 12_500.0,
+                    available: 9_000.0,
+                    unrealized_pnl: -350.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+                }),
+            })
+            .await
+            .unwrap();
+
+        Arc::new(
+            AccountMonitor::restore(
+                Arc::new(NoopExchange),
+                account_store,
+                notifications,
+                AccountMonitorConfig::default(),
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn broadcasts_events_to_multiple_clients() {
         let repository = seeded_repository();
@@ -208,24 +296,75 @@ mod tests {
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+        service.emit_internal_notification(ServerNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
-            recovery_anomaly_active: false,
         });
 
         let payload_a = recv_event(&mut stream_a).await;
         let payload_b = recv_event(&mut stream_b).await;
 
         assert_eq!(payload_a, payload_b);
-        assert_eq!(payload_a.track_id, "btc-core");
         assert!(matches!(
-            payload_a.payload,
-            TrackStreamPayload::TrackListItemChanged { .. }
+            payload_a,
+            StreamEvent::TrackListItemChanged { ref track_id, .. } if track_id == "btc-core"
         ));
     }
 
     #[tokio::test]
-    async fn broadcasts_track_detail_changed_after_write_commit() {
+    async fn broadcasts_track_events_with_stream_event_envelope() {
+        let repository = seeded_repository();
+        let (url, service, _) = spawn_server(repository).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        service.emit_internal_notification(
+            crate::notifications::ServerNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            },
+        );
+
+        let first = recv_event(&mut stream).await;
+        let second = recv_event(&mut stream).await;
+        let events = [first, second];
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TrackListItemChanged { track_id, .. } if track_id == "btc-core"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TrackDetailChanged { track_id, .. } if track_id == "btc-core"
+        )));
+    }
+
+    #[tokio::test]
+    async fn broadcasts_account_summary_changed_after_account_notification() {
+        let repository = seeded_repository();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_monitor = seeded_account_monitor(notifications.clone()).await;
+        let (url, service, _) =
+            spawn_server_with_account_monitor(repository, account_monitor).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        service.emit_internal_notification(ServerNotification::AccountChanged);
+
+        let event = recv_event(&mut stream).await;
+
+        match event {
+            StreamEvent::AccountSummaryChanged { summary } => {
+                assert_eq!(summary.equity, Some(12_500.0));
+                assert_eq!(summary.available, Some(9_000.0));
+                assert_eq!(summary.unrealized_pnl, Some(-350.0));
+                assert_eq!(summary.risk_signal, RiskSignalView::Attention);
+                assert_eq!(summary.reason.as_deref(), Some("day_change -3.8%"));
+            }
+            other => panic!("expected account summary event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcasts_grid_detail_changed_after_write_commit() {
         let repository = seeded_repository();
         let (url, service, _) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
@@ -241,23 +380,23 @@ mod tests {
         let events = [first, second];
 
         assert!(events.iter().any(|event| matches!(
-            event.payload,
-            TrackStreamPayload::TrackListItemChanged { .. }
+            event,
+            StreamEvent::TrackListItemChanged { track_id, .. } if track_id == "btc-core"
         )));
         let detail = events
             .iter()
-            .find_map(|event| match &event.payload {
-                TrackStreamPayload::TrackDetailChanged { detail } => Some(detail),
+            .find_map(|event| match event {
+                StreamEvent::TrackDetailChanged { detail, .. } => Some(detail),
                 _ => None,
             })
             .expect("should emit projected detail change");
         assert_eq!(detail.identity.id, "btc-core");
-        assert_eq!(detail.status.lifecycle.status, TrackStatus::Paused);
+        assert_eq!(detail.status.lifecycle.status, GridStatus::Paused);
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
     }
 
     #[tokio::test]
-    async fn broadcasts_track_list_item_changed_after_effect_state_change() {
+    async fn broadcasts_grid_list_item_changed_after_effect_state_change() {
         let repository = seeded_repository();
         repository.seed_pending_noop_effect();
         let (url, service, state) = spawn_server(repository).await;
@@ -273,8 +412,8 @@ mod tests {
 
         let item = events
             .iter()
-            .find_map(|event| match &event.payload {
-                TrackStreamPayload::TrackListItemChanged { item } => Some(item),
+            .find_map(|event| match event {
+                StreamEvent::TrackListItemChanged { item, .. } => Some(item),
                 _ => None,
             })
             .expect("should emit projected list item change");
@@ -282,10 +421,9 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert!(
-            events.iter().any(|event| matches!(
-                event.payload,
-                TrackStreamPayload::TrackDetailChanged { .. }
-            ))
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TrackDetailChanged { .. }))
         );
 
         drop(service);
@@ -300,9 +438,8 @@ mod tests {
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+            service.emit_internal_notification(ServerNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
-                recovery_anomaly_active: false,
             });
         }
 
@@ -327,16 +464,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closes_socket_when_track_read_model_is_missing_for_notification() {
+    async fn closes_socket_when_grid_read_model_is_missing_for_notification() {
         let repository = seeded_repository();
         repository.remove_snapshot("btc-core");
         let (url, service, _) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+        service.emit_internal_notification(ServerNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
-            recovery_anomaly_active: false,
         });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
@@ -360,16 +496,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closes_socket_when_track_read_model_load_fails() {
+    async fn closes_socket_when_grid_read_model_load_fails() {
         let repository = seeded_repository();
         repository.set_load_snapshot_error("injected read failure");
         let (url, service, _) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(TrackInternalNotification::TrackWriteCommitted {
+        service.emit_internal_notification(ServerNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
-            recovery_anomaly_active: false,
         });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
@@ -749,6 +884,18 @@ mod tests {
     }
 
     struct NoopExchange;
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for NoopExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: Utc::now(),
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl ExchangePort for NoopExchange {
