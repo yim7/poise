@@ -302,7 +302,7 @@ Task 2 code commit:
 - Test: `cargo test -p poise-server websocket::tests::broadcasts_account_summary_changed_after_account_notification -- --nocapture`
 - Test: `cargo test -p poise-server runtime::tests::account_monitor_task_triggers_immediate_refresh_and_periodic_refresh -- --nocapture`
 
-- [ ] **Step 1: 先写失败测试，固定 server 读侧和轮询边界**
+- [x] **Step 1: 先写失败测试，固定 server 读侧和轮询边界**
 
 要求：
 - 在 `server/src/http.rs` 固定新增 `GET /account`，返回 `AccountSummaryView`
@@ -312,7 +312,7 @@ Task 2 code commit:
   - 后续按 `5s` 轮询
   - runtime 只调用 `AccountMonitor::refresh_once()`，不重新实现摘要 diff 和通知规则
 
-- [ ] **Step 2: 运行定向测试，确认 server 还没有这条账户链路**
+- [x] **Step 2: 运行定向测试，确认 server 还没有这条账户链路**
 
 Run:
 `cargo test -p poise-server http::tests::get_account_returns_latest_summary -- --nocapture`
@@ -327,7 +327,7 @@ Expected:
   - runtime 还没有账户轮询任务
   - websocket 还不会通过 projector 重投影账户摘要
 
-- [ ] **Step 3: 实现 server 接线**
+- [x] **Step 3: 实现 server 接线**
 
 要求：
 - `ServerState` 增加 `account_monitor: Arc<AccountMonitor>`
@@ -339,7 +339,7 @@ Expected:
 - 单次刷新失败只保留最近一次成功摘要，不发风险异常
 - 首次成功刷新和摘要变化是否发 `AccountChanged`，统一留在 `AccountMonitor::refresh_once()` 内决定
 
-- [ ] **Step 4: 跑 server 包回归**
+- [x] **Step 4: 跑 server 包回归**
 
 Run:
 `cargo test -p poise-server http::tests::get_account_returns_latest_summary -- --nocapture`
@@ -353,7 +353,7 @@ Expected:
 - runtime 启动、关闭和调度边界稳定
 - `AccountMonitor` 继续独占账户摘要业务规则
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/assembly.rs server/src/http.rs server/src/runtime.rs server/src/websocket.rs server/src/main.rs server/src/account_monitor.rs server/src/account_projector.rs
@@ -361,7 +361,7 @@ git commit -m "feat: wire account monitor into server runtime and api"
 ```
 
 Task 3 code commit:
-`<pending>`
+`1d091dc`
 
 ---
 
