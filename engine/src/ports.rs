@@ -146,7 +146,7 @@ pub trait AccountSummaryPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait ExchangePort: Send + Sync {
+pub trait ExchangePort: AccountSummaryPort + Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
     async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()>;
     async fn cancel_all(&self, instrument: &Instrument) -> Result<()>;
@@ -159,6 +159,16 @@ pub trait ExchangePort: Send + Sync {
     ) -> Result<AccountMarginSnapshot>;
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
+}
+
+#[async_trait]
+impl<T> AccountSummaryPort for T
+where
+    T: ExchangePort + ?Sized,
+{
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+        ExchangePort::get_account_summary(self).await
+    }
 }
 
 #[async_trait]

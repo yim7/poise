@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
-use poise_engine::ports::{AccountSummaryPort, AccountSummarySnapshot, ExchangePort};
+use poise_engine::ports::{AccountSummaryPort, AccountSummarySnapshot};
 use tokio::sync::{RwLock, broadcast};
 
 use crate::account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
@@ -43,21 +43,6 @@ impl AccountMonitor {
     }
 
     pub async fn restore(
-        exchange: Arc<dyn ExchangePort>,
-        store: Arc<dyn AccountMonitorStore>,
-        notifications: broadcast::Sender<ServerNotification>,
-        config: AccountMonitorConfig,
-    ) -> Result<Self> {
-        Self::restore_from_account_summary(
-            exchange_account_summary_port(exchange),
-            store,
-            notifications,
-            config,
-        )
-        .await
-    }
-
-    pub async fn restore_from_account_summary(
         account_summary: Arc<dyn AccountSummaryPort>,
         store: Arc<dyn AccountMonitorStore>,
         notifications: broadcast::Sender<ServerNotification>,
@@ -151,12 +136,6 @@ fn trading_day_for(observed_at: DateTime<Utc>) -> NaiveDate {
     observed_at
         .with_timezone(&FixedOffset::east_opt(8 * 60 * 60).expect("valid fixed offset"))
         .date_naive()
-}
-
-pub(crate) fn exchange_account_summary_port(
-    exchange: Arc<dyn ExchangePort>,
-) -> Arc<dyn AccountSummaryPort> {
-    Arc::new(ExchangeAccountSummarySource { exchange })
 }
 
 fn build_read_model(
@@ -274,17 +253,6 @@ impl AccountMonitorStore for InMemoryAccountMonitorStore {
     }
 }
 
-struct ExchangeAccountSummarySource {
-    exchange: Arc<dyn ExchangePort>,
-}
-
-#[async_trait::async_trait]
-impl AccountSummaryPort for ExchangeAccountSummarySource {
-    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        self.exchange.get_account_summary().await
-    }
-}
-
 struct UnavailableAccountSummarySource;
 
 #[async_trait::async_trait]
@@ -382,7 +350,7 @@ mod tests {
             },
         });
         let (notifications, _) = broadcast::channel(1);
-        let monitor = AccountMonitor::restore_from_account_summary(
+        let monitor = AccountMonitor::restore(
             source,
             Arc::new(InMemoryAccountMonitorStore),
             notifications,
