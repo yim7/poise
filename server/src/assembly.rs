@@ -235,9 +235,12 @@ async fn assemble_with_state_store(
     let query_service = Arc::new(TrackQueryService::new(read_repository));
     let projector = Arc::new(TrackProjector::new());
     let account_monitor = if let Some(sqlite_storage) = repositories.sqlite_storage() {
+        let account_summary = crate::account_monitor::exchange_account_summary_port(
+            exchange.clone(),
+        );
         Arc::new(
-            AccountMonitor::restore(
-                exchange.clone(),
+            AccountMonitor::restore_from_account_summary(
+                account_summary,
                 Arc::new(SqliteAccountMonitorStore::new(sqlite_storage)),
                 write_service.notification_sender(),
                 config.account_monitor.clone(),

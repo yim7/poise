@@ -141,6 +141,11 @@ impl UserDataEvent {
 // ── Port traits ──
 
 #[async_trait]
+pub trait AccountSummaryPort: Send + Sync {
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
+}
+
+#[async_trait]
 pub trait ExchangePort: Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
     async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()>;

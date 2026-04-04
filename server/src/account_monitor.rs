@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
-use poise_engine::ports::{AccountSummarySnapshot, ExchangePort};
+use poise_engine::ports::{AccountSummaryPort, AccountSummarySnapshot, ExchangePort};
 use tokio::sync::{RwLock, broadcast};
 
 use crate::account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
@@ -21,7 +21,7 @@ pub(crate) struct InMemoryAccountMonitorState {
 }
 
 pub struct AccountMonitor {
-    exchange: Arc<dyn ExchangePort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     store: Arc<dyn AccountMonitorStore>,
     notifications: broadcast::Sender<ServerNotification>,
     config: AccountMonitorConfig,
@@ -34,7 +34,7 @@ impl AccountMonitor {
         config: AccountMonitorConfig,
     ) -> Self {
         Self {
-            exchange: Arc::new(UnsupportedAccountSummaryExchange),
+            account_summary: Arc::new(UnavailableAccountSummarySource),
             store: Arc::new(InMemoryAccountMonitorStore),
             notifications,
             config,
@@ -48,6 +48,21 @@ impl AccountMonitor {
         notifications: broadcast::Sender<ServerNotification>,
         config: AccountMonitorConfig,
     ) -> Result<Self> {
+        Self::restore_from_account_summary(
+            exchange_account_summary_port(exchange),
+            store,
+            notifications,
+            config,
+        )
+        .await
+    }
+
+    pub async fn restore_from_account_summary(
+        account_summary: Arc<dyn AccountSummaryPort>,
+        store: Arc<dyn AccountMonitorStore>,
+        notifications: broadcast::Sender<ServerNotification>,
+        config: AccountMonitorConfig,
+    ) -> Result<Self> {
         let restored_state = store
             .load_state()
             .await?
@@ -55,7 +70,7 @@ impl AccountMonitor {
             .unwrap_or_default();
 
         Ok(Self {
-            exchange,
+            account_summary,
             store,
             notifications,
             config,
@@ -69,7 +84,7 @@ impl AccountMonitor {
     }
 
     pub async fn refresh_once(&self) -> Result<()> {
-        let snapshot = self.exchange.get_account_summary().await?;
+        let snapshot = self.account_summary.get_account_summary().await?;
         let (previous_state, next_state, before, after) = {
             let mut state = self.state.write().await;
             let previous_state = state.clone();
@@ -136,6 +151,12 @@ fn trading_day_for(observed_at: DateTime<Utc>) -> NaiveDate {
     observed_at
         .with_timezone(&FixedOffset::east_opt(8 * 60 * 60).expect("valid fixed offset"))
         .date_naive()
+}
+
+pub(crate) fn exchange_account_summary_port(
+    exchange: Arc<dyn ExchangePort>,
+) -> Arc<dyn AccountSummaryPort> {
+    Arc::new(ExchangeAccountSummarySource { exchange })
 }
 
 fn build_read_model(
@@ -253,78 +274,22 @@ impl AccountMonitorStore for InMemoryAccountMonitorStore {
     }
 }
 
-struct UnsupportedAccountSummaryExchange;
+struct ExchangeAccountSummarySource {
+    exchange: Arc<dyn ExchangePort>,
+}
 
 #[async_trait::async_trait]
-impl ExchangePort for UnsupportedAccountSummaryExchange {
-    async fn submit_order(
-        &self,
-        _req: poise_engine::ports::OrderRequest,
-    ) -> Result<poise_engine::ports::OrderReceipt> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
-    async fn cancel_order(
-        &self,
-        _instrument: &poise_engine::track::Instrument,
-        _order_id: &str,
-    ) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
-    async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
-    async fn get_position(
-        &self,
-        _instrument: &poise_engine::track::Instrument,
-    ) -> Result<poise_engine::ports::Position> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
-    async fn get_open_orders(
-        &self,
-        _instrument: &poise_engine::track::Instrument,
-    ) -> Result<Vec<poise_engine::ports::ExchangeOrder>> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
-    async fn get_exchange_info(
-        &self,
-        _instrument: &poise_engine::track::Instrument,
-    ) -> Result<poise_engine::ports::ExchangeInfo> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
-    async fn get_account_margin_snapshot(
-        &self,
-        _instrument: &poise_engine::track::Instrument,
-    ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
-    }
-
+impl AccountSummaryPort for ExchangeAccountSummarySource {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        Err(anyhow::anyhow!(
-            "account monitor is unavailable in this server state"
-        ))
+        self.exchange.get_account_summary().await
     }
+}
 
-    async fn get_server_time(&self) -> Result<DateTime<Utc>> {
+struct UnavailableAccountSummarySource;
+
+#[async_trait::async_trait]
+impl AccountSummaryPort for UnavailableAccountSummarySource {
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         Err(anyhow::anyhow!(
             "account monitor is unavailable in this server state"
         ))
@@ -333,11 +298,19 @@ impl ExchangePort for UnsupportedAccountSummaryExchange {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use std::sync::Arc;
 
-    use super::{InMemoryAccountMonitorState, ObservedAccountSnapshot, build_read_model};
+    use anyhow::Result;
+    use chrono::{TimeZone, Utc};
+    use tokio::sync::broadcast;
+
+    use super::{
+        AccountMonitor, InMemoryAccountMonitorStore, InMemoryAccountMonitorState,
+        ObservedAccountSnapshot, build_read_model,
+    };
     use crate::account_read_model::AccountRiskSignal;
     use crate::config::AccountMonitorConfig;
+    use poise_engine::ports::AccountSummarySnapshot;
 
     #[test]
     fn marks_equity_below_zero_as_critical() {
@@ -385,5 +358,46 @@ mod tests {
         assert_eq!(summary.baseline_equity, 12_800.0);
         assert_eq!(summary.day_base_at, baseline_at);
         assert_eq!(summary.updated_at, observed_at);
+    }
+
+    struct SummaryOnlySource {
+        snapshot: AccountSummarySnapshot,
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for SummaryOnlySource {
+        async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+            Ok(self.snapshot.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn account_monitor_can_be_built_from_summary_only_source() {
+        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> = Arc::new(SummaryOnlySource {
+            snapshot: AccountSummarySnapshot {
+                equity: 12_500.0,
+                available: 9_000.0,
+                unrealized_pnl: -350.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            },
+        });
+        let (notifications, _) = broadcast::channel(1);
+        let monitor = AccountMonitor::restore_from_account_summary(
+            source,
+            Arc::new(InMemoryAccountMonitorStore),
+            notifications,
+            AccountMonitorConfig::default(),
+        )
+        .await
+        .expect("summary-only source should be sufficient");
+
+        monitor
+            .refresh_once()
+            .await
+            .expect("summary-only source should refresh");
+        let summary = monitor.current_summary().await.expect("summary should exist");
+        assert_eq!(summary.equity, 12_500.0);
+        assert_eq!(summary.available, 9_000.0);
+        assert_eq!(summary.unrealized_pnl, -350.0);
     }
 }
