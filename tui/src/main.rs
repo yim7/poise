@@ -845,8 +845,8 @@ mod tests {
                 execution_status: detail.execution.execution_status,
                 active_slot_count: detail.execution.active_slot_count,
             },
-            statistics: crate::protocol::TrackListStatisticsView {
-                total_pnl: detail.statistics.total_pnl,
+            pnl: crate::protocol::TrackListPnlView {
+                total_pnl: detail.pnl.total_pnl,
             },
         }
     }
@@ -2257,17 +2257,15 @@ out_of_band_policy = "hold"
         assert!(dashboard.contains("ETHUSDT"), "dashboard:\n{dashboard}");
 
         session.send_keys(&["Enter"]);
-        let btc_view = wait_for_pane_text(&session, "Overview").await;
-        assert!(btc_view.contains("Overview"), "btc view:\n{btc_view}");
+        let btc_view = wait_for_pane_text(&session, "Track").await;
+        assert!(btc_view.contains("Track"), "btc view:\n{btc_view}");
+        assert!(btc_view.contains("Market"), "btc view:\n{btc_view}");
         assert!(btc_view.contains("BTCUSDT"), "btc view:\n{btc_view}");
 
         session.send_keys(&["]"]);
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
-        assert!(
-            eth_view.contains("out of band policy: hold"),
-            "eth view:\n{eth_view}"
-        );
+        assert!(eth_view.contains("out of band hold"), "eth view:\n{eth_view}");
 
         let event_view = wait_for_pane_text(&session, "Activity").await;
         assert!(event_view.contains("Activity"), "event view:\n{event_view}");

@@ -25,7 +25,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         .split(frame.area());
 
     let header = Paragraph::new(render_status_line(app))
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+        .block(Block::default().borders(Borders::ALL).title("Context"));
     frame.render_widget(header, areas[0]);
 
     match app.current_view {
@@ -117,7 +117,7 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Poise"));
-        assert!(text.contains("Status"));
+        assert!(text.contains("Context"));
         assert!(text.contains("Keys"));
     }
 
@@ -149,5 +149,17 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("dashboard"));
+    }
+
+    #[test]
+    fn labels_header_as_context() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(vec![]);
+
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("Context"));
     }
 }

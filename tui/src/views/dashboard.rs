@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.execution.active_slot_count,
         );
         let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
-        let total_pnl = pnl_signal(item.statistics.total_pnl);
+        let total_pnl = pnl_signal(item.pnl.total_pnl);
 
         Row::new(vec![
             Cell::from(item.id.clone()),
@@ -224,7 +224,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
-                        "statistics": {"total_pnl": -245.3, "realized_pnl": -12.5}
+                        "pnl": {"total_pnl": -245.3}
                     }
                 ]
             }"#,

@@ -395,12 +395,16 @@ mod tests {
         assert_eq!(detail.status.lifecycle.status, GridStatus::Paused);
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
         assert_eq!(
-            detail_json["statistics"]["total_pnl"].as_f64(),
-            Some(detail.statistics.total_pnl)
+            detail_json["pnl"]["total_pnl"].as_f64(),
+            Some(detail.pnl.total_pnl)
         );
         assert_eq!(
-            detail_json["statistics"]["max_inventory_gap_abs"].as_f64(),
-            Some(detail.statistics.max_inventory_gap_abs)
+            detail_json["pnl"]["unrealized_pnl"].as_f64(),
+            Some(detail.pnl.unrealized_pnl)
+        );
+        assert_eq!(
+            detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
+            Some(detail.execution_stats.max_inventory_gap_abs)
         );
     }
 
@@ -431,8 +435,8 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(
-            item_json["statistics"]["total_pnl"].as_f64(),
-            Some(item.statistics.total_pnl)
+            item_json["pnl"]["total_pnl"].as_f64(),
+            Some(item.pnl.total_pnl)
         );
         assert!(
             events

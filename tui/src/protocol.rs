@@ -2,9 +2,9 @@
 pub use poise_protocol::{
     AccountSummaryView, ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView,
     ExecutionStateView, ExecutionStatusView, GridCommandType, GridCommandView, GridExecutionView,
-    GridStatisticsView, GridStatus, ReplacementGateView, RiskSignalView, StreamEvent,
-    TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackDiagnosticsView,
-    TrackListItemView, TrackListResponse, TrackListStatisticsView,
+    GridStatus, ReplacementGateView, RiskSignalView, StreamEvent, TrackCommandAccepted,
+    TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackExecutionStatsView,
+    TrackListItemView, TrackListPnlView, TrackListResponse, TrackPnlView,
 };
 
 #[cfg(test)]
@@ -38,8 +38,10 @@ mod tests {
 
         assert_eq!(detail.identity.id, "btc-core");
         assert_eq!(detail.identity.instrument.venue, "binance_futures");
-        assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert!((detail.pnl.realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((detail.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
+        assert!((detail.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+        assert!((detail.execution_stats.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
         assert_eq!(
             detail_json["strategy"]["long_exposure_units"].as_f64(),
             Some(8.0)
@@ -84,8 +86,8 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_grid_detail_view_without_statistics() {
-        let detail: TrackDetailView = serde_json::from_str(
+    fn rejects_grid_detail_view_without_pnl_and_execution_stats() {
+        let result = serde_json::from_str::<TrackDetailView>(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-28T12:34:56Z"},"reference_price":64000.0},
@@ -94,14 +96,11 @@ mod tests {
                 "position":{"current_exposure":0.5,"target_exposure":0.75},
                 "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
                 "activity":[{"ts":"2026-03-28T12:34:56Z","message":"Track activated","level":"info"}],
-                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
-            }"#,
-        )
-        .unwrap();
+                    "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+                }"#,
+        );
 
-        assert_eq!(detail.identity.id, "btc-core");
-        assert!((detail.statistics.realized_pnl - 0.0).abs() < f64::EPSILON);
-        assert!((detail.statistics.total_pnl - 0.0).abs() < f64::EPSILON);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -134,8 +133,10 @@ mod tests {
                 assert_eq!(track_id, "btc-core");
                 let detail_json = serde_json::to_value(&detail).unwrap();
                 assert_eq!(detail.identity.instrument.symbol, "BTCUSDT");
-                assert!((detail.statistics.realized_pnl - 980.1).abs() < f64::EPSILON);
-                assert!((detail.statistics.total_pnl - 1245.3).abs() < f64::EPSILON);
+                assert!((detail.pnl.realized_pnl - 980.1).abs() < f64::EPSILON);
+                assert!((detail.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
+                assert!((detail.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+                assert!((detail.execution_stats.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
                 assert_eq!(
                     detail_json["strategy"]["long_exposure_units"].as_f64(),
                     Some(8.0)
@@ -159,8 +160,8 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_grid_stream_detail_changed_without_statistics() {
-        let event: StreamEvent = serde_json::from_str(
+    fn rejects_grid_stream_detail_changed_without_pnl_and_execution_stats() {
+        let result = serde_json::from_str::<StreamEvent>(
             r#"{
                 "type":"track_detail_changed",
                 "track_id":"btc-core",
@@ -175,18 +176,9 @@ mod tests {
                     "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
                 }
             }"#,
-        )
-        .unwrap();
+        );
 
-        match event {
-            StreamEvent::TrackDetailChanged { track_id, detail } => {
-                assert_eq!(track_id, "btc-core");
-                assert_eq!(detail.identity.id, "btc-core");
-                assert!((detail.statistics.realized_pnl - 0.0).abs() < f64::EPSILON);
-                assert!((detail.statistics.total_pnl - 0.0).abs() < f64::EPSILON);
-            }
-            other => panic!("unexpected event variant: {other:?}"),
-        }
+        assert!(result.is_err());
     }
 
     #[test]
