@@ -14,7 +14,8 @@ use tokio::time::{Duration, sleep};
 use url::{Host, Url, form_urlencoded::Serializer};
 
 use poise_engine::ports::{
-    AccountMarginSnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, Position,
+    AccountMarginSnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    OrderRequest, Position,
 };
 
 use crate::types::{
@@ -176,6 +177,19 @@ impl BinanceRestClient {
             .await?;
 
         account.into_margin_snapshot(symbol)
+    }
+
+    pub async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+        let account: BinanceAccountInformation = self
+            .send_request(
+                Method::GET,
+                "/fapi/v3/account",
+                Vec::new(),
+                AuthMode::Signed,
+            )
+            .await?;
+
+        account.into_account_summary_snapshot()
     }
 
     pub async fn new_order(&self, req: &OrderRequest) -> Result<OrderReceipt> {

@@ -55,6 +55,17 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (track_id, batch_id, blocked_sequence, closed_order_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS account_monitor_state (
+            singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+            trading_day TEXT NOT NULL,
+            baseline_equity REAL NOT NULL,
+            baseline_captured_at TEXT NOT NULL,
+            last_observed_equity REAL,
+            last_observed_available REAL,
+            last_observed_unrealized_pnl REAL,
+            last_observed_at TEXT
         );",
     )?;
 
@@ -127,6 +138,20 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "closed_order_id",
             "created_at",
             "updated_at",
+        ],
+    )?;
+    ensure_columns_present(
+        conn,
+        "account_monitor_state",
+        &[
+            "singleton_key",
+            "trading_day",
+            "baseline_equity",
+            "baseline_captured_at",
+            "last_observed_equity",
+            "last_observed_available",
+            "last_observed_unrealized_pnl",
+            "last_observed_at",
         ],
     )?;
 
@@ -229,6 +254,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(follow_up_retirements_count, 1);
+
+        let account_monitor_state_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_monitor_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_monitor_state_count, 1);
 
         let index_count: i64 = conn
             .query_row(

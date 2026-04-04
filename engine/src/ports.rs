@@ -110,6 +110,14 @@ pub struct AccountMarginSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountSummarySnapshot {
+    pub equity: f64,
+    pub available: f64,
+    pub unrealized_pnl: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UserDataPayload {
     OrderUpdate(ExchangeOrder),
     PositionUpdate(Position),
@@ -144,6 +152,7 @@ pub trait ExchangePort: Send + Sync {
         &self,
         instrument: &Instrument,
     ) -> Result<AccountMarginSnapshot>;
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
 }
 

@@ -414,6 +414,7 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
@@ -472,6 +473,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let platform = assemble_with_fake_ports(&config).await.unwrap();
@@ -554,6 +556,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -588,6 +591,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -626,6 +630,7 @@ mod tests {
                 api_key: Some("demo-key".into()),
                 api_secret: Some("demo-secret".into()),
             },
+            account_monitor: Default::default(),
         };
 
         let error = validate_exchange_runtime_config(&config).unwrap_err();
@@ -664,6 +669,7 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
 
         let platform = super::assemble_with_components(
@@ -713,6 +719,7 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
 
         let result = super::assemble_with_components(
@@ -820,6 +827,7 @@ mod tests {
             exchange: ExchangeConfig {
                 ..Default::default()
             },
+            account_monitor: Default::default(),
         };
 
         let first = assemble_with_fake_ports(&config).await.unwrap();
@@ -1079,6 +1087,15 @@ mod tests {
             })
         }
 
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
         }
@@ -1133,6 +1150,15 @@ mod tests {
             })
         }
 
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Err(anyhow!("not used in tests"))
         }
@@ -1176,6 +1202,15 @@ mod tests {
                 available_balance: self.max_increase_notional,
                 total_wallet_balance: self.max_increase_notional,
                 max_increase_notional: self.max_increase_notional,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: self.max_increase_notional,
+                available: self.max_increase_notional,
+                unrealized_pnl: 0.0,
                 observed_at: chrono::Utc::now(),
             })
         }

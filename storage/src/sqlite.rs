@@ -24,6 +24,22 @@ pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountMonitorObservedSnapshotRow {
+    pub equity: f64,
+    pub available: f64,
+    pub unrealized_pnl: f64,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountMonitorStateRow {
+    pub trading_day: NaiveDate,
+    pub baseline_equity: f64,
+    pub baseline_captured_at: DateTime<Utc>,
+    pub last_observed_snapshot: Option<AccountMonitorObservedSnapshotRow>,
+}
+
 impl SqliteStorage {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("failed to open sqlite database")?;
@@ -124,6 +140,43 @@ impl SqliteStorage {
             })
     }
 
+    fn deserialize_trading_day(value: &str, column: usize) -> rusqlite::Result<NaiveDate> {
+        NaiveDate::parse_from_str(value, "%F").map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                column,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            )
+        })
+    }
+
+    fn deserialize_account_monitor_snapshot(
+        equity: Option<f64>,
+        available: Option<f64>,
+        unrealized_pnl: Option<f64>,
+        observed_at: Option<String>,
+    ) -> rusqlite::Result<Option<AccountMonitorObservedSnapshotRow>> {
+        match (equity, available, unrealized_pnl, observed_at) {
+            (None, None, None, None) => Ok(None),
+            (Some(equity), Some(available), Some(unrealized_pnl), Some(observed_at)) => {
+                Ok(Some(AccountMonitorObservedSnapshotRow {
+                    equity,
+                    available,
+                    unrealized_pnl,
+                    observed_at: Self::deserialize_timestamp(&observed_at, 6)?,
+                }))
+            }
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "account monitor snapshot columns must be all present or all absent",
+                )),
+            )),
+        }
+    }
+
     fn persisted_effect_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<PersistedTrackEffect> {
@@ -161,6 +214,115 @@ impl SqliteStorage {
             created_at: Self::deserialize_timestamp(&created_at, 8)?,
             updated_at: Self::deserialize_timestamp(&updated_at, 9)?,
         })
+    }
+
+    fn load_account_monitor_state_row_blocking(
+        conn: Arc<Mutex<Connection>>,
+    ) -> Result<Option<AccountMonitorStateRow>> {
+        let conn = Self::lock_connection(&conn)?;
+        let row = conn
+            .query_row(
+                "SELECT trading_day,
+                        baseline_equity,
+                        baseline_captured_at,
+                        last_observed_equity,
+                        last_observed_available,
+                        last_observed_unrealized_pnl,
+                        last_observed_at
+                 FROM account_monitor_state
+                 WHERE singleton_key = 1",
+                [],
+                |row| {
+                    let trading_day: String = row.get(0)?;
+                    let baseline_captured_at: String = row.get(2)?;
+                    let last_observed_equity: Option<f64> = row.get(3)?;
+                    let last_observed_available: Option<f64> = row.get(4)?;
+                    let last_observed_unrealized_pnl: Option<f64> = row.get(5)?;
+                    let last_observed_at: Option<String> = row.get(6)?;
+
+                    Ok(AccountMonitorStateRow {
+                        trading_day: Self::deserialize_trading_day(&trading_day, 0)?,
+                        baseline_equity: row.get(1)?,
+                        baseline_captured_at: Self::deserialize_timestamp(
+                            &baseline_captured_at,
+                            2,
+                        )?,
+                        last_observed_snapshot: Self::deserialize_account_monitor_snapshot(
+                            last_observed_equity,
+                            last_observed_available,
+                            last_observed_unrealized_pnl,
+                            last_observed_at,
+                        )?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load account monitor state")?;
+
+        Ok(row)
+    }
+
+    fn save_account_monitor_state_row_blocking(
+        conn: Arc<Mutex<Connection>>,
+        row: AccountMonitorStateRow,
+    ) -> Result<()> {
+        let conn = Self::lock_connection(&conn)?;
+        conn.execute(
+            "INSERT INTO account_monitor_state (
+                singleton_key,
+                trading_day,
+                baseline_equity,
+                baseline_captured_at,
+                last_observed_equity,
+                last_observed_available,
+                last_observed_unrealized_pnl,
+                last_observed_at
+            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(singleton_key) DO UPDATE SET
+                trading_day = excluded.trading_day,
+                baseline_equity = excluded.baseline_equity,
+                baseline_captured_at = excluded.baseline_captured_at,
+                last_observed_equity = excluded.last_observed_equity,
+                last_observed_available = excluded.last_observed_available,
+                last_observed_unrealized_pnl = excluded.last_observed_unrealized_pnl,
+                last_observed_at = excluded.last_observed_at",
+            params![
+                row.trading_day.format("%F").to_string(),
+                row.baseline_equity,
+                row.baseline_captured_at.to_rfc3339(),
+                row.last_observed_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.equity),
+                row.last_observed_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.available),
+                row.last_observed_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.unrealized_pnl),
+                row.last_observed_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.observed_at.to_rfc3339()),
+            ],
+        )
+        .context("failed to save account monitor state")?;
+        Ok(())
+    }
+
+    pub async fn load_account_monitor_state_row(&self) -> Result<Option<AccountMonitorStateRow>> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || Self::load_account_monitor_state_row_blocking(conn))
+            .await
+            .context("failed to join load_account_monitor_state_row blocking task")?
+    }
+
+    pub async fn save_account_monitor_state_row(&self, row: &AccountMonitorStateRow) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let row = row.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::save_account_monitor_state_row_blocking(conn, row)
+        })
+        .await
+        .context("failed to join save_account_monitor_state_row blocking task")?
     }
 
     fn save_transition_blocking(
@@ -1049,6 +1211,7 @@ impl TrackReadRepositoryPort for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::env;
     use std::fs;
     use std::sync::Arc;
@@ -1374,6 +1537,72 @@ mod tests {
         let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         env::temp_dir().join(format!("grid-storage-{timestamp}-{counter}.db"))
+    }
+
+    #[tokio::test]
+    async fn save_and_load_account_monitor_state_round_trip() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let expected = AccountMonitorStateRow {
+            trading_day: NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+            baseline_equity: 12_500.5,
+            baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 1, 2).unwrap(),
+            last_observed_snapshot: Some(AccountMonitorObservedSnapshotRow {
+                equity: 12_450.0,
+                available: 9_800.0,
+                unrealized_pnl: -120.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            }),
+        };
+
+        storage
+            .save_account_monitor_state_row(&expected)
+            .await
+            .unwrap();
+
+        let actual = storage.load_account_monitor_state_row().await.unwrap();
+
+        assert_eq!(actual, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn rejects_partial_account_monitor_snapshot_rows() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        {
+            let conn = storage.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO account_monitor_state (
+                    singleton_key,
+                    trading_day,
+                    baseline_equity,
+                    baseline_captured_at,
+                    last_observed_equity,
+                    last_observed_available,
+                    last_observed_unrealized_pnl,
+                    last_observed_at
+                ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    "2026-04-04",
+                    12_500.5,
+                    "2026-04-04T00:01:02+00:00",
+                    12_450.0,
+                    Option::<f64>::None,
+                    -120.0,
+                    "2026-04-04T01:02:03+00:00",
+                ],
+            )
+            .unwrap();
+        }
+
+        let error = storage
+            .load_account_monitor_state_row()
+            .await
+            .expect_err("partial account snapshot should fail to load");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("account monitor snapshot columns must be all present or all absent"),
+            "unexpected error: {rendered}"
+        );
     }
 
     #[tokio::test]

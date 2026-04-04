@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_engine::ports::{
-    AccountMarginSnapshot, ExchangeInfo, ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt,
-    OrderRequest, Position, PriceTick, UserDataEvent,
+    AccountMarginSnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, ExchangePort,
+    MarketDataPort, OrderReceipt, OrderRequest, Position, PriceTick, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
@@ -68,6 +68,10 @@ impl ExchangePort for BinanceAdapter {
         self.rest
             .get_account_margin_snapshot(&instrument.symbol)
             .await
+    }
+
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+        self.rest.get_account_summary().await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {

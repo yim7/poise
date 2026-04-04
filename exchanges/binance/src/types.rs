@@ -4,7 +4,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use poise_engine::ports::{
-    AccountMarginSnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position,
+    AccountMarginSnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    OrderStatus, Position,
 };
 use poise_engine::track::{Instrument, Venue};
 
@@ -32,8 +33,12 @@ pub struct BinancePositionRisk {
 pub struct BinanceAccountInformation {
     #[serde(rename = "availableBalance")]
     pub available_balance: String,
-    #[serde(rename = "totalWalletBalance")]
-    pub total_wallet_balance: String,
+    #[serde(rename = "totalWalletBalance", default)]
+    pub total_wallet_balance: Option<String>,
+    #[serde(rename = "totalMarginBalance", default)]
+    pub total_margin_balance: String,
+    #[serde(rename = "totalUnrealizedProfit", default)]
+    pub total_unrealized_profit: String,
     pub positions: Vec<BinanceAccountPosition>,
 }
 
@@ -114,7 +119,8 @@ impl BinanceAccountInformation {
             .find(|item| item.symbol == symbol)
             .with_context(|| format!("account position not found for symbol: {symbol}"))?;
         let available_balance = parse_decimal("availableBalance", &self.available_balance)?;
-        let total_wallet_balance = parse_decimal("totalWalletBalance", &self.total_wallet_balance)?;
+        let total_wallet_balance =
+            parse_required_decimal("totalWalletBalance", self.total_wallet_balance.as_deref())?;
         let leverage = parse_decimal("leverage", &position.leverage)?;
 
         Ok(AccountMarginSnapshot {
@@ -122,6 +128,15 @@ impl BinanceAccountInformation {
             available_balance,
             total_wallet_balance,
             max_increase_notional: available_balance * leverage,
+            observed_at: Utc::now(),
+        })
+    }
+
+    pub fn into_account_summary_snapshot(self) -> Result<AccountSummarySnapshot> {
+        Ok(AccountSummarySnapshot {
+            equity: parse_decimal("totalMarginBalance", &self.total_margin_balance)?,
+            available: parse_decimal("availableBalance", &self.available_balance)?,
+            unrealized_pnl: parse_decimal("totalUnrealizedProfit", &self.total_unrealized_profit)?,
             observed_at: Utc::now(),
         })
     }
@@ -212,6 +227,11 @@ fn parse_optional_decimal(field: &str, value: Option<&str>) -> Result<f64> {
     parse_decimal(field, value)
 }
 
+fn parse_required_decimal(field: &str, value: Option<&str>) -> Result<f64> {
+    let value = value.context(format!("missing {field}"))?;
+    parse_decimal(field, value)
+}
+
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
     value
         .parse::<f64>()
@@ -221,6 +241,7 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use poise_core::types::{ExchangeRules, Side};
+    use poise_engine::ports::AccountSummarySnapshot;
 
     use super::*;
 
@@ -268,6 +289,31 @@ mod tests {
                 qty: 0.25,
                 avg_price: 65000.5,
                 unrealized_pnl: 123.45,
+            }
+        );
+    }
+
+    #[test]
+    fn converts_account_information_into_account_summary_snapshot() {
+        let payload = r#"
+        {
+            "availableBalance": "9800.25",
+            "totalMarginBalance": "12500.5",
+            "totalUnrealizedProfit": "-120.75",
+            "positions": []
+        }
+        "#;
+
+        let account: BinanceAccountInformation = serde_json::from_str(payload).unwrap();
+        let snapshot = account.into_account_summary_snapshot().unwrap();
+
+        assert_eq!(
+            snapshot,
+            AccountSummarySnapshot {
+                equity: 12_500.5,
+                available: 9_800.25,
+                unrealized_pnl: -120.75,
+                observed_at: snapshot.observed_at,
             }
         );
     }

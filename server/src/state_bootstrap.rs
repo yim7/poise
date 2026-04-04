@@ -74,6 +74,7 @@ type BootstrapResult<T> = std::result::Result<T, StateBootstrapError>;
 
 #[derive(Clone)]
 pub struct StateRepositories {
+    sqlite_storage: Option<Arc<SqliteStorage>>,
     state_repository: Arc<dyn StateRepositoryPort>,
     read_repository: Arc<dyn TrackReadRepositoryPort>,
 }
@@ -134,9 +135,22 @@ impl StateRepositories {
         R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
     {
         Self {
+            sqlite_storage: None,
             state_repository: repository.clone(),
             read_repository: repository,
         }
+    }
+
+    pub(crate) fn from_sqlite_storage(repository: Arc<SqliteStorage>) -> Self {
+        Self {
+            sqlite_storage: Some(repository.clone()),
+            state_repository: repository.clone(),
+            read_repository: repository,
+        }
+    }
+
+    pub fn sqlite_storage(&self) -> Option<Arc<SqliteStorage>> {
+        self.sqlite_storage.as_ref().map(Arc::clone)
     }
 
     pub fn state_repository(&self) -> Arc<dyn StateRepositoryPort> {
@@ -187,7 +201,7 @@ pub async fn prepare_state_repository(
             if mismatches.is_empty() {
                 let repository = Arc::new(repository);
                 return Ok(PreparedStateStore {
-                    repositories: StateRepositories::new(repository),
+                    repositories: StateRepositories::from_sqlite_storage(repository),
                     db_path,
                     rebuild_backup: None,
                 });
@@ -213,7 +227,7 @@ pub async fn prepare_state_repository(
             };
             let repository = Arc::new(repository);
             Ok(PreparedStateStore {
-                repositories: StateRepositories::new(repository),
+                repositories: StateRepositories::from_sqlite_storage(repository),
                 db_path,
                 rebuild_backup,
             })
@@ -629,6 +643,7 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         };
         let seeded_config = test_config(environment.clone(), 80.0);
         persist_snapshot_with_lower_price(&seeded_config, 80.0).await;
@@ -689,6 +704,7 @@ mod tests {
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
         }
     }
 

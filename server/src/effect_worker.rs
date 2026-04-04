@@ -1735,6 +1735,15 @@ mod tests {
             })
         }
 
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+            })
+        }
+
         async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
             Ok(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap())
         }
