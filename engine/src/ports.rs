@@ -157,18 +157,7 @@ pub trait ExchangePort: AccountSummaryPort + Send + Sync {
         &self,
         instrument: &Instrument,
     ) -> Result<AccountMarginSnapshot>;
-    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
-}
-
-#[async_trait]
-impl<T> AccountSummaryPort for T
-where
-    T: ExchangePort + ?Sized,
-{
-    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        ExchangePort::get_account_summary(self).await
-    }
 }
 
 #[async_trait]

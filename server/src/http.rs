@@ -266,6 +266,13 @@ mod tests {
     struct AccountSummaryOnlyExchange;
 
     #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for AccountSummaryOnlyExchange {
+        async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
+            Err(anyhow!("not used in tests"))
+        }
+    }
+
+    #[async_trait::async_trait]
     impl poise_engine::ports::ExchangePort for AccountSummaryOnlyExchange {
         async fn submit_order(
             &self,
@@ -311,10 +318,6 @@ mod tests {
             &self,
             _instrument: &Instrument,
         ) -> anyhow::Result<poise_engine::ports::AccountMarginSnapshot> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
             Err(anyhow!("not used in tests"))
         }
 

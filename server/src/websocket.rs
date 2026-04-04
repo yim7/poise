@@ -886,6 +886,18 @@ mod tests {
     struct NoopExchange;
 
     #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for NoopExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: Utc::now(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
     impl ExchangePort for NoopExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Err(anyhow!("submit_order should not be called"))
@@ -935,15 +947,6 @@ mod tests {
                 available_balance: 1_000_000.0,
                 total_wallet_balance: 1_000_000.0,
                 max_increase_notional: 1_000_000.0,
-                observed_at: Utc::now(),
-            })
-        }
-
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
-            Ok(poise_engine::ports::AccountSummarySnapshot {
-                equity: 1_000_000.0,
-                available: 1_000_000.0,
-                unrealized_pnl: 0.0,
                 observed_at: Utc::now(),
             })
         }

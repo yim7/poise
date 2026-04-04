@@ -5878,6 +5878,20 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for FakeExchange {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            self.get_account_summary_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: Utc::now(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
     impl ExchangePort for FakeExchange {
         async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
             self.submitted_orders.lock().unwrap().push(req.clone());
@@ -5961,17 +5975,6 @@ mod tests {
                 available_balance: 1_000_000.0,
                 total_wallet_balance: 1_000_000.0,
                 max_increase_notional: 1_000_000.0,
-                observed_at: Utc::now(),
-            })
-        }
-
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
-            self.get_account_summary_calls
-                .fetch_add(1, Ordering::SeqCst);
-            Ok(poise_engine::ports::AccountSummarySnapshot {
-                equity: 1_000_000.0,
-                available: 1_000_000.0,
-                unrealized_pnl: 0.0,
                 observed_at: Utc::now(),
             })
         }
