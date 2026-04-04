@@ -1163,6 +1163,7 @@ mod tests {
 
         let app = load_initial_state(&client).await.unwrap();
 
+        assert_eq!(app.current_view, View::Dashboard);
         assert!(app.account_summary.is_none());
         assert_eq!(app.grids.len(), 2);
         assert_eq!(app.current_track.as_ref().unwrap().identity.id, BTC_GRID_ID);

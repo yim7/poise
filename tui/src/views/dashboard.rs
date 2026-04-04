@@ -271,4 +271,23 @@ mod tests {
                 .any(|bg| *bg != Color::Reset)
         );
     }
+
+    #[test]
+    fn renders_unavailable_account_panel_when_summary_is_missing() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("unavailable"));
+        assert!(text.contains("waiting for account summary"));
+    }
 }
