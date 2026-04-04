@@ -42,15 +42,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
+            Constraint::Length(13),
+            Constraint::Length(10),
             Constraint::Length(12),
             Constraint::Length(14),
-            Constraint::Length(15),
             Constraint::Length(22),
             Constraint::Length(14),
         ],
     )
     .header(header)
+    .column_spacing(2)
     .row_highlight_style(Theme::highlight())
     .highlight_symbol(">> ")
     .block(Block::default().title("Dashboard").borders(Borders::ALL));
@@ -116,6 +117,21 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn buffer_line_containing(terminal: &Terminal<TestBackend>, needle: &str) -> Option<String> {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+
+        (0..buffer.area.height as usize).find_map(|row| {
+            let start = row * width;
+            let line = buffer.content()[start..start + width]
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+
+            line.contains(needle).then_some(line)
+        })
     }
 
     fn background_colors_for_substring(
@@ -240,6 +256,35 @@ mod tests {
         assert!(text.contains("3.5000"));
         assert!(text.contains("long reduce"));
         assert!(text.contains("↓ -245.30"));
+    }
+
+    #[test]
+    fn keeps_pnl_column_visibly_separated_from_exposure_column() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+
+        let header = buffer_line_containing(&terminal, "Exposure").unwrap();
+        let header_gap = header.find("PnL").unwrap() - header.find("Exposure").unwrap();
+        assert!(
+            header_gap >= 24,
+            "header should keep Exposure and PnL apart, line: {header:?}"
+        );
+
+        let row = buffer_line_containing(&terminal, "BTCUSDT").unwrap();
+        let row_gap = row.find("↑ +1245.30").unwrap() - row.find("3.5000").unwrap();
+        assert!(
+            row_gap >= 24,
+            "row should keep Exposure and PnL apart, line: {row:?}"
+        );
     }
 
     #[test]
