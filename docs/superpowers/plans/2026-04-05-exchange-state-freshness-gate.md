@@ -318,7 +318,7 @@ Expected:
 - worker 消费 freshness abstraction，并负责写入执行结果不确定事实
 - 既有 submit preflight 与异常恢复路径不回退
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/effect_worker.rs
@@ -327,4 +327,4 @@ git commit -m "feat(server): gate side effects with exchange freshness"
 
 Commit:
 
-- `<填写 commit SHA>`
+- `8b9125b`
