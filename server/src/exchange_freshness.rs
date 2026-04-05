@@ -80,7 +80,9 @@ impl ExchangeFreshness {
 
         matches!(
             effect,
-            TrackEffect::SubmitOrder { .. } | TrackEffect::CancelOrder { .. }
+            TrackEffect::SubmitOrder { .. }
+                | TrackEffect::CancelOrder { .. }
+                | TrackEffect::CancelAll { .. }
         )
     }
 }

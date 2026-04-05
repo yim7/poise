@@ -227,7 +227,7 @@ Commit:
 - Modify: `server/src/effect_worker.rs`
 - Test: `server/src/effect_worker.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 worker 不再从执行状态猜 stale，并负责 outcome-unknown 置脏**
+- [x] **Step 1: 先写失败测试，锁住 worker 不再从执行状态猜 stale，并负责 outcome-unknown 置脏**
 
 在 `server/src/effect_worker.rs` 增加至少这些测试：
 
@@ -253,7 +253,7 @@ async fn outcome_unknown_marks_track_stale_before_reconcile() {}
 - `SubmitOutcomeUnknown` / `CancelOutcomeUnknown` 由 worker 先写入 stale，再发起 reconcile
 - worker 不读 slot 状态来决定 stale
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -267,7 +267,7 @@ Expected:
 - 当前 stale submit / cancel 测试失败，因为 worker 还没有消费 freshness state。
 - outcome unknown 测试失败，因为 worker 还没有在 reconcile 前写入 stale。
 
-- [ ] **Step 3: 做最小实现，把 freshness gate 挂到真实 side effect 前**
+- [x] **Step 3: 做最小实现，把 freshness gate 挂到真实 side effect 前**
 
 要求：
 
@@ -300,7 +300,7 @@ if self
   - 再调用 `enqueue_reconcile_request(...)`
 - 保持 submit preflight、取消 writeback、follow-up retirement 既有职责不变
 
-- [ ] **Step 4: 跑 Task 3 回归**
+- [x] **Step 4: 跑 Task 3 回归**
 
 Run:
 

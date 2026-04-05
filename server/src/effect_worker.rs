@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::assembly::ServerState;
+use crate::exchange_freshness::ExchangeFreshnessReason;
 use crate::order_outcome::{
     OutcomeClass, ReconcileRequest, classify_cancel_error, classify_submit_receipt_writeback_error,
 };
@@ -158,6 +159,25 @@ impl EffectWorker {
         request: OrderRequest,
         desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
+        if self
+            .state
+            .exchange_freshness
+            .requires_sync_before_effect(persisted.track_id.as_str(), &persisted.effect)
+            .await
+        {
+            runtime::enqueue_reconcile_request(
+                &self.state,
+                &self.exchange,
+                ReconcileRequest {
+                    track_id: persisted.track_id.as_str().to_string(),
+                    reason: crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
+                },
+                &request.instrument,
+            )
+            .await?;
+            return Ok(());
+        }
+
         let preflight_decision = self
             .state
             .submit_preflight
@@ -196,6 +216,13 @@ impl EffectWorker {
                     if let OutcomeClass::OutcomeUnknown(reason) =
                         classify_submit_receipt_writeback_error(&error)
                     {
+                        self.state
+                            .exchange_freshness
+                            .mark_stale(
+                                persisted.track_id.as_str(),
+                                ExchangeFreshnessReason::SubmitOutcomeUnknown,
+                            )
+                            .await;
                         runtime::enqueue_reconcile_request(
                             &self.state,
                             &self.exchange,
@@ -304,6 +331,24 @@ impl EffectWorker {
         cancellation: Cancellation,
     ) -> Result<()> {
         let instrument = cancellation.instrument().clone();
+        if self
+            .state
+            .exchange_freshness
+            .requires_sync_before_effect(persisted.track_id.as_str(), &persisted.effect)
+            .await
+        {
+            runtime::enqueue_reconcile_request(
+                &self.state,
+                &self.exchange,
+                ReconcileRequest {
+                    track_id: persisted.track_id.as_str().to_string(),
+                    reason: crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
+                },
+                &instrument,
+            )
+            .await?;
+            return Ok(());
+        }
         let result = match cancellation {
             Cancellation::One {
                 ref instrument,
@@ -352,6 +397,13 @@ impl EffectWorker {
             }
             Err(error) => {
                 if let OutcomeClass::OutcomeUnknown(reason) = classify_cancel_error(&error) {
+                    self.state
+                        .exchange_freshness
+                        .mark_stale(
+                            persisted.track_id.as_str(),
+                            ExchangeFreshnessReason::CancelOutcomeUnknown,
+                        )
+                        .await;
                     runtime::enqueue_reconcile_request(
                         &self.state,
                         &self.exchange,
@@ -450,6 +502,7 @@ mod tests {
     use tokio::time::timeout;
 
     use crate::assembly::build_server_state;
+    use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
     use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision};
@@ -607,6 +660,48 @@ mod tests {
         worker.run_once().await.unwrap();
 
         assert_eq!(exchange.get_open_orders_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_submit_effect_syncs_exchange_before_submitting() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+        state
+            .exchange_freshness
+            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        assert!(exchange.effects.lock().await.is_empty());
+        assert_eq!(exchange.get_position_calls(), 1);
+        assert_eq!(exchange.get_open_orders_calls(), 1);
+        assert_eq!(
+            repository
+                .list_all_effects()
+                .await
+                .into_iter()
+                .next()
+                .expect("submit effect should stay persisted")
+                .status,
+            EffectStatus::Pending
+        );
     }
 
     #[tokio::test]
@@ -840,6 +935,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_cancel_effect_syncs_exchange_before_canceling() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "btc-core:batch:0".into(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: TrackEffect::CancelOrder {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        state
+            .exchange_freshness
+            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        assert_eq!(exchange.get_position_calls(), 1);
+        assert_eq!(exchange.get_open_orders_calls(), 1);
+        assert_eq!(
+            repository
+                .list_all_effects()
+                .await
+                .into_iter()
+                .next()
+                .expect("cancel effect should stay persisted")
+                .status,
+            EffectStatus::Pending
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_failed() {
         let repository = Arc::new(MemoryRepository::default());
         let exchange = Arc::new(FakeExchange::with_cancel_order_error(
@@ -889,6 +1040,68 @@ mod tests {
         assert_eq!(effect.status, EffectStatus::Failed);
         assert_eq!(exchange.get_position_calls(), 1);
         assert_eq!(exchange.get_open_orders_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_effects_do_not_trigger_extra_sync() {
+        let submit_repository = Arc::new(MemoryRepository::default());
+        let submit_exchange = Arc::new(FakeExchange::default());
+        let submit_state = test_state(submit_repository.clone(), submit_exchange.clone()).await;
+        submit_state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+
+        let submit_worker = EffectWorker::new(
+            submit_state,
+            submit_exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        submit_worker.run_once().await.unwrap();
+
+        assert_eq!(submit_exchange.get_position_calls(), 0);
+        assert_eq!(submit_exchange.get_open_orders_calls(), 0);
+
+        let cancel_repository = Arc::new(MemoryRepository::default());
+        let cancel_exchange = Arc::new(FakeExchange::default());
+        let cancel_state = test_state(cancel_repository.clone(), cancel_exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+        cancel_repository
+            .seed_snapshot("btc-core", snapshot.clone())
+            .await;
+        {
+            let manager_handle = cancel_state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        cancel_repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "btc-core:cancel:0".into(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "cancel".into(),
+                sequence: 0,
+                effect: TrackEffect::CancelOrder {
+                    instrument: btc_instrument(),
+                    order_id: "order-1".into(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+
+        let cancel_worker = EffectWorker::new(
+            cancel_state,
+            cancel_exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        cancel_worker.run_once().await.unwrap();
+
+        assert_eq!(cancel_exchange.get_position_calls(), 0);
+        assert_eq!(cancel_exchange.get_open_orders_calls(), 0);
     }
 
     #[tokio::test]
@@ -1357,6 +1570,62 @@ mod tests {
         assert_eq!(exchange.get_open_orders_calls(), 1);
     }
 
+    #[tokio::test]
+    async fn outcome_unknown_marks_track_stale_before_reconcile() {
+        let repository = Arc::new(MemoryRepository::default());
+        let submit_started = Arc::new(Notify::new());
+        let release_submit = Arc::new(Notify::new());
+        let get_position_started = Arc::new(Notify::new());
+        let release_get_position = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_submit_and_get_position(
+            submit_started.clone(),
+            release_submit.clone(),
+            get_position_started.clone(),
+            release_get_position.clone(),
+        ));
+        exchange.set_position_qty(15.0).await;
+        let state = test_state(repository.clone(), exchange.clone()).await;
+
+        let transition = state
+            .write_service
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        let task = tokio::spawn(async move { worker.run_once().await });
+
+        submit_started.notified().await;
+
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot.executor_state.slots = vec![poise_engine::runtime::ExecutionSlot {
+                slot: poise_engine::executor::OrderSlot::new("inventory_core"),
+                state: SlotState::Empty,
+                working_order: None,
+            }];
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+
+        release_submit.notify_waiters();
+        get_position_started.notified().await;
+        assert!(state.exchange_freshness.is_stale("btc-core").await);
+        release_get_position.notify_waiters();
+        task.await.unwrap().unwrap();
+
+        assert!(!state.exchange_freshness.is_stale("btc-core").await);
+    }
+
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
@@ -1609,6 +1878,8 @@ mod tests {
         effects: AsyncMutex<Vec<OrderRequest>>,
         submit_started: Option<Arc<Notify>>,
         release_submit: Option<Arc<Notify>>,
+        get_position_started: Option<Arc<Notify>>,
+        release_get_position: Option<Arc<Notify>>,
         cancel_order_error: Option<String>,
         position: AsyncMutex<Position>,
         open_orders: AsyncMutex<Vec<ExchangeOrder>>,
@@ -1622,6 +1893,8 @@ mod tests {
                 effects: AsyncMutex::default(),
                 submit_started: None,
                 release_submit: None,
+                get_position_started: None,
+                release_get_position: None,
                 cancel_order_error: None,
                 position: AsyncMutex::new(Position {
                     instrument: btc_instrument(),
@@ -1639,6 +1912,21 @@ mod tests {
             Self {
                 submit_started: Some(submit_started),
                 release_submit: Some(release_submit),
+                ..Self::default()
+            }
+        }
+
+        fn with_blocked_submit_and_get_position(
+            submit_started: Arc<Notify>,
+            release_submit: Arc<Notify>,
+            get_position_started: Arc<Notify>,
+            release_get_position: Arc<Notify>,
+        ) -> Self {
+            Self {
+                submit_started: Some(submit_started),
+                release_submit: Some(release_submit),
+                get_position_started: Some(get_position_started),
+                release_get_position: Some(release_get_position),
                 ..Self::default()
             }
         }
@@ -1712,6 +2000,12 @@ mod tests {
 
         async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(notify) = &self.get_position_started {
+                notify.notify_waiters();
+            }
+            if let Some(notify) = &self.release_get_position {
+                notify.notified().await;
+            }
             Ok(self.position.lock().await.clone())
         }
 
