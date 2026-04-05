@@ -475,7 +475,7 @@ mod tests {
             now,
         ));
 
-        assert_eq!(decision.lifecycle, RoundLifecycleDecision::StartRound);
+        assert_eq!(decision.lifecycle, RoundLifecycleDecision::Start);
     }
 
     #[test]
@@ -492,7 +492,7 @@ mod tests {
             now,
         ));
 
-        assert_eq!(decision.lifecycle, RoundLifecycleDecision::ContinueRound);
+        assert_eq!(decision.lifecycle, RoundLifecycleDecision::Continue);
     }
 
     #[test]
@@ -1119,7 +1119,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(evaluation.lifecycle, RoundLifecycleDecision::StartRound);
+        assert_eq!(evaluation.lifecycle, RoundLifecycleDecision::Start);
         assert_eq!(
             evaluation
                 .submit_hint
@@ -1154,7 +1154,7 @@ mod tests {
             Some(&previous_state),
         );
 
-        assert_eq!(evaluation.lifecycle, RoundLifecycleDecision::ContinueRound);
+        assert_eq!(evaluation.lifecycle, RoundLifecycleDecision::Continue);
         assert!(evaluation.submit_hint.is_none());
     }
 

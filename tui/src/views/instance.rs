@@ -568,11 +568,11 @@ fn status_command_hint(commands: &[TrackCommandView]) -> String {
     let hints = commands
         .iter()
         .filter(|command| command.enabled)
-        .filter_map(|command| match command.command {
-            TrackCommandType::Pause => Some("p pause".to_string()),
-            TrackCommandType::Resume => Some("r resume".to_string()),
-            TrackCommandType::Terminate => Some("t terminate".to_string()),
-            TrackCommandType::Flatten => Some("f flatten".to_string()),
+        .map(|command| match command.command {
+            TrackCommandType::Pause => "p pause".to_string(),
+            TrackCommandType::Resume => "r resume".to_string(),
+            TrackCommandType::Terminate => "t terminate".to_string(),
+            TrackCommandType::Flatten => "f flatten".to_string(),
         })
         .collect::<Vec<_>>();
 

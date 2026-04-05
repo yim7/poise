@@ -1015,11 +1015,26 @@ mod tests {
         Json(serde_json::json!({
             "availableBalance": "1000.0",
             "totalWalletBalance": "1200.0",
-            "positions": [
-                { "symbol": "BTCUSDT", "leverage": "20" },
-                { "symbol": "ETHUSDT", "leverage": "10" }
-            ]
+            "totalMarginBalance": "1200.0",
+            "totalUnrealizedProfit": "0.0"
         }))
+    }
+
+    async fn symbol_config(
+        Query(params): Query<HashMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        let symbol = params
+            .get("symbol")
+            .cloned()
+            .unwrap_or_else(|| "BTCUSDT".to_string());
+        let leverage = if symbol == "ETHUSDT" { 10 } else { 20 };
+
+        Json(serde_json::json!([
+            {
+                "symbol": symbol,
+                "leverage": leverage
+            }
+        ]))
     }
 
     async fn open_orders() -> Json<serde_json::Value> {
@@ -1766,7 +1781,9 @@ mod tests {
             .route("/ws/:stream", get(exchange_ws_handler))
             .route("/fapi/v1/time", get(server_time))
             .route("/fapi/v1/exchangeInfo", get(exchange_info))
+            .route("/fapi/v1/symbolConfig", get(symbol_config))
             .route("/fapi/v2/account", get(account_information))
+            .route("/fapi/v3/account", get(account_information))
             .route("/fapi/v2/positionRisk", get(position_risk))
             .route("/fapi/v1/openOrders", get(open_orders))
             .route("/fapi/v1/order", post(create_order).delete(cancel_order))

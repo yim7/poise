@@ -130,6 +130,7 @@ impl PreparedStateStore {
 }
 
 impl StateRepositories {
+    #[cfg(test)]
     pub(crate) fn new<R>(repository: Arc<R>) -> Self
     where
         R: StateRepositoryPort + TrackReadRepositoryPort + 'static,

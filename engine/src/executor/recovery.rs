@@ -170,13 +170,14 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let matching_pending_submit_can_proceed = active_lifecycle
         .pending_submit_for_request(&input.request.client_order_id)
         .is_some_and(|slot| {
-            current_plan_evaluation.as_ref().is_some_and(|evaluation| {
-                evaluation.lifecycle == RoundLifecycleDecision::ContinueRound
-            }) && input
-                .previous_state
-                .active_round
+            current_plan_evaluation
                 .as_ref()
-                .is_some_and(|round| round.desired_exposure == *input.desired_exposure)
+                .is_some_and(|evaluation| evaluation.lifecycle == RoundLifecycleDecision::Continue)
+                && input
+                    .previous_state
+                    .active_round
+                    .as_ref()
+                    .is_some_and(|round| round.desired_exposure == *input.desired_exposure)
                 && current_plan_submit.is_none()
                 && pending_submit_matches_request(slot, input.request, input.exchange_rules)
         });

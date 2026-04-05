@@ -1632,15 +1632,17 @@ mod tests {
         snapshot.current_exposure = Exposure(2.0);
         snapshot.desired_exposure = Some(Exposure(2.0));
         snapshot.executor_state = ExecutorState::empty(test_server_time());
-        let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
+        let fixture = runtime_fixture_with_options(
             Some(snapshot),
             btc_position(2.0, 0.0),
             vec![],
             test_budget(),
-            Duration::from_secs(60),
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-            clock.clone() as Arc<dyn ClockPort>,
+            RuntimeFixtureOptions {
+                recovery_retry_interval: Duration::from_secs(60),
+                audit_interval: Duration::from_secs(60),
+                account_refresh_interval: Duration::from_secs(5),
+                clock: clock.clone() as Arc<dyn ClockPort>,
+            },
         )
         .await;
         let worker = EffectWorker::new(
@@ -4737,15 +4739,17 @@ mod tests {
         snapshot.status = TrackStatus::Paused;
         snapshot.desired_exposure = None;
         snapshot.executor_state = ExecutorState::empty(test_server_time());
-        let fixture = runtime_fixture_with_clock_and_recovery_retry_interval(
+        let fixture = runtime_fixture_with_options(
             Some(snapshot),
             btc_position(0.0, 0.0),
             vec![],
             test_budget(),
-            Duration::from_millis(50),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            clock.clone() as Arc<dyn ClockPort>,
+            RuntimeFixtureOptions {
+                recovery_retry_interval: Duration::from_millis(50),
+                audit_interval: Duration::from_secs(5),
+                account_refresh_interval: Duration::from_secs(5),
+                clock: clock.clone() as Arc<dyn ClockPort>,
+            },
         )
         .await;
 
@@ -5381,6 +5385,13 @@ mod tests {
         user_sender: mpsc::Sender<UserDataEvent>,
     }
 
+    struct RuntimeFixtureOptions {
+        recovery_retry_interval: Duration,
+        audit_interval: Duration,
+        account_refresh_interval: Duration,
+        clock: Arc<dyn ClockPort>,
+    }
+
     async fn runtime_fixture(
         restored_snapshot: Option<TrackSnapshot>,
         position: Position,
@@ -5464,30 +5475,29 @@ mod tests {
         audit_interval: Duration,
         account_refresh_interval: Duration,
     ) -> RuntimeFixture {
-        runtime_fixture_with_clock_and_recovery_retry_interval(
+        runtime_fixture_with_options(
             restored_snapshot,
             position,
             open_orders,
             budget,
-            recovery_retry_interval,
-            audit_interval,
-            account_refresh_interval,
-            Arc::new(FixedClock(
-                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-            )),
+            RuntimeFixtureOptions {
+                recovery_retry_interval,
+                audit_interval,
+                account_refresh_interval,
+                clock: Arc::new(FixedClock(
+                    Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                )),
+            },
         )
         .await
     }
 
-    async fn runtime_fixture_with_clock_and_recovery_retry_interval(
+    async fn runtime_fixture_with_options(
         restored_snapshot: Option<TrackSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
-        recovery_retry_interval: Duration,
-        audit_interval: Duration,
-        account_refresh_interval: Duration,
-        clock: Arc<dyn ClockPort>,
+        options: RuntimeFixtureOptions,
     ) -> RuntimeFixture {
         let exchange = Arc::new(FakeExchange::new(position, open_orders));
         let persistence = Arc::new(MemoryPersistence::default());
@@ -5495,7 +5505,7 @@ mod tests {
         let (user_sender, user_receiver) = mpsc::channel(8);
         let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
 
-        let mut manager = TrackManager::new(clock);
+        let mut manager = TrackManager::new(options.clock);
         manager
             .add_track(
                 TrackId::new("BTCUSDT"),
@@ -5541,9 +5551,9 @@ mod tests {
                 state.clone(),
                 exchange.clone() as Arc<dyn ExchangePort>,
                 market_data as Arc<dyn MarketDataPort>,
-                recovery_retry_interval,
-                audit_interval,
-                account_refresh_interval,
+                options.recovery_retry_interval,
+                options.audit_interval,
+                options.account_refresh_interval,
             ),
             state,
             exchange,

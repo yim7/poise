@@ -150,7 +150,9 @@ mod tests {
                 }
 
                 let matches = needle_chars.iter().enumerate().all(|(offset, expected)| {
-                    buffer.content()[start + offset].symbol().chars().next() == Some(*expected)
+                    buffer.content()[start + offset]
+                        .symbol()
+                        .starts_with(*expected)
                 });
                 if matches {
                     return needle_chars

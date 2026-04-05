@@ -363,6 +363,7 @@ impl ClockPort for SystemClock {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_server_state(
     write_service: Arc<TrackWriteService>,
     state_repository: Arc<dyn StateRepositoryPort>,

@@ -179,9 +179,11 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredTrackEvent>> {
-            Ok((track_id.as_str() == "btc-core")
-                .then_some(self.events.clone())
-                .unwrap_or_default())
+            Ok(if track_id.as_str() == "btc-core" {
+                self.events.clone()
+            } else {
+                Vec::new()
+            })
         }
 
         async fn list_recent_track_effects(
@@ -189,9 +191,11 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok((track_id.as_str() == "btc-core")
-                .then_some(self.effects.clone())
-                .unwrap_or_default())
+            Ok(if track_id.as_str() == "btc-core" {
+                self.effects.clone()
+            } else {
+                Vec::new()
+            })
         }
     }
 

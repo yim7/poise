@@ -31,10 +31,10 @@ pub struct RoundPolicyActiveRound<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoundLifecycleDecision {
-    StartRound,
-    ContinueRound,
-    SwitchRound,
-    FinishRound,
+    Start,
+    Continue,
+    Switch,
+    Finish,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,31 +170,27 @@ pub fn evaluate_round_policy(input: RoundPolicyInput<'_>) -> RoundDecision {
     let has_active_round = input.active_round.is_some();
     let lifecycle = match trigger_decision {
         RebalanceTriggerDecision::PreserveActiveLifecycle if has_active_round => {
-            RoundLifecycleDecision::ContinueRound
+            RoundLifecycleDecision::Continue
         }
-        RebalanceTriggerDecision::PreserveActiveLifecycle => RoundLifecycleDecision::StartRound,
+        RebalanceTriggerDecision::PreserveActiveLifecycle => RoundLifecycleDecision::Start,
         RebalanceTriggerDecision::TriggerFreshAction if has_active_round => {
-            RoundLifecycleDecision::SwitchRound
+            RoundLifecycleDecision::Switch
         }
-        RebalanceTriggerDecision::TriggerFreshAction => RoundLifecycleDecision::StartRound,
-        RebalanceTriggerDecision::Suppress => RoundLifecycleDecision::FinishRound,
+        RebalanceTriggerDecision::TriggerFreshAction => RoundLifecycleDecision::Start,
+        RebalanceTriggerDecision::Suppress => RoundLifecycleDecision::Finish,
     };
     let active_round = match lifecycle {
-        RoundLifecycleDecision::ContinueRound => {
-            input.active_round.map(|active_round| ExecutionRound {
-                desired_exposure: active_round.desired_exposure.clone(),
-                mode: mode.clone(),
-                started_at: active_round.started_at,
-            })
-        }
-        RoundLifecycleDecision::StartRound | RoundLifecycleDecision::SwitchRound => {
-            Some(ExecutionRound {
-                desired_exposure: input.desired_exposure.clone(),
-                mode: mode.clone(),
-                started_at: input.observed_at,
-            })
-        }
-        RoundLifecycleDecision::FinishRound => None,
+        RoundLifecycleDecision::Continue => input.active_round.map(|active_round| ExecutionRound {
+            desired_exposure: active_round.desired_exposure.clone(),
+            mode: mode.clone(),
+            started_at: active_round.started_at,
+        }),
+        RoundLifecycleDecision::Start | RoundLifecycleDecision::Switch => Some(ExecutionRound {
+            desired_exposure: input.desired_exposure.clone(),
+            mode: mode.clone(),
+            started_at: input.observed_at,
+        }),
+        RoundLifecycleDecision::Finish => None,
     };
 
     RoundDecision {

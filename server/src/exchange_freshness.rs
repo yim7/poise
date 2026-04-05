@@ -14,6 +14,7 @@ pub enum ExchangeFreshnessReason {
 #[derive(Debug, Clone)]
 struct TrackFreshnessState {
     generation: u64,
+    #[cfg(test)]
     last_reason: ExchangeFreshnessReason,
 }
 
@@ -36,6 +37,9 @@ pub struct ExchangeFreshness {
 
 impl ExchangeFreshness {
     pub async fn mark_stale(&self, track_id: &str, reason: ExchangeFreshnessReason) {
+        #[cfg(not(test))]
+        let _ = reason;
+
         let mut inner = self.inner.lock().unwrap();
         let next_generation = inner
             .get(track_id)
@@ -45,6 +49,7 @@ impl ExchangeFreshness {
             track_id.to_string(),
             TrackFreshnessState {
                 generation: next_generation,
+                #[cfg(test)]
                 last_reason: reason,
             },
         );

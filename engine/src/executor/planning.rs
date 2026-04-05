@@ -273,7 +273,7 @@ fn desired_inventory_order_for_submit_intent(
     round_decision: &RoundDecision,
 ) -> Option<DesiredOrder> {
     match round_decision.lifecycle {
-        RoundLifecycleDecision::StartRound | RoundLifecycleDecision::SwitchRound => {
+        RoundLifecycleDecision::Start | RoundLifecycleDecision::Switch => {
             desired_inventory_order_for_target(
                 input,
                 round_decision
@@ -283,13 +283,13 @@ fn desired_inventory_order_for_submit_intent(
                     .unwrap_or(&input.desired_exposure),
             )
         }
-        RoundLifecycleDecision::ContinueRound => desired_inventory_order_for_preserved_round(
+        RoundLifecycleDecision::Continue => desired_inventory_order_for_preserved_round(
             input,
             executor_state,
             &round_decision.mode,
             round_decision.active_round.as_ref(),
         ),
-        RoundLifecycleDecision::FinishRound => None,
+        RoundLifecycleDecision::Finish => None,
     }
 }
 
@@ -383,7 +383,7 @@ fn diff_desired_orders(
 
     match desired_order {
         None => {
-            if matches!(lifecycle, RoundLifecycleDecision::ContinueRound)
+            if matches!(lifecycle, RoundLifecycleDecision::Continue)
                 && matches!(
                     current_slot.state,
                     SlotState::SubmitPending | SlotState::Working
@@ -551,11 +551,8 @@ fn replacement_gate_reason_for_pending_order(
         return None;
     }
 
-    let Some(improvement_ratio) =
-        replacement_improvement_ratio(current_order, desired_order, reference_price)
-    else {
-        return None;
-    };
+    let improvement_ratio =
+        replacement_improvement_ratio(current_order, desired_order, reference_price)?;
     let threshold_rate = (rules.maker_fee_rate + rules.taker_fee_rate)
         + (replacement_safety_buffer_bps(mode) / BPS_DENOMINATOR);
     (improvement_ratio < threshold_rate).then(|| ReplacementGateReason::ImprovementBelowThreshold {
