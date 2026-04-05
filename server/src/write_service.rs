@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -51,7 +51,7 @@ pub struct TrackWriteService {
     repository: Arc<dyn StateRepositoryPort>,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ServerNotification>,
-    account_margin_guard: Arc<StdMutex<Option<Arc<AccountMarginGuardStore>>>>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,13 +157,14 @@ impl TrackWriteService {
         manager: TrackManager,
         repository: Arc<dyn StateRepositoryPort>,
         notifications: broadcast::Sender<ServerNotification>,
+        account_margin_guard: Arc<AccountMarginGuardStore>,
     ) -> Self {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             repository,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
-            account_margin_guard: Arc::new(StdMutex::new(None)),
+            account_margin_guard,
         }
     }
 
@@ -180,8 +181,16 @@ impl TrackWriteService {
         self.notifications.clone()
     }
 
-    pub fn set_account_margin_guard(&self, account_margin_guard: Arc<AccountMarginGuardStore>) {
-        *self.account_margin_guard.lock().unwrap() = Some(account_margin_guard);
+    pub(crate) fn uses_account_margin_guard(
+        &self,
+        account_margin_guard: &Arc<AccountMarginGuardStore>,
+    ) -> bool {
+        Arc::ptr_eq(&self.account_margin_guard, account_margin_guard)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn account_margin_guard(&self) -> Arc<AccountMarginGuardStore> {
+        Arc::clone(&self.account_margin_guard)
     }
 
     pub(crate) fn emit_internal_notification(&self, notification: ServerNotification) {
@@ -831,13 +840,10 @@ impl TrackWriteService {
     }
 
     fn sync_account_capacity_constraint(&self, manager: &mut TrackManager, id: &str) -> Result<()> {
-        let Some(account_margin_guard) = self.account_margin_guard.lock().unwrap().clone() else {
-            return Ok(());
-        };
         let Some(mut snapshot) = manager.snapshot(id) else {
             return Ok(());
         };
-        let constraint = account_margin_guard.constraint_for(&snapshot.instrument);
+        let constraint = self.account_margin_guard.constraint_for(&snapshot.instrument);
         if snapshot.risk.account_capacity_constraint == constraint {
             return Ok(());
         }
@@ -1010,8 +1016,8 @@ mod tests {
     use tokio::time::timeout;
 
     use crate::write_service::FollowUpRetirementRequest;
-
     use crate::notifications::ServerNotification;
+    use crate::runtime::AccountMarginGuardStore;
 
     use super::TrackWriteService;
 
@@ -1042,6 +1048,32 @@ mod tests {
             ServerNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn constructor_injected_guard_is_used_when_syncing_capacity_constraint() {
+        let repository = Arc::new(MemoryRepository::default());
+        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+
+        service.account_margin_guard().activate_insufficient_margin(
+            &Instrument::new(Venue::Binance, "BTCUSDT"),
+            "insufficient_margin",
+            Utc.with_ymd_and_hms(2026, 4, 5, 0, 0, 0).unwrap(),
+        );
+
+        service.observe_market("btc-core", 95.0).await.unwrap();
+
+        let snapshot = service
+            .manager()
+            .read()
+            .await
+            .snapshot("btc-core")
+            .expect("track snapshot should exist");
+        assert!(snapshot.risk.account_capacity_constraint.increase_blocked);
+        assert_eq!(
+            snapshot.risk.account_capacity_constraint.blocked_reason.as_deref(),
+            Some("insufficient_margin")
         );
     }
 
@@ -2786,7 +2818,12 @@ mod tests {
                 .unwrap();
         }
 
-        TrackWriteService::new(manager, repository, notifications)
+        TrackWriteService::new(
+            manager,
+            repository,
+            notifications,
+            Arc::new(AccountMarginGuardStore::default()),
+        )
     }
 
     #[derive(Default)]

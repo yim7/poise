@@ -31,7 +31,7 @@
 建议结构：
 
 ```rust
-pub struct AccountMarginSnapshot {
+pub struct AccountCapacitySnapshot {
     pub venue: Venue,
     pub available_balance: f64,
     pub total_wallet_balance: f64,
@@ -46,7 +46,7 @@ pub struct AccountMarginSnapshot {
 
 ### 2. 启动预检只做硬失败校验
 
-服务启动时，按账号读取一次 `AccountMarginSnapshot`，并校验每个 track 的配置上限是否超过账号当前能力：
+服务启动时，按账号读取一次 `AccountCapacitySnapshot`，并校验每个 track 的配置上限是否超过账号当前能力：
 
 - `track_required_notional = budget.max_notional`
 - 若 `track_required_notional > max_increase_notional`，启动失败或进入 `attention_required`
@@ -63,7 +63,7 @@ pub struct AccountMarginSnapshot {
 
 ```rust
 pub struct AccountMarginGuard {
-    pub snapshot: Option<AccountMarginSnapshot>,
+    pub snapshot: Option<AccountCapacitySnapshot>,
     pub increase_blocked: bool,
     pub blocked_reason: Option<String>,
     pub blocked_at: Option<DateTime<Utc>>,
@@ -77,7 +77,7 @@ pub struct AccountMarginGuard {
 - guard 激活后，所有会增加风险的 submit 都必须被拦下。
 - `reduce_only` submit、撤单、已有仓位的减仓不受影响。
 
-这个 guard 是账号级状态。`ExchangePort::get_account_margin_snapshot(&Instrument)` 中的 `instrument` 参数只用于解析合约维度的容量信息或交易所规则，不表示每个 instrument 拥有独立保证金池。
+这个 guard 是账号级状态。`ExchangePort::get_account_capacity_snapshot(&Instrument)` 中的 `instrument` 参数只用于解析合约维度的容量信息或交易所规则，不表示每个 instrument 拥有独立保证金池。
 
 这个结构是 server 侧的权威状态。第一版不要求把完整 `AccountMarginGuard` 直接持久化进每个 track snapshot。
 
@@ -132,7 +132,7 @@ pub struct AccountCapacityConstraint {
 
 - 若订单 `reduce_only=true`，直接允许
 - 若账号 guard 激活，禁止任何增加风险的目标
-- 若 guard 未激活但有新鲜 `AccountMarginSnapshot`，当
+- 若 guard 未激活但有新鲜 `AccountCapacitySnapshot`，当
   `required_increase_notional > max_increase_notional`
   时，返回 `RiskDenied { reason: "insufficient account margin" }`
 
@@ -149,7 +149,7 @@ guard 不能靠时间自动失效，必须靠新的账号快照解除。
 
 解除条件：
 
-- 成功拉到新的 `AccountMarginSnapshot`
+- 成功拉到新的 `AccountCapacitySnapshot`
 - 快照证明账号已有正的可用新增容量
 
 恢复后再允许新的风险增加单。
@@ -174,7 +174,7 @@ guard 不能靠时间自动失效，必须靠新的账号快照解除。
 ### exchange adapter
 
 - 负责从 Binance REST 读取账号信息
-- 负责把交易所原始字段折叠成 `AccountMarginSnapshot`
+- 负责把交易所原始字段折叠成 `AccountCapacitySnapshot`
 
 ## 测试策略
 

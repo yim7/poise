@@ -410,7 +410,7 @@ pub enum StreamEvent {
 Exchange port 边界固定为：
 
 - 新增账户级读取方法，例如 `get_account_summary()`
-- 保留现有 `get_account_margin_snapshot(symbol)`，继续服务逐 symbol 的容量与风控校验
+- 保留现有 `get_account_capacity_snapshot(symbol)`，继续服务逐 symbol 的容量与风控校验
 - 两者职责不同，前者服务账户级读侧，后者服务交易执行前的风险边界
 
 Server 通知边界固定为：

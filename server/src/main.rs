@@ -681,16 +681,12 @@ notional_per_unit = 375.0
             })
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: 1_000_000.0,
-                total_wallet_balance: 1_000_000.0,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
-                observed_at: Utc::now(),
             })
         }
 

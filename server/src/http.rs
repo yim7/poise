@@ -5,7 +5,7 @@ use axum::{Json, Router};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
-    AccountSummaryView, TrackCommandType, TrackCommandAccepted, TrackCommandRequest,
+    AccountSummaryView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
     TrackDetailView, TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
@@ -223,8 +223,8 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
-        TrackCommandType, TrackStatus, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
-        TrackDetailView, TrackDiagnosticsView, TrackListResponse,
+        RiskSignalView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+        TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
@@ -314,10 +314,10 @@ mod tests {
             Err(anyhow!("not used in tests"))
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
             _instrument: &Instrument,
-        ) -> anyhow::Result<poise_engine::ports::AccountMarginSnapshot> {
+        ) -> anyhow::Result<poise_engine::ports::AccountCapacitySnapshot> {
             Err(anyhow!("not used in tests"))
         }
 
@@ -356,10 +356,12 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             notifications,
+            account_margin_guard.clone(),
         ));
 
         let query_service = Arc::new(TrackQueryService::new(read_repository));
@@ -368,6 +370,7 @@ mod tests {
             state_repository,
             query_service,
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         )
     }
 
@@ -395,10 +398,12 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             notifications.clone(),
+            account_margin_guard.clone(),
         ));
         let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
             SqliteStorage::in_memory().unwrap(),
@@ -434,6 +439,7 @@ mod tests {
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
             account_monitor,
+            account_margin_guard,
         )
     }
 
@@ -790,15 +796,18 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackReadRepositoryPort>
         ));
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let app = router(build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
                 state_repository.clone(),
                 notifications,
+                account_margin_guard.clone(),
             )),
             state_repository,
             query_service,
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         ));
 
         let pause = app

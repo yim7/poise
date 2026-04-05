@@ -196,21 +196,22 @@ async fn assemble_with_state_store(
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
 
     let mut manager = TrackManager::new(clock);
-    let mut account_margin_snapshots = HashMap::new();
+    let mut account_capacity_snapshots = HashMap::new();
     for track in &config.tracks {
         let track_id = track.track_id();
         let info = load_exchange_info_with_retry(exchange.as_ref(), &track.instrument()).await?;
-        let account_margin_snapshot =
-            load_account_margin_snapshot_with_retry(exchange.as_ref(), &track.instrument()).await?;
-        if track.budget().max_notional > account_margin_snapshot.max_increase_notional {
+        let account_capacity_snapshot =
+            load_account_capacity_snapshot_with_retry(exchange.as_ref(), &track.instrument())
+                .await?;
+        if track.budget().max_notional > account_capacity_snapshot.max_increase_notional {
             return Err(anyhow!(
                 "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
                 track_id.as_str(),
                 track.budget().max_notional,
-                account_margin_snapshot.max_increase_notional
+                account_capacity_snapshot.max_increase_notional
             ));
         }
-        account_margin_snapshots.insert(track.instrument(), account_margin_snapshot);
+        account_capacity_snapshots.insert(track.instrument(), account_capacity_snapshot);
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             track.instrument(),
@@ -227,10 +228,12 @@ async fn assemble_with_state_store(
     let (notifications, _) = broadcast::channel(256);
     let state_repository = repositories.state_repository();
     let read_repository = repositories.read_repository();
+    let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let write_service = Arc::new(TrackWriteService::new(
         manager,
         state_repository.clone(),
         notifications.clone(),
+        account_margin_guard.clone(),
     ));
     let query_service = Arc::new(TrackQueryService::new(read_repository));
     let projector = Arc::new(TrackProjector::new());
@@ -257,15 +260,16 @@ async fn assemble_with_state_store(
         query_service,
         projector,
         account_monitor,
+        account_margin_guard,
     );
 
     Ok(ServerPlatform {
         state: server_state.clone(),
-        runtime: ServerRuntime::with_account_margin_snapshots(
+        runtime: ServerRuntime::with_account_capacity_snapshots(
             server_state,
             exchange,
             market_data,
-            account_margin_snapshots,
+            account_capacity_snapshots,
             Duration::from_secs(1),
         ),
     })
@@ -300,14 +304,14 @@ async fn load_exchange_info_with_retry(
     Err(last_error.unwrap_or_else(|| anyhow!("failed to load exchange info")))
 }
 
-async fn load_account_margin_snapshot_with_retry(
+async fn load_account_capacity_snapshot_with_retry(
     exchange: &dyn ExchangePort,
     instrument: &Instrument,
-) -> Result<poise_engine::ports::AccountMarginSnapshot> {
+) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
     let mut last_error = None;
 
     for attempt in 0..STARTUP_RETRY_ATTEMPTS {
-        match exchange.get_account_margin_snapshot(instrument).await {
+        match exchange.get_account_capacity_snapshot(instrument).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(error) => {
                 if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
@@ -317,7 +321,7 @@ async fn load_account_margin_snapshot_with_retry(
                     instrument = %instrument.symbol,
                     attempt = attempt + 1,
                     max_attempts = STARTUP_RETRY_ATTEMPTS,
-                    "startup account margin probe failed: {error}"
+                    "startup account capacity probe failed: {error}"
                 );
                 last_error = Some(error);
             }
@@ -326,7 +330,7 @@ async fn load_account_margin_snapshot_with_retry(
         sleep(STARTUP_RETRY_DELAY).await;
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow!("failed to load account margin snapshot")))
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to load account capacity snapshot")))
 }
 
 impl ServerPlatform {
@@ -362,6 +366,7 @@ pub(crate) fn build_server_state(
     state_repository: Arc<dyn StateRepositoryPort>,
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
 ) -> ServerState {
     let account_monitor = Arc::new(AccountMonitor::unavailable(
         write_service.notification_sender(),
@@ -373,6 +378,7 @@ pub(crate) fn build_server_state(
         query_service,
         projector,
         account_monitor,
+        account_margin_guard,
     )
 }
 
@@ -382,9 +388,12 @@ pub(crate) fn build_server_state_with_account_monitor(
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
 ) -> ServerState {
-    let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    write_service.set_account_margin_guard(account_margin_guard.clone());
+    assert!(
+        write_service.uses_account_margin_guard(&account_margin_guard),
+        "account margin guard mismatch"
+    );
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     ServerState {
         write_service,
@@ -421,6 +430,8 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
+
+    use crate::runtime::AccountMarginGuardStore;
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, TrackDefinition};
@@ -788,6 +799,105 @@ mod tests {
         assert!(error.to_string().contains("insufficient account margin"));
     }
 
+    #[tokio::test]
+    async fn build_server_state_reuses_explicit_account_margin_guard() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let mut manager = TrackManager::new(Arc::new(SystemClock));
+        manager
+            .add_track(
+                TrackId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                poise_core::strategy::TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                },
+                poise_core::risk::CapacityBudget {
+                    max_notional: 3000.0,
+                    daily_loss_limit: -100.0,
+                    stop_loss_pct: 10.0,
+                },
+                test_exchange_rules(),
+            )
+            .unwrap();
+        let (events, _) = broadcast::channel(16);
+        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
+        let write_service = Arc::new(TrackWriteService::new(
+            manager,
+            state_repository.clone(),
+            events,
+            account_margin_guard.clone(),
+        ));
+
+        let state = build_server_state(
+            write_service,
+            state_repository,
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
+            account_margin_guard.clone(),
+        );
+
+        assert!(Arc::ptr_eq(
+            &state.account_margin_guard,
+            &account_margin_guard
+        ));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "account margin guard mismatch")]
+    async fn build_server_state_rejects_mismatched_account_margin_guard() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let mut manager = TrackManager::new(Arc::new(SystemClock));
+        manager
+            .add_track(
+                TrackId::new("BTCUSDT"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                poise_core::strategy::TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                },
+                poise_core::risk::CapacityBudget {
+                    max_notional: 3000.0,
+                    daily_loss_limit: -100.0,
+                    stop_loss_pct: 10.0,
+                },
+                test_exchange_rules(),
+            )
+            .unwrap();
+        let (events, _) = broadcast::channel(16);
+        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
+        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let write_service_guard = Arc::new(AccountMarginGuardStore::default());
+        let server_state_guard = Arc::new(AccountMarginGuardStore::default());
+        let write_service = Arc::new(TrackWriteService::new(
+            manager,
+            state_repository.clone(),
+            events,
+            write_service_guard,
+        ));
+
+        let _ = build_server_state(
+            write_service,
+            state_repository,
+            Arc::new(TrackQueryService::new(read_repository)),
+            Arc::new(TrackProjector::new()),
+            server_state_guard,
+        );
+    }
+
     #[test]
     fn test_runtime_reads_endpoints_from_env_lookup() {
         let (rest_base_url, ws_base_url) =
@@ -1047,10 +1157,12 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let query_service = Arc::new(TrackQueryService::new(read_repository));
         let state = build_server_state(
@@ -1058,6 +1170,7 @@ mod tests {
             state_repository,
             query_service,
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
 
         (
@@ -1135,16 +1248,12 @@ mod tests {
             })
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: 1_000_000.0,
-                total_wallet_balance: 1_000_000.0,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
-                observed_at: chrono::Utc::now(),
             })
         }
 
@@ -1201,16 +1310,12 @@ mod tests {
             })
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: 1_000_000.0,
-                total_wallet_balance: 1_000_000.0,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
-                observed_at: chrono::Utc::now(),
             })
         }
 
@@ -1260,16 +1365,12 @@ mod tests {
             })
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: self.max_increase_notional,
-                total_wallet_balance: self.max_increase_notional,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: self.max_increase_notional,
-                observed_at: chrono::Utc::now(),
             })
         }
 

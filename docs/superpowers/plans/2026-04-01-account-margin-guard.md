@@ -34,7 +34,7 @@ Expected: 编译失败或测试失败，因为相关结构尚不存在。
 在 `engine/src/ports.rs` 增加：
 
 ```rust
-pub struct AccountMarginSnapshot {
+pub struct AccountCapacitySnapshot {
     pub venue: Venue,
     pub available_balance: f64,
     pub total_wallet_balance: f64,
@@ -46,7 +46,7 @@ pub struct AccountMarginSnapshot {
 在 `ExchangePort` 增加：
 
 ```rust
-async fn get_account_margin_snapshot(&self, instrument: &Instrument) -> Result<AccountMarginSnapshot>;
+async fn get_account_capacity_snapshot(&self, instrument: &Instrument) -> Result<AccountCapacitySnapshot>;
 ```
 
 在 `engine/src/runtime.rs` 或 `core/src/risk.rs` 增加一个面向 reconcile 的最小约束视图，例如：
@@ -83,7 +83,7 @@ Task 1 code commit: `e03d1ec`
 **Files:**
 - Modify: `exchanges/binance/src/types.rs` — 增加账户响应结构
 - Modify: `exchanges/binance/src/rest.rs` — 增加账户 REST 查询
-- Modify: `exchanges/binance/src/adapter.rs` — 实现 `get_account_margin_snapshot`
+- Modify: `exchanges/binance/src/adapter.rs` — 实现 `get_account_capacity_snapshot`
 - Modify: `server/src/main.rs` 及其他测试内 `ExchangePort` 假实现 — 补齐新 trait 方法
 - Test: `exchanges/binance/src/rest.rs`, `exchanges/binance/src/adapter.rs`
 
@@ -98,7 +98,7 @@ Task 1 code commit: `e03d1ec`
 
 - [x] **Step 2: 运行单测，确认当前失败**
 
-Run: `cargo test -p poise-binance account_margin_snapshot -- --nocapture`
+Run: `cargo test -p poise-binance account_capacity_snapshot -- --nocapture`
 Expected: FAIL，因为还没有账户接口和解析实现。
 
 - [x] **Step 3: 增加 Binance 账户查询**
@@ -106,7 +106,7 @@ Expected: FAIL，因为还没有账户接口和解析实现。
 在 `rest.rs` 增加一个新方法，例如：
 
 ```rust
-pub async fn get_account_margin_snapshot(&self, symbol: &str) -> Result<AccountMarginSnapshot>
+pub async fn get_account_capacity_snapshot(&self, symbol: &str) -> Result<AccountCapacitySnapshot>
 ```
 
 第一版可以使用单个 Binance 账户接口响应，内部完成：
@@ -125,14 +125,14 @@ pub async fn get_account_margin_snapshot(&self, symbol: &str) -> Result<AccountM
 
 - [x] **Step 5: 运行单测，确认通过**
 
-Run: `cargo test -p poise-binance account_margin_snapshot -- --nocapture`
+Run: `cargo test -p poise-binance account_capacity_snapshot -- --nocapture`
 Expected: PASS
 
 - [x] **Step 6: 提交**
 
 ```bash
 git add exchanges/binance/src/types.rs exchanges/binance/src/rest.rs exchanges/binance/src/adapter.rs
-git commit -m "feat: expose binance account margin snapshot"
+git commit -m "feat: expose binance account capacity snapshot"
 ```
 
 Task 2 code commit: `f6b7bab`
@@ -218,7 +218,7 @@ Expected: FAIL
 - 当前 effect 标记失败
 - guard 置为 `increase_blocked`
 - 保存 `blocked_reason = "insufficient_margin"`
-- 拉取新的 `AccountMarginSnapshot`
+- 拉取新的 `AccountCapacitySnapshot`
 - 快照证明恢复前，不允许新的风险增加单
 
 这里更新的是 server 持有的完整账号级 guard；后续 reconcile 只能读取它投影出来的最小约束视图。

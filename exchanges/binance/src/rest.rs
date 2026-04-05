@@ -14,13 +14,14 @@ use tokio::time::{Duration, sleep};
 use url::{Host, Url, form_urlencoded::Serializer};
 
 use poise_engine::ports::{
-    AccountMarginSnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest, Position,
 };
 
 use crate::types::{
-    BinanceAccountInformation, BinanceExchangeInfoResponse, BinanceOpenOrder, BinanceOrderResponse,
-    BinancePositionRisk,
+    BinanceAccountSummaryInformation, BinanceExchangeInfoResponse, BinanceOpenOrder,
+    BinanceOrderResponse, BinancePositionRisk, BinanceSymbolConfiguration,
+    build_account_capacity_snapshot,
 };
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
@@ -166,21 +167,25 @@ impl BinanceRestClient {
             .collect::<Result<Vec<_>>>()
     }
 
-    pub async fn get_account_margin_snapshot(&self, symbol: &str) -> Result<AccountMarginSnapshot> {
-        let account: BinanceAccountInformation = self
+    pub async fn get_account_capacity_snapshot(
+        &self,
+        symbol: &str,
+    ) -> Result<AccountCapacitySnapshot> {
+        let account: BinanceAccountSummaryInformation = self
             .send_request(
                 Method::GET,
-                "/fapi/v2/account",
+                "/fapi/v3/account",
                 Vec::new(),
                 AuthMode::Signed,
             )
             .await?;
+        let symbol_config = self.get_symbol_configuration(symbol).await?;
 
-        account.into_margin_snapshot(symbol)
+        build_account_capacity_snapshot(account, symbol_config)
     }
 
     pub async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        let account: BinanceAccountInformation = self
+        let account: BinanceAccountSummaryInformation = self
             .send_request(
                 Method::GET,
                 "/fapi/v3/account",
@@ -190,6 +195,22 @@ impl BinanceRestClient {
             .await?;
 
         account.into_account_summary_snapshot()
+    }
+
+    async fn get_symbol_configuration(&self, symbol: &str) -> Result<BinanceSymbolConfiguration> {
+        let configs: Vec<BinanceSymbolConfiguration> = self
+            .send_request(
+                Method::GET,
+                "/fapi/v1/symbolConfig",
+                vec![("symbol", symbol.to_string())],
+                AuthMode::Signed,
+            )
+            .await?;
+
+        configs
+            .into_iter()
+            .find(|item| item.symbol == symbol)
+            .with_context(|| format!("symbol config not found for symbol: {symbol}"))
     }
 
     pub async fn new_order(&self, req: &OrderRequest) -> Result<OrderReceipt> {
@@ -936,15 +957,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_margin_snapshot_reads_account_endpoint_and_maps_capacity() {
+    async fn account_capacity_snapshot_reads_account_endpoint_and_maps_capacity() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{
+                    "totalWalletBalance": "120.75",
+                    "availableBalance": "100.5",
+                    "totalMarginBalance": "125.25",
+                    "totalUnrealizedProfit": "4.5",
+                    "positions": []
+                }"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"[
+                    {
+                        "symbol": "BTCUSDT",
+                        "marginType": "CROSSED",
+                        "isAutoAddMargin": false,
+                        "leverage": 20,
+                        "maxNotionalValue": "1000000"
+                    }
+                ]"#,
+            ),
+        ])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let snapshot = client
+            .get_account_capacity_snapshot("BTCUSDT")
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+
+        assert!((snapshot.max_increase_notional - 2010.0).abs() < f64::EPSILON);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].path.starts_with("/fapi/v3/account?timestamp="));
+        assert!(
+            requests[1]
+                .path
+                .starts_with("/fapi/v1/symbolConfig?symbol=BTCUSDT&timestamp=")
+        );
+        assert_eq!(
+            requests[0].headers.get("x-mbx-apikey"),
+            Some(&"api-key".to_string())
+        );
+        assert_eq!(
+            requests[1].headers.get("x-mbx-apikey"),
+            Some(&"api-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn account_summary_reads_v3_account_without_position_leverage() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
             r#"{
-                "availableBalance": "100.5",
-                "totalWalletBalance": "120.75",
+                "totalInitialMargin": "254.31158865",
+                "totalMaintMargin": "33.85742740",
+                "totalWalletBalance": "2483.25470753",
+                "totalUnrealizedProfit": "-37.68082866",
+                "totalMarginBalance": "2445.57387887",
+                "totalPositionInitialMargin": "254.31158865",
+                "totalOpenOrderInitialMargin": "0.00000000",
+                "totalCrossWalletBalance": "2483.25470753",
+                "totalCrossUnPnl": "-37.68082866",
+                "availableBalance": "2191.26188188",
+                "maxWithdrawAmount": "2191.26188188",
+                "assets": [
+                    {
+                        "asset": "USDT",
+                        "walletBalance": "2483.25470753",
+                        "unrealizedProfit": "-37.68082866",
+                        "marginBalance": "2445.57387887",
+                        "maintMargin": "33.85742740",
+                        "initialMargin": "254.31158865",
+                        "positionInitialMargin": "254.31158865",
+                        "openOrderInitialMargin": "0.00000000",
+                        "crossWalletBalance": "2483.25470753",
+                        "crossUnPnl": "-37.68082866",
+                        "availableBalance": "2191.26188188",
+                        "maxWithdrawAmount": "2191.26188188",
+                        "updateTime": 1712357389000
+                    }
+                ],
                 "positions": [
-                    { "symbol": "ETHUSDT", "leverage": "5" },
-                    { "symbol": "BTCUSDT", "leverage": "20" }
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "BOTH",
+                        "positionAmt": "0.003",
+                        "unrealizedProfit": "-37.68082866",
+                        "isolatedMargin": "0.00000000",
+                        "notional": "254.31158865",
+                        "isolatedWallet": "0.00000000",
+                        "initialMargin": "254.31158865",
+                        "maintMargin": "33.85742740",
+                        "updateTime": 1712357389000
+                    }
                 ]
             }"#,
         )])
@@ -956,18 +1071,14 @@ mod tests {
             Arc::new(|| 1_700_000_000_000),
         );
 
-        let snapshot = client.get_account_margin_snapshot("BTCUSDT").await.unwrap();
+        let snapshot = client.get_account_summary().await.unwrap();
         let requests = server.requests().await;
 
-        assert_eq!(snapshot.available_balance, 100.5);
-        assert_eq!(snapshot.total_wallet_balance, 120.75);
-        assert!((snapshot.max_increase_notional - 2010.0).abs() < f64::EPSILON);
+        assert_eq!(snapshot.equity, 2445.57387887);
+        assert_eq!(snapshot.available, 2191.26188188);
+        assert_eq!(snapshot.unrealized_pnl, -37.68082866);
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].path.starts_with("/fapi/v2/account?timestamp="));
-        assert_eq!(
-            requests[0].headers.get("x-mbx-apikey"),
-            Some(&"api-key".to_string())
-        );
+        assert!(requests[0].path.starts_with("/fapi/v3/account?timestamp="));
     }
 
     #[tokio::test]

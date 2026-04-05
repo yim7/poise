@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use poise_engine::ports::{
-    AccountMarginSnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderStatus, Position,
 };
 use poise_engine::track::{Instrument, Venue};
@@ -30,22 +30,19 @@ pub struct BinancePositionRisk {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct BinanceAccountInformation {
+pub struct BinanceAccountSummaryInformation {
     #[serde(rename = "availableBalance")]
     pub available_balance: String,
-    #[serde(rename = "totalWalletBalance", default)]
-    pub total_wallet_balance: Option<String>,
-    #[serde(rename = "totalMarginBalance", default)]
+    #[serde(rename = "totalMarginBalance")]
     pub total_margin_balance: String,
-    #[serde(rename = "totalUnrealizedProfit", default)]
+    #[serde(rename = "totalUnrealizedProfit")]
     pub total_unrealized_profit: String,
-    pub positions: Vec<BinanceAccountPosition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct BinanceAccountPosition {
+pub struct BinanceSymbolConfiguration {
     pub symbol: String,
-    pub leverage: String,
+    pub leverage: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,27 +108,7 @@ impl TryFrom<BinancePositionRisk> for Position {
     }
 }
 
-impl BinanceAccountInformation {
-    pub fn into_margin_snapshot(self, symbol: &str) -> Result<AccountMarginSnapshot> {
-        let position = self
-            .positions
-            .into_iter()
-            .find(|item| item.symbol == symbol)
-            .with_context(|| format!("account position not found for symbol: {symbol}"))?;
-        let available_balance = parse_decimal("availableBalance", &self.available_balance)?;
-        let total_wallet_balance =
-            parse_required_decimal("totalWalletBalance", self.total_wallet_balance.as_deref())?;
-        let leverage = parse_decimal("leverage", &position.leverage)?;
-
-        Ok(AccountMarginSnapshot {
-            venue: Venue::Binance,
-            available_balance,
-            total_wallet_balance,
-            max_increase_notional: available_balance * leverage,
-            observed_at: Utc::now(),
-        })
-    }
-
+impl BinanceAccountSummaryInformation {
     pub fn into_account_summary_snapshot(self) -> Result<AccountSummarySnapshot> {
         Ok(AccountSummarySnapshot {
             equity: parse_decimal("totalMarginBalance", &self.total_margin_balance)?,
@@ -140,6 +117,17 @@ impl BinanceAccountInformation {
             observed_at: Utc::now(),
         })
     }
+}
+
+pub(crate) fn build_account_capacity_snapshot(
+    account: BinanceAccountSummaryInformation,
+    symbol_config: BinanceSymbolConfiguration,
+) -> Result<AccountCapacitySnapshot> {
+    let available_balance = parse_decimal("availableBalance", &account.available_balance)?;
+
+    Ok(AccountCapacitySnapshot {
+        max_increase_notional: available_balance * symbol_config.leverage as f64,
+    })
 }
 
 impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
@@ -227,11 +215,6 @@ fn parse_optional_decimal(field: &str, value: Option<&str>) -> Result<f64> {
     parse_decimal(field, value)
 }
 
-fn parse_required_decimal(field: &str, value: Option<&str>) -> Result<f64> {
-    let value = value.context(format!("missing {field}"))?;
-    parse_decimal(field, value)
-}
-
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
     value
         .parse::<f64>()
@@ -299,12 +282,11 @@ mod tests {
         {
             "availableBalance": "9800.25",
             "totalMarginBalance": "12500.5",
-            "totalUnrealizedProfit": "-120.75",
-            "positions": []
+            "totalUnrealizedProfit": "-120.75"
         }
         "#;
 
-        let account: BinanceAccountInformation = serde_json::from_str(payload).unwrap();
+        let account: BinanceAccountSummaryInformation = serde_json::from_str(payload).unwrap();
         let snapshot = account.into_account_summary_snapshot().unwrap();
 
         assert_eq!(
@@ -316,6 +298,31 @@ mod tests {
                 observed_at: snapshot.observed_at,
             }
         );
+    }
+
+    #[test]
+    fn builds_account_capacity_snapshot_from_account_summary_and_symbol_config() {
+        let account_payload = r#"
+        {
+            "availableBalance": "100.5",
+            "totalMarginBalance": "125.25",
+            "totalUnrealizedProfit": "4.5"
+        }
+        "#;
+        let symbol_config_payload = r#"
+        {
+            "symbol": "BTCUSDT",
+            "leverage": 20
+        }
+        "#;
+
+        let account: BinanceAccountSummaryInformation =
+            serde_json::from_str(account_payload).unwrap();
+        let symbol_config: BinanceSymbolConfiguration =
+            serde_json::from_str(symbol_config_payload).unwrap();
+        let snapshot = build_account_capacity_snapshot(account, symbol_config).unwrap();
+
+        assert_eq!(snapshot.max_increase_notional, 2010.0);
     }
 
     #[test]

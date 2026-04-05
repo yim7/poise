@@ -232,7 +232,7 @@ impl EffectWorker {
                         );
                     if let Ok(snapshot) = self
                         .exchange
-                        .get_account_margin_snapshot(&request.instrument)
+                        .get_account_capacity_snapshot(&request.instrument)
                         .await
                     {
                         self.state
@@ -1401,16 +1401,19 @@ mod tests {
         let (notifications, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             notifications.clone(),
+            account_margin_guard.clone(),
         ));
         build_server_state(
             write_service,
             state_repository,
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         )
     }
 
@@ -1734,16 +1737,12 @@ mod tests {
             })
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: 1_000_000.0,
-                total_wallet_balance: 1_000_000.0,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
-                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
             })
         }
 

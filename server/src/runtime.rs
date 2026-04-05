@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    AccountMarginSnapshot, ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent,
+    AccountCapacitySnapshot, ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent,
     UserDataPayload,
 };
 use poise_engine::runtime::AccountCapacityConstraint;
@@ -37,8 +37,7 @@ pub struct ServerRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct AccountMarginGuard {
-    pub snapshot: Option<AccountMarginSnapshot>,
+pub(crate) struct VenueMarginBlock {
     pub increase_blocked: bool,
     pub blocked_reason: Option<String>,
     pub blocked_at: Option<DateTime<Utc>>,
@@ -46,24 +45,28 @@ pub(crate) struct AccountMarginGuard {
 
 #[derive(Default)]
 pub(crate) struct AccountMarginGuardStore {
-    inner: std::sync::Mutex<HashMap<Instrument, AccountMarginGuard>>,
+    snapshots_by_instrument: std::sync::Mutex<HashMap<Instrument, AccountCapacitySnapshot>>,
+    blocks_by_venue: std::sync::Mutex<HashMap<poise_engine::track::Venue, VenueMarginBlock>>,
 }
 
 impl AccountMarginGuardStore {
-    pub(crate) fn replace_snapshots(&self, snapshots: HashMap<Instrument, AccountMarginSnapshot>) {
-        let mut guards = self.inner.lock().unwrap();
-        for (instrument, snapshot) in snapshots {
-            guards.entry(instrument).or_default().snapshot = Some(snapshot);
-        }
+    pub(crate) fn replace_snapshots(
+        &self,
+        snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
+    ) {
+        let mut stored_snapshots = self.snapshots_by_instrument.lock().unwrap();
+        stored_snapshots.extend(snapshots);
     }
 
-    pub(crate) fn update_snapshot(&self, instrument: Instrument, snapshot: AccountMarginSnapshot) {
-        self.inner
+    pub(crate) fn update_snapshot(
+        &self,
+        instrument: Instrument,
+        snapshot: AccountCapacitySnapshot,
+    ) {
+        self.snapshots_by_instrument
             .lock()
             .unwrap()
-            .entry(instrument)
-            .or_default()
-            .snapshot = Some(snapshot);
+            .insert(instrument, snapshot);
     }
 
     pub(crate) fn activate_insufficient_margin(
@@ -73,45 +76,39 @@ impl AccountMarginGuardStore {
         blocked_at: DateTime<Utc>,
     ) {
         let reason = reason.into();
-        let mut guards = self.inner.lock().unwrap();
-        let mut matched = false;
-        for (tracked_instrument, guard) in guards.iter_mut() {
-            if tracked_instrument.venue != instrument.venue {
-                continue;
-            }
-            guard.increase_blocked = true;
-            guard.blocked_reason = Some(reason.clone());
-            guard.blocked_at = Some(blocked_at);
-            matched = true;
-        }
-
-        if !matched {
-            guards.insert(
-                instrument.clone(),
-                AccountMarginGuard {
-                    snapshot: None,
+        self.blocks_by_venue
+            .lock()
+            .unwrap()
+            .insert(
+                instrument.venue,
+                VenueMarginBlock {
                     increase_blocked: true,
                     blocked_reason: Some(reason),
                     blocked_at: Some(blocked_at),
                 },
             );
-        }
     }
 
     pub(crate) fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
-        self.inner
+        let snapshot = self
+            .snapshots_by_instrument
             .lock()
             .unwrap()
             .get(instrument)
-            .map(|guard| AccountCapacityConstraint {
-                increase_blocked: guard.increase_blocked,
-                blocked_reason: guard.blocked_reason.clone(),
-                max_increase_notional: guard
-                    .snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.max_increase_notional),
-            })
-            .unwrap_or_default()
+            .cloned();
+        let block = self
+            .blocks_by_venue
+            .lock()
+            .unwrap()
+            .get(&instrument.venue)
+            .cloned()
+            .unwrap_or_default();
+
+        AccountCapacityConstraint {
+            increase_blocked: block.increase_blocked,
+            blocked_reason: block.blocked_reason,
+            max_increase_notional: snapshot.map(|snapshot| snapshot.max_increase_notional),
+        }
     }
 }
 
@@ -168,7 +165,7 @@ impl ServerRuntime {
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_margin_snapshots(
+        Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             exchange,
             market_data,
@@ -179,18 +176,18 @@ impl ServerRuntime {
         )
     }
 
-    pub(crate) fn with_account_margin_snapshots(
+    pub(crate) fn with_account_capacity_snapshots(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
-        account_margin_snapshots: HashMap<Instrument, AccountMarginSnapshot>,
+        account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
         recovery_retry_interval: Duration,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_margin_snapshots(
+        Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             exchange,
             market_data,
-            account_margin_snapshots,
+            account_capacity_snapshots,
             recovery_retry_interval,
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -205,7 +202,7 @@ impl ServerRuntime {
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_margin_snapshots(
+        Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             exchange,
             market_data,
@@ -225,7 +222,7 @@ impl ServerRuntime {
         audit_interval: Duration,
         account_refresh_interval: Duration,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_margin_snapshots(
+        Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             exchange,
             market_data,
@@ -236,11 +233,11 @@ impl ServerRuntime {
         )
     }
 
-    fn with_reconcile_intervals_and_account_margin_snapshots(
+    fn with_reconcile_intervals_and_account_capacity_snapshots(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
-        account_margin_snapshots: HashMap<Instrument, AccountMarginSnapshot>,
+        account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
@@ -248,7 +245,7 @@ impl ServerRuntime {
         let (shutdown_tx, _) = watch::channel(false);
         state
             .account_margin_guard
-            .replace_snapshots(account_margin_snapshots);
+            .replace_snapshots(account_capacity_snapshots);
         Self {
             state,
             exchange,
@@ -1006,11 +1003,12 @@ mod tests {
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort, OrderReceipt,
-        OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick, StateRepositoryPort,
-        StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort, TrackSnapshot,
-        UserDataEvent, UserDataPayload,
+        AccountCapacitySnapshot, ClockPort, CommittedTrackWrite, EffectStatus,
+        EffectStatusUpdate, ExchangeInfo, ExchangeOrder, ExchangePort,
+        FollowUpRetirementRequest, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus,
+        PersistedTrackEffect, Position, PriceTick, StateRepositoryPort, StoredTrackEvent,
+        StoredTrackSnapshot, TrackReadRepositoryPort, TrackSnapshot, UserDataEvent,
+        UserDataPayload,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -1034,7 +1032,7 @@ mod tests {
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
 
-    use super::{RuntimeHandles, ServerRuntime};
+    use super::{AccountMarginGuardStore, RuntimeHandles, ServerRuntime};
 
     #[tokio::test]
     async fn market_tick_submits_order_and_records_inventory_core_slot() {
@@ -2302,6 +2300,33 @@ mod tests {
         shutdown(handles).await;
     }
 
+    #[test]
+    fn venue_level_block_applies_to_symbols_added_after_block_activation() {
+        let store = AccountMarginGuardStore::default();
+        let eth_instrument = Instrument::new(Venue::Binance, "ETHUSDT");
+
+        store.activate_insufficient_margin(
+            &btc_instrument(),
+            "insufficient_margin",
+            test_server_time(),
+        );
+        store.update_snapshot(
+            eth_instrument.clone(),
+            AccountCapacitySnapshot {
+                max_increase_notional: 500.0,
+            },
+        );
+
+        let constraint = store.constraint_for(&eth_instrument);
+
+        assert!(constraint.increase_blocked);
+        assert_eq!(
+            constraint.blocked_reason.as_deref(),
+            Some("insufficient_margin")
+        );
+        assert_eq!(constraint.max_increase_notional, Some(500.0));
+    }
+
     #[tokio::test]
     async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_fails() {
         let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
@@ -3310,15 +3335,18 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence.clone();
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let state = build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
                 state_repository.clone(),
                 events,
+                account_margin_guard.clone(),
             )),
             state_repository,
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
         let worker = EffectWorker::new(
             state,
@@ -3411,10 +3439,12 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
@@ -3423,6 +3453,7 @@ mod tests {
                 persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
         let runtime = ServerRuntime::new(
             state.clone(),
@@ -3500,10 +3531,12 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
@@ -3512,6 +3545,7 @@ mod tests {
                 persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
         let runtime = ServerRuntime::new(
             state.clone(),
@@ -4793,10 +4827,12 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
@@ -4805,6 +4841,7 @@ mod tests {
                 persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
         let runtime = ServerRuntime::new(
             state,
@@ -4831,17 +4868,20 @@ mod tests {
         )));
         let persistence = Arc::new(MemoryPersistence::default());
         let (events, _) = broadcast::channel(16);
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let state = build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
                 persistence.clone() as Arc<dyn StateRepositoryPort>,
                 events.clone(),
+                account_margin_guard.clone(),
             )),
             persistence.clone() as Arc<dyn StateRepositoryPort>,
             Arc::new(TrackQueryService::new(
                 persistence as Arc<dyn TrackReadRepositoryPort>,
             )),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
 
         let error = super::apply_user_data_event(
@@ -5103,10 +5143,12 @@ mod tests {
             .unwrap();
 
         let (events, _) = broadcast::channel(16);
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
@@ -5115,6 +5157,7 @@ mod tests {
                 persistence.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
 
         let runtime = ServerRuntime::new(
@@ -5270,10 +5313,12 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let account_monitor =
             build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events.clone())
@@ -5286,6 +5331,7 @@ mod tests {
             )),
             Arc::new(TrackProjector::new()),
             account_monitor,
+            account_margin_guard,
         );
 
         RuntimeFixture {
@@ -5335,10 +5381,12 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let account_monitor = build_test_account_monitor(exchange, events).await;
         build_server_state_with_account_monitor(
@@ -5347,6 +5395,7 @@ mod tests {
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
             account_monitor,
+            account_margin_guard,
         )
     }
 
@@ -5381,10 +5430,12 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
         let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             state_repository.clone(),
             events.clone(),
+            account_margin_guard.clone(),
         ));
         let account_monitor = build_test_account_monitor(exchange, events).await;
         build_server_state_with_account_monitor(
@@ -5393,6 +5444,7 @@ mod tests {
             Arc::new(TrackQueryService::new(read_repository)),
             Arc::new(TrackProjector::new()),
             account_monitor,
+            account_margin_guard,
         )
     }
 
@@ -5966,16 +6018,12 @@ mod tests {
             Ok(self.open_orders.lock().unwrap().clone())
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: 1_000_000.0,
-                total_wallet_balance: 1_000_000.0,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
-                observed_at: Utc::now(),
             })
         }
 

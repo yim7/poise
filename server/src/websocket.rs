@@ -141,7 +141,7 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
-        ExecutionStateView, ExecutionStatusView, TrackStatus, RiskSignalView, StreamEvent,
+        ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent, TrackStatus,
     };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
@@ -182,10 +182,12 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let service = Arc::new(TrackWriteService::new(
             test_manager(),
             state_repository.clone(),
             notifications,
+            account_margin_guard.clone(),
         ));
         let state = build_server_state(
             Arc::clone(&service),
@@ -194,6 +196,7 @@ mod tests {
                 repository.clone() as Arc<dyn TrackReadRepositoryPort>
             )),
             Arc::new(TrackProjector::new()),
+            account_margin_guard,
         );
         let app = Router::new()
             .route("/ws", axum::routing::get(ws_handler))
@@ -214,10 +217,12 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let service = Arc::new(TrackWriteService::new(
             test_manager(),
             state_repository.clone(),
             notifications,
+            account_margin_guard.clone(),
         ));
         let state = build_server_state_with_account_monitor(
             Arc::clone(&service),
@@ -227,6 +232,7 @@ mod tests {
             )),
             Arc::new(TrackProjector::new()),
             account_monitor,
+            account_margin_guard,
         );
         let app = Router::new()
             .route("/ws", axum::routing::get(ws_handler))
@@ -956,16 +962,12 @@ mod tests {
             })
         }
 
-        async fn get_account_margin_snapshot(
+        async fn get_account_capacity_snapshot(
             &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountMarginSnapshot> {
-            Ok(poise_engine::ports::AccountMarginSnapshot {
-                venue: instrument.venue,
-                available_balance: 1_000_000.0,
-                total_wallet_balance: 1_000_000.0,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
-                observed_at: Utc::now(),
             })
         }
 
