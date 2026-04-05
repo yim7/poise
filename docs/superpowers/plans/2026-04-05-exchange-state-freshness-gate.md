@@ -144,7 +144,7 @@ Commit:
 - Modify: `docs/superpowers/specs/2026-04-05-exchange-state-freshness-gate-design.md`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 runtime 只处理事件侧 freshness 事实**
+- [x] **Step 1: 先写失败测试，锁住 runtime 只处理事件侧 freshness 事实**
 
 在 `server/src/runtime.rs` 增加至少这些测试：
 
@@ -168,7 +168,7 @@ async fn successful_exchange_sync_does_not_clear_newer_stale_fact() {}
 - `UnabsorbedOrderUpdate` 仍是异常恢复路径：先置脏，再立即 sync
 - 成功 `sync_exchange_state_from_exchange(...)` 只会按 token 条件清除当前代 stale
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -181,7 +181,7 @@ Expected:
 - 当前实现失败，因为 freshness 事实还没有由 runtime 显式维护，且 `Filled` 仍可能沿旧路径直接 sync。
 - 当前实现也还没有 token 化清脏语义，晚到 stale 可能被无条件清除。
 
-- [ ] **Step 3: 做最小实现，把 freshness 写入 runtime 和 sync 边界**
+- [x] **Step 3: 做最小实现，把 freshness 写入 runtime 和 sync 边界**
 
 要求：
 
@@ -194,7 +194,7 @@ Expected:
 - 增加 `ReconcileReason::SyncBeforeSideEffect`
 - 若实现中命名微调，回写 spec
 
-- [ ] **Step 4: 跑 Task 2 回归**
+- [x] **Step 4: 跑 Task 2 回归**
 
 Run:
 

@@ -7,6 +7,7 @@ pub enum ReconcileReason {
     SubmitOutcomeUnknown,
     CancelOutcomeUnknown,
     UnabsorbedOrderUpdate,
+    SyncBeforeSideEffect,
     ManualRecovery,
 }
 

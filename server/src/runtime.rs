@@ -19,6 +19,7 @@ use tokio::time::{Instant, MissedTickBehavior, sleep};
 
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
+use crate::exchange_freshness::ExchangeFreshnessReason;
 use crate::notifications::ServerNotification;
 use crate::order_outcome::{
     ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
@@ -749,6 +750,10 @@ async fn apply_user_data_event(
                 .await
                 .map_err(preserve_track_mutation_error)?;
             if absorb_result == poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed {
+                state
+                    .exchange_freshness
+                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
+                    .await;
                 enqueue_reconcile_request(
                     state,
                     exchange,
@@ -759,6 +764,11 @@ async fn apply_user_data_event(
                     &instrument,
                 )
                 .await?;
+            } else if order.status == poise_engine::ports::OrderStatus::Filled {
+                state
+                    .exchange_freshness
+                    .mark_stale(track_id, ExchangeFreshnessReason::FilledAwaitingSync)
+                    .await;
             }
         }
     }
@@ -792,6 +802,7 @@ async fn sync_exchange_state_from_exchange(
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
     let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
+    let sync_token = state.exchange_freshness.prepare_sync(track_id).await;
     let snapshot = state
         .state_repository
         .load_track_state(track_id)
@@ -850,6 +861,7 @@ async fn sync_exchange_state_from_exchange(
             .await
             .map_err(preserve_track_mutation_error)?;
     }
+    state.exchange_freshness.clear_if_current(sync_token).await;
     Ok(())
 }
 
@@ -1004,7 +1016,7 @@ mod tests {
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::ExecutionAction;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::manager::TrackManager;
+    use poise_engine::manager::{ExchangeSyncMode, TrackManager};
     use poise_engine::ports::{
         ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
         ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort, OrderReceipt,
@@ -1030,6 +1042,7 @@ mod tests {
     };
     use crate::config::AccountMonitorConfig;
     use crate::effect_worker::EffectWorker;
+    use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
     use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
@@ -3608,6 +3621,9 @@ mod tests {
         let order = inventory_core_order(&current_instance(&fixture.state).await)
             .unwrap()
             .clone();
+        fixture
+            .exchange
+            .set_position(btc_position(order.quantity, 0.0));
 
         fixture
             .user_sender
@@ -3630,6 +3646,7 @@ mod tests {
             inventory_core_order(instance).is_none()
         })
         .await;
+        assert_eq!(fixture.exchange.submitted_orders.lock().unwrap().len(), 1);
 
         shutdown(handles).await;
     }
@@ -4864,6 +4881,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.current_exposure = Exposure(2.0);
+        snapshot.desired_exposure = Some(Exposure(4.0));
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("fill-1"),
+                "fill-1",
+                Side::Buy,
+                94.5,
+                test_config().base_qty_per_unit() * 2.0,
+                Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence,
+            Some(snapshot),
+            test_budget(),
+        )
+        .await;
+
+        super::apply_user_data_event(
+            &state,
+            &(exchange.clone() as Arc<dyn ExchangePort>),
+            "BTCUSDT",
+            order_event_at(
+                test_server_time() + chrono::Duration::milliseconds(1),
+                btc_exchange_order(
+                    "fill-1",
+                    "fill-1",
+                    Side::Buy,
+                    94.5,
+                    7.5,
+                    0.0,
+                    OrderStatus::Filled,
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let instance = current_instance(&state).await;
+        assert_eq!(instance.current_exposure, Exposure(2.0));
+        assert!(inventory_core_order(&instance).is_none());
+        assert!(state.exchange_freshness.is_stale("BTCUSDT").await);
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn successful_exchange_sync_clears_stale_state() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Arc::new(MemoryPersistence::default()),
+            None,
+            test_budget(),
+        )
+        .await;
+        state
+            .exchange_freshness
+            .mark_stale("BTCUSDT", ExchangeFreshnessReason::FilledAwaitingSync)
+            .await;
+
+        super::sync_exchange_state_from_exchange(
+            &state,
+            &(exchange.clone() as Arc<dyn ExchangePort>),
+            "BTCUSDT",
+            &btc_instrument(),
+            ExchangeSyncMode::RecoverAndReconcile,
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.exchange_freshness.is_stale("BTCUSDT").await);
+    }
+
+    #[tokio::test]
+    async fn successful_exchange_sync_does_not_clear_newer_stale_fact() {
+        let get_position_started = Arc::new(Notify::new());
+        let release_get_position = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_get_position(
+            btc_position(0.0, 0.0),
+            vec![],
+            get_position_started.clone(),
+            release_get_position.clone(),
+        ));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Arc::new(MemoryPersistence::default()),
+            None,
+            test_budget(),
+        )
+        .await;
+        state
+            .exchange_freshness
+            .mark_stale("BTCUSDT", ExchangeFreshnessReason::FilledAwaitingSync)
+            .await;
+
+        let task = tokio::spawn({
+            let state = state.clone();
+            let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+            async move {
+                super::sync_exchange_state_from_exchange(
+                    &state,
+                    &exchange,
+                    "BTCUSDT",
+                    &btc_instrument(),
+                    ExchangeSyncMode::RecoverAndReconcile,
+                )
+                .await
+            }
+        });
+
+        get_position_started.notified().await;
+        state
+            .exchange_freshness
+            .mark_stale("BTCUSDT", ExchangeFreshnessReason::SubmitOutcomeUnknown)
+            .await;
+        release_get_position.notify_waiters();
+        task.await.unwrap().unwrap();
+
+        assert!(state.exchange_freshness.is_stale("BTCUSDT").await);
+    }
+
+    #[tokio::test]
     async fn stale_live_user_event_does_not_rollback_state_after_start() {
         let fixture = runtime_fixture(None, btc_position(7.5, 3.0), vec![], test_budget()).await;
 
@@ -4901,6 +5051,7 @@ mod tests {
         .await;
 
         let handles = fixture.runtime.start().await.unwrap();
+        fixture.exchange.set_position(btc_position(0.0, 0.0));
         fixture
             .user_sender
             .send(order_event_at(
@@ -4924,17 +5075,70 @@ mod tests {
         .await;
 
         fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
-
-        wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
+        sleep(Duration::from_millis(100)).await;
 
         let submitted = fixture.exchange.submitted_orders.lock().unwrap().clone();
-        assert_eq!(submitted[0].side, Side::Sell);
+        assert!(submitted.is_empty());
         assert_eq!(
             current_instance(&fixture.state).await.desired_exposure,
             Some(Exposure(0.0))
         );
 
         shutdown(handles).await;
+    }
+
+    #[tokio::test]
+    async fn unabsorbed_order_update_marks_stale_and_triggers_immediate_reconcile() {
+        let get_position_started = Arc::new(Notify::new());
+        let release_get_position = Arc::new(Notify::new());
+        let exchange = Arc::new(FakeExchange::with_blocked_get_position(
+            btc_position(0.0, 0.0),
+            vec![],
+            get_position_started.clone(),
+            release_get_position.clone(),
+        ));
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Arc::new(MemoryPersistence::default()),
+            None,
+            test_budget(),
+        )
+        .await;
+
+        let task = tokio::spawn({
+            let state = state.clone();
+            let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+            async move {
+                super::apply_user_data_event(
+                    &state,
+                    &exchange,
+                    "BTCUSDT",
+                    order_event_at(
+                        test_server_time() + chrono::Duration::milliseconds(1),
+                        btc_exchange_order(
+                            "untracked-live-order",
+                            "untracked-live-order",
+                            Side::Buy,
+                            95.0,
+                            1.0,
+                            0.0,
+                            OrderStatus::New,
+                        ),
+                    ),
+                )
+                .await
+            }
+        });
+
+        get_position_started.notified().await;
+        assert!(state.exchange_freshness.is_stale("BTCUSDT").await);
+
+        release_get_position.notify_waiters();
+        task.await.unwrap().unwrap();
+
+        assert!(!state.exchange_freshness.is_stale("BTCUSDT").await);
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -5874,6 +6078,10 @@ mod tests {
 
         fn set_open_orders(&self, open_orders: Vec<ExchangeOrder>) {
             *self.open_orders.lock().unwrap() = open_orders;
+        }
+
+        fn set_position(&self, position: Position) {
+            *self.position.lock().unwrap() = position;
         }
     }
 
