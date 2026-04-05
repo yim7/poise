@@ -125,7 +125,7 @@ Expected:
 - 清脏语义已经封装进 token，而不是暴露 revision 细节给调用方
 - 仍没有把 stale 规则泄露到 `runtime` / `effect_worker` 之外
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/exchange_freshness.rs server/src/main.rs server/src/assembly.rs docs/superpowers/plans/2026-04-05-exchange-state-freshness-gate.md
@@ -134,7 +134,7 @@ git commit -m "feat(server): add exchange freshness state owner"
 
 Commit:
 
-- `<填写 commit SHA>`
+- `070cb89`
 
 ### Task 2: 让 `runtime` 写入事件侧 freshness 事实，并删掉 `Filled` 专用 sync
 
