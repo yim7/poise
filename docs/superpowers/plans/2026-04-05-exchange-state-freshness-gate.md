@@ -210,7 +210,7 @@ Expected:
 - `Filled` 专用 sync 被删除
 - 清脏语义集中在成功交易所同步，并由 token 保护
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/runtime.rs server/src/order_outcome.rs docs/superpowers/specs/2026-04-05-exchange-state-freshness-gate-design.md
@@ -219,7 +219,7 @@ git commit -m "refactor(server): route freshness facts through runtime"
 
 Commit:
 
-- `<填写 commit SHA>`
+- `5ad1eff`
 
 ### Task 3: 让 `effect_worker` 消费 freshness state，并写入执行结果不确定的 freshness 事实
 
