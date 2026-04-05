@@ -20,6 +20,7 @@ use crate::account_monitor_store::SqliteAccountMonitorStore;
 use crate::account_projector::AccountProjector;
 use crate::config::Config;
 use crate::debug_query_service::TrackDebugQueryService;
+use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::query_service::TrackQueryService;
 use crate::runtime::{
@@ -32,6 +33,7 @@ use crate::write_service::TrackWriteService;
 pub struct ServerState {
     pub write_service: Arc<TrackWriteService>,
     pub state_repository: Arc<dyn StateRepositoryPort>,
+    pub exchange_freshness: Arc<ExchangeFreshness>,
     #[allow(dead_code)]
     pub query_service: Arc<TrackQueryService>,
     #[allow(dead_code)]
@@ -398,6 +400,7 @@ pub(crate) fn build_server_state_with_account_monitor(
     ServerState {
         write_service,
         state_repository,
+        exchange_freshness: Arc::new(ExchangeFreshness::default()),
         query_service,
         debug_query_service,
         projector,
@@ -1096,6 +1099,13 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.status, poise_engine::runtime::TrackStatus::Frozen);
         assert_eq!(snapshot.observed.reference_price, Some(85.0));
+    }
+
+    #[tokio::test]
+    async fn build_server_state_initializes_fresh_exchange_freshness_store() {
+        let (platform, _) = test_platform();
+
+        assert!(!platform.state.exchange_freshness.is_stale("btc-core").await);
     }
 
     fn test_platform() -> (ServerPlatform, mpsc::Sender<PriceTick>) {
