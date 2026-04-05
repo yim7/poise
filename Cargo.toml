@@ -26,6 +26,5 @@ tower-http = { version = "0.5", features = ["cors"] }
 toml_edit = { version = "0.22", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 native-tls = "0.2"
