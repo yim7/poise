@@ -387,8 +387,8 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSummaryView, TrackCommandType, RiskSignalView, StreamEvent, TrackCommandAccepted,
-        TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
+        AccountSummaryView, RiskSignalView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
     };
 
     #[test]
@@ -413,7 +413,10 @@ mod tests {
 
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].id, "btc-core");
-        assert_eq!(serialized["items"][0]["pnl"]["total_pnl"].as_f64(), Some(1245.3));
+        assert_eq!(
+            serialized["items"][0]["pnl"]["total_pnl"].as_f64(),
+            Some(1245.3)
+        );
         assert_eq!(serialized["items"][0]["pnl"].get("realized_pnl"), None);
     }
 
@@ -437,7 +440,10 @@ mod tests {
         .unwrap();
 
         let serialized = serde_json::to_value(&response).unwrap();
-        assert_eq!(serialized["items"][0]["pnl"]["total_pnl"].as_f64(), Some(1245.3));
+        assert_eq!(
+            serialized["items"][0]["pnl"]["total_pnl"].as_f64(),
+            Some(1245.3)
+        );
     }
 
     #[test]

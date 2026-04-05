@@ -568,9 +568,9 @@ mod tests {
     use crate::app::App;
     use crate::input::Action;
     use crate::protocol::{
-        AccountSummaryView, ExecutionStateView, TrackCommandType, TrackStatus, RiskSignalView,
-        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackDetailView,
-        TrackDiagnosticsView, TrackListItemView, TrackListResponse,
+        AccountSummaryView, ExecutionStateView, RiskSignalView, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
+        TrackListItemView, TrackListResponse, TrackStatus,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -633,10 +633,7 @@ mod tests {
     }
 
     fn account_summary_view() -> AccountSummaryView {
-        serde_json::from_str(include_str!(
-            "../tests/fixtures/account_summary_view.json"
-        ))
-        .unwrap()
+        serde_json::from_str(include_str!("../tests/fixtures/account_summary_view.json")).unwrap()
     }
 
     fn account_summary_changed_event() -> StreamEvent {
@@ -771,8 +768,8 @@ mod tests {
         (ApiClient::new(format!("http://{address}")), state)
     }
 
-    async fn spawn_projection_stub_server_with_failing_account_summary(
-    ) -> (ApiClient, ProjectionStubState) {
+    async fn spawn_projection_stub_server_with_failing_account_summary()
+    -> (ApiClient, ProjectionStubState) {
         let state = ProjectionStubState {
             requests: Arc::new(Mutex::new(vec![])),
             account_summary_failures_left: Arc::new(Mutex::new(1)),
@@ -1232,13 +1229,10 @@ mod tests {
         let (client, state) =
             spawn_projection_stub_server_with_slow_account_summary(Duration::from_secs(1)).await;
 
-        let app = tokio::time::timeout(
-            Duration::from_millis(500),
-            load_initial_state(&client),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let app = tokio::time::timeout(Duration::from_millis(500), load_initial_state(&client))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(app.current_view, View::Dashboard);
         assert!(app.account_summary.is_none());
@@ -2083,7 +2077,11 @@ out_of_band_policy = "hold"
 
         let mut app = load_initial_state(&client).await.unwrap();
         assert_eq!(app.tracks.len(), 2);
-        assert!(app.tracks.iter().all(|track| track.reference_price.is_some()));
+        assert!(
+            app.tracks
+                .iter()
+                .all(|track| track.reference_price.is_some())
+        );
 
         let action = crate::input::handle_key_event(
             &mut app,
@@ -2265,7 +2263,10 @@ out_of_band_policy = "hold"
         session.send_keys(&["]"]);
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
-        assert!(eth_view.contains("out of band hold"), "eth view:\n{eth_view}");
+        assert!(
+            eth_view.contains("out of band hold"),
+            "eth view:\n{eth_view}"
+        );
 
         let event_view = wait_for_pane_text(&session, "Activity").await;
         assert!(event_view.contains("Activity"), "event view:\n{event_view}");

@@ -273,7 +273,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::{
-        AccountMonitor, InMemoryAccountMonitorStore, InMemoryAccountMonitorState,
+        AccountMonitor, InMemoryAccountMonitorState, InMemoryAccountMonitorStore,
         ObservedAccountSnapshot, build_read_model,
     };
     use crate::account_read_model::AccountRiskSignal;
@@ -341,14 +341,15 @@ mod tests {
 
     #[tokio::test]
     async fn account_monitor_can_be_built_from_summary_only_source() {
-        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> = Arc::new(SummaryOnlySource {
-            snapshot: AccountSummarySnapshot {
-                equity: 12_500.0,
-                available: 9_000.0,
-                unrealized_pnl: -350.0,
-                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-            },
-        });
+        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
+            Arc::new(SummaryOnlySource {
+                snapshot: AccountSummarySnapshot {
+                    equity: 12_500.0,
+                    available: 9_000.0,
+                    unrealized_pnl: -350.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                },
+            });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
             source,
@@ -363,7 +364,10 @@ mod tests {
             .refresh_once()
             .await
             .expect("summary-only source should refresh");
-        let summary = monitor.current_summary().await.expect("summary should exist");
+        let summary = monitor
+            .current_summary()
+            .await
+            .expect("summary should exist");
         assert_eq!(summary.equity, 12_500.0);
         assert_eq!(summary.available, 9_000.0);
         assert_eq!(summary.unrealized_pnl, -350.0);

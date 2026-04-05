@@ -843,7 +843,9 @@ impl TrackWriteService {
         let Some(mut snapshot) = manager.snapshot(id) else {
             return Ok(());
         };
-        let constraint = self.account_margin_guard.constraint_for(&snapshot.instrument);
+        let constraint = self
+            .account_margin_guard
+            .constraint_for(&snapshot.instrument);
         if snapshot.risk.account_capacity_constraint == constraint {
             return Ok(());
         }
@@ -1015,9 +1017,9 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
-    use crate::write_service::FollowUpRetirementRequest;
     use crate::notifications::ServerNotification;
     use crate::runtime::AccountMarginGuardStore;
+    use crate::write_service::FollowUpRetirementRequest;
 
     use super::TrackWriteService;
 
@@ -1072,7 +1074,11 @@ mod tests {
             .expect("track snapshot should exist");
         assert!(snapshot.risk.account_capacity_constraint.increase_blocked);
         assert_eq!(
-            snapshot.risk.account_capacity_constraint.blocked_reason.as_deref(),
+            snapshot
+                .risk
+                .account_capacity_constraint
+                .blocked_reason
+                .as_deref(),
             Some("insufficient_margin")
         );
     }

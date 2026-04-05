@@ -8,7 +8,8 @@ use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
     ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-    ExecutionStatusView, TrackCommandType, TrackCommandView, TrackExecutionView, ReplacementGateView,
+    ExecutionStatusView, ReplacementGateView, TrackCommandType, TrackCommandView,
+    TrackExecutionView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
@@ -36,8 +37,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     if let Some(execution_stats_area) = sections.execution_stats {
-        let execution_stats = Paragraph::new(execution_stats_lines(detail, sections.mode))
-            .block(Block::default().title("Execution Stats").borders(Borders::ALL));
+        let execution_stats = Paragraph::new(execution_stats_lines(detail, sections.mode)).block(
+            Block::default()
+                .title("Execution Stats")
+                .borders(Borders::ALL),
+        );
         frame.render_widget(execution_stats, execution_stats_area);
     }
 
@@ -101,8 +105,7 @@ fn track_lines(
 
     lines.push(Line::from(format!(
         "{} | updated {}",
-        detail.identity.instrument.venue,
-        detail.status.lifecycle.updated_at
+        detail.identity.instrument.venue, detail.status.lifecycle.updated_at
     )));
 
     let commands = status_command_hint(&detail.available_commands);
@@ -194,7 +197,8 @@ fn strategy_lines(
                 "units {:.4}/{:.4} | notional {:.4} | min {:.4}",
                 detail.strategy.long_exposure_units,
                 detail.strategy.short_exposure_units,
-                detail.strategy.notional_per_unit, detail.strategy.min_rebalance_units
+                detail.strategy.notional_per_unit,
+                detail.strategy.min_rebalance_units
             )),
         ]
     } else {
@@ -205,8 +209,9 @@ fn strategy_lines(
             )),
             Line::from(format!(
                 "units {:.4}/{:.4} | notional {:.4}",
-                detail.strategy.long_exposure_units, detail.strategy.short_exposure_units
-                , detail.strategy.notional_per_unit
+                detail.strategy.long_exposure_units,
+                detail.strategy.short_exposure_units,
+                detail.strategy.notional_per_unit
             )),
             Line::from(format!(
                 "min rebalance {:.4} | shape {} | out of band {}",
@@ -265,7 +270,10 @@ fn render_trace(
 
     let trace_layout = resolve_trace_layout(inner, app.debug_diagnostics_enabled());
 
-    let activity = Paragraph::new(trace_activity_lines(detail, trace_layout.activity.max_entries));
+    let activity = Paragraph::new(trace_activity_lines(
+        detail,
+        trace_layout.activity.max_entries,
+    ));
     frame.render_widget(activity, trace_layout.activity.area);
 
     if let Some(diagnostics_area) = trace_layout.diagnostics {
@@ -352,10 +360,7 @@ fn attention_summary(attention_reasons: &[String]) -> String {
     }
 }
 
-fn execution_lines(
-    execution: &TrackExecutionView,
-    mode: DetailLayoutMode,
-) -> Vec<Line<'static>> {
+fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Vec<Line<'static>> {
     let slot_details = execution
         .slots
         .iter()
@@ -457,7 +462,11 @@ fn compact_slot_summary(execution: &TrackExecutionView) -> Option<String> {
     match execution.slots.as_slice() {
         [] => None,
         [slot] => Some(format!("slot: {}", compact_slot_label(slot))),
-        slots => Some(format!("slots {} | {}", slots.len(), compact_slot_label(&slots[0]))),
+        slots => Some(format!(
+            "slots {} | {}",
+            slots.len(),
+            compact_slot_label(&slots[0])
+        )),
     }
 }
 
@@ -536,7 +545,11 @@ fn format_exposure_line(
     ])
 }
 
-fn format_pnl_summary_line(total_pnl: f64, realized_pnl: f64, unrealized_pnl: f64) -> Line<'static> {
+fn format_pnl_summary_line(
+    total_pnl: f64,
+    realized_pnl: f64,
+    unrealized_pnl: f64,
+) -> Line<'static> {
     let total = pnl_signal(total_pnl);
     let unrealized = pnl_signal(unrealized_pnl);
     let realized = pnl_signal(realized_pnl);
@@ -583,14 +596,14 @@ fn format_activity_timestamp(ts: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Local};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
     use crate::app::{App, View};
     use crate::protocol::{
         ExecutionStatusView, TrackCommandType, TrackCommandView, TrackDetailView,
         TrackDiagnosticsView,
     };
+    use chrono::{DateTime, Local};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::render;
 

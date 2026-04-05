@@ -77,17 +77,14 @@ impl AccountMarginGuardStore {
         blocked_at: DateTime<Utc>,
     ) {
         let reason = reason.into();
-        self.blocks_by_venue
-            .lock()
-            .unwrap()
-            .insert(
-                instrument.venue,
-                VenueMarginBlock {
-                    increase_blocked: true,
-                    blocked_reason: Some(reason),
-                    blocked_at: Some(blocked_at),
-                },
-            );
+        self.blocks_by_venue.lock().unwrap().insert(
+            instrument.venue,
+            VenueMarginBlock {
+                increase_blocked: true,
+                blocked_reason: Some(reason),
+                blocked_at: Some(blocked_at),
+            },
+        );
     }
 
     pub(crate) fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
@@ -1015,12 +1012,11 @@ mod tests {
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::manager::{ExchangeSyncMode, TrackManager};
     use poise_engine::ports::{
-        AccountCapacitySnapshot, ClockPort, CommittedTrackWrite, EffectStatus,
-        EffectStatusUpdate, ExchangeInfo, ExchangeOrder, ExchangePort,
-        FollowUpRetirementRequest, MarketDataPort, OrderReceipt, OrderRequest, OrderStatus,
-        PersistedTrackEffect, Position, PriceTick, StateRepositoryPort, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort, TrackSnapshot, UserDataEvent,
-        UserDataPayload,
+        AccountCapacitySnapshot, ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
+        ExchangeInfo, ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort,
+        OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
+        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
+        TrackSnapshot, UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,

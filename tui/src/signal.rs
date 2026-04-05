@@ -93,9 +93,8 @@ fn format_exposure_signal(current: f64, target: Option<f64>) -> ExposureSignal {
     let target_abs = target.abs();
     let current_side = exposure_side(current, threshold);
     let target_side = exposure_side(target, threshold);
-    let flips_direction = current_abs > threshold
-        && target_abs > threshold
-        && current.signum() != target.signum();
+    let flips_direction =
+        current_abs > threshold && target_abs > threshold && current.signum() != target.signum();
 
     if flips_direction {
         ExposureSignal {

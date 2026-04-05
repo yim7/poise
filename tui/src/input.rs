@@ -80,7 +80,8 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
             }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            if app.current_view == View::Instance && app.is_command_enabled(TrackCommandType::Resume)
+            if app.current_view == View::Instance
+                && app.is_command_enabled(TrackCommandType::Resume)
             {
                 Action::SubmitCommand(CommandKind::Resume)
             } else {

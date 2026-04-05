@@ -1,10 +1,10 @@
 #[allow(unused_imports)]
 pub use poise_protocol::{
     AccountSummaryView, ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView,
-    ExecutionStateView, ExecutionStatusView, TrackCommandType, TrackCommandView, TrackExecutionView,
-    TrackStatus, ReplacementGateView, RiskSignalView, StreamEvent, TrackCommandAccepted,
-    TrackCommandRequest, TrackDetailView, TrackDiagnosticsView, TrackExecutionStatsView,
-    TrackListItemView, TrackListPnlView, TrackListResponse, TrackPnlView,
+    ExecutionStateView, ExecutionStatusView, ReplacementGateView, RiskSignalView, StreamEvent,
+    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackCommandView, TrackDetailView,
+    TrackDiagnosticsView, TrackExecutionStatsView, TrackExecutionView, TrackListItemView,
+    TrackListPnlView, TrackListResponse, TrackPnlView, TrackStatus,
 };
 
 #[cfg(test)]
@@ -13,9 +13,9 @@ pub use poise_protocol::{ExecutionBadgeView, ExposureSummaryView};
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivityLevelView, ExecutionStateView, ExecutionStatusView, TrackCommandType, StreamEvent,
-        TrackCommandAccepted, TrackCommandRequest, TrackDetailView, TrackDiagnosticsView,
-        TrackListResponse,
+        ActivityLevelView, ExecutionStateView, ExecutionStatusView, StreamEvent,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackListResponse,
     };
 
     #[test]
@@ -67,7 +67,10 @@ mod tests {
         assert_eq!(detail.execution.active_slot_count, 1);
         assert_eq!(detail.execution.slots.len(), 1);
         assert_eq!(detail.activity[0].level, ActivityLevelView::Info);
-        assert_eq!(detail.available_commands[0].command, TrackCommandType::Pause);
+        assert_eq!(
+            detail.available_commands[0].command,
+            TrackCommandType::Pause
+        );
         assert!(!detail.available_commands.is_empty());
     }
 
@@ -153,7 +156,10 @@ mod tests {
                     detail_json["strategy"]["min_rebalance_units"].as_f64(),
                     Some(0.5)
                 );
-                assert_eq!(detail.available_commands[0].command, TrackCommandType::Pause);
+                assert_eq!(
+                    detail.available_commands[0].command,
+                    TrackCommandType::Pause
+                );
             }
             other => panic!("unexpected event variant: {other:?}"),
         }

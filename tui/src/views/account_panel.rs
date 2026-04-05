@@ -48,7 +48,8 @@ fn format_optional_amount(value: Option<f64>) -> String {
 }
 
 fn format_optional_percent(value: Option<f64>) -> String {
-    value.map(|value| format!("{value:+.1}%"))
+    value
+        .map(|value| format!("{value:+.1}%"))
         .unwrap_or_else(|| "-".to_string())
 }
 

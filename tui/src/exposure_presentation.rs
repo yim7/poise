@@ -1,6 +1,4 @@
-use crate::signal::{
-    ExposureAction, ExposureSignal, SignalDisplay, SignalKind, SignalTone,
-};
+use crate::signal::{ExposureAction, ExposureSignal, SignalDisplay, SignalKind, SignalTone};
 use crate::theme::Theme;
 
 pub fn dashboard_exposure_summary(current: f64, signal: ExposureSignal) -> SignalDisplay {

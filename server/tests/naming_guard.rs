@@ -1,7 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN_PATTERNS: &[&str] = &["Grid", "grid_", "grid_id", "target_exposure", "target exposure"];
+const FORBIDDEN_PATTERNS: &[&str] = &[
+    "Grid",
+    "grid_",
+    "grid_id",
+    "target_exposure",
+    "target exposure",
+];
 
 #[test]
 fn server_surface_uses_track_and_desired_exposure_names() {

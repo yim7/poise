@@ -1,14 +1,23 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN_PATTERNS: &[&str] = &["Grid", "grid_", "grid_id", "target_exposure", "target exposure"];
+const FORBIDDEN_PATTERNS: &[&str] = &[
+    "Grid",
+    "grid_",
+    "grid_id",
+    "target_exposure",
+    "target exposure",
+];
 
 #[test]
 fn tui_surface_uses_track_and_desired_exposure_names() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
     collect_violations(&manifest_dir.join("src"), &mut violations);
-    collect_fixture_violations(&manifest_dir.join("tests").join("fixtures"), &mut violations);
+    collect_fixture_violations(
+        &manifest_dir.join("tests").join("fixtures"),
+        &mut violations,
+    );
     assert!(
         violations.is_empty(),
         "tui crate still contains legacy naming:\n{}",

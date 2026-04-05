@@ -3,11 +3,12 @@ use poise_engine::runtime::TrackStatus as EngineTrackStatus;
 use poise_protocol::{
     ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
     ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
-    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackExecutionView, TrackIdentityView,
-    TrackLifecycleView, TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
-    TrackStatusPanelView, TrackStrategyView, InstrumentView, OutOfBandPolicy as ProtocolPolicy,
-    ReplacementGateView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
-    TrackDetailView, TrackExecutionStatsView, TrackListItemView, TrackListPnlView, TrackPnlView,
+    InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
+    TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionStatsView,
+    TrackExecutionView, TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
+    TrackMarketView, TrackPnlView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
+    TrackStatusPanelView, TrackStrategyView,
 };
 
 use crate::event_presentation::{PresentationAudience, classify_track_events};
@@ -364,7 +365,10 @@ mod tests {
             Some(0.5)
         );
         assert!(!detail.available_commands.is_empty());
-        assert_eq!(detail.available_commands[0].command, TrackCommandType::Pause);
+        assert_eq!(
+            detail.available_commands[0].command,
+            TrackCommandType::Pause
+        );
         assert_eq!(detail.available_commands.len(), 4);
         assert_eq!(
             detail.available_commands[2].command,
@@ -469,7 +473,8 @@ mod tests {
     fn multiple_attention_sources_preserve_reason_order_and_attention_status() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.has_recovery_anomaly = true;
-        source.recovery_anomaly = Some(poise_engine::executor::RecoveryAnomaly::DuplicateLiveOrders);
+        source.recovery_anomaly =
+            Some(poise_engine::executor::RecoveryAnomaly::DuplicateLiveOrders);
         source.has_stale_market_data = true;
         source.has_account_margin_guard = true;
 
