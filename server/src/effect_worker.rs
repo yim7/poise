@@ -14,9 +14,10 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::assembly::ServerState;
-use crate::exchange_freshness::ExchangeFreshnessReason;
+use crate::exchange_freshness::FreshnessGateDecision;
 use crate::order_outcome::{
-    OutcomeClass, ReconcileRequest, classify_cancel_error, classify_submit_receipt_writeback_error,
+    OutcomeClass, OutcomeUnknownRecovery, ReconcileRequest, classify_cancel_error,
+    classify_submit_receipt_writeback_error,
 };
 use crate::runtime;
 use crate::submit_preflight::SubmitPreflightDecision;
@@ -159,20 +160,17 @@ impl EffectWorker {
         request: OrderRequest,
         desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
-        if self
-            .state
-            .exchange_freshness
-            .requires_sync_before_effect(persisted.track_id.as_str(), &persisted.effect)
-            .await
-        {
-            runtime::enqueue_reconcile_request(
-                &self.state,
-                &self.exchange,
-                ReconcileRequest {
-                    track_id: persisted.track_id.as_str().to_string(),
-                    reason: crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
-                },
+        if matches!(
+            self.state
+                .exchange_freshness
+                .decide_effect(persisted.track_id.as_str(), &persisted.effect)
+                .await,
+            FreshnessGateDecision::ReconcileFirst
+        ) {
+            self.trigger_immediate_reconcile(
+                persisted.track_id.as_str(),
                 &request.instrument,
+                crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
             )
             .await?;
             return Ok(());
@@ -213,24 +211,13 @@ impl EffectWorker {
                     )
                     .await
                 {
-                    if let OutcomeClass::OutcomeUnknown(reason) =
+                    if let OutcomeClass::OutcomeUnknown(recovery) =
                         classify_submit_receipt_writeback_error(&error)
                     {
-                        self.state
-                            .exchange_freshness
-                            .mark_stale(
-                                persisted.track_id.as_str(),
-                                ExchangeFreshnessReason::SubmitOutcomeUnknown,
-                            )
-                            .await;
-                        runtime::enqueue_reconcile_request(
-                            &self.state,
-                            &self.exchange,
-                            ReconcileRequest {
-                                track_id: persisted.track_id.as_str().to_string(),
-                                reason,
-                            },
+                        self.recover_unknown_outcome(
+                            persisted.track_id.as_str(),
                             &request.instrument,
+                            recovery,
                         )
                         .await?;
                     }
@@ -331,20 +318,17 @@ impl EffectWorker {
         cancellation: Cancellation,
     ) -> Result<()> {
         let instrument = cancellation.instrument().clone();
-        if self
-            .state
-            .exchange_freshness
-            .requires_sync_before_effect(persisted.track_id.as_str(), &persisted.effect)
-            .await
-        {
-            runtime::enqueue_reconcile_request(
-                &self.state,
-                &self.exchange,
-                ReconcileRequest {
-                    track_id: persisted.track_id.as_str().to_string(),
-                    reason: crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
-                },
+        if matches!(
+            self.state
+                .exchange_freshness
+                .decide_effect(persisted.track_id.as_str(), &persisted.effect)
+                .await,
+            FreshnessGateDecision::ReconcileFirst
+        ) {
+            self.trigger_immediate_reconcile(
+                persisted.track_id.as_str(),
                 &instrument,
+                crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
             )
             .await?;
             return Ok(());
@@ -396,22 +380,11 @@ impl EffectWorker {
                 Ok(())
             }
             Err(error) => {
-                if let OutcomeClass::OutcomeUnknown(reason) = classify_cancel_error(&error) {
-                    self.state
-                        .exchange_freshness
-                        .mark_stale(
-                            persisted.track_id.as_str(),
-                            ExchangeFreshnessReason::CancelOutcomeUnknown,
-                        )
-                        .await;
-                    runtime::enqueue_reconcile_request(
-                        &self.state,
-                        &self.exchange,
-                        ReconcileRequest {
-                            track_id: persisted.track_id.as_str().to_string(),
-                            reason,
-                        },
+                if let OutcomeClass::OutcomeUnknown(recovery) = classify_cancel_error(&error) {
+                    self.recover_unknown_outcome(
+                        persisted.track_id.as_str(),
                         &instrument,
+                        recovery,
                     )
                     .await?;
                     if let Cancellation::One { order_id, .. } = &cancellation
@@ -446,6 +419,39 @@ impl EffectWorker {
                 Err(error)
             }
         }
+    }
+
+    async fn trigger_immediate_reconcile(
+        &self,
+        track_id: &str,
+        instrument: &Instrument,
+        reason: crate::order_outcome::ReconcileReason,
+    ) -> Result<()> {
+        runtime::enqueue_reconcile_request(
+            &self.state,
+            &self.exchange,
+            ReconcileRequest {
+                track_id: track_id.to_string(),
+                reason,
+            },
+            instrument,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn recover_unknown_outcome(
+        &self,
+        track_id: &str,
+        instrument: &Instrument,
+        recovery: OutcomeUnknownRecovery,
+    ) -> Result<()> {
+        self.state
+            .exchange_freshness
+            .mark_stale(track_id, recovery.freshness_reason)
+            .await;
+        self.trigger_immediate_reconcile(track_id, instrument, recovery.reconcile_reason)
+            .await
     }
 }
 
@@ -985,6 +991,61 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("cancel effect should stay persisted")
+                .status,
+            EffectStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cancel_all_effect_syncs_exchange_before_canceling() {
+        let repository = Arc::new(MemoryRepository::default());
+        let exchange = Arc::new(FakeExchange::default());
+        let state = test_state(repository.clone(), exchange.clone()).await;
+        let snapshot = snapshot_with_working_order();
+
+        repository.seed_snapshot("btc-core", snapshot.clone()).await;
+        {
+            let manager_handle = state.write_service.manager();
+            let mut manager = manager_handle.write().await;
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+        repository
+            .seed_effect(PersistedTrackEffect {
+                effect_id: "btc-core:batch:0".into(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "batch".into(),
+                sequence: 0,
+                effect: TrackEffect::CancelAll {
+                    instrument: btc_instrument(),
+                },
+                status: EffectStatus::Pending,
+                attempt_count: 0,
+                last_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await;
+        state
+            .exchange_freshness
+            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .await;
+
+        let worker = EffectWorker::new(
+            state.clone(),
+            exchange.clone() as Arc<dyn ExchangePort>,
+            Duration::from_secs(60),
+        );
+        worker.run_once().await.unwrap();
+
+        assert_eq!(exchange.get_position_calls(), 1);
+        assert_eq!(exchange.get_open_orders_calls(), 1);
+        assert_eq!(
+            repository
+                .list_all_effects()
+                .await
+                .into_iter()
+                .next()
+                .expect("cancel-all effect should stay persisted")
                 .status,
             EffectStatus::Pending
         );

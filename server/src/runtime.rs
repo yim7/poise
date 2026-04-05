@@ -5211,7 +5211,8 @@ mod tests {
                     &exchange,
                     crate::order_outcome::ReconcileRequest {
                         track_id: "BTCUSDT".into(),
-                        reason: crate::order_outcome::ReconcileReason::SubmitOutcomeUnknown,
+                        reason:
+                            crate::order_outcome::ReconcileReason::SyncAfterSubmitOutcomeUnknown,
                     },
                     &instrument,
                 )
@@ -5231,7 +5232,8 @@ mod tests {
                     &exchange,
                     crate::order_outcome::ReconcileRequest {
                         track_id: "BTCUSDT".into(),
-                        reason: crate::order_outcome::ReconcileReason::CancelOutcomeUnknown,
+                        reason:
+                            crate::order_outcome::ReconcileReason::SyncAfterCancelOutcomeUnknown,
                     },
                     &instrument,
                 )

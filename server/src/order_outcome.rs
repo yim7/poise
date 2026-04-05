@@ -1,11 +1,13 @@
 use anyhow::Error;
 
+use crate::exchange_freshness::ExchangeFreshnessReason;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileReason {
     PeriodicAudit,
-    SubmitOutcomeUnknown,
-    CancelOutcomeUnknown,
+    SyncAfterSubmitOutcomeUnknown,
+    SyncAfterCancelOutcomeUnknown,
     UnabsorbedOrderUpdate,
     SyncBeforeSideEffect,
     ManualRecovery,
@@ -31,9 +33,15 @@ pub struct ReconcileExecution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutcomeUnknownRecovery {
+    pub freshness_reason: ExchangeFreshnessReason,
+    pub reconcile_reason: ReconcileReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutcomeClass {
     FinalFailure,
-    OutcomeUnknown(ReconcileReason),
+    OutcomeUnknown(OutcomeUnknownRecovery),
 }
 
 pub fn classify_cancel_error(error: &Error) -> OutcomeClass {
@@ -42,7 +50,10 @@ pub fn classify_cancel_error(error: &Error) -> OutcomeClass {
 
 pub fn classify_cancel_error_message(message: &str) -> OutcomeClass {
     if message.contains("\"code\":-2011") && message.contains("Unknown order sent.") {
-        return OutcomeClass::OutcomeUnknown(ReconcileReason::CancelOutcomeUnknown);
+        return OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+            freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
+            reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
+        });
     }
 
     OutcomeClass::FinalFailure
@@ -53,7 +64,10 @@ pub fn classify_submit_receipt_writeback_error(error: &Error) -> OutcomeClass {
         .to_string()
         .contains("submit receipt did not match executor slot")
     {
-        return OutcomeClass::OutcomeUnknown(ReconcileReason::SubmitOutcomeUnknown);
+        return OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+            freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
+            reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
+        });
     }
 
     OutcomeClass::FinalFailure
@@ -93,7 +107,10 @@ mod tests {
 
         assert_eq!(
             classify_cancel_error(&error),
-            OutcomeClass::OutcomeUnknown(ReconcileReason::CancelOutcomeUnknown)
+            OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+                freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
+                reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
+            })
         );
     }
 
@@ -103,7 +120,23 @@ mod tests {
             classify_cancel_error_message(
                 "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}"
             ),
-            OutcomeClass::OutcomeUnknown(ReconcileReason::CancelOutcomeUnknown)
+            OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+                freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
+                reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
+            })
+        );
+    }
+
+    #[test]
+    fn classify_submit_receipt_writeback_error_returns_recovery_mapping() {
+        let error = anyhow!("submit receipt did not match executor slot");
+
+        assert_eq!(
+            classify_submit_receipt_writeback_error(&error),
+            OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+                freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
+                reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
+            })
         );
     }
 }

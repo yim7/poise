@@ -23,6 +23,12 @@ pub struct ExchangeFreshnessSyncToken {
     generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshnessGateDecision {
+    Proceed,
+    ReconcileFirst,
+}
+
 #[derive(Default)]
 pub struct ExchangeFreshness {
     inner: Mutex<HashMap<String, TrackFreshnessState>>,
@@ -73,17 +79,25 @@ impl ExchangeFreshness {
         self.inner.lock().unwrap().contains_key(track_id)
     }
 
-    pub async fn requires_sync_before_effect(&self, track_id: &str, effect: &TrackEffect) -> bool {
+    pub async fn decide_effect(
+        &self,
+        track_id: &str,
+        effect: &TrackEffect,
+    ) -> FreshnessGateDecision {
         if !self.is_stale(track_id).await {
-            return false;
+            return FreshnessGateDecision::Proceed;
         }
 
-        matches!(
+        if matches!(
             effect,
             TrackEffect::SubmitOrder { .. }
                 | TrackEffect::CancelOrder { .. }
                 | TrackEffect::CancelAll { .. }
-        )
+        ) {
+            return FreshnessGateDecision::ReconcileFirst;
+        }
+
+        FreshnessGateDecision::Proceed
     }
 }
 
@@ -94,7 +108,7 @@ mod tests {
     use poise_engine::track::{Instrument, Venue};
     use poise_engine::transition::TrackEffect;
 
-    use super::{ExchangeFreshness, ExchangeFreshnessReason};
+    use super::{ExchangeFreshness, ExchangeFreshnessReason, FreshnessGateDecision};
 
     fn test_instrument() -> Instrument {
         Instrument {
@@ -124,6 +138,12 @@ mod tests {
         }
     }
 
+    fn cancel_all_effect() -> TrackEffect {
+        TrackEffect::CancelAll {
+            instrument: test_instrument(),
+        }
+    }
+
     #[tokio::test]
     async fn freshness_is_fresh_by_default() {
         let freshness = ExchangeFreshness::default();
@@ -146,37 +166,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_track_blocks_submit_and_cancel_effects() {
+    async fn stale_track_requires_reconcile_for_side_effects() {
         let freshness = ExchangeFreshness::default();
         freshness
             .mark_stale("btc-core", ExchangeFreshnessReason::UnabsorbedOrderUpdate)
             .await;
 
-        assert!(
-            freshness
-                .requires_sync_before_effect("btc-core", &submit_effect())
-                .await
+        assert_eq!(
+            freshness.decide_effect("btc-core", &submit_effect()).await,
+            FreshnessGateDecision::ReconcileFirst
         );
-        assert!(
+        assert_eq!(
+            freshness.decide_effect("btc-core", &cancel_effect()).await,
+            FreshnessGateDecision::ReconcileFirst
+        );
+        assert_eq!(
             freshness
-                .requires_sync_before_effect("btc-core", &cancel_effect())
-                .await
+                .decide_effect("btc-core", &cancel_all_effect())
+                .await,
+            FreshnessGateDecision::ReconcileFirst
         );
     }
 
     #[tokio::test]
-    async fn fresh_track_allows_submit_and_cancel_effects() {
+    async fn fresh_track_allows_side_effects_to_proceed() {
         let freshness = ExchangeFreshness::default();
 
-        assert!(
-            !freshness
-                .requires_sync_before_effect("btc-core", &submit_effect())
-                .await
+        assert_eq!(
+            freshness.decide_effect("btc-core", &submit_effect()).await,
+            FreshnessGateDecision::Proceed
         );
-        assert!(
-            !freshness
-                .requires_sync_before_effect("btc-core", &cancel_effect())
-                .await
+        assert_eq!(
+            freshness.decide_effect("btc-core", &cancel_effect()).await,
+            FreshnessGateDecision::Proceed
+        );
+        assert_eq!(
+            freshness
+                .decide_effect("btc-core", &cancel_all_effect())
+                .await,
+            FreshnessGateDecision::Proceed
         );
     }
 
@@ -212,6 +240,39 @@ mod tests {
         assert_eq!(
             state.last_reason,
             ExchangeFreshnessReason::CancelOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_track_returns_explicit_reconcile_decision_for_side_effects() {
+        let freshness = ExchangeFreshness::default();
+        freshness
+            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .await;
+
+        assert_eq!(
+            freshness.decide_effect("btc-core", &submit_effect()).await,
+            FreshnessGateDecision::ReconcileFirst
+        );
+        assert_eq!(
+            freshness.decide_effect("btc-core", &cancel_effect()).await,
+            FreshnessGateDecision::ReconcileFirst
+        );
+        assert_eq!(
+            freshness
+                .decide_effect("btc-core", &cancel_all_effect())
+                .await,
+            FreshnessGateDecision::ReconcileFirst
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_track_returns_proceed_decision() {
+        let freshness = ExchangeFreshness::default();
+
+        assert_eq!(
+            freshness.decide_effect("btc-core", &submit_effect()).await,
+            FreshnessGateDecision::Proceed
         );
     }
 }
