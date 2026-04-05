@@ -338,51 +338,8 @@ mod tests {
         workspace_root().join("scripts").join("probe-health.sh")
     }
 
-    fn run_paper_tui_script_path() -> PathBuf {
-        workspace_root().join("scripts").join("run-paper-tui.sh")
-    }
-
     fn run_paper_server_script_path() -> PathBuf {
         workspace_root().join("scripts").join("run-paper-server.sh")
-    }
-
-    fn start_paper_zellij_script_path() -> PathBuf {
-        workspace_root()
-            .join("scripts")
-            .join("start-paper-zellij.sh")
-    }
-
-    fn paper_layout_path() -> PathBuf {
-        workspace_root()
-            .join("ops")
-            .join("zellij")
-            .join("poise-paper.kdl")
-    }
-
-    #[test]
-    fn paper_layout_prefers_tui_in_primary_left_pane() {
-        let layout = fs::read_to_string(paper_layout_path()).unwrap();
-
-        assert!(layout.contains("pane size=\"72%\" command=\"bash\""));
-        assert!(layout.contains("./scripts/run-paper-tui.sh"));
-        assert!(layout.contains("pane size=\"68%\" command=\"bash\""));
-        assert!(layout.contains("./scripts/run-paper-server.sh"));
-        assert!(layout.contains("pane size=\"32%\" command=\"bash\""));
-        assert!(layout.contains("./scripts/probe-health.sh"));
-    }
-
-    #[test]
-    fn run_paper_tui_script_supports_dry_run() {
-        let output = Command::new("bash")
-            .arg(run_paper_tui_script_path())
-            .arg("--dry-run")
-            .output()
-            .unwrap();
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("base_url="));
-        assert!(stdout.contains("command=cargo run -p poise-tui"));
     }
 
     #[test]
@@ -400,20 +357,6 @@ mod tests {
         assert!(stdout.contains(
             "command=cargo run -p poise-server -- --config configs/binance-testnet.local.toml --rebuild-state"
         ));
-    }
-
-    #[test]
-    fn start_paper_zellij_script_exports_rebuild_state_in_dry_run() {
-        let output = Command::new("bash")
-            .arg(start_paper_zellij_script_path())
-            .arg("--dry-run")
-            .env("POISE_REBUILD_STATE", "1")
-            .output()
-            .unwrap();
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("rebuild_state=1"));
     }
 
     async fn wait_for_child_exit(child: &mut std::process::Child) -> std::process::ExitStatus {

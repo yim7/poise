@@ -186,7 +186,32 @@ cargo test -p poise-tui
 cargo test
 ```
 
-最近一次完整验证已通过 `cargo test`。
+日常本地检查建议直接跑：
+
+```bash
+./scripts/check-workspace.sh
+```
+
+默认快路径只覆盖生产代码 lint，以及除 `poise-server` / `poise-tui` bin 单测外的 workspace 单元 / 集成测试，不包含：
+
+- `poise-server` 的 bin 单元测试
+- `poise-tui` 的 bin 单元测试
+- 测试目标的 `clippy`
+- workspace doctest
+- `poise-tui` 的 3 个慢速真实端到端测试
+
+如果你需要把 `poise-tui` 的慢速真实端到端测试也一起验收，再跑：
+
+```bash
+./scripts/check-workspace.sh --full
+```
+
+`--full` 会切换到全量检查，补齐：
+
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --all-targets`
+- `cargo test --workspace --doc`
+- `cargo test -p poise-tui --bin poise-tui real_server_ -- --ignored`
 
 ## 用 zellij 连续跑模拟仓
 

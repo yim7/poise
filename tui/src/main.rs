@@ -544,7 +544,7 @@ mod tests {
     use std::io::Read;
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
@@ -1868,30 +1868,38 @@ mod tests {
         path
     }
 
+    #[derive(Clone)]
+    struct RealServerTestBinaries {
+        server: PathBuf,
+        tui: PathBuf,
+    }
+
+    fn ensure_real_server_test_binaries() -> RealServerTestBinaries {
+        static BINARIES: OnceLock<RealServerTestBinaries> = OnceLock::new();
+
+        BINARIES
+            .get_or_init(|| {
+                let status = Command::new("cargo")
+                    .args(["build", "-p", "poise-server", "-p", "poise-tui"])
+                    .current_dir(workspace_root())
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+
+                RealServerTestBinaries {
+                    server: track_server_binary_path(),
+                    tui: track_tui_binary_path(),
+                }
+            })
+            .clone()
+    }
+
     fn ensure_track_server_binary() -> PathBuf {
-        let path = track_server_binary_path();
-        let status = Command::new("cargo")
-            .arg("build")
-            .arg("-p")
-            .arg("poise-server")
-            .current_dir(workspace_root())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        path
+        ensure_real_server_test_binaries().server
     }
 
     fn ensure_track_tui_binary() -> PathBuf {
-        let path = track_tui_binary_path();
-        let status = Command::new("cargo")
-            .arg("build")
-            .arg("-p")
-            .arg("poise-tui")
-            .current_dir(workspace_root())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        path
+        ensure_real_server_test_binaries().tui
     }
 
     struct TmuxSession {
@@ -2027,6 +2035,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow e2e"]
     async fn real_server_protocol_integration_covers_list_switch_and_ws_updates() {
         let exchange = spawn_fake_exchange_server().await;
         let server_binary = ensure_track_server_binary();
@@ -2145,6 +2154,7 @@ out_of_band_policy = "hold"
     }
 
     #[tokio::test]
+    #[ignore = "slow e2e"]
     async fn real_server_starts_with_loopback_exchange_even_when_proxy_env_is_set() {
         let exchange = spawn_fake_exchange_server().await;
         let server_binary = ensure_track_server_binary();
@@ -2202,6 +2212,7 @@ notional_per_unit = 375.0
     }
 
     #[tokio::test]
+    #[ignore = "slow e2e"]
     async fn real_server_and_tui_binary_end_to_end_renders_and_exits() {
         let exchange = spawn_fake_exchange_server().await;
         let server_binary = ensure_track_server_binary();
