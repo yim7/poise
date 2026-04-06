@@ -5,6 +5,7 @@ mod input;
 mod protocol;
 mod signal;
 mod theme;
+mod timestamp_display;
 mod views;
 
 use std::env;

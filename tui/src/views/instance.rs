@@ -1,4 +1,3 @@
-use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -13,6 +12,7 @@ use crate::protocol::{
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
+use crate::timestamp_display::format_local_timestamp_for_display;
 use crate::views::instance_layout::{
     DetailLayoutMode, resolve_detail_layout, resolve_trace_layout,
 };
@@ -105,7 +105,8 @@ fn track_lines(
 
     lines.push(Line::from(format!(
         "{} | updated {}",
-        detail.identity.instrument.venue, detail.status.lifecycle.updated_at
+        detail.identity.instrument.venue,
+        format_local_timestamp_for_display(&detail.status.lifecycle.updated_at)
     )));
 
     let commands = status_command_hint(&detail.available_commands);
@@ -246,7 +247,8 @@ fn execution_stats_lines(
             detail
                 .execution_stats
                 .stats_started_at
-                .clone()
+                .as_deref()
+                .map(format_local_timestamp_for_display)
                 .unwrap_or_else(|| "-".to_string())
         )));
     }
@@ -346,7 +348,7 @@ fn format_trace_item_line(ts: &str, level: ActivityLevelView, message: &str) -> 
 
     Line::from(format!(
         "{} [{}] {}",
-        format_activity_timestamp(ts),
+        format_local_timestamp_for_display(ts),
         level,
         message
     ))
@@ -583,17 +585,6 @@ fn status_command_hint(commands: &[TrackCommandView]) -> String {
     }
 }
 
-fn format_activity_timestamp(ts: &str) -> String {
-    DateTime::parse_from_rfc3339(ts)
-        .map(|value| {
-            value
-                .with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S %:z")
-                .to_string()
-        })
-        .unwrap_or_else(|_| ts.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::app::{App, View};
@@ -601,9 +592,10 @@ mod tests {
         ExecutionStatusView, TrackCommandType, TrackCommandView, TrackDetailView,
         TrackDiagnosticsView,
     };
-    use chrono::{DateTime, Local};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    use crate::timestamp_display::format_local_timestamp_for_display;
 
     use super::render;
 
@@ -825,7 +817,6 @@ mod tests {
         assert!(text.contains("commands: p pause"));
         assert!(text.contains("total ↑ +1245.30"));
         assert!(text.contains("realized cumulative ↑ +980.10"));
-        assert!(text.contains("execution stats since: 2026-03-26T09:45:00Z"));
         assert!(text.contains("prices: ref 101.2500 | mark 101.3000 | index 101.2000"));
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
@@ -894,11 +885,7 @@ mod tests {
 
         let text = render_text(detail.clone());
         let original_ts = detail.activity[0].ts.clone();
-        let expected_local = DateTime::parse_from_rfc3339(&original_ts)
-            .unwrap()
-            .with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M:%S %:z")
-            .to_string();
+        let expected_local = format_local_timestamp_for_display(&original_ts);
 
         assert!(text.contains(&expected_local));
         assert!(!text.contains(&original_ts));
@@ -914,6 +901,27 @@ mod tests {
         let text = render_text(detail);
 
         assert!(text.contains("not-a-timestamp"));
+    }
+
+    #[test]
+    fn renders_track_timestamps_in_local_time() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+
+        let text = render_text(detail.clone());
+        let expected_updated_at =
+            format_local_timestamp_for_display(&detail.status.lifecycle.updated_at);
+        let original_stats_started_at = detail.execution_stats.stats_started_at.as_deref().unwrap();
+        let expected_stats_started_at =
+            format_local_timestamp_for_display(original_stats_started_at);
+
+        assert!(text.contains(&format!("updated {expected_updated_at}")));
+        assert!(text.contains(&format!(
+            "execution stats since: {expected_stats_started_at}"
+        )));
+        assert!(!text.contains(&detail.status.lifecycle.updated_at));
+        assert!(!text.contains(original_stats_started_at));
     }
 
     #[test]

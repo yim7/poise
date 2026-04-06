@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::protocol::{AccountSummaryView, RiskSignalView};
 use crate::theme::Theme;
+use crate::timestamp_display::format_local_timestamp_for_display;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, summary: Option<&AccountSummaryView>) {
     let panel = Paragraph::new(lines(summary))
@@ -36,8 +37,16 @@ fn lines(summary: Option<&AccountSummaryView>) -> Vec<Line<'static>> {
             Span::raw(format!(
                 " | reason {} | day base {} | updated {}",
                 summary.reason.as_deref().unwrap_or("-"),
-                summary.day_base_at.as_deref().unwrap_or("-"),
-                summary.updated_at.as_deref().unwrap_or("-"),
+                summary
+                    .day_base_at
+                    .as_deref()
+                    .map(format_local_timestamp_for_display)
+                    .unwrap_or_else(|| "-".to_string()),
+                summary
+                    .updated_at
+                    .as_deref()
+                    .map(format_local_timestamp_for_display)
+                    .unwrap_or_else(|| "-".to_string()),
             )),
         ]),
     ]
@@ -87,5 +96,51 @@ fn signal_style(signal: RiskSignalView) -> ratatui::style::Style {
         RiskSignalView::Normal => Theme::status_neutral(),
         RiskSignalView::Attention => Theme::status_attention(),
         RiskSignalView::Critical => Theme::status_alert(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use crate::protocol::AccountSummaryView;
+    use crate::timestamp_display::format_local_timestamp_for_display;
+
+    use super::render;
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn renders_account_timestamps_in_local_time() {
+        let backend = TestBackend::new(160, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let summary: AccountSummaryView = serde_json::from_str(include_str!(
+            "../../tests/fixtures/account_summary_view.json"
+        ))
+        .unwrap();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), Some(&summary)))
+            .unwrap();
+
+        let text = buffer_text(&terminal);
+        let original_day_base_at = summary.day_base_at.as_deref().unwrap();
+        let original_updated_at = summary.updated_at.as_deref().unwrap();
+        let expected_day_base_at = format_local_timestamp_for_display(original_day_base_at);
+        let expected_updated_at = format_local_timestamp_for_display(original_updated_at);
+
+        assert!(text.contains(&format!("day base {expected_day_base_at}")));
+        assert!(text.contains(&format!("updated {expected_updated_at}")));
+        assert!(!text.contains(original_day_base_at));
+        assert!(!text.contains(original_updated_at));
     }
 }
