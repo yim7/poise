@@ -132,6 +132,7 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
+    use poise_engine::ledger::LedgerGapRecord;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         AccountSummarySnapshot, ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
@@ -256,7 +257,9 @@ mod tests {
 
     fn seeded_repository() -> Arc<TestRepository> {
         let repository = Arc::new(TestRepository::default());
-        repository.seed_snapshot(test_manager().snapshot("btc-core").unwrap());
+        let mut snapshot = test_manager().snapshot("btc-core").unwrap();
+        seed_snapshot_ledger(&mut snapshot);
+        repository.seed_snapshot(snapshot);
         repository
     }
 
@@ -401,12 +404,12 @@ mod tests {
         assert_eq!(detail.status.lifecycle.status, TrackStatus::Paused);
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
         assert_eq!(
-            detail_json["pnl"]["total_pnl"].as_f64(),
-            Some(detail.pnl.total_pnl)
+            detail_json["ledger"]["total_pnl"].as_f64(),
+            Some(detail.ledger.total_pnl)
         );
         assert_eq!(
-            detail_json["pnl"]["unrealized_pnl"].as_f64(),
-            Some(detail.pnl.unrealized_pnl)
+            detail_json["ledger"]["unrealized_pnl"].as_f64(),
+            Some(detail.ledger.unrealized_pnl)
         );
         assert_eq!(
             detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
@@ -441,8 +444,8 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(
-            item_json["pnl"]["total_pnl"].as_f64(),
-            Some(item.pnl.total_pnl)
+            item_json["ledger"]["total_pnl"].as_f64(),
+            Some(item.ledger.total_pnl)
         );
         assert!(
             events
@@ -593,6 +596,32 @@ mod tests {
             )
             .unwrap();
         manager
+    }
+
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::ports::TrackSnapshot) {
+        snapshot.risk.realized_pnl_cumulative = 980.1;
+        snapshot.risk.unrealized_pnl = 265.2;
+        snapshot.ledger_state.realized_pnl_day =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap());
+        snapshot.ledger_state.gross_realized_pnl_today = 980.1;
+        snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
+        snapshot.ledger_state.trading_fee_cumulative = 12.3;
+        snapshot.ledger_state.funding_fee_cumulative = -4.0;
+        snapshot.ledger_state.unresolved_gaps = vec![
+            LedgerGapRecord {
+                gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
+                reason: "unsupported_commission_asset".into(),
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                source: "ORDER_TRADE_UPDATE".into(),
+            },
+            LedgerGapRecord {
+                gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
+                    .into(),
+                reason: "missing_symbol".into(),
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
+            },
+        ];
     }
 
     struct FakeClock;
