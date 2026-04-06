@@ -277,7 +277,7 @@ Commit SHA: `676f5c6`
 - Test: `exchanges/binance/src/websocket.rs`
 - Test: `server/src/runtime.rs`
 
-- [ ] **Step 1: 写失败测试，固定“单条消息 -> 单个高层事件”的契约**
+- [x] **Step 1: 写失败测试，固定“单条消息 -> 单个高层事件”的契约**
 
 在 `exchanges/binance/src/websocket.rs` 新增测试：
 
@@ -314,15 +314,15 @@ async fn apply_user_data_event_persists_track_ledger_event_atomically() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前红灯**
+- [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p poise-binance parses_order_trade_update_into_track_ledger_execution_event -- --exact`
+Run: `cargo test -p poise-binance websocket::tests::parses_order_trade_update_into_track_ledger_execution_event -- --exact`
 Expected: FAIL，原因是还没有枚举化的高层 ledger 事件
 
-Run: `cargo test -p poise-server apply_user_data_event_persists_track_ledger_event_atomically -- --exact`
+Run: `cargo test -p poise-server runtime::tests::apply_user_data_event_persists_track_ledger_event_atomically -- --exact`
 Expected: FAIL，原因是 runtime / write_service 还没有统一入口
 
-- [ ] **Step 3: 最小实现高层事件归一**
+- [x] **Step 3: 最小实现高层事件归一**
 
 在 `engine/src/ports.rs`：
 
@@ -344,21 +344,21 @@ pub enum UserDataPayload {
 - 新增单个写入入口，例如 `apply_track_ledger_event`
 - 不再把同一条交易所消息拆成多个独立写入
 
-- [ ] **Step 4: 重新运行定向测试，确认转绿**
+- [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p poise-binance parses_order_trade_update_into_track_ledger_execution_event -- --exact`
+Run: `cargo test -p poise-binance websocket::tests::parses_order_trade_update_into_track_ledger_execution_event -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-binance parses_funding_fee_account_update_into_track_ledger_adjustment_event -- --exact`
+Run: `cargo test -p poise-binance websocket::tests::parses_funding_fee_account_update_into_track_ledger_adjustment_event -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-binance parses_unsupported_commission_asset_into_execution_gap_record -- --exact`
+Run: `cargo test -p poise-binance websocket::tests::parses_unsupported_commission_asset_into_execution_gap_record -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-server apply_user_data_event_persists_track_ledger_event_atomically -- --exact`
+Run: `cargo test -p poise-server runtime::tests::apply_user_data_event_persists_track_ledger_event_atomically -- --exact`
 Expected: PASS
 
-- [ ] **Step 5: 运行本 task 回归测试**
+- [x] **Step 5: 运行本 task 回归测试**
 
 Run: `cargo test -p poise-binance`
 Expected: PASS
@@ -366,16 +366,16 @@ Expected: PASS
 Run: `cargo test -p poise-server runtime::tests -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: 提交本 task**
+- [x] **Step 6: 提交本 task**
 
 ```bash
 git add engine/src/ports.rs engine/src/observation.rs exchanges/binance/src/websocket.rs server/src/runtime.rs server/src/write_service.rs
 git commit -m "refactor: normalize exchange messages into execution ledger events"
 ```
 
-- [ ] **Step 7: 回写 commit SHA 到本任务**
+- [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `<待回写>`
+Commit SHA: `a5ef1ed`
 
 ---
 
