@@ -570,7 +570,7 @@ mod tests {
     use crate::protocol::{
         AccountSummaryView, ExecutionStateView, RiskSignalView, StreamEvent, TrackCommandAccepted,
         TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackListItemView, TrackListResponse, TrackStatus,
+        TrackListItemView, TrackListLedgerView, TrackListResponse, TrackStatus,
     };
 
     const BTC_GRID_ID: &str = "btc-core";
@@ -842,8 +842,9 @@ mod tests {
                 execution_status: detail.execution.execution_status,
                 active_slot_count: detail.execution.active_slot_count,
             },
-            pnl: crate::protocol::TrackListPnlView {
-                total_pnl: detail.pnl.total_pnl,
+            ledger: TrackListLedgerView {
+                total_pnl: detail.ledger.total_pnl,
+                has_unresolved_gaps: !detail.ledger.unresolved_gaps.is_empty(),
             },
         }
     }
@@ -1528,6 +1529,20 @@ mod tests {
             app.current_track.as_ref().unwrap().status.reference_price,
             Some(101.5)
         );
+        assert!((app.current_track.as_ref().unwrap().ledger.total_pnl - 1229.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn list_and_detail_show_same_total_pnl_for_same_track() {
+        let (client, _, _) = spawn_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+
+        let list_total = app.tracks[app.selected_index].ledger.total_pnl;
+        let detail_total = app.current_track_detail().unwrap().ledger.total_pnl;
+
+        assert!((list_total - detail_total).abs() < 1e-9);
     }
 
     #[tokio::test]

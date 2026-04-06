@@ -34,10 +34,14 @@
       "current_exposure": 3.7,
       "desired_exposure": 4.0
     },
-    "pnl": {
-      "total_pnl": 1245.3,
-      "realized_pnl": 980.1,
-      "unrealized_pnl": 265.2
+    "ledger": {
+      "gross_realized_pnl": 980.1,
+      "net_realized_pnl": 963.8,
+      "unrealized_pnl": 265.2,
+      "total_pnl": 1229.0,
+      "trading_fee_cumulative": 12.3,
+      "funding_fee_cumulative": -4.0,
+      "unresolved_gaps": []
     },
     "execution_stats": {
       "max_inventory_gap_abs": 1.5,
