@@ -252,6 +252,7 @@ mod tests {
                 },
             },
             replacement_gate_reason: None,
+            ledger_state: Default::default(),
             risk: RiskState {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,

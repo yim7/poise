@@ -10,6 +10,7 @@ use poise_core::types::Exposure;
 
 use crate::command::TrackCommand;
 use crate::executor;
+use crate::ledger::{LedgerDelta, LedgerGapRecord};
 use crate::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
@@ -147,6 +148,50 @@ impl TrackManager {
         };
 
         Ok((self.transition_for(id, events, effects)?, absorb_result))
+    }
+
+    pub fn apply_ledger_adjustment(
+        &mut self,
+        id: &TrackId,
+        deltas: &[LedgerDelta],
+        gaps: &[LedgerGapRecord],
+    ) -> Result<()> {
+        let today = self.clock.now().date_naive();
+        let track = self
+            .tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+
+        if track.ledger_state.is_empty()
+            && (track.risk_state.realized_pnl_day.is_some()
+                || track.risk_state.realized_pnl_today.abs() > f64::EPSILON
+                || track.risk_state.realized_pnl_cumulative.abs() > f64::EPSILON)
+        {
+            track.ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
+                track.risk_state.realized_pnl_day,
+                track.risk_state.realized_pnl_today,
+                track.risk_state.realized_pnl_cumulative,
+            );
+        }
+
+        for delta in deltas {
+            track.ledger_state.apply_delta(today, delta);
+        }
+        for gap in gaps {
+            if track
+                .ledger_state
+                .unresolved_gaps
+                .iter()
+                .all(|existing| existing.gap_key != gap.gap_key)
+            {
+                track.ledger_state.record_gap(gap.clone());
+            }
+        }
+        track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
+        track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
+        track.risk_state.realized_pnl_cumulative =
+            track.ledger_state.gross_realized_pnl_cumulative;
+        Ok(())
     }
 
     pub fn sync_exchange_state(

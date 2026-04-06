@@ -1787,6 +1787,7 @@ mod tests {
                 },
             },
             replacement_gate_reason: None,
+            ledger_state: Default::default(),
             risk: RiskState::default(),
             observed: ObservedState {
                 reference_price: Some(95.0),
@@ -1841,6 +1842,7 @@ mod tests {
                 },
             },
             replacement_gate_reason: None,
+            ledger_state: Default::default(),
             risk: RiskState::default(),
             observed: ObservedState {
                 reference_price: Some(95.0),
@@ -1899,6 +1901,7 @@ mod tests {
                 },
             },
             replacement_gate_reason: None,
+            ledger_state: Default::default(),
             risk: RiskState::default(),
             observed: ObservedState {
                 reference_price: Some(reference_price),

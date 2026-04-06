@@ -7,6 +7,7 @@ use poise_engine::command::TrackCommand;
 use poise_engine::executor::{
     OrderSlot, OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution,
 };
+use poise_engine::ledger::TrackLedgerEvent;
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
@@ -63,6 +64,14 @@ pub struct TrackInstrument {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedSubmitExecution {
     pub desired_exposure: poise_core::types::Exposure,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApplyTrackLedgerEventResult {
+    pub absorb_result: Option<OrderUpdateAbsorbResult>,
+    pub order_status: Option<poise_engine::ports::OrderStatus>,
+    pub domain_events: Vec<DomainEvent>,
+    pub effects: Vec<TrackEffect>,
 }
 
 #[derive(Debug)]
@@ -145,6 +154,16 @@ impl TransitionResult for (TrackTransition, OrderUpdateAbsorbResult) {
 impl TransitionResult for SubmitRecoveryPlan {
     fn domain_events(&self) -> &[DomainEvent] {
         &[]
+    }
+
+    fn effects(&self) -> &[TrackEffect] {
+        &self.effects
+    }
+}
+
+impl TransitionResult for ApplyTrackLedgerEventResult {
+    fn domain_events(&self) -> &[DomainEvent] {
+        &self.domain_events
     }
 
     fn effects(&self) -> &[TrackEffect] {
@@ -286,6 +305,47 @@ impl TrackWriteService {
         }
 
         Ok(result)
+    }
+
+    pub async fn apply_track_ledger_event(
+        &self,
+        id: &str,
+        event: TrackLedgerEvent,
+    ) -> Result<ApplyTrackLedgerEventResult> {
+        self.mutate_track(id, |manager| match &event {
+            TrackLedgerEvent::Execution(update) => {
+                let mut order_update = update.order_update.clone();
+                order_update.realized_pnl = 0.0;
+                let (transition, absorb_result) =
+                    manager.observe_order_update(&TrackId::new(id), order_update)?;
+                manager.apply_ledger_adjustment(
+                    &TrackId::new(id),
+                    &update.ledger_deltas,
+                    &update.ledger_gaps,
+                )?;
+                Ok(ApplyTrackLedgerEventResult {
+                    absorb_result: Some(absorb_result),
+                    order_status: Some(update.order_update.status),
+                    domain_events: transition.events,
+                    effects: transition.effects,
+                })
+            }
+            TrackLedgerEvent::Adjustment(update) => {
+                manager.apply_ledger_adjustment(
+                    &TrackId::new(id),
+                    &update.ledger_deltas,
+                    &update.ledger_gaps,
+                )?;
+                Ok(ApplyTrackLedgerEventResult {
+                    absorb_result: None,
+                    order_status: None,
+                    domain_events: Vec::new(),
+                    effects: Vec::new(),
+                })
+            }
+        })
+        .await
+        .map_err(anyhow::Error::new)
     }
 
     pub async fn sync_exchange_state(

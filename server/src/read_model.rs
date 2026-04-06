@@ -71,6 +71,7 @@ impl TrackReadModel {
             manual_target_override,
             executor_state,
             replacement_gate_reason,
+            ledger_state: _,
             risk,
             observed,
         } = snapshot;
