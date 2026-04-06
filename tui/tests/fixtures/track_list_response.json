@@ -20,8 +20,9 @@
         "execution_status": "normal",
         "active_slot_count": 1
       },
-      "pnl": {
-        "total_pnl": 1245.3
+      "ledger": {
+        "total_pnl": 1229.0,
+        "has_unresolved_gaps": false
       }
     }
   ]

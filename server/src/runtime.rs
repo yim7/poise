@@ -765,6 +765,35 @@ async fn apply_user_data_event(
                     .await;
             }
         }
+        UserDataPayload::TrackLedger(update) => {
+            let result = state
+                .write_service
+                .apply_track_ledger_event(track_id, update.event)
+                .await
+                .map_err(preserve_track_mutation_error)?;
+            if result.absorb_result == Some(poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed)
+            {
+                state
+                    .exchange_freshness
+                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
+                    .await;
+                enqueue_reconcile_request(
+                    state,
+                    exchange,
+                    ReconcileRequest {
+                        track_id: track_id.to_string(),
+                        reason: ReconcileReason::UnabsorbedOrderUpdate,
+                    },
+                    &instrument,
+                )
+                .await?;
+            } else if result.order_status == Some(poise_engine::ports::OrderStatus::Filled) {
+                state
+                    .exchange_freshness
+                    .mark_stale(track_id, ExchangeFreshnessReason::FilledAwaitingSync)
+                    .await;
+            }
+        }
     }
 
     Ok(())
@@ -1010,13 +1039,15 @@ mod tests {
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::ExecutionAction;
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::ledger::{ExecutionLedgerUpdate, LedgerDelta, TrackLedgerEvent};
     use poise_engine::manager::{ExchangeSyncMode, TrackManager};
+    use poise_engine::observation::OrderObservation;
     use poise_engine::ports::{
         AccountCapacitySnapshot, ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
         ExchangeInfo, ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort,
         OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
-        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
-        TrackSnapshot, UserDataEvent, UserDataPayload,
+        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackLedgerUpdate,
+        TrackReadRepositoryPort, TrackSnapshot, UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -3736,6 +3767,7 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
+            ledger_state: Default::default(),
             risk: RiskState::default(),
             observed: poise_engine::snapshot::ObservedState {
                 reference_price: Some(100.0),
@@ -4921,6 +4953,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_user_data_event_persists_track_ledger_event_atomically() {
+        let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        let mut snapshot = test_snapshot();
+        snapshot.observed.reference_price = Some(95.0);
+        set_executor_state(
+            &mut snapshot,
+            working_order(
+                Some("fill-1"),
+                "fill-1",
+                Side::Buy,
+                94.5,
+                test_config().base_qty_per_unit() * 2.0,
+                Exposure(4.0),
+                OrderStatus::New,
+            ),
+            SlotState::Working,
+        );
+        let state = test_state(
+            exchange.clone() as Arc<dyn ExchangePort>,
+            persistence.clone(),
+            Some(snapshot),
+            test_budget(),
+        )
+        .await;
+
+        super::apply_user_data_event(
+            &state,
+            &(exchange.clone() as Arc<dyn ExchangePort>),
+            "BTCUSDT",
+            UserDataEvent {
+                event_time: test_server_time() + chrono::Duration::milliseconds(1),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
+                        order_update: OrderObservation {
+                            order_id: "fill-1".into(),
+                            client_order_id: "fill-1".into(),
+                            side: Side::Buy,
+                            price: 94.5,
+                            quantity: 7.5,
+                            realized_pnl: 12.34,
+                            status: OrderStatus::Filled,
+                        },
+                        ledger_deltas: vec![
+                            LedgerDelta::GrossRealizedPnl(12.34),
+                            LedgerDelta::TradingFee(3.2),
+                        ],
+                        ledger_gaps: vec![],
+                    }),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(persistence.save_transition_count.load(Ordering::SeqCst), 1);
+        let instance = current_instance(&state).await;
+        assert!((instance.ledger_state.gross_realized_pnl_cumulative - 12.34).abs() < f64::EPSILON);
+        assert!((instance.ledger_state.trading_fee_cumulative - 3.2).abs() < f64::EPSILON);
+        assert!(inventory_core_order(&instance).is_none());
+    }
+
+    #[tokio::test]
     async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
         let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
         let persistence = Arc::new(MemoryPersistence::default());
@@ -5972,6 +6068,7 @@ mod tests {
             manual_target_override: None,
             executor_state: ExecutorState::empty(test_server_time()),
             replacement_gate_reason: None,
+            ledger_state: Default::default(),
             risk: RiskState::default(),
             observed: poise_engine::snapshot::ObservedState {
                 reference_price: Some(95.0),

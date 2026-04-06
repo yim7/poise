@@ -225,11 +225,19 @@ fn strategy_lines(
 }
 
 fn pnl_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
-    vec![format_pnl_summary_line(
-        detail.pnl.total_pnl,
-        detail.pnl.realized_pnl,
-        detail.pnl.unrealized_pnl,
-    )]
+    vec![
+        format_pnl_summary_line(
+            detail.ledger.total_pnl,
+            detail.ledger.unrealized_pnl,
+            detail.ledger.gross_realized_pnl,
+            detail.ledger.net_realized_pnl,
+        ),
+        format_pnl_cost_line(
+            detail.ledger.trading_fee_cumulative,
+            detail.ledger.funding_fee_cumulative,
+        ),
+        format_ledger_gap_line(&detail.ledger.unresolved_gaps),
+    ]
 }
 
 fn execution_stats_lines(
@@ -549,21 +557,71 @@ fn format_exposure_line(
 
 fn format_pnl_summary_line(
     total_pnl: f64,
-    realized_pnl: f64,
     unrealized_pnl: f64,
+    gross_realized_pnl: f64,
+    net_realized_pnl: f64,
 ) -> Line<'static> {
     let total = pnl_signal(total_pnl);
     let unrealized = pnl_signal(unrealized_pnl);
-    let realized = pnl_signal(realized_pnl);
+    let gross_realized = pnl_signal(gross_realized_pnl);
+    let net_realized = pnl_signal(net_realized_pnl);
 
     Line::from(vec![
         Span::raw("total "),
         Span::styled(total.text, total.style),
         Span::raw(" | unrealized "),
         Span::styled(unrealized.text, unrealized.style),
-        Span::raw(" | realized cumulative "),
-        Span::styled(realized.text, realized.style),
+        Span::raw(" | gross realized "),
+        Span::styled(gross_realized.text, gross_realized.style),
+        Span::raw(" | net realized "),
+        Span::styled(net_realized.text, net_realized.style),
     ])
+}
+
+fn format_pnl_cost_line(trading_fee_cumulative: f64, funding_fee_cumulative: f64) -> Line<'static> {
+    let trading_fee = pnl_signal(-trading_fee_cumulative);
+    let funding_fee = pnl_signal(funding_fee_cumulative);
+
+    Line::from(vec![
+        Span::raw("fee cumulative "),
+        Span::styled(trading_fee.text, trading_fee.style),
+        Span::raw(" | funding cumulative "),
+        Span::styled(funding_fee.text, funding_fee.style),
+    ])
+}
+
+fn format_ledger_gap_line(gaps: &[crate::protocol::TrackLedgerGapView]) -> Line<'static> {
+    if gaps.is_empty() {
+        return Line::from("ledger gaps: none");
+    }
+
+    let first = &gaps[0];
+    let mut summary = format!(
+        "ledger gaps: {} ({})",
+        format_ledger_gap_reason(first.reason),
+        first.observed_at
+    );
+    if gaps.len() > 1 {
+        summary.push_str(&format!(" | +{} more", gaps.len() - 1));
+    }
+
+    Line::from(summary)
+}
+
+fn format_ledger_gap_reason(reason: crate::protocol::TrackLedgerGapReasonView) -> &'static str {
+    match reason {
+        crate::protocol::TrackLedgerGapReasonView::UnsupportedCommissionAsset => {
+            "unsupported commission asset"
+        }
+        crate::protocol::TrackLedgerGapReasonView::MissingCommissionAsset => {
+            "missing commission asset"
+        }
+        crate::protocol::TrackLedgerGapReasonView::MissingSymbol => "missing symbol",
+        crate::protocol::TrackLedgerGapReasonView::UnsupportedFundingAsset => {
+            "unsupported funding asset"
+        }
+        crate::protocol::TrackLedgerGapReasonView::Unknown => "unknown ledger gap",
+    }
 }
 
 fn status_command_hint(commands: &[TrackCommandView]) -> String {
@@ -596,8 +654,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::timestamp_display::format_local_timestamp_for_display;
-
-    use super::render;
+    use super::{pnl_lines, render};
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         terminal
@@ -635,6 +692,13 @@ mod tests {
 
     fn render_text(detail: TrackDetailView) -> String {
         render_text_with_size(detail, 100, 36)
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     fn render_text_with_debug(
@@ -679,7 +743,7 @@ mod tests {
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
 
-        let text = render_text(detail);
+        let text = render_text_with_size(detail, 160, 36);
 
         assert!(text.contains("Track"));
         assert!(text.contains("PnL"));
@@ -804,7 +868,18 @@ mod tests {
             enabled: false,
             disabled_reason: Some("no position to flatten".to_string()),
         });
-        let text = render_text(detail);
+        let expected_stats_started_at = format_local_timestamp_for_display(
+            detail
+                .execution_stats
+                .stats_started_at
+                .as_deref()
+                .expect("fixture should include stats started at"),
+        );
+        let pnl_text = pnl_lines(&detail)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        let text = render_text_with_size(detail, 180, 36);
 
         assert!(text.contains("Market"));
         assert!(text.contains("Strategy"));
@@ -815,8 +890,16 @@ mod tests {
         assert!(text.contains("Activity"));
         assert!(!text.contains("Commands"));
         assert!(text.contains("commands: p pause"));
-        assert!(text.contains("total ↑ +1245.30"));
-        assert!(text.contains("realized cumulative ↑ +980.10"));
+        assert!(pnl_text[0].contains("total ↑ +1229.00"));
+        assert!(pnl_text[0].contains("unrealized ↑ +265.20"));
+        assert!(pnl_text[0].contains("gross realized ↑ +980.10"));
+        assert!(pnl_text[0].contains("net realized ↑ +963.80"));
+        assert!(pnl_text[1].contains("fee cumulative ↓ -12.30"));
+        assert!(pnl_text[1].contains("funding cumulative ↓ -4.00"));
+        assert_eq!(pnl_text[2], "ledger gaps: none");
+        assert!(text.contains(&format!(
+            "execution stats since: {expected_stats_started_at}"
+        )));
         assert!(text.contains("prices: ref 101.2500 | mark 101.3000 | index 101.2000"));
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
@@ -866,15 +949,46 @@ mod tests {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.pnl.total_pnl = -123456789.12;
-        detail.pnl.realized_pnl = 987654321.99;
-        detail.pnl.unrealized_pnl = -111111111.11;
+        detail.ledger.total_pnl = -123456789.12;
+        detail.ledger.gross_realized_pnl = 987654321.99;
+        detail.ledger.net_realized_pnl = 876543210.88;
+        detail.ledger.unrealized_pnl = -111111111.11;
+        detail.ledger.trading_fee_cumulative = 12.34;
+        detail.ledger.funding_fee_cumulative = -5.67;
 
-        let text = render_text(detail);
+        let pnl_text = pnl_lines(&detail)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
 
-        assert!(text.contains("total ↓ -123456789.12"));
-        assert!(text.contains("unrealized ↓ -111111111.11"));
-        assert!(text.contains("realized cumulative ↑ +987654321.99"));
+        assert!(pnl_text[0].contains("total ↓ -123456789.12"));
+        assert!(pnl_text[0].contains("unrealized ↓ -111111111.11"));
+        assert!(pnl_text[0].contains("gross realized ↑ +987654321.99"));
+        assert!(pnl_text[0].contains("net realized ↑ +876543210.88"));
+        assert!(pnl_text[1].contains("fee cumulative ↓ -12.34"));
+        assert!(pnl_text[1].contains("funding cumulative ↓ -5.67"));
+    }
+
+    #[test]
+    fn renders_ledger_gap_summary_when_unresolved_gap_exists() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.ledger.unresolved_gaps = vec![crate::protocol::TrackLedgerGapView {
+            gap_key: "gap-1".to_string(),
+            reason: crate::protocol::TrackLedgerGapReasonView::UnsupportedCommissionAsset,
+            observed_at: "2026-04-06T10:00:00Z".to_string(),
+        }];
+
+        let pnl_text = pnl_lines(&detail)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            pnl_text[2],
+            "ledger gaps: unsupported commission asset (2026-04-06T10:00:00Z)"
+        );
     }
 
     #[test]

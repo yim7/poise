@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
+use poise_engine::ledger::TrackLedgerState;
 use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
 use poise_engine::ports::{PersistedTrackEffect, StoredTrackEvent};
 use poise_engine::runtime::{SlotState, TrackStatus};
@@ -25,7 +26,7 @@ pub struct TrackReadModel {
     pub reference_price: Option<f64>,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
-    pub realized_pnl_cumulative: f64,
+    pub ledger_state: TrackLedgerState,
     pub unrealized_pnl: f64,
     pub executor_mode: ExecutionMode,
     pub inventory_gap: f64,
@@ -71,6 +72,7 @@ impl TrackReadModel {
             manual_target_override,
             executor_state,
             replacement_gate_reason,
+            ledger_state,
             risk,
             observed,
         } = snapshot;
@@ -109,7 +111,7 @@ impl TrackReadModel {
             reference_price: observed.reference_price,
             current_exposure: current_exposure.0,
             desired_exposure: desired_exposure.map(|value| value.0),
-            realized_pnl_cumulative: risk.realized_pnl_cumulative,
+            ledger_state,
             unrealized_pnl: risk.unrealized_pnl,
             executor_mode: executor_state.diagnostics.mode.clone(),
             inventory_gap: executor_state.diagnostics.inventory_gap.0,

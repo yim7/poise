@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use poise_core::events::DomainEvent;
 use poise_core::types::Side;
 
+use crate::ledger::TrackLedgerEvent;
 use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
 use crate::transition::TrackEffect;
@@ -117,6 +118,13 @@ pub struct AccountSummarySnapshot {
 pub enum UserDataPayload {
     OrderUpdate(ExchangeOrder),
     PositionUpdate(Position),
+    TrackLedger(TrackLedgerUpdate),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackLedgerUpdate {
+    pub instrument: Instrument,
+    pub event: TrackLedgerEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +138,7 @@ impl UserDataEvent {
         match &self.payload {
             UserDataPayload::OrderUpdate(order) => &order.instrument,
             UserDataPayload::PositionUpdate(position) => &position.instrument,
+            UserDataPayload::TrackLedger(update) => &update.instrument,
         }
     }
 }

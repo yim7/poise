@@ -226,6 +226,7 @@ mod tests {
                         max_gap_age_ms: 0,
                     },
                 },
+                ledger_state: Default::default(),
                 replacement_gate_reason: None,
                 risk: RiskState {
                     realized_pnl_day: None,
@@ -416,6 +417,7 @@ mod tests {
                     max_gap_age_ms: 0,
                 },
             },
+            ledger_state: Default::default(),
             replacement_gate_reason: None,
             risk: RiskState {
                 realized_pnl_day: None,

@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.execution.active_slot_count,
         );
         let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
-        let total_pnl = pnl_signal(item.pnl.total_pnl);
+        let total_pnl = pnl_signal(item.ledger.total_pnl);
 
         Row::new(vec![
             Cell::from(item.id.clone()),
@@ -193,7 +193,7 @@ mod tests {
         assert!(text.contains("BTCUSDT"));
         assert!(text.contains("PnL"));
         assert!(text.contains("3.5000 | ↑ +0.5000"));
-        assert!(text.contains("↑ +1245.30"));
+        assert!(text.contains("↑ +1229.00"));
         assert!(text.contains("Execution"));
         assert!(text.contains("open"));
     }
@@ -241,7 +241,7 @@ mod tests {
                         "reference_price": 101.25,
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
-                        "pnl": {"total_pnl": -245.3}
+                        "ledger": {"total_pnl": -245.3, "has_unresolved_gaps": false}
                     }
                 ]
             }"#,
@@ -280,7 +280,7 @@ mod tests {
         );
 
         let row = buffer_line_containing(&terminal, "BTCUSDT").unwrap();
-        let row_gap = row.find("↑ +1245.30").unwrap() - row.find("3.5000").unwrap();
+        let row_gap = row.find("↑ +1229.00").unwrap() - row.find("3.5000").unwrap();
         assert!(
             row_gap >= 24,
             "row should keep Exposure and PnL apart, line: {row:?}"

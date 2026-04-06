@@ -10,6 +10,7 @@ use poise_core::types::Exposure;
 
 use crate::command::TrackCommand;
 use crate::executor;
+use crate::ledger::{LedgerDelta, LedgerGapRecord};
 use crate::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
@@ -147,6 +148,50 @@ impl TrackManager {
         };
 
         Ok((self.transition_for(id, events, effects)?, absorb_result))
+    }
+
+    pub fn apply_ledger_adjustment(
+        &mut self,
+        id: &TrackId,
+        deltas: &[LedgerDelta],
+        gaps: &[LedgerGapRecord],
+    ) -> Result<()> {
+        let today = self.clock.now().date_naive();
+        let track = self
+            .tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+
+        if track.ledger_state.is_empty()
+            && (track.risk_state.realized_pnl_day.is_some()
+                || track.risk_state.realized_pnl_today.abs() > f64::EPSILON
+                || track.risk_state.realized_pnl_cumulative.abs() > f64::EPSILON)
+        {
+            track.ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
+                track.risk_state.realized_pnl_day,
+                track.risk_state.realized_pnl_today,
+                track.risk_state.realized_pnl_cumulative,
+            );
+        }
+
+        for delta in deltas {
+            track.ledger_state.apply_delta(today, delta);
+        }
+        for gap in gaps {
+            if track
+                .ledger_state
+                .unresolved_gaps
+                .iter()
+                .all(|existing| existing.gap_key != gap.gap_key)
+            {
+                track.ledger_state.record_gap(gap.clone());
+            }
+        }
+        track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
+        track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
+        track.risk_state.realized_pnl_cumulative =
+            track.ledger_state.gross_realized_pnl_cumulative;
+        Ok(())
     }
 
     pub fn sync_exchange_state(
@@ -606,14 +651,24 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
 
-        if track.risk_state.realized_pnl_day != Some(today) {
-            track.risk_state.realized_pnl_day = Some(today);
-            track.risk_state.realized_pnl_today = 0.0;
+        if track.ledger_state.is_empty()
+            && (track.risk_state.realized_pnl_day.is_some()
+                || track.risk_state.realized_pnl_today.abs() > f64::EPSILON
+                || track.risk_state.realized_pnl_cumulative.abs() > f64::EPSILON)
+        {
+            track.ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
+                track.risk_state.realized_pnl_day,
+                track.risk_state.realized_pnl_today,
+                track.risk_state.realized_pnl_cumulative,
+            );
         }
-        if observation.realized_pnl.abs() > f64::EPSILON {
-            track.risk_state.realized_pnl_today += observation.realized_pnl;
-            track.risk_state.realized_pnl_cumulative += observation.realized_pnl;
-        }
+        track
+            .ledger_state
+            .apply_gross_realized_pnl(today, observation.realized_pnl);
+        track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
+        track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
+        track.risk_state.realized_pnl_cumulative =
+            track.ledger_state.gross_realized_pnl_cumulative;
 
         if track.executor_state.diagnostics.recovery_anomaly.is_some() {
             return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
@@ -937,6 +992,8 @@ fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use serde_json::json;
 
     use super::*;
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
@@ -3559,6 +3616,59 @@ mod tests {
                 poise_core::types::Exposure(6.0),
                 OrderStatus::New,
             ))
+        );
+    }
+
+    #[test]
+    fn apply_execution_ledger_event_updates_order_and_ledger_in_one_step() {
+        let clock = Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+        ));
+        let mut manager = test_manager_with_clock(clock);
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let request = OrderRequest {
+            instrument: test_instrument("BTCUSDT"),
+            client_order_id: "client-1".into(),
+            side: poise_core::types::Side::Buy,
+            price: 94.5,
+            quantity: 0.25,
+            reduce_only: false,
+        };
+        manager
+            .record_submit_request(
+                &TrackId::new("btc1"),
+                &request,
+                poise_core::types::Exposure(6.0),
+            )
+            .unwrap();
+
+        let (_, absorb_result) = manager
+            .observe_order_update(
+                &TrackId::new("btc1"),
+                OrderObservation {
+                    order_id: "order-1".into(),
+                    client_order_id: "client-1".into(),
+                    side: poise_core::types::Side::Buy,
+                    price: 94.5,
+                    quantity: 0.25,
+                    realized_pnl: -12.5,
+                    status: OrderStatus::PartiallyFilled,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(absorb_result, crate::executor::OrderUpdateAbsorbResult::Applied);
+        let track = manager.get_track("btc1").unwrap();
+        assert_eq!(
+            inventory_core_order(track).map(|order| order.status),
+            Some(OrderStatus::PartiallyFilled)
+        );
+
+        let snapshot = serde_json::to_value(manager.snapshot("btc1").unwrap()).unwrap();
+        assert_eq!(
+            snapshot["ledger_state"]["gross_realized_pnl_cumulative"],
+            json!(-12.5)
         );
     }
 

@@ -14,7 +14,12 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
 };
 
-use poise_engine::ports::{PriceTick, UserDataEvent, UserDataPayload};
+use poise_engine::ledger::{
+    ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord,
+    TrackLedgerEvent,
+};
+use poise_engine::observation::OrderObservation;
+use poise_engine::ports::{PriceTick, TrackLedgerUpdate, UserDataEvent, UserDataPayload};
 use poise_engine::track::{Instrument, Venue};
 
 use crate::rest::BinanceRestClient;
@@ -494,18 +499,67 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
             let order = envelope
                 .order
                 .context("missing order payload for ORDER_TRADE_UPDATE")?;
+            let realized_pnl = parse_decimal("o.rp", &order.realized_pnl)?;
+            let price = parse_decimal("o.p", &order.price)?;
+            let quantity = parse_decimal("o.q", &order.quantity)?;
+            let instrument = Instrument::new(Venue::Binance, order.symbol.clone());
+            let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(realized_pnl)];
+            let mut ledger_gaps = Vec::new();
+            if let Some(commission_amount) = order
+                .commission_amount
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                let commission_amount = parse_decimal("o.n", commission_amount)?;
+                if commission_amount.abs() > f64::EPSILON {
+                    match (
+                        order.commission_asset.as_deref(),
+                        quote_asset_for_symbol(&order.symbol),
+                    ) {
+                        (Some(asset), Some(quote_asset)) if asset == quote_asset => {
+                            ledger_deltas.push(LedgerDelta::TradingFee(commission_amount));
+                        }
+                        (Some(_), _) => ledger_gaps.push(LedgerGapRecord {
+                            gap_key: format!(
+                                "binance:order_trade_update:{}:{}:commission_asset",
+                                order.symbol.to_lowercase(),
+                                order.order_id
+                            ),
+                            reason: LedgerGapReason::UnsupportedCommissionAsset,
+                            observed_at: event_time,
+                            source: "binance:order_trade_update".into(),
+                        }),
+                        (None, _) => ledger_gaps.push(LedgerGapRecord {
+                            gap_key: format!(
+                                "binance:order_trade_update:{}:{}:missing_commission_asset",
+                                order.symbol.to_lowercase(),
+                                order.order_id
+                            ),
+                            reason: LedgerGapReason::MissingCommissionAsset,
+                            observed_at: event_time,
+                            source: "binance:order_trade_update".into(),
+                        }),
+                    }
+                }
+            }
 
             Ok(UserStreamMessage::Events(vec![UserDataEvent {
                 event_time,
-                payload: UserDataPayload::OrderUpdate(poise_engine::ports::ExchangeOrder {
-                    instrument: Instrument::new(Venue::Binance, order.symbol),
-                    order_id: order.order_id.to_string(),
-                    client_order_id: order.client_order_id,
-                    side: parse_side(&order.side)?,
-                    price: parse_decimal("o.p", &order.price)?,
-                    qty: parse_decimal("o.q", &order.quantity)?,
-                    realized_pnl: parse_decimal("o.rp", &order.realized_pnl)?,
-                    status: parse_order_status(&order.status)?,
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument,
+                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
+                        order_update: OrderObservation {
+                            order_id: order.order_id.to_string(),
+                            client_order_id: order.client_order_id,
+                            side: parse_side(&order.side)?,
+                            price,
+                            quantity,
+                            realized_pnl,
+                            status: parse_order_status(&order.status)?,
+                        },
+                        ledger_deltas,
+                        ledger_gaps,
+                    }),
                 }),
             }]))
         }
@@ -513,6 +567,53 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
             let account = envelope
                 .account
                 .context("missing account payload for ACCOUNT_UPDATE")?;
+            if account.reason.as_deref() == Some("FUNDING_FEE") {
+                let Some(symbol) = account
+                    .positions
+                    .iter()
+                    .map(|position| position.symbol.as_str())
+                    .find(|symbol| !symbol.is_empty())
+                else {
+                    return Ok(UserStreamMessage::Events(Vec::new()));
+                };
+                let Some(balance) = account
+                    .balances
+                    .iter()
+                    .find(|balance| balance.balance_change != "0" && balance.balance_change != "0.0")
+                else {
+                    return Ok(UserStreamMessage::Events(Vec::new()));
+                };
+                let balance_change = parse_decimal("a.B.bc", &balance.balance_change)?;
+                let mut ledger_deltas = Vec::new();
+                let mut ledger_gaps = Vec::new();
+                match quote_asset_for_symbol(symbol) {
+                    Some(quote_asset) if quote_asset == balance.asset => {
+                        ledger_deltas.push(LedgerDelta::FundingFee(balance_change));
+                    }
+                    _ => ledger_gaps.push(LedgerGapRecord {
+                        gap_key: format!(
+                            "binance:funding_fee:{}:{}:asset",
+                            symbol.to_lowercase(),
+                            balance.asset.to_lowercase()
+                        ),
+                        reason: LedgerGapReason::UnsupportedFundingAsset,
+                        observed_at: event_time,
+                        source: "binance:funding_fee".into(),
+                    }),
+                }
+
+                return Ok(UserStreamMessage::Events(vec![UserDataEvent {
+                    event_time,
+                    payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                        instrument: Instrument::new(Venue::Binance, symbol.to_string()),
+                        event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                            ledger_deltas,
+                            ledger_gaps,
+                            source: "binance:funding_fee".into(),
+                        }),
+                    }),
+                }]));
+            }
 
             let events = account
                 .positions
@@ -556,6 +657,12 @@ fn parse_side(value: &str) -> Result<poise_core::types::Side> {
     }
 }
 
+fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
+    ["USDT", "USDC", "FDUSD", "BUSD"]
+        .into_iter()
+        .find(|quote| symbol.ends_with(quote))
+}
+
 #[derive(Debug, Deserialize)]
 struct MarkPriceMessage {
     #[serde(rename = "E")]
@@ -594,14 +701,30 @@ struct OrderTradeUpdate {
     quantity: String,
     #[serde(rename = "rp")]
     realized_pnl: String,
+    #[serde(rename = "n")]
+    commission_amount: Option<String>,
+    #[serde(rename = "N")]
+    commission_asset: Option<String>,
     #[serde(rename = "X")]
     status: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct AccountUpdate {
+    #[serde(rename = "m")]
+    reason: Option<String>,
+    #[serde(rename = "B", default)]
+    balances: Vec<AccountBalanceUpdate>,
     #[serde(rename = "P")]
     positions: Vec<AccountPositionUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountBalanceUpdate {
+    #[serde(rename = "a")]
+    asset: String,
+    #[serde(rename = "bc")]
+    balance_change: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -640,7 +763,12 @@ mod tests {
     };
 
     use poise_core::types::Side;
-    use poise_engine::ports::{ExchangeOrder, OrderStatus, Position, UserDataPayload};
+    use poise_engine::ledger::{
+        ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapRecord,
+        TrackLedgerEvent,
+    };
+    use poise_engine::observation::OrderObservation;
+    use poise_engine::ports::{OrderStatus, Position, TrackLedgerUpdate, UserDataPayload};
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
@@ -691,15 +819,157 @@ mod tests {
             events,
             UserStreamMessage::Events(vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    order_id: "12345".to_string(),
-                    client_order_id: "grid-order-004".to_string(),
-                    side: Side::Sell,
-                    price: 65000.5,
-                    qty: 0.02,
-                    realized_pnl: 12.34,
-                    status: OrderStatus::Filled,
+                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
+                        order_update: OrderObservation {
+                            order_id: "12345".into(),
+                            client_order_id: "grid-order-004".into(),
+                            side: Side::Sell,
+                            price: 65000.5,
+                            quantity: 0.02,
+                            realized_pnl: 12.34,
+                            status: OrderStatus::Filled,
+                        },
+                        ledger_deltas: vec![LedgerDelta::GrossRealizedPnl(12.34)],
+                        ledger_gaps: vec![],
+                    }),
+                }),
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_order_trade_update_into_track_ledger_execution_event() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDT",
+                "i": 12345,
+                "c": "grid-order-004",
+                "S": "SELL",
+                "p": "65000.5",
+                "q": "0.020",
+                "rp": "12.34",
+                "n": "3.2",
+                "N": "USDT",
+                "X": "FILLED"
+            }
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            events,
+            UserStreamMessage::Events(vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
+                        order_update: OrderObservation {
+                            order_id: "12345".into(),
+                            client_order_id: "grid-order-004".into(),
+                            side: Side::Sell,
+                            price: 65000.5,
+                            quantity: 0.02,
+                            realized_pnl: 12.34,
+                            status: OrderStatus::Filled,
+                        },
+                        ledger_deltas: vec![
+                            LedgerDelta::GrossRealizedPnl(12.34),
+                            LedgerDelta::TradingFee(3.2),
+                        ],
+                        ledger_gaps: vec![],
+                    }),
+                }),
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_funding_fee_account_update_into_track_ledger_adjustment_event() {
+        let payload = r#"{
+            "e": "ACCOUNT_UPDATE",
+            "E": 1700000000000,
+            "a": {
+                "m": "FUNDING_FEE",
+                "B": [{
+                    "a": "USDT",
+                    "bc": "-1.5"
+                }],
+                "P": [{
+                    "s": "BTCUSDT",
+                    "pa": "0.015",
+                    "ep": "64200.0",
+                    "up": "12.3"
+                }]
+            }
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            events,
+            UserStreamMessage::Events(vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                        ledger_deltas: vec![LedgerDelta::FundingFee(-1.5)],
+                        ledger_gaps: vec![],
+                        source: "binance:funding_fee".into(),
+                    }),
+                }),
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_unsupported_commission_asset_into_execution_gap_record() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDT",
+                "i": 12345,
+                "c": "grid-order-004",
+                "S": "SELL",
+                "p": "65000.5",
+                "q": "0.020",
+                "rp": "12.34",
+                "n": "0.01",
+                "N": "BNB",
+                "X": "FILLED"
+            }
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            events,
+            UserStreamMessage::Events(vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
+                        order_update: OrderObservation {
+                            order_id: "12345".into(),
+                            client_order_id: "grid-order-004".into(),
+                            side: Side::Sell,
+                            price: 65000.5,
+                            quantity: 0.02,
+                            realized_pnl: 12.34,
+                            status: OrderStatus::Filled,
+                        },
+                        ledger_deltas: vec![LedgerDelta::GrossRealizedPnl(12.34)],
+                        ledger_gaps: vec![LedgerGapRecord {
+                            gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
+                            reason: LedgerGapReason::UnsupportedCommissionAsset,
+                            observed_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                            source: "binance:order_trade_update".into(),
+                        }],
+                    }),
                 }),
             }])
         );

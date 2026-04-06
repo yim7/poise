@@ -215,6 +215,7 @@ mod tests {
         events::DomainEvent,
         types::{ExchangeRules, Exposure},
     };
+    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
     use poise_engine::ports::{
@@ -339,8 +340,7 @@ mod tests {
         let mut snapshot = manager
             .snapshot("btc-core")
             .expect("seeded manager should expose runtime snapshot");
-        snapshot.risk.realized_pnl_cumulative = 980.1;
-        snapshot.risk.unrealized_pnl = 265.2;
+        seed_snapshot_ledger(&mut snapshot);
         repository
             .save_transition(
                 "btc-core",
@@ -380,8 +380,7 @@ mod tests {
         let mut snapshot = manager
             .snapshot("btc-core")
             .expect("seeded manager should expose runtime snapshot");
-        snapshot.risk.realized_pnl_cumulative = 980.1;
-        snapshot.risk.unrealized_pnl = 265.2;
+        seed_snapshot_ledger(&mut snapshot);
         repository
             .save_transition(
                 "btc-core",
@@ -492,6 +491,32 @@ mod tests {
         slot_order.status = OrderStatus::New;
         manager.restore_track_state(&snapshot).unwrap();
         manager
+    }
+
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::ports::TrackSnapshot) {
+        snapshot.risk.realized_pnl_cumulative = 980.1;
+        snapshot.risk.unrealized_pnl = 265.2;
+        snapshot.ledger_state.realized_pnl_day =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap());
+        snapshot.ledger_state.gross_realized_pnl_today = 980.1;
+        snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
+        snapshot.ledger_state.trading_fee_cumulative = 12.3;
+        snapshot.ledger_state.funding_fee_cumulative = -4.0;
+        snapshot.ledger_state.unresolved_gaps = vec![
+            LedgerGapRecord {
+                gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
+                reason: LedgerGapReason::UnsupportedCommissionAsset,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                source: "ORDER_TRADE_UPDATE".into(),
+            },
+            LedgerGapRecord {
+                gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
+                    .into(),
+                reason: LedgerGapReason::MissingSymbol,
+                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+                source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
+            },
+        ];
     }
 
     #[tokio::test]
@@ -606,9 +631,18 @@ mod tests {
             payload_json["strategy"]["min_rebalance_units"].as_f64(),
             Some(0.5)
         );
-        assert!((payload.pnl.realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((payload.pnl.total_pnl - 1245.3).abs() < f64::EPSILON);
-        assert!((payload.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+        assert_eq!(
+            payload_json["ledger"]["gross_realized_pnl"].as_f64(),
+            Some(980.1)
+        );
+        assert!(
+            (payload_json["ledger"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9
+        );
+        assert!((payload_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
+        assert_eq!(
+            payload_json["ledger"]["unrealized_pnl"].as_f64(),
+            Some(265.2)
+        );
         assert_eq!(
             payload_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
             Some(payload.execution_stats.max_inventory_gap_abs)

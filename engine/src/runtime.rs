@@ -7,6 +7,7 @@ use poise_core::risk::CapacityBudget;
 use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
+use crate::ledger::TrackLedgerState;
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
@@ -262,6 +263,7 @@ pub struct TrackRuntime {
     pub(crate) manual_target_override: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
+    pub(crate) ledger_state: TrackLedgerState,
     pub(crate) risk_state: RiskState,
     pub(crate) reference_price: Option<f64>,
     pub(crate) out_of_band_since: Option<DateTime<Utc>>,
@@ -311,6 +313,7 @@ impl TrackRuntime {
             manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
+            ledger_state: TrackLedgerState::default(),
             risk_state: RiskState::default(),
             reference_price: None,
             out_of_band_since: None,
@@ -341,6 +344,19 @@ impl TrackRuntime {
     }
 
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
+        let ledger_state = if self.ledger_state.is_empty()
+            && (self.risk_state.realized_pnl_day.is_some()
+                || self.risk_state.realized_pnl_today.abs() > f64::EPSILON
+                || self.risk_state.realized_pnl_cumulative.abs() > f64::EPSILON)
+        {
+            TrackLedgerState::from_legacy_realized(
+                self.risk_state.realized_pnl_day,
+                self.risk_state.realized_pnl_today,
+                self.risk_state.realized_pnl_cumulative,
+            )
+        } else {
+            self.ledger_state.clone()
+        };
         TrackRuntimeSnapshot {
             track_id: self.id.clone(),
             instrument: self.instrument.clone(),
@@ -351,6 +367,7 @@ impl TrackRuntime {
             manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
+            ledger_state,
             risk: self.risk_state.clone(),
             observed: ObservedState {
                 reference_price: self.reference_price,
@@ -389,6 +406,19 @@ impl TrackRuntime {
         self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
+        self.ledger_state = if snapshot.ledger_state.is_empty()
+            && (snapshot.risk.realized_pnl_day.is_some()
+                || snapshot.risk.realized_pnl_today.abs() > f64::EPSILON
+                || snapshot.risk.realized_pnl_cumulative.abs() > f64::EPSILON)
+        {
+            TrackLedgerState::from_legacy_realized(
+                snapshot.risk.realized_pnl_day,
+                snapshot.risk.realized_pnl_today,
+                snapshot.risk.realized_pnl_cumulative,
+            )
+        } else {
+            snapshot.ledger_state.clone()
+        };
         self.risk_state = snapshot.risk.clone();
         self.reference_price = snapshot.observed.reference_price;
         self.out_of_band_since = snapshot.observed.out_of_band_since;
@@ -790,5 +820,118 @@ mod tests {
         let restored: TrackRuntimeSnapshot = serde_json::from_value(snapshot).unwrap();
 
         assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
+    }
+
+    fn future_ledger_snapshot_json() -> serde_json::Value {
+        json!({
+            "track_id": "track-1",
+            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+            "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_exposure_units": 8.0,
+                "short_exposure_units": 8.0,
+                "notional_per_unit": 375.0,
+                "min_rebalance_units": 0.5,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+            },
+            "status": "active",
+            "current_exposure": 4.0,
+            "desired_exposure": 6.0,
+            "executor_state": {
+                "mode": "passive",
+                "inventory_gap": 0.0,
+                "gap_started_at": null,
+                "last_reprice_at": null,
+                "slots": [{
+                    "slot": "inventory_core",
+                    "state": "empty",
+                    "working_order": null
+                }],
+                "last_execution_reason": null,
+                "recovery_anomaly": null,
+                "stats": {
+                    "started_at": "2026-03-29T09:00:00Z",
+                    "max_inventory_gap_abs": 0.0,
+                    "max_gap_age_ms": 0
+                }
+            },
+            "replacement_gate_reason": null,
+            "risk": {
+                "realized_pnl_day": null,
+                "realized_pnl_today": 0.0,
+                "realized_pnl_cumulative": 0.0,
+                "unrealized_pnl": -0.5
+            },
+            "ledger_state": {
+                "realized_pnl_day": "2026-03-29",
+                "gross_realized_pnl_today": 1.0,
+                "gross_realized_pnl_cumulative": 2.0,
+                "trading_fee_cumulative": 0.3,
+                "funding_fee_cumulative": -0.1,
+                "unresolved_gaps": [
+                    {
+                        "gap_key": "binance:order_trade_update:btcusdt:12345:commission_asset",
+                        "reason": "unsupported_commission_asset",
+                        "observed_at": "2026-03-29T08:00:00Z",
+                        "source": "binance:order_trade_update"
+                    },
+                    {
+                        "gap_key": "binance:funding_fee:btcusdt:2026-03-29T08:05:00Z:missing_symbol",
+                        "reason": "missing_symbol",
+                        "observed_at": "2026-03-29T08:05:00Z",
+                        "source": "binance:account_update"
+                    }
+                ]
+            },
+            "observed": {
+                "reference_price": 96.0,
+                "out_of_band_since": null,
+                "last_tick_at": null,
+                "market_data_stale_since": null
+            }
+        })
+    }
+
+    #[test]
+    fn unresolved_gaps_accumulate_without_overwriting_previous_records() {
+        let restored: TrackRuntimeSnapshot =
+            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let roundtrip = serde_json::to_value(restored).unwrap();
+        let gaps = roundtrip["ledger_state"]["unresolved_gaps"]
+            .as_array()
+            .expect("ledger snapshot should persist unresolved gaps");
+
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0]["reason"], json!("unsupported_commission_asset"));
+        assert_eq!(gaps[1]["reason"], json!("missing_symbol"));
+    }
+
+    #[test]
+    fn ledger_state_owns_daily_realized_window() {
+        let restored: TrackRuntimeSnapshot =
+            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let roundtrip = serde_json::to_value(restored).unwrap();
+
+        assert_eq!(roundtrip["ledger_state"]["realized_pnl_day"], json!("2026-03-29"));
+        assert_eq!(roundtrip["ledger_state"]["gross_realized_pnl_today"], json!(1.0));
+        assert_eq!(
+            roundtrip["ledger_state"]["gross_realized_pnl_cumulative"],
+            json!(2.0)
+        );
+    }
+
+    #[test]
+    fn ledger_gap_record_has_stable_gap_key() {
+        let restored: TrackRuntimeSnapshot =
+            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let roundtrip = serde_json::to_value(restored).unwrap();
+        let first_gap = &roundtrip["ledger_state"]["unresolved_gaps"][0];
+
+        assert_eq!(
+            first_gap["gap_key"],
+            json!("binance:order_trade_update:btcusdt:12345:commission_asset")
+        );
     }
 }
