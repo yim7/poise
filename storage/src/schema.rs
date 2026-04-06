@@ -21,6 +21,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             manual_target_override REAL,
             executor_state_json TEXT,
             replacement_gate_reason_json TEXT,
+            ledger_state_json TEXT,
             realized_pnl_day TEXT,
             realized_pnl_today REAL NOT NULL DEFAULT 0,
             realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
@@ -88,6 +89,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "replacement_gate_reason_json",
         "TEXT",
     )?;
+    add_column_if_missing(conn, "track_snapshots", "ledger_state_json", "TEXT")?;
     add_column_if_missing(
         conn,
         "track_snapshots",
@@ -111,6 +113,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "manual_target_override",
             "executor_state_json",
             "replacement_gate_reason_json",
+            "ledger_state_json",
             "realized_pnl_day",
             "realized_pnl_today",
             "realized_pnl_cumulative",

@@ -5,6 +5,7 @@ use poise_core::events::ReplacementGateReason;
 use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
 
+use crate::ledger::TrackLedgerState;
 use crate::runtime::{ExecutorState, RiskState, TrackStatus};
 use crate::track::{Instrument, TrackId};
 
@@ -31,6 +32,8 @@ pub struct TrackRuntimeSnapshot {
     pub executor_state: ExecutorState,
     #[serde(default)]
     pub replacement_gate_reason: Option<ReplacementGateReason>,
+    #[serde(default)]
+    pub ledger_state: TrackLedgerState,
     pub risk: RiskState,
     pub observed: ObservedState,
 }

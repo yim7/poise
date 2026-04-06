@@ -10,6 +10,7 @@ use crate::schema;
 use poise_core::events::{DomainEvent, ReplacementGateReason};
 use poise_core::strategy::{TrackConfig, validate_config};
 use poise_core::types::Exposure;
+use poise_engine::ledger::TrackLedgerState;
 use poise_engine::ports::{
     CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
     PersistedTrackEffect, StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot,
@@ -345,6 +346,21 @@ impl SqliteStorage {
             .map(serde_json::to_string)
             .transpose()
             .context("failed to serialize replacement gate reason")?;
+        let ledger_state = if state.ledger_state.is_empty()
+            && (state.risk.realized_pnl_day.is_some()
+                || state.risk.realized_pnl_today.abs() > f64::EPSILON
+                || state.risk.realized_pnl_cumulative.abs() > f64::EPSILON)
+        {
+            TrackLedgerState::from_legacy_realized(
+                state.risk.realized_pnl_day,
+                state.risk.realized_pnl_today,
+                state.risk.realized_pnl_cumulative,
+            )
+        } else {
+            state.ledger_state.clone()
+        };
+        let ledger_state_json =
+            serde_json::to_string(&ledger_state).context("failed to serialize ledger state")?;
         let realized_pnl_day = state
             .risk
             .realized_pnl_day
@@ -381,6 +397,7 @@ impl SqliteStorage {
                 manual_target_override,
                 executor_state_json,
                 replacement_gate_reason_json,
+                ledger_state_json,
                 realized_pnl_day,
                 realized_pnl_today,
                 realized_pnl_cumulative,
@@ -390,7 +407,7 @@ impl SqliteStorage {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 id,
                 state.instrument.venue.as_str(),
@@ -402,6 +419,7 @@ impl SqliteStorage {
                 state.manual_target_override.as_ref().map(|exposure| exposure.0),
                 executor_state_json,
                 replacement_gate_reason_json,
+                ledger_state_json,
                 realized_pnl_day,
                 state.risk.realized_pnl_today,
                 state.risk.realized_pnl_cumulative,
@@ -521,8 +539,8 @@ impl SqliteStorage {
             .query_row(
                 "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
                         manual_target_override,
-                        executor_state_json, replacement_gate_reason_json, realized_pnl_day,
-                        realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
+                        executor_state_json, replacement_gate_reason_json, ledger_state_json,
+                        realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, last_tick_at, market_data_stale_since
                  FROM track_snapshots
                  WHERE track_id = ?1",
@@ -544,8 +562,8 @@ impl SqliteStorage {
             .query_row(
                 "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
                         manual_target_override,
-                        executor_state_json, replacement_gate_reason_json, realized_pnl_day,
-                        realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
+                        executor_state_json, replacement_gate_reason_json, ledger_state_json,
+                        realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
                  WHERE track_id = ?1",
@@ -564,10 +582,11 @@ impl SqliteStorage {
         let status_json: String = row.get(4)?;
         let executor_state_json: String = row.get(8)?;
         let replacement_gate_reason_json: Option<String> = row.get(9)?;
-        let realized_pnl_day: Option<String> = row.get(10)?;
-        let out_of_band_since: Option<String> = row.get(15)?;
-        let last_tick_at: Option<String> = row.get(16)?;
-        let market_data_stale_since: Option<String> = row.get(17)?;
+        let ledger_state_json: Option<String> = row.get(10)?;
+        let realized_pnl_day: Option<String> = row.get(11)?;
+        let out_of_band_since: Option<String> = row.get(16)?;
+        let last_tick_at: Option<String> = row.get(17)?;
+        let market_data_stale_since: Option<String> = row.get(18)?;
         let config = Self::deserialize_track_config(&config_json)?;
         let status = Self::deserialize_track_status(&status_json)?;
         let venue = Self::deserialize_venue(&venue)?;
@@ -590,9 +609,9 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
-        let realized_pnl_day = realized_pnl_day
-            .map(|value| {
-                NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
+        let ledger_state = ledger_state_json
+            .map(|json| {
+                serde_json::from_str::<TrackLedgerState>(&json).map_err(|err| {
                     rusqlite::Error::FromSqlConversionFailure(
                         10,
                         rusqlite::types::Type::Text,
@@ -601,22 +620,23 @@ impl SqliteStorage {
                 })
             })
             .transpose()?;
-        let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
-        let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
-        let out_of_band_since = out_of_band_since
+        let realized_pnl_day = realized_pnl_day
             .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            15,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
+                NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        11,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })
             })
             .transpose()?;
-        let last_tick_at = last_tick_at
+        let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
+        let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
+        let realized_pnl_today: f64 = row.get(12)?;
+        let realized_pnl_cumulative: f64 = row.get(13)?;
+        let unrealized_pnl: f64 = row.get(14)?;
+        let out_of_band_since = out_of_band_since
             .map(|value| {
                 DateTime::parse_from_rfc3339(&value)
                     .map(|parsed| parsed.with_timezone(&Utc))
@@ -629,13 +649,26 @@ impl SqliteStorage {
                     })
             })
             .transpose()?;
-        let market_data_stale_since = market_data_stale_since
+        let last_tick_at = last_tick_at
             .map(|value| {
                 DateTime::parse_from_rfc3339(&value)
                     .map(|parsed| parsed.with_timezone(&Utc))
                     .map_err(|err| {
                         rusqlite::Error::FromSqlConversionFailure(
                             17,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })
+            })
+            .transpose()?;
+        let market_data_stale_since = market_data_stale_since
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|parsed| parsed.with_timezone(&Utc))
+                    .map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            18,
                             rusqlite::types::Type::Text,
                             Box::new(err),
                         )
@@ -653,15 +686,22 @@ impl SqliteStorage {
             manual_target_override,
             executor_state,
             replacement_gate_reason,
+            ledger_state: ledger_state.unwrap_or_else(|| {
+                TrackLedgerState::from_legacy_realized(
+                    realized_pnl_day,
+                    realized_pnl_today,
+                    realized_pnl_cumulative,
+                )
+            }),
             risk: RiskState {
                 realized_pnl_day,
-                realized_pnl_today: row.get(11)?,
-                realized_pnl_cumulative: row.get(12)?,
-                unrealized_pnl: row.get(13)?,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
                 ..RiskState::default()
             },
             observed: ObservedState {
-                reference_price: row.get(14)?,
+                reference_price: row.get(15)?,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
@@ -672,11 +712,11 @@ impl SqliteStorage {
     fn stored_track_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredTrackSnapshot> {
-        let updated_at: String = row.get(18)?;
+        let updated_at: String = row.get(19)?;
 
         Ok(StoredTrackSnapshot {
             snapshot: Self::track_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 18)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 19)?,
         })
     }
 
@@ -688,8 +728,8 @@ impl SqliteStorage {
             .prepare(
                 "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
                         manual_target_override,
-                        executor_state_json, replacement_gate_reason_json, realized_pnl_day,
-                        realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
+                        executor_state_json, replacement_gate_reason_json, ledger_state_json,
+                        realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
                         reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
                  ORDER BY track_id ASC",
@@ -1209,6 +1249,7 @@ impl TrackReadRepositoryPort for SqliteStorage {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use serde_json::json;
     use std::env;
     use std::fs;
     use std::sync::Arc;
@@ -1224,6 +1265,7 @@ mod tests {
     };
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use poise_engine::ledger::{LedgerGapRecord, TrackLedgerState};
     use poise_engine::ports::{
         EffectStatus, FollowUpRetirementRequest, OrderRequest, OrderStatus, StateRepositoryPort,
         TrackReadRepositoryPort,
@@ -1256,6 +1298,33 @@ mod tests {
             desired_exposure: Some(Exposure(6.0)),
             manual_target_override: Some(Exposure(0.0)),
             replacement_gate_reason: None,
+            ledger_state: TrackLedgerState {
+                realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
+                gross_realized_pnl_today: 12.5,
+                gross_realized_pnl_cumulative: 17.5,
+                trading_fee_cumulative: 3.2,
+                funding_fee_cumulative: -1.5,
+                unresolved_gaps: vec![
+                    LedgerGapRecord {
+                        gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset"
+                            .into(),
+                        reason: "unsupported_commission_asset".into(),
+                        observed_at: DateTime::parse_from_rfc3339("2026-03-24T07:35:00+00:00")
+                            .unwrap()
+                            .with_timezone(&Utc),
+                        source: "binance:order_trade_update".into(),
+                    },
+                    LedgerGapRecord {
+                        gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
+                            .into(),
+                        reason: "missing_symbol".into(),
+                        observed_at: DateTime::parse_from_rfc3339("2026-03-24T08:00:00+00:00")
+                            .unwrap()
+                            .with_timezone(&Utc),
+                        source: "binance:account_update".into(),
+                    },
+                ],
+            },
             risk: RiskState {
                 realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
                 realized_pnl_today: 12.5,
@@ -1690,6 +1759,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!((loaded.risk.realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
+        assert_eq!(loaded, snapshot);
+    }
+
+    #[tokio::test]
+    async fn save_and_load_grid_runtime_snapshot_roundtrip() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition(snapshot.track_id.as_str(), &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let ledger_state_json = {
+            let conn = storage.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT ledger_state_json
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
+                params![snapshot.track_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let ledger_state: serde_json::Value = serde_json::from_str(&ledger_state_json).unwrap();
+        let gaps = ledger_state["unresolved_gaps"]
+            .as_array()
+            .expect("ledger_state_json should persist unresolved gaps");
+        let loaded = storage
+            .load_track_state(snapshot.track_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(
+            gaps[0]["gap_key"],
+            json!("binance:order_trade_update:btcusdt:12345:commission_asset")
+        );
+        assert_eq!(ledger_state["trading_fee_cumulative"], json!(3.2));
+        assert_eq!(ledger_state["funding_fee_cumulative"], json!(-1.5));
         assert_eq!(loaded, snapshot);
     }
 
