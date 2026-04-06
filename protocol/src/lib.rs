@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,11 +131,39 @@ pub struct TrackLedgerView {
     pub unresolved_gaps: Vec<TrackLedgerGapView>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackLedgerGapReasonView {
+    UnsupportedCommissionAsset,
+    MissingCommissionAsset,
+    MissingSymbol,
+    UnsupportedFundingAsset,
+    #[default]
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for TrackLedgerGapReasonView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "unsupported_commission_asset" => Self::UnsupportedCommissionAsset,
+            "missing_commission_asset" => Self::MissingCommissionAsset,
+            "missing_symbol" => Self::MissingSymbol,
+            "unsupported_funding_asset" => Self::UnsupportedFundingAsset,
+            "unknown" => Self::Unknown,
+            _ => Self::Unknown,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackLedgerGapView {
     pub gap_key: String,
-    pub reason: String,
+    pub reason: TrackLedgerGapReasonView,
     pub observed_at: String,
 }
 
@@ -403,7 +431,8 @@ impl fmt::Display for Side {
 mod tests {
     use super::{
         AccountSummaryView, RiskSignalView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
+        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackLedgerGapReasonView,
+        TrackListResponse,
     };
 
     #[test]
@@ -537,7 +566,7 @@ mod tests {
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
                 "market":{"mark_price":64123.4,"index_price":64120.1},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
-                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
+                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"unsupported_commission_asset","observed_at":"2026-03-31T11:11:11Z"}]},
                 "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
                 "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
@@ -549,8 +578,36 @@ mod tests {
         let detail_json = serde_json::to_value(&detail).unwrap();
         assert_eq!(detail_json["ledger"]["unrealized_pnl"].as_f64(), Some(265.2));
         assert_eq!(
+            detail.ledger.unresolved_gaps[0].reason,
+            TrackLedgerGapReasonView::UnsupportedCommissionAsset
+        );
+        assert_eq!(
             detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
             Some(1.5)
+        );
+    }
+
+    #[test]
+    fn deserializes_unknown_track_ledger_gap_reason_as_unknown() {
+        let detail: TrackDetailView = serde_json::from_str(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"future_gap_reason","observed_at":"2026-03-31T11:11:11Z"}]},
+                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            detail.ledger.unresolved_gaps[0].reason,
+            TrackLedgerGapReasonView::Unknown
         );
     }
 

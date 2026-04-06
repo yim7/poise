@@ -15,7 +15,8 @@ use tokio_tungstenite::{
 };
 
 use poise_engine::ledger::{
-    ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapRecord, TrackLedgerEvent,
+    ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord,
+    TrackLedgerEvent,
 };
 use poise_engine::observation::OrderObservation;
 use poise_engine::ports::{PriceTick, TrackLedgerUpdate, UserDataEvent, UserDataPayload};
@@ -524,7 +525,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                                 order.symbol.to_lowercase(),
                                 order.order_id
                             ),
-                            reason: "unsupported_commission_asset".into(),
+                            reason: LedgerGapReason::UnsupportedCommissionAsset,
                             observed_at: event_time,
                             source: "binance:order_trade_update".into(),
                         }),
@@ -534,7 +535,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                                 order.symbol.to_lowercase(),
                                 order.order_id
                             ),
-                            reason: "missing_commission_asset".into(),
+                            reason: LedgerGapReason::MissingCommissionAsset,
                             observed_at: event_time,
                             source: "binance:order_trade_update".into(),
                         }),
@@ -595,7 +596,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                             symbol.to_lowercase(),
                             balance.asset.to_lowercase()
                         ),
-                        reason: "unsupported_funding_asset".into(),
+                        reason: LedgerGapReason::UnsupportedFundingAsset,
                         observed_at: event_time,
                         source: "binance:funding_fee".into(),
                     }),
@@ -964,7 +965,7 @@ mod tests {
                         ledger_deltas: vec![LedgerDelta::GrossRealizedPnl(12.34)],
                         ledger_gaps: vec![LedgerGapRecord {
                             gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
-                            reason: "unsupported_commission_asset".into(),
+                            reason: LedgerGapReason::UnsupportedCommissionAsset,
                             observed_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                             source: "binance:order_trade_update".into(),
                         }],

@@ -215,7 +215,7 @@ mod tests {
         events::DomainEvent,
         types::{ExchangeRules, Exposure},
     };
-    use poise_engine::ledger::LedgerGapRecord;
+    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
     use poise_engine::ports::{
@@ -505,14 +505,14 @@ mod tests {
         snapshot.ledger_state.unresolved_gaps = vec![
             LedgerGapRecord {
                 gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
-                reason: "unsupported_commission_asset".into(),
+                reason: LedgerGapReason::UnsupportedCommissionAsset,
                 observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
                 source: "ORDER_TRADE_UPDATE".into(),
             },
             LedgerGapRecord {
                 gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
                     .into(),
-                reason: "missing_symbol".into(),
+                reason: LedgerGapReason::MissingSymbol,
                 observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
                 source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
             },

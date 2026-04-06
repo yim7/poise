@@ -104,9 +104,18 @@ pub enum TrackLedgerEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LedgerGapRecord {
     pub gap_key: String,
-    pub reason: String,
+    pub reason: LedgerGapReason,
     pub observed_at: DateTime<Utc>,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerGapReason {
+    UnsupportedCommissionAsset,
+    MissingCommissionAsset,
+    MissingSymbol,
+    UnsupportedFundingAsset,
 }
 
 #[cfg(test)]
@@ -135,13 +144,13 @@ mod tests {
         let mut ledger = TrackLedgerState::default();
         ledger.record_gap(LedgerGapRecord {
             gap_key: "gap-1".into(),
-            reason: "unsupported_commission_asset".into(),
+            reason: LedgerGapReason::UnsupportedCommissionAsset,
             observed_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
             source: "binance:order_trade_update".into(),
         });
         ledger.record_gap(LedgerGapRecord {
             gap_key: "gap-2".into(),
-            reason: "missing_symbol".into(),
+            reason: LedgerGapReason::MissingSymbol,
             observed_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap(),
             source: "binance:account_update".into(),
         });

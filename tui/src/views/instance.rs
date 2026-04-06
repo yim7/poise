@@ -596,7 +596,7 @@ fn format_ledger_gap_line(gaps: &[crate::protocol::TrackLedgerGapView]) -> Line<
     let first = &gaps[0];
     let mut summary = format!(
         "ledger gaps: {} ({})",
-        first.reason.replace('_', " "),
+        format_ledger_gap_reason(first.reason),
         first.observed_at
     );
     if gaps.len() > 1 {
@@ -604,6 +604,22 @@ fn format_ledger_gap_line(gaps: &[crate::protocol::TrackLedgerGapView]) -> Line<
     }
 
     Line::from(summary)
+}
+
+fn format_ledger_gap_reason(reason: crate::protocol::TrackLedgerGapReasonView) -> &'static str {
+    match reason {
+        crate::protocol::TrackLedgerGapReasonView::UnsupportedCommissionAsset => {
+            "unsupported commission asset"
+        }
+        crate::protocol::TrackLedgerGapReasonView::MissingCommissionAsset => {
+            "missing commission asset"
+        }
+        crate::protocol::TrackLedgerGapReasonView::MissingSymbol => "missing symbol",
+        crate::protocol::TrackLedgerGapReasonView::UnsupportedFundingAsset => {
+            "unsupported funding asset"
+        }
+        crate::protocol::TrackLedgerGapReasonView::Unknown => "unknown ledger gap",
+    }
 }
 
 fn status_command_hint(commands: &[TrackCommandView]) -> String {
@@ -960,7 +976,7 @@ mod tests {
                 .unwrap();
         detail.ledger.unresolved_gaps = vec![crate::protocol::TrackLedgerGapView {
             gap_key: "gap-1".to_string(),
-            reason: "unsupported_commission_asset".to_string(),
+            reason: crate::protocol::TrackLedgerGapReasonView::UnsupportedCommissionAsset,
             observed_at: "2026-04-06T10:00:00Z".to_string(),
         }];
 
