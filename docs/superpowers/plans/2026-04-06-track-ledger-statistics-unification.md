@@ -393,7 +393,7 @@ Commit SHA: `a5ef1ed`
 - Test: `server/src/http.rs`
 - Test: `server/src/websocket.rs`
 
-- [ ] **Step 1: 写失败测试，固定独立账务视图语义**
+- [x] **Step 1: 写失败测试，固定独立账务视图语义**
 
 在 `server/src/projector.rs` 新增测试：
 
@@ -434,21 +434,21 @@ fn projects_all_unresolved_ledger_gaps() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前红灯**
+- [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p poise-server projects_list_item_total_pnl_from_shared_ledger_summary -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_list_item_total_pnl_from_shared_ledger_summary -- --exact`
 Expected: FAIL，原因是各 track 视图还没有共享 ledger 投影
 
-Run: `cargo test -p poise-server projects_list_item_lightweight_ledger_view -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_list_item_lightweight_ledger_view -- --exact`
 Expected: FAIL，原因是列表协议还沿用旧 `pnl`
 
-Run: `cargo test -p poise-server projects_detail_ledger_from_unified_ledger_state -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_detail_ledger_from_unified_ledger_state -- --exact`
 Expected: FAIL，原因是 detail 还没有 `ledger` 视图
 
-Run: `cargo test -p poise-protocol deserializes_track_detail_with_pnl_and_execution_stats -- --exact`
+Run: `cargo test -p poise-protocol tests::deserializes_track_detail_with_pnl_and_execution_stats -- --exact`
 Expected: FAIL，原因是协议还沿用 `pnl`
 
-- [ ] **Step 3: 最小实现独立账务视图**
+- [x] **Step 3: 最小实现独立账务视图**
 
 在 `server/src/projector.rs` 先新增内部共享摘要：
 
@@ -539,47 +539,53 @@ pub ledger: TrackLedgerView
 
 `TrackListItemView.ledger.total_pnl` 和 `TrackListItemView.ledger.has_unresolved_gaps` 都来自 `project_ledger_summary(source)`。
 
-- [ ] **Step 4: 重新运行定向测试，确认转绿**
+- [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p poise-server projects_list_item_total_pnl_from_shared_ledger_summary -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_list_item_total_pnl_from_shared_ledger_summary -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-server projects_list_item_lightweight_ledger_view -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_list_item_lightweight_ledger_view -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-server projects_detail_ledger_from_unified_ledger_state -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_detail_ledger_from_unified_ledger_state -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-server projects_all_unresolved_ledger_gaps -- --exact`
+Run: `cargo test -p poise-server projector::tests::projects_all_unresolved_ledger_gaps -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-protocol deserializes_track_detail_with_pnl_and_execution_stats -- --exact`
+Run: `cargo test -p poise-protocol tests::deserializes_track_detail_with_pnl_and_execution_stats -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-server get_track_detail_returns_track_detail_view -- --exact`
+Run: `cargo test -p poise-server http::tests::get_track_detail_returns_track_detail_view -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-server broadcasts_track_detail_changed_after_write_commit -- --exact`
+Run: `cargo test -p poise-server websocket::tests::broadcasts_track_detail_changed_after_write_commit -- --exact`
 Expected: PASS
 
-- [ ] **Step 5: 运行本 task 回归测试**
+- [x] **Step 5: 运行本 task 回归测试**
 
 Run: `cargo test -p poise-protocol`
 Expected: PASS
 
-Run: `cargo test -p poise-server projector::tests http::tests websocket::tests -- --nocapture`
+Run: `cargo test -p poise-server projector::tests -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: 提交本 task**
+Run: `cargo test -p poise-server http::tests -- --nocapture`
+Expected: PASS
+
+Run: `cargo test -p poise-server websocket::tests -- --nocapture`
+Expected: PASS
+
+- [x] **Step 6: 提交本 task**
 
 ```bash
 git add server/src/read_model.rs server/src/projector.rs protocol/src/lib.rs server/src/http.rs server/src/websocket.rs
 git commit -m "refactor: project shared track ledger views"
 ```
 
-- [ ] **Step 7: 回写 commit SHA 到本任务**
+- [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `<待回写>`
+Commit SHA: `a7b9232`
 
 ---
 
