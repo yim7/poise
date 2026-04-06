@@ -601,7 +601,7 @@ Commit SHA: `a7b9232`
 - Test: `tui/src/app.rs`
 - Test: `tui/src/main.rs`
 
-- [ ] **Step 1: 写失败测试，固定 TUI track ledger 展示**
+- [x] **Step 1: 写失败测试，固定 TUI track ledger 展示**
 
 在 `tui/src/views/instance.rs` 新增或扩展测试，断言 detail ledger 区包含：
 
@@ -626,18 +626,18 @@ async fn list_and_detail_show_same_total_pnl_for_same_track() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前红灯**
+- [x] **Step 2: 运行定向测试，确认当前红灯**
 
-Run: `cargo test -p poise-tui renders_track_detail_execution_activity_and_commands -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_track_detail_execution_activity_and_commands -- --exact`
 Expected: FAIL，原因是 fixture 和视图还没迁到 `ledger`
 
-Run: `cargo test -p poise-tui websocket_event_applies_projected_detail -- --exact`
+Run: `cargo test -p poise-tui tests::websocket_event_applies_projected_detail -- --exact`
 Expected: FAIL，原因是 websocket fixture 结构已变化
 
-Run: `cargo test -p poise-tui list_and_detail_show_same_total_pnl_for_same_track -- --exact`
+Run: `cargo test -p poise-tui tests::list_and_detail_show_same_total_pnl_for_same_track -- --exact`
 Expected: FAIL，原因是 TUI 各 track 视图还没共享新口径
 
-- [ ] **Step 3: 最小实现 TUI 展示**
+- [x] **Step 3: 最小实现 TUI 展示**
 
 在 `tui/src/views/instance.rs`：
 
@@ -650,29 +650,29 @@ fixture 全部迁到 `ledger` 结构。
 
 列表展示保持 UI 结构不变，但协议和测试都改成读取 `item.ledger`，并覆盖各 track 视图的 `total_pnl` 一致性。
 
-- [ ] **Step 4: 重新运行定向测试，确认转绿**
+- [x] **Step 4: 重新运行定向测试，确认转绿**
 
-Run: `cargo test -p poise-tui renders_track_detail_execution_activity_and_commands -- --exact`
+Run: `cargo test -p poise-tui views::instance::tests::renders_track_detail_execution_activity_and_commands -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-tui websocket_event_applies_projected_detail -- --exact`
+Run: `cargo test -p poise-tui tests::websocket_event_applies_projected_detail -- --exact`
 Expected: PASS
 
-Run: `cargo test -p poise-tui list_and_detail_show_same_total_pnl_for_same_track -- --exact`
+Run: `cargo test -p poise-tui tests::list_and_detail_show_same_total_pnl_for_same_track -- --exact`
 Expected: PASS
 
-- [ ] **Step 5: 运行本 task 回归测试**
+- [x] **Step 5: 运行本 task 回归测试**
 
 Run: `cargo test -p poise-tui`
 Expected: PASS
 
-- [ ] **Step 6: 提交本 task**
+- [x] **Step 6: 提交本 task**
 
 ```bash
 git add tui/src/views/instance.rs tui/tests/fixtures/track_detail_view.json tui/tests/fixtures/ws_track_detail_changed.json tui/src/app.rs tui/src/main.rs
 git commit -m "refactor: render shared track ledger summaries"
 ```
 
-- [ ] **Step 7: 回写 commit SHA 到本任务**
+- [x] **Step 7: 回写 commit SHA 到本任务**
 
-Commit SHA: `<待回写>`
+Commit SHA: `09e5fdd`
