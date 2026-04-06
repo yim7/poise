@@ -1265,7 +1265,7 @@ mod tests {
     };
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
-    use poise_engine::ledger::{LedgerGapRecord, TrackLedgerState};
+    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::ports::{
         EffectStatus, FollowUpRetirementRequest, OrderRequest, OrderStatus, StateRepositoryPort,
         TrackReadRepositoryPort,
@@ -1308,7 +1308,7 @@ mod tests {
                     LedgerGapRecord {
                         gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset"
                             .into(),
-                        reason: "unsupported_commission_asset".into(),
+                        reason: LedgerGapReason::UnsupportedCommissionAsset,
                         observed_at: DateTime::parse_from_rfc3339("2026-03-24T07:35:00+00:00")
                             .unwrap()
                             .with_timezone(&Utc),
@@ -1317,7 +1317,7 @@ mod tests {
                     LedgerGapRecord {
                         gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
                             .into(),
-                        reason: "missing_symbol".into(),
+                        reason: LedgerGapReason::MissingSymbol,
                         observed_at: DateTime::parse_from_rfc3339("2026-03-24T08:00:00+00:00")
                             .unwrap()
                             .with_timezone(&Utc),
