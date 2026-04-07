@@ -191,7 +191,9 @@ Task 1 code commit:
 - Modify: `scripts/flatten-track.sh`
 - Test: `tui/src/main.rs`
 
-- [ ] **Step 1: 先写失败测试，固定 TUI 不再接受独立 WS 环境变量**
+执行备注：当前分支不存在 `scripts/flatten-track.sh`，因此本 task 实际只修改 `tui/src/main.rs`。
+
+- [x] **Step 1: 先写失败测试，固定 TUI 不再接受独立 WS 环境变量**
 
 在 `tui/src/main.rs` 增加测试：
 
@@ -214,7 +216,7 @@ fn runtime_config_ignores_removed_ws_env_vars() {
 
 在 `scripts/flatten-track.sh` 对齐只认 `POISE_BASE_URL` 的 dry-run 断言，补测试说明到 plan 使用现有脚本 smoke 路径。
 
-- [ ] **Step 2: 运行定向测试，确认当前仍允许独立 WS 覆盖**
+- [x] **Step 2: 运行定向测试，确认当前仍允许独立 WS 覆盖**
 
 Run:
 `cargo test -p poise-tui runtime_config_ignores_removed_ws_env_vars -- --exact`
@@ -222,7 +224,7 @@ Run:
 Expected:
 - FAIL，原因是 `RuntimeConfig::from_env()` 当前还会读取 `POISE_TUI_WS_URL` / `POISE_WS_URL`
 
-- [ ] **Step 3: 实现最小运行配置收敛**
+- [x] **Step 3: 实现最小运行配置收敛**
 
 要求：
 - `RuntimeConfig::from_env()` 只读取 `POISE_BASE_URL`
@@ -230,7 +232,7 @@ Expected:
 - 删除 `POISE_TUI_WS_URL` / `POISE_WS_URL` 的读取分支
 - `scripts/flatten-track.sh` 默认基地址只认 `POISE_BASE_URL`
 
-- [ ] **Step 4: 运行 TUI 与脚本回归**
+- [x] **Step 4: 运行 TUI 与脚本回归**
 
 Run:
 `cargo test -p poise-tui derives_ws_url_from_http_base_url -- --exact`
@@ -240,7 +242,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add tui/src/main.rs scripts/flatten-track.sh
@@ -248,7 +250,7 @@ git commit -m "refactor: derive tui websocket url from base url"
 ```
 
 Task 2 code commit:
-`TODO`
+`348c6de`
 
 ---
 
