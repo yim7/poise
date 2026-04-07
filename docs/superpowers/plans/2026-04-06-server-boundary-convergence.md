@@ -311,7 +311,7 @@ git commit -m "refactor: move persistence and queue stores under poise-applicati
 ```
 
 Task 2 code commit:
-`<fill during execution>`
+`ac46b3b`
 
 ---
 
