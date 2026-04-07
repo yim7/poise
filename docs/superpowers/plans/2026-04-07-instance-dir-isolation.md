@@ -371,43 +371,29 @@ Task 3 code commit:
 - Modify: `server/src/config.rs`
 - Test: `server/src/config.rs`
 
-- [ ] **Step 1: 先写失败测试，固定配置示例与文档语义**
+- [x] **Step 1: 先写失败测试，固定配置示例与文档语义**
 
-在 `server/src/config.rs` 调整或新增测试，去掉 `environment = "paper"` 作为普通示例输入，改成 `testnet` 或 `mainnet`：
+在 `server/src/config.rs` 调整或新增测试，去掉 `environment = "paper"` 作为普通示例输入，改成 `testnet` 或 `mainnet`。
+
+实际执行时补了一个更直接的源码级断言，确保模块内示例不再出现 `environment = "paper"`：
 
 ```rust
 #[test]
-fn defaults_bind_address_and_exchange_credentials_for_testnet() {
-    let config = parse_config(
-        r#"
-environment = "testnet"
-
-[[tracks]]
-track_id = "btc-core"
-venue = "binance"
-symbol = "BTCUSDT"
-lower_price = 90.0
-upper_price = 110.0
-long_exposure_units = 8.0
-short_exposure_units = 8.0
-notional_per_unit = 375.0
-"#,
-    )
-    .unwrap();
-
-    assert_eq!(config.environment, "testnet");
+fn config_module_examples_do_not_use_paper_environment() {
+    let source = include_str!("config.rs");
+    assert!(!source.contains("environment = \"paper\""));
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前仍有 `paper` 示例残留**
+- [x] **Step 2: 运行定向测试，确认当前仍有 `paper` 示例残留**
 
 Run:
-`cargo test -p poise-server config::tests::defaults_bind_address_and_exchange_credentials_for_testnet -- --exact`
+`cargo test -p poise-server config::tests::config_module_examples_do_not_use_paper_environment -- --exact`
 
 Expected:
-- FAIL，原因是测试尚未存在或当前示例仍使用 `paper`
+- FAIL，原因是 `server/src/config.rs` 当前仍包含 `environment = "paper"` 示例
 
-- [ ] **Step 3: 改写 README 和配置示例**
+- [x] **Step 3: 改写 README 和配置示例**
 
 要求：
 - README 改成“一个实例目录一个 `config.toml`”
@@ -417,7 +403,7 @@ Expected:
 - README 增加多账号 mainnet 的实例目录示例
 - `server/src/config.rs` 内嵌 TOML 测试示例不再出现 `paper`
 
-- [ ] **Step 4: 运行文档相关配置回归**
+- [x] **Step 4: 运行文档相关配置回归**
 
 Run:
 `cargo test -p poise-server config::tests:: -- --nocapture`
@@ -425,7 +411,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add README.md server/src/config.rs
@@ -433,7 +419,7 @@ git commit -m "docs: document instance dir runtime model"
 ```
 
 Task 4 code commit:
-`TODO`
+`9cea4ae`
 
 ---
 
