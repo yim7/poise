@@ -1,6 +1,6 @@
 use std::fs;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -188,10 +188,11 @@ fn unexpected(error: anyhow::Error) -> StateBootstrapError {
 
 pub async fn prepare_state_repository(
     config: &Config,
+    db_path: &Path,
     mode: StateBootstrapMode,
 ) -> BootstrapResult<PreparedStateStore> {
-    let db_path = config.default_db_path();
     ensure_parent_dir(&db_path).map_err(unexpected)?;
+    let db_path = db_path.to_path_buf();
 
     match mode {
         StateBootstrapMode::Strict => {
@@ -390,6 +391,7 @@ fn state_file_path(base_path: &std::path::Path, suffix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use poise_engine::manager::TrackManager;
@@ -405,7 +407,9 @@ mod tests {
     async fn prepare_state_repository_requires_explicit_bootstrap_mode() {
         let config = test_config(unique_test_environment(), 90.0);
 
-        let prepared = prepare_state_repository(&config, StateBootstrapMode::Strict)
+        let db_path = crate::instance_dir::InstanceDir::new(std::env::temp_dir())
+            .db_path(&config.environment);
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .unwrap();
         let _ = prepared.repositories.state_repository();
@@ -415,9 +419,10 @@ mod tests {
     async fn strict_mode_rejects_persisted_config_mismatch() {
         let environment = unique_test_environment();
         let config = test_config(environment.clone(), 90.0);
-        persist_snapshot_with_lower_price(&config, 80.0).await;
+        let db_path = test_db_path(&environment);
+        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
-        let error = prepare_state_repository(&config, StateBootstrapMode::Strict)
+        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .err()
             .unwrap();
@@ -434,12 +439,12 @@ mod tests {
     async fn rebuild_mode_recreates_repository_after_mismatch() {
         let environment = unique_test_environment();
         let config = test_config(environment.clone(), 90.0);
-        let db_path = config.default_db_path();
-        persist_snapshot_with_lower_price(&config, 80.0).await;
+        let db_path = test_db_path(&environment);
+        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
         std::fs::write(format!("{}-wal", db_path.display()), b"wal").unwrap();
         std::fs::write(format!("{}-shm", db_path.display()), b"shm").unwrap();
 
-        let prepared = prepare_state_repository(&config, StateBootstrapMode::Rebuild)
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
             .unwrap();
 
@@ -501,11 +506,11 @@ mod tests {
     async fn rebuild_mode_recovers_from_unreadable_existing_database() {
         let environment = unique_test_environment();
         let config = test_config(environment.clone(), 90.0);
-        let db_path = config.default_db_path();
+        let db_path = test_db_path(&environment);
         super::ensure_parent_dir(&db_path).unwrap();
         std::fs::write(&db_path, b"not-a-sqlite-database").unwrap();
 
-        let prepared = prepare_state_repository(&config, StateBootstrapMode::Rebuild)
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
             .unwrap();
 
@@ -537,14 +542,15 @@ mod tests {
     async fn restore_backup_recovers_original_state_after_rebuild() {
         let environment = unique_test_environment();
         let config = test_config(environment.clone(), 90.0);
-        persist_snapshot_with_lower_price(&config, 80.0).await;
+        let db_path = test_db_path(&environment);
+        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
-        let mut prepared = prepare_state_repository(&config, StateBootstrapMode::Rebuild)
+        let mut prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
             .unwrap();
         prepared.restore_backup().unwrap();
 
-        let restored = SqliteStorage::new(config.default_db_path())
+        let restored = SqliteStorage::new(&db_path)
             .unwrap()
             .load_track_state("btc-core")
             .await
@@ -558,9 +564,10 @@ mod tests {
     async fn run_startup_restores_backup_after_failed_operation() {
         let environment = unique_test_environment();
         let config = test_config(environment.clone(), 90.0);
-        persist_snapshot_with_lower_price(&config, 80.0).await;
+        let db_path = test_db_path(&environment);
+        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
-        let prepared = prepare_state_repository(&config, StateBootstrapMode::Rebuild)
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
             .unwrap();
         let error = prepared
@@ -569,7 +576,7 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("startup failed"));
-        let restored = SqliteStorage::new(config.default_db_path())
+        let restored = SqliteStorage::new(&db_path)
             .unwrap()
             .load_track_state("btc-core")
             .await
@@ -601,10 +608,10 @@ mod tests {
     async fn strict_mode_returns_structured_mismatch() {
         let environment = unique_test_environment();
         let config = test_config(environment.clone(), 90.0);
-        let db_path = config.default_db_path();
-        persist_snapshot_with_lower_price(&config, 80.0).await;
+        let db_path = test_db_path(&environment);
+        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
-        let error = prepare_state_repository(&config, StateBootstrapMode::Strict)
+        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .err()
             .unwrap();
@@ -647,9 +654,10 @@ mod tests {
             account_monitor: Default::default(),
         };
         let seeded_config = test_config(environment.clone(), 80.0);
-        persist_snapshot_with_lower_price(&seeded_config, 80.0).await;
+        let db_path = test_db_path(&environment);
+        persist_snapshot_with_lower_price(&seeded_config, &db_path, 80.0).await;
 
-        let error = prepare_state_repository(&config, StateBootstrapMode::Strict)
+        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .err()
             .unwrap();
@@ -672,6 +680,26 @@ mod tests {
         }
 
         cleanup_environment(&environment);
+    }
+
+    #[tokio::test]
+    async fn rebuild_mode_only_touches_database_under_current_instance_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config_with_instance_dir(temp_dir.path(), "mainnet", 90.0);
+        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path("mainnet");
+
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
+            .await
+            .unwrap();
+
+        let loaded = prepared
+            .repositories
+            .state_repository()
+            .load_track_state("btc-core")
+            .await
+            .unwrap();
+        assert!(loaded.is_none());
+        assert!(db_path.exists());
     }
 
     fn unique_test_environment() -> String {
@@ -709,10 +737,21 @@ mod tests {
         }
     }
 
-    async fn persist_snapshot_with_lower_price(config: &Config, lower_price: f64) {
-        let db_path = config.default_db_path();
+    fn test_config_with_instance_dir(
+        _instance_dir: &Path,
+        environment: &str,
+        lower_price: f64,
+    ) -> Config {
+        test_config(environment.to_string(), lower_price)
+    }
+
+    fn test_db_path(environment: &str) -> PathBuf {
+        crate::instance_dir::InstanceDir::new(std::env::temp_dir()).db_path(environment)
+    }
+
+    async fn persist_snapshot_with_lower_price(_config: &Config, db_path: &Path, lower_price: f64) {
         super::ensure_parent_dir(&db_path).unwrap();
-        let storage = SqliteStorage::new(&db_path).unwrap();
+        let storage = SqliteStorage::new(db_path).unwrap();
         let mut manager = TrackManager::new(std::sync::Arc::new(SystemClock));
         manager
             .add_track(
@@ -750,6 +789,9 @@ mod tests {
     }
 
     fn cleanup_environment(environment: &str) {
-        let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(environment));
+        let _ = std::fs::remove_file(test_db_path(environment));
+        let _ = std::fs::remove_file(format!("{}-wal", test_db_path(environment).display()));
+        let _ = std::fs::remove_file(format!("{}-shm", test_db_path(environment).display()));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(".data").join(environment));
     }
 }

@@ -9,6 +9,7 @@ mod effect_worker;
 mod event_presentation;
 mod exchange_freshness;
 mod http;
+mod instance_dir;
 mod notifications;
 mod order_outcome;
 #[allow(dead_code)]
@@ -30,9 +31,11 @@ use state_bootstrap::{
     PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, SuggestedAction,
 };
 
+use crate::instance_dir::InstanceDir;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupOptions {
-    config_path: String,
+    instance_dir: std::path::PathBuf,
     bootstrap_mode: StateBootstrapMode,
 }
 
@@ -42,13 +45,20 @@ async fn main() -> Result<()> {
     tracing::info!("Poise server starting");
 
     let options = parse_startup_options(env::args().skip(1))?;
-    let config = config::load_config(&options.config_path)?;
-    let prepared_state =
-        match state_bootstrap::prepare_state_repository(&config, options.bootstrap_mode).await {
-            Ok(repository) => repository,
-            Err(StateBootstrapError::Unexpected(error)) => return Err(error),
-            Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
-        };
+    let instance_dir = InstanceDir::new(&options.instance_dir);
+    let config = config::load_config(instance_dir.config_path())?;
+    let db_path = instance_dir.db_path(&config.environment);
+    let prepared_state = match state_bootstrap::prepare_state_repository(
+        &config,
+        &db_path,
+        options.bootstrap_mode,
+    )
+    .await
+    {
+        Ok(repository) => repository,
+        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
+        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
+    };
     let (platform, runtime_handles, listener) = prepared_state
         .run_startup(|repositories| async {
             let platform = assembly::assemble(&config, repositories).await?;
@@ -103,16 +113,16 @@ async fn shutdown_signal() {
 }
 
 fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
-    let mut config_path = None;
+    let mut instance_dir = None;
     let mut bootstrap_mode = StateBootstrapMode::Strict;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--config" => {
+            "--instance-dir" => {
                 let value = args
                     .next()
-                    .ok_or_else(|| anyhow::anyhow!("missing value for --config"))?;
-                config_path = Some(value);
+                    .ok_or_else(|| anyhow::anyhow!("missing value for --instance-dir"))?;
+                instance_dir = Some(std::path::PathBuf::from(value));
             }
             "--rebuild-state" => {
                 bootstrap_mode = StateBootstrapMode::Rebuild;
@@ -124,8 +134,8 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     }
 
     Ok(StartupOptions {
-        config_path: config_path
-            .ok_or_else(|| anyhow::anyhow!("missing required --config <path>"))?,
+        instance_dir: instance_dir
+            .ok_or_else(|| anyhow::anyhow!("missing required --instance-dir <path>"))?,
         bootstrap_mode,
     })
 }
@@ -191,7 +201,7 @@ fn render_startup_error(error: &StateBootstrapError) -> String {
                 SuggestedAction::RebuildState => {
                     rendered.push_str(
                         "\nuse `--rebuild-state` to back up the old database, discard local snapshots, and rebuild state from the exchange's live positions and orders.\n\
-suggested command: cargo run -p poise-server -- --config <path> --rebuild-state",
+suggested command: cargo run -p poise-server -- --instance-dir <path> --rebuild-state",
                     );
                 }
             }
@@ -241,33 +251,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_path_requires_config_flag() {
+    fn parse_startup_options_requires_instance_dir() {
         let error = parse_startup_options(Vec::<String>::new().into_iter()).unwrap_err();
-        assert!(error.to_string().contains("--config"));
+        assert!(error.to_string().contains("--instance-dir"));
     }
 
     #[test]
-    fn parse_config_path_reads_flag_value() {
+    fn parse_startup_options_reads_instance_dir_value() {
         let options = parse_startup_options(
-            vec!["--config".to_string(), "configs/test.demo.toml".to_string()].into_iter(),
+            vec!["--instance-dir".to_string(), "/tmp/poise-a".to_string()].into_iter(),
         )
         .unwrap();
         assert_eq!(
             options,
             StartupOptions {
-                config_path: "configs/test.demo.toml".to_string(),
+                instance_dir: std::path::PathBuf::from("/tmp/poise-a"),
                 bootstrap_mode: StateBootstrapMode::Strict,
             }
         );
     }
 
     #[test]
-    fn parse_config_path_accepts_rebuild_state_flag() {
+    fn parse_startup_options_accepts_rebuild_state_flag() {
         let options = parse_startup_options(
             vec![
                 "--rebuild-state".to_string(),
-                "--config".to_string(),
-                "configs/test.demo.toml".to_string(),
+                "--instance-dir".to_string(),
+                "/tmp/poise-a".to_string(),
             ]
             .into_iter(),
         )
@@ -276,7 +286,7 @@ mod tests {
         assert_eq!(
             options,
             StartupOptions {
-                config_path: "configs/test.demo.toml".to_string(),
+                instance_dir: std::path::PathBuf::from("/tmp/poise-a"),
                 bootstrap_mode: StateBootstrapMode::Rebuild,
             }
         );
@@ -325,6 +335,7 @@ mod tests {
         assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
         assert!(rendered.contains("btc-core"));
         assert!(rendered.contains("--rebuild-state"));
+        assert!(rendered.contains("--instance-dir <path>"));
     }
 
     fn workspace_root() -> PathBuf {
@@ -431,7 +442,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = listener.local_addr().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("test.toml");
+        let instance_dir = temp_dir.path().join("instance-a");
+        fs::create_dir_all(&instance_dir).unwrap();
+        let config_path = instance_dir.join("config.toml");
         fs::write(
             &config_path,
             format!(
@@ -457,9 +470,10 @@ notional_per_unit = 375.0
         )
         .unwrap();
 
-        let config = crate::config::load_config(config_path.to_str().unwrap()).unwrap();
-        fs::create_dir_all(config.default_db_path().parent().unwrap()).unwrap();
-        let storage = Arc::new(SqliteStorage::new(config.default_db_path()).unwrap());
+        let config = crate::config::load_config(&config_path).unwrap();
+        let db_path = crate::instance_dir::InstanceDir::new(&instance_dir).db_path(&config.environment);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
         let platform = crate::assembly::assemble_with_components(
             &config,
             Arc::new(FakeExchange),
@@ -506,7 +520,6 @@ notional_per_unit = 375.0
         let _ = runtime_handles.user_task.await;
         let _ = runtime_handles.effect_task.await;
         let _ = runtime_handles.recovery_task.await;
-        let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 
     #[tokio::test]
@@ -541,8 +554,10 @@ notional_per_unit = 375.0
             },
             account_monitor: Default::default(),
         };
-        fs::create_dir_all(config.default_db_path().parent().unwrap()).unwrap();
-        let storage = Arc::new(SqliteStorage::new(config.default_db_path()).unwrap());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
         let platform = crate::assembly::assemble_with_components(
             &config,
             Arc::new(FakeExchange),
@@ -563,7 +578,6 @@ notional_per_unit = 375.0
                 .to_string()
                 .contains("subscribe_user_data should not run")
         );
-        let _ = fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 
     struct FakeExchange;

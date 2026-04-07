@@ -1115,7 +1115,8 @@ mod tests {
     }
 
     async fn assemble_with_fake_ports(config: &Config) -> Result<ServerPlatform> {
-        let db_path = config.default_db_path();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
         super::ensure_parent_dir(&db_path)?;
         let repository = Arc::new(SqliteStorage::new(&db_path)?);
         super::assemble_with_components(

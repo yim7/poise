@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result, ensure};
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
@@ -60,9 +62,10 @@ pub struct AccountMonitorConfig {
     pub unrealized_loss_critical_pct: f64,
 }
 
-pub fn load_config(path: &str) -> Result<Config> {
+pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
+    let path = path.as_ref();
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file `{path}`"))?;
+        .with_context(|| format!("failed to read config file `{}`", path.display()))?;
     parse_config(&raw)
 }
 
@@ -74,14 +77,6 @@ pub fn parse_config(input: &str) -> Result<Config> {
     }
     config.account_monitor.validate()?;
     Ok(config)
-}
-
-impl Config {
-    pub fn default_db_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(".data")
-            .join(&self.environment)
-            .join("poise-server.sqlite")
-    }
 }
 
 impl Default for AccountMonitorConfig {
@@ -218,7 +213,7 @@ fn validate_threshold_pair(
 mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 
-    use super::{AccountMonitorConfig, Config, default_bind_address, parse_config};
+    use super::{AccountMonitorConfig, default_bind_address, parse_config};
 
     #[test]
     fn parses_config_file_with_tracks_and_exchange() {
@@ -476,24 +471,6 @@ notional_per_unit = 375.0
         assert!((budget.max_notional - implied_max).abs() < f64::EPSILON);
         assert!((budget.daily_loss_limit - (-implied_max * 0.1)).abs() < f64::EPSILON);
         assert!((budget.stop_loss_pct - 10.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn computes_default_db_path_from_environment() {
-        let config = Config {
-            environment: "testnet".into(),
-            bind_address: default_bind_address(),
-            tracks: vec![],
-            exchange: Default::default(),
-            account_monitor: Default::default(),
-        };
-
-        assert_eq!(
-            config.default_db_path(),
-            std::path::Path::new(".data")
-                .join("testnet")
-                .join("poise-server.sqlite")
-        );
     }
 
     #[test]
