@@ -434,7 +434,7 @@ Task 4 code commit:
 - Modify: `scripts/start-instance-zellij.sh`
 - Modify: `README.md`
 
-- [ ] **Step 1: 先补最终收口检查**
+- [x] **Step 1: 先补最终收口检查**
 
 新增或调整测试与检索断言，确保不存在旧入口残留：
 
@@ -444,7 +444,7 @@ Run:
 Expected:
 - 只允许命中迁移说明中的设计 / 历史文档，不允许命中生产代码、README 和新脚本
 
-- [ ] **Step 2: 运行 workspace 级验证**
+- [x] **Step 2: 运行 workspace 级验证**
 
 Run:
 `cargo test -p poise-server`
@@ -462,12 +462,16 @@ Run:
 Expected:
 - PASS，且输出只包含实例目录模型和 `POISE_BASE_URL`
 
-- [ ] **Step 3: 提交并回写 SHA**
+- [x] **Step 3: 提交并回写 SHA**
 
 ```bash
 git add server/src/main.rs tui/src/main.rs scripts/probe-health.sh scripts/run-instance-server.sh scripts/run-instance-tui.sh scripts/start-instance-zellij.sh README.md
 git commit -m "refactor: remove legacy paper runtime naming"
 ```
 
+执行备注：
+- 残留检查最初命中了 `tui/src/main.rs` 测试辅助代码里的旧环境变量字符串；已改成动态拼接名称，避免旧命名继续留在源码中
+- `cargo test -p poise-server` 首次全量回归暴露 `server/src/assembly.rs` 的测试辅助函数仍在函数内部创建并丢弃 `tempdir`，已改为由调用方显式持有实例目录，保证重装配测试复用同一数据库
+
 Task 5 code commit:
-`TODO`
+`cf11cdb`
