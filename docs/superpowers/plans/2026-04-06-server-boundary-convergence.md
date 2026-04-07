@@ -528,7 +528,7 @@ git commit -m "refactor: split track write paths into application services"
 ```
 
 Task 4 code commit:
-`<fill during execution>`
+`ea9581e`
 
 ---
 
