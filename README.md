@@ -37,8 +37,8 @@
 手工联调 Binance USDⓈ-M Futures 测试网时，先准备实例目录：
 
 ```bash
-mkdir -p instances/testnet-demo
-cp configs/binance-testnet.demo.toml instances/testnet-demo/config.toml
+mkdir -p "$HOME/poise-instances/testnet-demo"
+cp configs/binance-testnet.demo.toml "$HOME/poise-instances/testnet-demo/config.toml"
 ```
 
 补充说明：
@@ -99,16 +99,16 @@ tick_timeout_secs = 30
 
 `Poise` 服务端通过 `poise-server` 二进制启动。
 
-把 `instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后按默认严格模式启动：
+把 `$HOME/poise-instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后按默认严格模式启动：
 
 ```bash
-cargo run -p poise-server -- --instance-dir instances/testnet-demo
+cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet-demo"
 ```
 
 如果当前本地 SQLite 快照和新的配置不一致，默认会拒绝启动。这时如果你确认要丢弃旧本地快照，并按交易所真实仓位和挂单重建本地状态，再加 `--rebuild-state`：
 
 ```bash
-cargo run -p poise-server -- --instance-dir instances/testnet-demo --rebuild-state
+cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet-demo" --rebuild-state
 ```
 
 `--rebuild-state` 的语义是：
@@ -180,12 +180,12 @@ curl http://127.0.0.1:8000/tracks/btc-core
 多账号主网运行时，目录应该显式分开，例如：
 
 ```text
-instances/mainnet-account-a/
+~/poise-instances/mainnet-account-a/
   config.toml
   .data/
   .logs/
 
-instances/mainnet-account-b/
+~/poise-instances/mainnet-account-b/
   config.toml
   .data/
   .logs/
@@ -247,18 +247,18 @@ cargo test
 ### 1. 先准备本地配置
 
 ```bash
-mkdir -p instances/testnet-demo
-cp configs/binance-testnet.demo.toml instances/testnet-demo/config.toml
+mkdir -p "$HOME/poise-instances/testnet-demo"
+cp configs/binance-testnet.demo.toml "$HOME/poise-instances/testnet-demo/config.toml"
 ```
 
-把 `instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证。
+把 `$HOME/poise-instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证。
 
 ### 2. 启动 zellij 会话
 
 先确保本机已经安装 `zellij`，然后执行：
 
 ```bash
-export POISE_INSTANCE_DIR=instances/testnet-demo
+export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo"
 ./scripts/start-instance-zellij.sh
 ```
 
@@ -273,12 +273,12 @@ export POISE_INSTANCE_DIR=instances/testnet-demo
 如果你想改默认值，可以在启动前设置：
 
 ```bash
-export POISE_INSTANCE_DIR=instances/testnet-demo
+export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo"
 export POISE_BASE_URL=http://127.0.0.1:8000
-export POISE_LOG_DIR=instances/testnet-demo/.logs
+export POISE_LOG_DIR="$HOME/poise-instances/testnet-demo/.logs"
 export POISE_REBUILD_STATE=0
 export POISE_HEALTH_FAILURE_THRESHOLD=3
-export POISE_TUI_LOG=instances/testnet-demo/.logs/poise-tui.log
+export POISE_TUI_LOG="$HOME/poise-instances/testnet-demo/.logs/poise-tui.log"
 export POISE_ZELLIJ_SESSION_NAME=poise-testnet-demo
 ./scripts/start-instance-zellij.sh
 ```
@@ -286,7 +286,7 @@ export POISE_ZELLIJ_SESSION_NAME=poise-testnet-demo
 如果你要通过脚本方式重建本地状态，可以把 `POISE_REBUILD_STATE=1`，这样 `run-instance-server.sh` 会自动在 `poise-server` 启动命令后追加 `--rebuild-state`：
 
 ```bash
-export POISE_INSTANCE_DIR=instances/testnet-demo
+export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo"
 export POISE_REBUILD_STATE=1
 ./scripts/run-instance-server.sh
 ```
@@ -301,25 +301,25 @@ export POISE_HEALTH_ALERT_HOOK='printf "alert:%s:%s\n" "$POISE_HEALTH_FAILURE_CO
 
 默认日志目录是 `<instance-dir>/.logs/`，主要看这三个文件：
 
-- `instances/testnet-demo/.logs/poise-tui.log`
-- `instances/testnet-demo/.logs/poise-server.log`
-- `instances/testnet-demo/.logs/health-probe.log`
+- `$HOME/poise-instances/testnet-demo/.logs/poise-tui.log`
+- `$HOME/poise-instances/testnet-demo/.logs/poise-server.log`
+- `$HOME/poise-instances/testnet-demo/.logs/health-probe.log`
 
 ### 5. 巡检脚本
 
-手工单次探测：
+单次探测只需要 `POISE_BASE_URL`：
 
 ```bash
-./scripts/probe-health.sh --once
+POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --once
 ```
 
 只看脚本会用什么参数，不真正启动：
 
 ```bash
-POISE_INSTANCE_DIR=instances/testnet-demo ./scripts/start-instance-zellij.sh --dry-run
-POISE_INSTANCE_DIR=instances/testnet-demo ./scripts/run-instance-server.sh --dry-run
-POISE_INSTANCE_DIR=instances/testnet-demo ./scripts/run-instance-tui.sh --dry-run
-./scripts/probe-health.sh --dry-run
+POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo" ./scripts/start-instance-zellij.sh --dry-run
+POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo" ./scripts/run-instance-server.sh --dry-run
+POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo" ./scripts/run-instance-tui.sh --dry-run
+POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --dry-run
 ```
 
 ### 6. 会话管理

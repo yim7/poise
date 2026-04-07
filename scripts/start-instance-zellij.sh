@@ -3,10 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/poise-instance.sh"
+REPO_ROOT="$(poise_repo_root_from_script_dir "$SCRIPT_DIR")"
 LAYOUT_PATH="${REPO_ROOT}/ops/zellij/poise-instance.kdl"
 
-INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
+RAW_INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
 BASE_URL="${POISE_BASE_URL:-http://127.0.0.1:8000}"
 REBUILD_STATE="${POISE_REBUILD_STATE:-0}"
 DRY_RUN=0
@@ -42,11 +43,13 @@ while (($# > 0)); do
   esac
 done
 
-if [[ -z "$INSTANCE_DIR" ]]; then
+if [[ -z "$RAW_INSTANCE_DIR" ]]; then
   echo "missing required POISE_INSTANCE_DIR" >&2
   usage >&2
   exit 1
 fi
+
+INSTANCE_DIR="$(poise_absolutize_path "$RAW_INSTANCE_DIR")"
 
 CONFIG_PATH="${INSTANCE_DIR}/config.toml"
 INSTANCE_NAME="$(basename "$INSTANCE_DIR")"
@@ -69,6 +72,7 @@ export POISE_INSTANCE_DIR="$INSTANCE_DIR"
 export POISE_BASE_URL="$BASE_URL"
 export POISE_LOG_DIR="$LOG_DIR"
 export POISE_REBUILD_STATE="$REBUILD_STATE"
+export POISE_REPO_ROOT="$REPO_ROOT"
 export POISE_SERVER_LOG="${POISE_SERVER_LOG:-${LOG_DIR}/poise-server.log}"
 export POISE_HEALTH_LOG="${POISE_HEALTH_LOG:-${LOG_DIR}/health-probe.log}"
 export POISE_TUI_LOG="${POISE_TUI_LOG:-${LOG_DIR}/poise-tui.log}"
@@ -92,8 +96,6 @@ if ! command -v zellij >/dev/null 2>&1; then
   echo "zellij is not installed or not in PATH" >&2
   exit 1
 fi
-
-cd "$REPO_ROOT"
 
 if zellij attach "$SESSION_NAME" 2>/dev/null; then
   exit 0

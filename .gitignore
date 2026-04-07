@@ -8,4 +8,5 @@ target/
 /.worktrees/
 /.agents
 .superpowers
+/instances/
 configs/*.local.toml

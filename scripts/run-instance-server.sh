@@ -3,9 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/poise-instance.sh"
+REPO_ROOT="$(poise_repo_root_from_script_dir "$SCRIPT_DIR")"
 
-INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
+RAW_INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
 REBUILD_STATE="${POISE_REBUILD_STATE:-0}"
 DRY_RUN=0
 
@@ -38,11 +39,13 @@ while (($# > 0)); do
   esac
 done
 
-if [[ -z "$INSTANCE_DIR" ]]; then
+if [[ -z "$RAW_INSTANCE_DIR" ]]; then
   echo "missing required POISE_INSTANCE_DIR" >&2
   usage >&2
   exit 1
 fi
+
+INSTANCE_DIR="$(poise_absolutize_path "$RAW_INSTANCE_DIR")"
 
 CONFIG_PATH="${INSTANCE_DIR}/config.toml"
 LOG_DIR="${POISE_LOG_DIR:-${INSTANCE_DIR}/.logs}"

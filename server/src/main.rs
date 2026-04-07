@@ -357,6 +357,10 @@ mod tests {
         workspace_root().join("scripts").join("start-instance-zellij.sh")
     }
 
+    fn instance_zellij_layout_path() -> PathBuf {
+        workspace_root().join("ops").join("zellij").join("poise-instance.kdl")
+    }
+
     #[test]
     fn run_instance_server_script_dry_run_uses_instance_dir() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -375,6 +379,33 @@ mod tests {
     }
 
     #[test]
+    fn run_instance_server_script_dry_run_normalizes_relative_instance_dir() {
+        let caller_dir = tempfile::tempdir().unwrap();
+        let instance_dir = caller_dir.path().join("instances").join("alpha");
+        fs::create_dir_all(&instance_dir).unwrap();
+
+        let output = Command::new("bash")
+            .arg(run_instance_server_script_path())
+            .arg("--dry-run")
+            .env("POISE_INSTANCE_DIR", "instances/alpha")
+            .current_dir(caller_dir.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let rendered_instance_dir = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("instance_dir="))
+            .unwrap();
+        assert!(std::path::Path::new(rendered_instance_dir).is_absolute());
+        assert_eq!(
+            fs::canonicalize(rendered_instance_dir).unwrap(),
+            fs::canonicalize(&instance_dir).unwrap()
+        );
+    }
+
+    #[test]
     fn start_instance_zellij_dry_run_exports_instance_dir_and_base_url() {
         let temp_dir = tempfile::tempdir().unwrap();
         let output = Command::new("bash")
@@ -389,6 +420,42 @@ mod tests {
         assert!(stdout.contains("instance_dir="));
         assert!(stdout.contains("base_url="));
         assert!(!stdout.contains("paper"));
+    }
+
+    #[test]
+    fn start_instance_zellij_dry_run_normalizes_relative_instance_dir() {
+        let caller_dir = tempfile::tempdir().unwrap();
+        let instance_dir = caller_dir.path().join("instances").join("beta");
+        fs::create_dir_all(&instance_dir).unwrap();
+
+        let output = Command::new("bash")
+            .arg(start_instance_zellij_script_path())
+            .arg("--dry-run")
+            .env("POISE_INSTANCE_DIR", "instances/beta")
+            .current_dir(caller_dir.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let rendered_instance_dir = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("instance_dir="))
+            .unwrap();
+        assert!(std::path::Path::new(rendered_instance_dir).is_absolute());
+        assert_eq!(
+            fs::canonicalize(rendered_instance_dir).unwrap(),
+            fs::canonicalize(&instance_dir).unwrap()
+        );
+    }
+
+    #[test]
+    fn instance_zellij_layout_quotes_repo_root_script_paths() {
+        let layout = fs::read_to_string(instance_zellij_layout_path()).unwrap();
+
+        assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/run-instance-tui.sh\\\""));
+        assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/run-instance-server.sh\\\""));
+        assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/probe-health.sh\\\""));
     }
 
     async fn wait_for_child_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
@@ -453,6 +520,51 @@ mod tests {
         let log_output = fs::read_to_string(log_dir.join("health-probe.log")).unwrap();
         assert!(log_output.contains("http_status=503"));
         assert!(log_output.contains("ALERT"));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn probe_health_once_succeeds_without_instance_dir_or_log_dir() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/health",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"status":"ok","track_count":1,"attention_required_count":0}"#,
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        for _ in 0..20 {
+            if tokio::net::TcpStream::connect(bind_address).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let script_path = probe_health_script_path();
+        let base_url = format!("http://{bind_address}");
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new("bash")
+                .arg(script_path)
+                .arg("--once")
+                .env("POISE_BASE_URL", base_url)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("http_status=200"));
 
         server.abort();
         let _ = server.await;
