@@ -365,7 +365,8 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_engine::ports::{EffectStatus, OrderRequest, PersistedTrackEffect, StoredTrackEvent};
+    use poise_application::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
+    use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::TrackStatus;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;

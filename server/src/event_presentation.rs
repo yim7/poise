@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::DomainEvent;
-use poise_engine::ports::EffectStatus;
+use poise_application::{EffectStatus, PersistedTrackEffect};
 use poise_engine::transition::TrackEffect;
 use poise_protocol::ActivityLevelView;
 
@@ -86,7 +86,7 @@ fn project_domain_event_level(event: &DomainEvent) -> ActivityLevelView {
     }
 }
 
-fn project_effect_message(effect: &poise_engine::ports::PersistedTrackEffect) -> String {
+fn project_effect_message(effect: &PersistedTrackEffect) -> String {
     match &effect.effect {
         TrackEffect::SubmitOrder { .. } => match effect.status {
             EffectStatus::Failed => effect

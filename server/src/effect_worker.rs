@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use poise_engine::ports::{
-    ExchangePort, FollowUpRetirementRequest, OrderRequest, PersistedTrackEffect,
-};
+use poise_application::{FollowUpRetirementRequest, PersistedTrackEffect};
+use poise_engine::ports::{ExchangePort, OrderRequest};
 use poise_engine::track::Instrument;
 use poise_engine::transition::TrackEffect;
 use tokio::sync::watch;
@@ -95,7 +94,7 @@ impl EffectWorker {
 
             let Some(effect) = self
                 .state
-                .state_repository
+                .effect_store
                 .list_dispatchable_effects()
                 .await?
                 .into_iter()
@@ -489,14 +488,17 @@ mod tests {
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_application::{
+        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
+        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
+        TrackMutationStore, TrackQueryStore,
+    };
     use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::OrderObservation;
     use poise_engine::ports::{
-        ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, ExchangeInfo,
-        ExchangeOrder, ExchangePort, FollowUpRetirementRequest, OrderReceipt, OrderRequest,
-        OrderStatus, PersistedTrackEffect, Position, StateRepositoryPort, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort,
+        ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
+        OrderStatus, Position,
     };
     use poise_engine::runtime::{
         ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,
@@ -1729,19 +1731,22 @@ mod tests {
             .unwrap();
 
         let (notifications, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             notifications.clone(),
             account_margin_guard.clone(),
         ));
         build_server_state(
             write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            mutation_store,
+            effect_store,
+            Arc::new(TrackQueryService::new(query_store)),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
         )
@@ -2136,7 +2141,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for MemoryRepository {
+    impl TrackMutationStore for MemoryRepository {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
@@ -2210,6 +2215,10 @@ mod tests {
             Ok(Vec::new())
         }
 
+    }
+
+    #[async_trait::async_trait]
+    impl TrackEffectStore for MemoryRepository {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
@@ -2310,7 +2319,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for MemoryRepository {
+    #[async_trait::async_trait]
+    impl TrackQueryStore for MemoryRepository {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots

@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use poise_application::{
+    EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
+    TrackEffectStore, TrackMutationStore,
+};
 use poise_core::events::DomainEvent;
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::{
@@ -12,10 +16,7 @@ use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
-use poise_engine::ports::{
-    EffectStatusUpdate, ExchangeOrder, FollowUpRetirementRequest, OrderReceipt, OrderRequest,
-    PersistedTrackEffect, StateRepositoryPort,
-};
+use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
 use poise_engine::runtime::AccountCapacityConstraint;
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
@@ -49,7 +50,8 @@ impl TrackMutationGuards {
 #[derive(Clone)]
 pub struct TrackWriteService {
     manager: SharedManager,
-    repository: Arc<dyn StateRepositoryPort>,
+    mutation_store: Arc<dyn TrackMutationStore>,
+    effect_store: Arc<dyn TrackEffectStore>,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ServerNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
@@ -174,13 +176,15 @@ impl TransitionResult for ApplyTrackLedgerEventResult {
 impl TrackWriteService {
     pub fn new(
         manager: TrackManager,
-        repository: Arc<dyn StateRepositoryPort>,
+        mutation_store: Arc<dyn TrackMutationStore>,
+        effect_store: Arc<dyn TrackEffectStore>,
         notifications: broadcast::Sender<ServerNotification>,
         account_margin_guard: Arc<AccountMarginGuardStore>,
     ) -> Self {
         Self {
             manager: Arc::new(RwLock::new(manager)),
-            repository,
+            mutation_store,
+            effect_store,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
             account_margin_guard,
@@ -382,7 +386,7 @@ impl TrackWriteService {
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let pending_submit_hints = self
-            .repository
+            .effect_store
             .list_pending_submit_effects_for_track(&TrackId::new(id))
             .await
             .map_err(TrackMutationError::Persistence)?
@@ -668,7 +672,7 @@ impl TrackWriteService {
         id: &str,
         request: FollowUpRetirementRequest,
     ) -> Result<()> {
-        self.repository
+        self.effect_store
             .save_follow_up_retirement_request(&TrackId::new(id), &request)
             .await?;
         self.retry_pending_follow_up_retirements(id).await?;
@@ -690,12 +694,12 @@ impl TrackWriteService {
 
     async fn retry_pending_follow_up_retirements(&self, id: &str) -> Result<()> {
         for request in self
-            .repository
+            .effect_store
             .list_follow_up_retirement_requests(&TrackId::new(id))
             .await?
         {
             if self.retire_stale_follow_up_submit(id, &request).await? {
-                self.repository
+                self.effect_store
                     .delete_follow_up_retirement_request(&TrackId::new(id), &request)
                     .await?;
             }
@@ -922,7 +926,7 @@ impl TrackWriteService {
         id: &str,
         batch_id: &str,
     ) -> std::result::Result<Vec<PersistedTrackEffect>, TrackMutationError> {
-        self.repository
+        self.effect_store
             .list_pending_submit_effects_for_track_batch(&TrackId::new(id), batch_id)
             .await
             .map_err(TrackMutationError::Persistence)
@@ -950,7 +954,7 @@ impl TrackWriteService {
         }
 
         if let Err(error) = self
-            .repository
+            .mutation_store
             .save_transition_with_effect_status(
                 id,
                 next_snapshot,
@@ -985,7 +989,7 @@ impl TrackWriteService {
 fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
     EffectStatusUpdate {
         effect_id: effect_id.to_string(),
-        status: poise_engine::ports::EffectStatus::Failed,
+        status: EffectStatus::Failed,
         attempt_delta: 1,
         last_error: Some(error.to_string()),
     }
@@ -1064,10 +1068,11 @@ mod tests {
     use poise_engine::observation::{
         MarketObservation, OrderObservation, PositionObservation, TrackObservation,
     };
-    use poise_engine::ports::{
-        ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, OrderReceipt,
-        OrderRequest, OrderStatus, PersistedTrackEffect, StateRepositoryPort,
+    use poise_application::{
+        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
+        TrackEffectStore, TrackMutationStore,
     };
+    use poise_engine::ports::{ClockPort, OrderReceipt, OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder,
     };
@@ -1086,7 +1091,7 @@ mod tests {
     #[tokio::test]
     async fn mutate_track_persists_tick_events_and_emits_notification_after_save() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let mut receiver = service.subscribe_notifications();
 
         let outcome = service
@@ -1116,7 +1121,7 @@ mod tests {
     #[tokio::test]
     async fn constructor_injected_guard_is_used_when_syncing_capacity_constraint() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         service.account_margin_guard().activate_insufficient_margin(
             &Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -1146,7 +1151,7 @@ mod tests {
     #[tokio::test]
     async fn mutate_track_persists_engine_snapshot_without_server_side_snapshot_builder() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         service
             .mutate_track("btc-core", |manager| {
@@ -1170,7 +1175,7 @@ mod tests {
     #[tokio::test]
     async fn mutate_track_persists_effects_with_snapshot_and_events() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         let transition = service.observe_market("btc-core", 95.0).await.unwrap();
         assert!(
@@ -1192,7 +1197,7 @@ mod tests {
     #[tokio::test]
     async fn mutate_track_rolls_back_and_does_not_broadcast_when_save_fails() {
         let repository = Arc::new(FailOnSaveRepository::default());
-        let service = test_service(repository as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository);
         let mut receiver = service.subscribe_notifications();
 
         let error = match service
@@ -1225,7 +1230,7 @@ mod tests {
     #[tokio::test]
     async fn command_persists_transition_and_emits_track_write_committed() {
         let service =
-            test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
+            test_service(Arc::new(MemoryRepository::default()));
         let mut receiver = service.subscribe_notifications();
 
         service
@@ -1251,7 +1256,7 @@ mod tests {
     #[tokio::test]
     async fn sync_exchange_state_emits_recovery_anomaly_flag_when_attention_is_required() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository);
         let mut receiver = service.subscribe_notifications();
 
         service
@@ -1285,7 +1290,7 @@ mod tests {
     #[tokio::test]
     async fn sync_exchange_state_does_not_read_global_pending_effect_list_for_submit_hints() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         service
             .sync_exchange_state(
@@ -1314,7 +1319,7 @@ mod tests {
     async fn mutations_for_same_track_remain_serialized() {
         let repository = Arc::new(MemoryRepository::default());
         repository.block_next_save("btc-core");
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         let first_service = service.clone();
         let first_mutation =
@@ -1349,7 +1354,7 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         repository.block_next_save("btc-core");
         let service = multi_track_service(
-            repository.clone() as Arc<dyn StateRepositoryPort>,
+            repository.clone(),
             &[("btc-core", "BTCUSDT"), ("eth-core", "ETHUSDT")],
         );
 
@@ -1387,7 +1392,7 @@ mod tests {
     async fn recover_submit_effect_uses_same_per_track_guard_as_regular_mutations() {
         let repository = Arc::new(MemoryRepository::default());
         let service = multi_track_service(
-            repository.clone() as Arc<dyn StateRepositoryPort>,
+            repository.clone(),
             &[("btc-core", "BTCUSDT"), ("eth-core", "ETHUSDT")],
         );
         let manager_handle = service.manager();
@@ -1510,7 +1515,7 @@ mod tests {
     #[tokio::test]
     async fn recovers_slot_workset_from_live_exchange_state() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -1581,7 +1586,7 @@ mod tests {
     #[tokio::test]
     async fn complete_submit_execution_returns_error_when_executor_slot_is_missing() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository);
 
         let error = service
             .complete_submit_execution(
@@ -1611,7 +1616,7 @@ mod tests {
     #[tokio::test]
     async fn record_submit_failure_clears_submit_pending_slot_and_marks_effect_failed() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         let transition = service.observe_market("btc-core", 95.0).await.unwrap();
         let request = match transition.effects.as_slice() {
@@ -1655,7 +1660,7 @@ mod tests {
     #[tokio::test]
     async fn complete_effect_failed_returns_invariant_violation_when_track_is_not_loaded() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = multi_track_service(repository as Arc<dyn StateRepositoryPort>, &[]);
+        let service = multi_track_service(repository, &[]);
 
         let error = service
             .complete_effect_failed("btc-core", "btc-core:batch:0", "submit order rejected")
@@ -1674,7 +1679,7 @@ mod tests {
     #[tokio::test]
     async fn recover_submit_effect_returns_invariant_violation_when_track_is_not_loaded() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = multi_track_service(repository as Arc<dyn StateRepositoryPort>, &[]);
+        let service = multi_track_service(repository, &[]);
 
         let error = match service
             .recover_submit_effect(
@@ -1784,7 +1789,7 @@ mod tests {
     #[tokio::test]
     async fn recover_submit_effect_proceed_persists_submit_pending_slot_before_returning() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         let transition = service.observe_market("btc-core", 95.0).await.unwrap();
         let (request, desired_exposure) = match transition.effects.as_slice() {
@@ -1842,7 +1847,7 @@ mod tests {
     #[tokio::test]
     async fn recover_submit_effect_supersedes_old_effect_in_same_persisted_write() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -1974,7 +1979,7 @@ mod tests {
     async fn record_cancel_order_success_restores_ready_replacement_submit_before_command_reconcile()
      {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2087,7 +2092,7 @@ mod tests {
     #[tokio::test]
     async fn record_cancel_order_success_restores_same_batch_replacement_submit() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2202,7 +2207,7 @@ mod tests {
     #[tokio::test]
     async fn record_cancel_order_success_rolls_back_when_atomic_save_fails() {
         let repository = Arc::new(FailOnSaveRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2282,7 +2287,7 @@ mod tests {
     #[tokio::test]
     async fn pending_follow_up_retirement_retries_after_terminal_order_update() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2374,7 +2379,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_follow_up_retirement_survives_service_restart_and_retries_on_sync() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2436,7 +2441,7 @@ mod tests {
             .await
             .unwrap();
 
-        let restarted = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let restarted = test_service(repository.clone());
         {
             let manager_handle = restarted.manager();
             let mut manager = manager_handle.write().await;
@@ -2472,7 +2477,7 @@ mod tests {
     #[tokio::test]
     async fn requested_follow_up_retirement_retires_immediately_when_lifecycle_already_closed() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2564,7 +2569,7 @@ mod tests {
     #[tokio::test]
     async fn request_follow_up_retirement_surfaces_immediate_retry_errors() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
 
         repository.seed_effect(PersistedTrackEffect {
             effect_id: "btc-core:replacement:1".into(),
@@ -2630,7 +2635,7 @@ mod tests {
     #[tokio::test]
     async fn retry_pending_follow_up_retirements_surfaces_selection_errors() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         repository.seed_effect(PersistedTrackEffect {
             effect_id: "btc-core:broken:1".into(),
             track_id: TrackId::new("btc-core"),
@@ -2703,7 +2708,7 @@ mod tests {
     async fn record_cancel_order_success_keeps_main_writeback_succeeded_when_follow_up_retry_errors()
      {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository.clone() as Arc<dyn StateRepositoryPort>);
+        let service = test_service(repository.clone());
         let manager_handle = service.manager();
         let mut snapshot = {
             let manager = manager_handle.read().await;
@@ -2833,7 +2838,7 @@ mod tests {
     #[tokio::test]
     async fn resolves_track_id_from_instrument() {
         let service =
-            test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>);
+            test_service(Arc::new(MemoryRepository::default()));
 
         let track_id = service
             .resolve_track_id(&Instrument::new(Venue::Binance, "BTCUSDT"))
@@ -2842,14 +2847,17 @@ mod tests {
         assert_eq!(track_id, Some("btc-core".to_string()));
     }
 
-    fn test_service(repository: Arc<dyn StateRepositoryPort>) -> TrackWriteService {
+    fn test_service<R>(repository: Arc<R>) -> TrackWriteService
+    where
+        R: TrackMutationStore + TrackEffectStore + 'static,
+    {
         multi_track_service(repository, &[("btc-core", "BTCUSDT")])
     }
 
-    fn multi_track_service(
-        repository: Arc<dyn StateRepositoryPort>,
-        tracks: &[(&str, &str)],
-    ) -> TrackWriteService {
+    fn multi_track_service<R>(repository: Arc<R>, tracks: &[(&str, &str)]) -> TrackWriteService
+    where
+        R: TrackMutationStore + TrackEffectStore + 'static,
+    {
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mut manager = TrackManager::new(Arc::new(FixedClock));
         for (id, symbol) in tracks {
@@ -2886,6 +2894,7 @@ mod tests {
 
         TrackWriteService::new(
             manager,
+            repository.clone(),
             repository,
             notifications,
             Arc::new(AccountMarginGuardStore::default()),
@@ -2995,7 +3004,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for MemoryRepository {
+    impl TrackMutationStore for MemoryRepository {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
@@ -3079,6 +3088,10 @@ mod tests {
             Ok(self.events_for(id))
         }
 
+    }
+
+    #[async_trait::async_trait]
+    impl TrackEffectStore for MemoryRepository {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             self.global_pending_effect_queries
                 .fetch_add(1, Ordering::SeqCst);
@@ -3186,7 +3199,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for FailOnSaveRepository {
+    impl TrackMutationStore for FailOnSaveRepository {
         async fn save_transition_with_effect_status(
             &self,
             _id: &str,
@@ -3206,6 +3219,10 @@ mod tests {
             Ok(Vec::new())
         }
 
+    }
+
+    #[async_trait::async_trait]
+    impl TrackEffectStore for FailOnSaveRepository {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
@@ -3307,7 +3324,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn _test_snapshot() -> TrackRuntimeSnapshot {
-        test_service(Arc::new(MemoryRepository::default()) as Arc<dyn StateRepositoryPort>)
+        test_service(Arc::new(MemoryRepository::default()))
             .manager
             .blocking_read()
             .get_track("btc-core")

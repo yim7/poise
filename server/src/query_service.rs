@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_engine::ports::TrackReadRepositoryPort;
+use poise_application::TrackQueryStore;
 use poise_engine::track::TrackId;
 
 use crate::read_model::TrackReadModel;
@@ -11,11 +11,11 @@ const DETAIL_EVENTS_LIMIT: usize = 20;
 const DETAIL_EFFECTS_LIMIT: usize = 20;
 
 pub struct TrackQueryService {
-    repository: Arc<dyn TrackReadRepositoryPort>,
+    repository: Arc<dyn TrackQueryStore>,
 }
 
 impl TrackQueryService {
-    pub fn new(repository: Arc<dyn TrackReadRepositoryPort>) -> Self {
+    pub fn new(repository: Arc<dyn TrackQueryStore>) -> Self {
         Self { repository }
     }
 
@@ -84,10 +84,11 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::ports::{
-        EffectStatus, OrderRequest, OrderStatus, PersistedTrackEffect, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort,
+    use poise_application::{
+        EffectStatus, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
+        TrackQueryStore,
     };
+    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
@@ -324,7 +325,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl TrackReadRepositoryPort for FakeReadRepository {
+    impl TrackQueryStore for FakeReadRepository {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.values().cloned().collect())
         }

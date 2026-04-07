@@ -4,6 +4,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
+use poise_application::{
+    self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
+    FollowUpRetirementRequest, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
+    TrackEffectStore, TrackMutationStore, TrackQueryStore,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
@@ -11,11 +16,6 @@ use poise_core::events::{DomainEvent, ReplacementGateReason};
 use poise_core::strategy::{TrackConfig, validate_config};
 use poise_core::types::Exposure;
 use poise_engine::ledger::TrackLedgerState;
-use poise_engine::ports::{
-    CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot,
-    TrackReadRepositoryPort,
-};
 use poise_engine::runtime::{ExecutorState, RiskState, TrackStatus};
 use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use poise_engine::track::{Instrument, TrackId, Venue};
@@ -1055,7 +1055,7 @@ impl SqliteStorage {
 }
 
 #[async_trait]
-impl StateRepositoryPort for SqliteStorage {
+impl TrackMutationStore for SqliteStorage {
     async fn save_transition_with_effect_status(
         &self,
         id: &str,
@@ -1101,7 +1101,10 @@ impl StateRepositoryPort for SqliteStorage {
             .await
             .context("failed to join list_events blocking task")?
     }
+}
 
+#[async_trait]
+impl TrackEffectStore for SqliteStorage {
     async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
         let conn = Arc::clone(&self.conn);
 
@@ -1196,7 +1199,7 @@ impl StateRepositoryPort for SqliteStorage {
 }
 
 #[async_trait]
-impl TrackReadRepositoryPort for SqliteStorage {
+impl TrackQueryStore for SqliteStorage {
     async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
         let conn = Arc::clone(&self.conn);
 
@@ -1245,6 +1248,46 @@ impl TrackReadRepositoryPort for SqliteStorage {
     }
 }
 
+#[async_trait]
+impl app::AccountMonitorStore for SqliteStorage {
+    async fn load_state(&self) -> Result<Option<app::StoredAccountMonitorState>> {
+        Ok(self
+            .load_account_monitor_state_row()
+            .await?
+            .map(|row| app::StoredAccountMonitorState {
+                trading_day: row.trading_day,
+                baseline_equity: row.baseline_equity,
+                baseline_captured_at: row.baseline_captured_at,
+                last_observed_account_snapshot: row.last_observed_snapshot.map(|snapshot| {
+                    poise_engine::ports::AccountSummarySnapshot {
+                        equity: snapshot.equity,
+                        available: snapshot.available,
+                        unrealized_pnl: snapshot.unrealized_pnl,
+                        observed_at: snapshot.observed_at,
+                    }
+                }),
+            }))
+    }
+
+    async fn save_state(&self, state: &app::StoredAccountMonitorState) -> Result<()> {
+        let row = AccountMonitorStateRow {
+            trading_day: state.trading_day,
+            baseline_equity: state.baseline_equity,
+            baseline_captured_at: state.baseline_captured_at,
+            last_observed_snapshot: state
+                .last_observed_account_snapshot
+                .as_ref()
+                .map(|snapshot| AccountMonitorObservedSnapshotRow {
+                    equity: snapshot.equity,
+                    available: snapshot.available,
+                    unrealized_pnl: snapshot.unrealized_pnl,
+                    observed_at: snapshot.observed_at,
+                }),
+        };
+        self.save_account_monitor_state_row(&row).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,12 +1307,13 @@ mod tests {
         DEFAULT_MIN_REBALANCE_UNITS, OutOfBandPolicy, ShapeFamily, TrackConfig,
     };
     use poise_core::types::{Exposure, Side};
+    use poise_application::{
+        EffectStatus, FollowUpRetirementRequest, TrackEffectStore, TrackMutationStore,
+        TrackQueryStore,
+    };
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
-    use poise_engine::ports::{
-        EffectStatus, FollowUpRetirementRequest, OrderRequest, OrderStatus, StateRepositoryPort,
-        TrackReadRepositoryPort,
-    };
+    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionRound, ExecutionSlot, ExecutionStats, ExecutorDiagnostics, ExecutorState,
         RiskState, SlotState, TrackStatus, WorkingOrder,
@@ -2203,10 +2247,10 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let expected_events = persist_two_events_for("btc-core", &storage).await;
 
-        let events = storage
-            .list_recent_track_events(&TrackId::new("btc-core"), 10)
-            .await
-            .unwrap();
+        let events =
+            TrackQueryStore::list_recent_track_events(&storage, &TrackId::new("btc-core"), 10)
+                .await
+                .unwrap();
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].track_id.as_str(), "btc-core");
@@ -2223,10 +2267,10 @@ mod tests {
         let [oldest_btc_effect, newest_btc_effect] =
             persist_effect_batches_for_two_tracks(&storage).await;
 
-        let effects = storage
-            .list_recent_track_effects(&TrackId::new("btc-core"), 1)
-            .await
-            .unwrap();
+        let effects =
+            TrackQueryStore::list_recent_track_effects(&storage, &TrackId::new("btc-core"), 1)
+                .await
+                .unwrap();
 
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].track_id.as_str(), "btc-core");
@@ -2247,10 +2291,10 @@ mod tests {
         overwrite_effect_updated_at(&storage, &second.effect_id, "2026-03-24T10:00:01+00:00");
         overwrite_effect_updated_at(&storage, &third.effect_id, "2026-03-24T10:00:02+00:00");
 
-        let effects = storage
-            .list_recent_track_effects(&TrackId::new("btc-core"), 3)
-            .await
-            .unwrap();
+        let effects =
+            TrackQueryStore::list_recent_track_effects(&storage, &TrackId::new("btc-core"), 3)
+                .await
+                .unwrap();
 
         assert_eq!(effects.len(), 3);
         assert_eq!(
@@ -2290,10 +2334,10 @@ mod tests {
         )
         .await;
 
-        let effects = storage
-            .list_recent_track_effects(&TrackId::new("btc-core"), 2)
-            .await
-            .unwrap();
+        let effects =
+            TrackQueryStore::list_recent_track_effects(&storage, &TrackId::new("btc-core"), 2)
+                .await
+                .unwrap();
 
         assert_eq!(effects.len(), 2);
         assert_eq!(effects[0].effect_id, third.effect_id);
@@ -2307,6 +2351,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_storage_lists_recent_track_effects_via_track_query_store() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        persist_effect_batches_for_two_tracks(&storage).await;
+
+        let effects =
+            TrackQueryStore::list_recent_track_effects(&storage, &TrackId::new("btc-core"), 10)
+                .await
+                .unwrap();
+
+        assert_eq!(effects.len(), 2);
+    }
+
+    #[tokio::test]
     async fn list_track_snapshots_returns_persisted_updated_at() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
@@ -2317,7 +2374,9 @@ mod tests {
             .unwrap();
         overwrite_snapshot_updated_at(&storage, "btc-core", "2026-03-26T10:01:30+00:00");
 
-        let snapshots = storage.list_track_snapshots().await.unwrap();
+        let snapshots = TrackQueryStore::list_track_snapshots(&storage)
+            .await
+            .unwrap();
 
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].snapshot.track_id.as_str(), "btc-core");

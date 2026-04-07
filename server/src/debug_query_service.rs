@@ -48,14 +48,15 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
+    use poise_application::{
+        EffectStatus, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
+        TrackQueryStore,
+    };
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::ports::{
-        EffectStatus, OrderRequest, OrderStatus, PersistedTrackEffect, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort,
-    };
+    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
@@ -162,7 +163,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for FakeReadRepository {
+    impl TrackQueryStore for FakeReadRepository {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(vec![self.snapshot.clone()])
         }

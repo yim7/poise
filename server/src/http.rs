@@ -209,6 +209,11 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
+    use poise_application::{
+        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest,
+        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
+        TrackMutationStore, TrackQueryStore,
+    };
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::{
@@ -218,9 +223,7 @@ mod tests {
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
-    use poise_engine::ports::{
-        ClockPort, OrderStatus, StateRepositoryPort, StoredTrackSnapshot, TrackReadRepositoryPort,
-    };
+    use poise_engine::ports::{ClockPort, OrderStatus};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
@@ -334,7 +337,7 @@ mod tests {
 
     async fn build_test_state<R>(repository: Arc<R>) -> ServerState
     where
-        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
         let manager = test_manager();
         let mut snapshot = manager
@@ -354,20 +357,23 @@ mod tests {
             .await
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
         ));
 
-        let query_service = Arc::new(TrackQueryService::new(read_repository));
+        let query_service = Arc::new(TrackQueryService::new(query_store));
         build_server_state(
             write_service,
-            state_repository,
+            mutation_store,
+            effect_store,
             query_service,
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -395,12 +401,14 @@ mod tests {
             .unwrap();
 
         let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             notifications.clone(),
             account_margin_guard.clone(),
         ));
@@ -434,8 +442,9 @@ mod tests {
 
         build_server_state_with_account_monitor(
             write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            mutation_store,
+            effect_store,
+            Arc::new(TrackQueryService::new(query_store)),
             Arc::new(TrackProjector::new()),
             account_monitor,
             account_margin_guard,
@@ -493,7 +502,7 @@ mod tests {
         manager
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::ports::TrackSnapshot) {
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.realized_pnl_cumulative = 980.1;
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.realized_pnl_day =
@@ -826,19 +835,21 @@ mod tests {
                 .expect("seeded manager should expose runtime snapshot"),
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
-        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
-        let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackReadRepositoryPort>
-        ));
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let query_service =
+            Arc::new(TrackQueryService::new(repository.clone() as Arc<dyn TrackQueryStore>));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let app = router(build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
-                state_repository.clone(),
+                mutation_store.clone(),
+                effect_store.clone(),
                 notifications,
                 account_margin_guard.clone(),
             )),
-            state_repository,
+            mutation_store,
+            effect_store,
             query_service,
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -1019,7 +1030,7 @@ mod tests {
     }
 
     impl FailingRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::ports::TrackSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
             self.snapshots.lock().unwrap().insert(
                 snapshot.track_id.as_str().to_string(),
                 StoredTrackSnapshot {
@@ -1031,22 +1042,22 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for FailingRepository {
+    impl TrackMutationStore for FailingRepository {
         async fn save_transition_with_effect_status(
             &self,
             _id: &str,
-            _state: &poise_engine::ports::TrackSnapshot,
+            _state: &poise_engine::snapshot::TrackRuntimeSnapshot,
             _events: &[poise_core::events::DomainEvent],
             _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
-        ) -> anyhow::Result<poise_engine::ports::CommittedTrackWrite> {
+            _effect_status_update: Option<&EffectStatusUpdate>,
+        ) -> anyhow::Result<CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
         }
 
         async fn load_track_state(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Option<poise_engine::ports::TrackSnapshot>> {
+        ) -> anyhow::Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
             Ok(None)
         }
 
@@ -1057,22 +1068,24 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_dispatchable_effects(
-            &self,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+    }
+
+    #[async_trait::async_trait]
+    impl TrackEffectStore for FailingRepository {
+        async fn list_dispatchable_effects(&self) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_all_pending_submit_effects(
             &self,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_track(
             &self,
             _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
@@ -1080,14 +1093,14 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _batch_id: &str,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn save_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1095,21 +1108,21 @@ mod tests {
         async fn list_follow_up_retirement_requests(
             &self,
             _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+        ) -> anyhow::Result<Vec<FollowUpRetirementRequest>> {
             Ok(Vec::new())
         }
 
         async fn delete_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> anyhow::Result<()> {
             Ok(())
         }
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for FailingRepository {
+    impl TrackQueryStore for FailingRepository {
         async fn list_track_snapshots(&self) -> anyhow::Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())
         }
@@ -1130,7 +1143,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<poise_engine::ports::StoredTrackEvent>> {
+        ) -> anyhow::Result<Vec<StoredTrackEvent>> {
             Ok(Vec::new())
         }
 
@@ -1138,7 +1151,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }

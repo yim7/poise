@@ -264,7 +264,7 @@ impl ServerRuntime {
             .await?;
         let startup_pending_submit_effects = self
             .state
-            .state_repository
+            .effect_store
             .list_all_pending_submit_effects()
             .await?;
         self.state
@@ -827,7 +827,7 @@ async fn sync_exchange_state_from_exchange(
     let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
     let sync_token = state.exchange_freshness.prepare_sync(track_id).await;
     let snapshot = state
-        .state_repository
+        .mutation_store
         .load_track_state(track_id)
         .await
         .map_err(TrackMutationError::Persistence)?;
@@ -892,7 +892,7 @@ async fn reconcile_submit_preflight_state(
     state: &ServerState,
 ) -> std::result::Result<(), TrackMutationError> {
     let current_pending_submit_effect_ids: HashSet<String> = state
-        .state_repository
+        .effect_store
         .list_all_pending_submit_effects()
         .await
         .map_err(TrackMutationError::Persistence)?
@@ -957,7 +957,7 @@ async fn seed_recovery_tracking(
 ) -> std::collections::HashMap<String, RecoveryTrackedTrack> {
     let mut tracked = std::collections::HashMap::new();
     for track in instruments {
-        let Ok(Some(snapshot)) = state.state_repository.load_track_state(&track.id).await else {
+        let Ok(Some(snapshot)) = state.mutation_store.load_track_state(&track.id).await else {
             continue;
         };
         update_recovery_tracking(
@@ -976,7 +976,7 @@ async fn seed_recovery_tracking(
 }
 
 async fn load_recovery_anomaly_active(state: &ServerState, track_id: &str) -> bool {
-    match state.state_repository.load_track_state(track_id).await {
+    match state.mutation_store.load_track_state(track_id).await {
         Ok(Some(snapshot)) => snapshot
             .executor_state
             .diagnostics
@@ -1032,6 +1032,11 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
+    use poise_application::{
+        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
+        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
+        TrackMutationStore, TrackQueryStore,
+    };
     use poise_core::events::DomainEvent;
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
@@ -1043,16 +1048,15 @@ mod tests {
     use poise_engine::manager::{ExchangeSyncMode, TrackManager};
     use poise_engine::observation::OrderObservation;
     use poise_engine::ports::{
-        AccountCapacitySnapshot, ClockPort, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
-        ExchangeInfo, ExchangeOrder, ExchangePort, FollowUpRetirementRequest, MarketDataPort,
-        OrderReceipt, OrderRequest, OrderStatus, PersistedTrackEffect, Position, PriceTick,
-        StateRepositoryPort, StoredTrackEvent, StoredTrackSnapshot, TrackLedgerUpdate,
-        TrackReadRepositoryPort, TrackSnapshot, UserDataEvent, UserDataPayload,
+        AccountCapacitySnapshot, ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort,
+        MarketDataPort, OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick,
+        TrackLedgerUpdate, UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
     };
+    use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
@@ -3375,18 +3379,21 @@ mod tests {
         ));
         let manager = TrackManager::new(clock);
         let (events, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence.clone();
+        let mutation_store: Arc<dyn TrackMutationStore> = persistence.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = persistence.clone();
+        let query_store: Arc<dyn TrackQueryStore> = persistence.clone();
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let state = build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
-                state_repository.clone(),
+                mutation_store.clone(),
+                effect_store.clone(),
                 events,
                 account_margin_guard.clone(),
             )),
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            mutation_store,
+            effect_store,
+            Arc::new(TrackQueryService::new(query_store)),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
         );
@@ -3485,14 +3492,16 @@ mod tests {
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
+            persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
             persistence.clone(),
+            persistence.clone(),
             Arc::new(TrackQueryService::new(
-                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
+                persistence.clone() as Arc<dyn TrackQueryStore>
             )),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -3577,14 +3586,16 @@ mod tests {
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
+            persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
             persistence.clone(),
+            persistence.clone(),
             Arc::new(TrackQueryService::new(
-                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
+                persistence.clone() as Arc<dyn TrackQueryStore>
             )),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -3757,7 +3768,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event()
      {
-        let mut snapshot = TrackSnapshot {
+        let mut snapshot = TrackRuntimeSnapshot {
             track_id: TrackId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config: test_config(),
@@ -4880,14 +4891,16 @@ mod tests {
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
+            persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
             persistence.clone(),
+            persistence.clone(),
             Arc::new(TrackQueryService::new(
-                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
+                persistence.clone() as Arc<dyn TrackQueryStore>
             )),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -4921,13 +4934,15 @@ mod tests {
         let state = build_server_state(
             Arc::new(TrackWriteService::new(
                 manager,
-                persistence.clone() as Arc<dyn StateRepositoryPort>,
+                persistence.clone() as Arc<dyn TrackMutationStore>,
+                persistence.clone() as Arc<dyn TrackEffectStore>,
                 events.clone(),
                 account_margin_guard.clone(),
             )),
-            persistence.clone() as Arc<dyn StateRepositoryPort>,
+            persistence.clone() as Arc<dyn TrackMutationStore>,
+            persistence.clone() as Arc<dyn TrackEffectStore>,
             Arc::new(TrackQueryService::new(
-                persistence as Arc<dyn TrackReadRepositoryPort>,
+                persistence as Arc<dyn TrackQueryStore>,
             )),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -5449,14 +5464,16 @@ mod tests {
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
+            persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
         let state = build_server_state(
             write_service,
             persistence.clone(),
+            persistence.clone(),
             Arc::new(TrackQueryService::new(
-                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
+                persistence.clone() as Arc<dyn TrackQueryStore>
             )),
             Arc::new(TrackProjector::new()),
             account_margin_guard,
@@ -5489,7 +5506,7 @@ mod tests {
     }
 
     async fn runtime_fixture(
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -5506,7 +5523,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_recovery_retry_interval(
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -5524,7 +5541,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_account_refresh_interval(
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -5543,7 +5560,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_intervals(
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -5563,7 +5580,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_intervals_and_account_refresh(
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -5589,7 +5606,7 @@ mod tests {
     }
 
     async fn runtime_fixture_with_options(
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         position: Position,
         open_orders: Vec<ExchangeOrder>,
         budget: CapacityBudget,
@@ -5625,6 +5642,7 @@ mod tests {
         let write_service = Arc::new(TrackWriteService::new(
             manager,
             persistence.clone(),
+            persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
@@ -5634,8 +5652,9 @@ mod tests {
         let state = build_server_state_with_account_monitor(
             write_service,
             persistence.clone(),
+            persistence.clone(),
             Arc::new(TrackQueryService::new(
-                persistence.clone() as Arc<dyn TrackReadRepositoryPort>
+                persistence.clone() as Arc<dyn TrackQueryStore>
             )),
             Arc::new(TrackProjector::new()),
             account_monitor,
@@ -5662,11 +5681,11 @@ mod tests {
     async fn test_state<R>(
         exchange: Arc<dyn ExchangePort>,
         persistence: Arc<R>,
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         budget: CapacityBudget,
     ) -> ServerState
     where
-        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
@@ -5687,20 +5706,23 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let mutation_store: Arc<dyn TrackMutationStore> = persistence.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = persistence.clone();
+        let query_store: Arc<dyn TrackQueryStore> = persistence;
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
         let account_monitor = build_test_account_monitor(exchange, events).await;
         build_server_state_with_account_monitor(
             write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            mutation_store,
+            effect_store,
+            Arc::new(TrackQueryService::new(query_store)),
             Arc::new(TrackProjector::new()),
             account_monitor,
             account_margin_guard,
@@ -5710,12 +5732,12 @@ mod tests {
     async fn test_state_with_config<R>(
         exchange: Arc<dyn ExchangePort>,
         persistence: Arc<R>,
-        restored_snapshot: Option<TrackSnapshot>,
+        restored_snapshot: Option<TrackRuntimeSnapshot>,
         budget: CapacityBudget,
         config: TrackConfig,
     ) -> ServerState
     where
-        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
@@ -5736,20 +5758,23 @@ mod tests {
         }
 
         let (events, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = persistence.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = persistence;
+        let mutation_store: Arc<dyn TrackMutationStore> = persistence.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = persistence.clone();
+        let query_store: Arc<dyn TrackQueryStore> = persistence;
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let write_service = Arc::new(TrackWriteService::new(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
         let account_monitor = build_test_account_monitor(exchange, events).await;
         build_server_state_with_account_monitor(
             write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
+            mutation_store,
+            effect_store,
+            Arc::new(TrackQueryService::new(query_store)),
             Arc::new(TrackProjector::new()),
             account_monitor,
             account_margin_guard,
@@ -5987,7 +6012,7 @@ mod tests {
         }
     }
 
-    fn test_snapshot() -> TrackSnapshot {
+    fn test_snapshot() -> TrackRuntimeSnapshot {
         test_snapshot_with_config(test_config())
     }
 
@@ -6014,7 +6039,7 @@ mod tests {
         }
     }
 
-    fn set_executor_state(snapshot: &mut TrackSnapshot, order: WorkingOrder, state: SlotState) {
+    fn set_executor_state(snapshot: &mut TrackRuntimeSnapshot, order: WorkingOrder, state: SlotState) {
         let desired_exposure = snapshot
             .desired_exposure
             .clone()
@@ -6057,8 +6082,8 @@ mod tests {
             .and_then(|slot| slot.working_order.as_ref())
     }
 
-    fn test_snapshot_with_config(config: TrackConfig) -> TrackSnapshot {
-        let mut snapshot = TrackSnapshot {
+    fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnapshot {
+        let mut snapshot = TrackRuntimeSnapshot {
             track_id: TrackId::new("BTCUSDT"),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             config,
@@ -6357,7 +6382,7 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryPersistence {
-        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        snapshots: AsyncMutex<HashMap<String, TrackRuntimeSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AtomicUsize,
@@ -6365,11 +6390,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for MemoryPersistence {
+    impl TrackMutationStore for MemoryPersistence {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &TrackSnapshot,
+            state: &TrackRuntimeSnapshot,
             _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
@@ -6412,7 +6437,7 @@ mod tests {
             })
         }
 
-        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -6422,7 +6447,10 @@ mod tests {
         ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TrackEffectStore for MemoryPersistence {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
@@ -6525,7 +6553,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for MemoryPersistence {
+    impl TrackQueryStore for MemoryPersistence {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
@@ -6582,18 +6610,18 @@ mod tests {
 
     #[derive(Default)]
     struct FailOnReceiptPersistence {
-        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        snapshots: AsyncMutex<HashMap<String, TrackRuntimeSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AtomicUsize,
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for FailOnReceiptPersistence {
+    impl TrackMutationStore for FailOnReceiptPersistence {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &TrackSnapshot,
+            state: &TrackRuntimeSnapshot,
             _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
@@ -6646,7 +6674,7 @@ mod tests {
             })
         }
 
-        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -6656,7 +6684,10 @@ mod tests {
         ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TrackEffectStore for FailOnReceiptPersistence {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
@@ -6751,7 +6782,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for FailOnReceiptPersistence {
+    impl TrackQueryStore for FailOnReceiptPersistence {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
@@ -6807,7 +6838,7 @@ mod tests {
     }
 
     struct FailOnSavePersistence {
-        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        snapshots: AsyncMutex<HashMap<String, TrackRuntimeSnapshot>>,
         effects: AsyncMutex<Vec<PersistedTrackEffect>>,
         follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
         next_effect_batch: AtomicUsize,
@@ -6833,11 +6864,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for FailOnSavePersistence {
+    impl TrackMutationStore for FailOnSavePersistence {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &TrackSnapshot,
+            state: &TrackRuntimeSnapshot,
             _events: &[poise_core::events::DomainEvent],
             effects: &[ExecutionAction],
             effect_status_update: Option<&EffectStatusUpdate>,
@@ -6884,7 +6915,7 @@ mod tests {
             })
         }
 
-        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
@@ -6894,7 +6925,10 @@ mod tests {
         ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TrackEffectStore for FailOnSavePersistence {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             let effects = self.effects.lock().await;
             Ok(ready_pending_effects(&effects))
@@ -6983,7 +7017,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for FailOnSavePersistence {
+    impl TrackQueryStore for FailOnSavePersistence {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
