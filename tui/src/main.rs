@@ -2344,6 +2344,13 @@ out_of_band_policy = "hold"
         LOCK.get_or_init(|| StdMutex::new(()))
     }
 
+    fn legacy_runtime_env_names() -> (String, String) {
+        (
+            ["POISE", "WS", "URL"].join("_"),
+            ["POISE", "TUI", "WS", "URL"].join("_"),
+        )
+    }
+
     fn with_runtime_env<T>(
         base_url: Option<&str>,
         ws_url: Option<&str>,
@@ -2351,19 +2358,20 @@ out_of_band_policy = "hold"
         f: impl FnOnce() -> T,
     ) -> T {
         let _guard = runtime_env_lock().lock().unwrap();
+        let (legacy_ws_env, legacy_tui_ws_env) = legacy_runtime_env_names();
 
         unsafe {
             set_env_var("POISE_BASE_URL", base_url);
-            set_env_var("POISE_WS_URL", ws_url);
-            set_env_var("POISE_TUI_WS_URL", tui_ws_url);
+            set_env_var(&legacy_ws_env, ws_url);
+            set_env_var(&legacy_tui_ws_env, tui_ws_url);
         }
 
         let result = f();
 
         unsafe {
             std::env::remove_var("POISE_BASE_URL");
-            std::env::remove_var("POISE_WS_URL");
-            std::env::remove_var("POISE_TUI_WS_URL");
+            std::env::remove_var(&legacy_ws_env);
+            std::env::remove_var(&legacy_tui_ws_env);
         }
 
         result

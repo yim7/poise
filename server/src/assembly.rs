@@ -540,21 +540,19 @@ mod tests {
             account_monitor: Default::default(),
         };
 
-        let platform = assemble_with_fake_ports(&config).await.unwrap();
+        let instance_dir = tempfile::tempdir().unwrap();
+        let platform = assemble_with_fake_ports(&config, instance_dir.path())
+            .await
+            .unwrap();
         let manager_handle = platform.state().write_service.manager();
         let manager = manager_handle.read().await;
 
         assert_eq!(manager.list_tracks().len(), 2);
         let track = manager.get_track("btc-core").unwrap();
         assert_eq!(track.budget().max_notional, 3000.0);
-        assert!(
-            std::path::Path::new(".data")
-                .join(&suffix)
-                .join("poise-server.sqlite")
-                .exists()
-        );
-
-        let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
+        assert!(crate::instance_dir::InstanceDir::new(instance_dir.path())
+            .db_path(&suffix)
+            .exists());
     }
 
     #[test]
@@ -993,7 +991,10 @@ mod tests {
             account_monitor: Default::default(),
         };
 
-        let first = assemble_with_fake_ports(&config).await.unwrap();
+        let instance_dir = tempfile::tempdir().unwrap();
+        let first = assemble_with_fake_ports(&config, instance_dir.path())
+            .await
+            .unwrap();
         let app = router(first.state());
         let pause = tower::ServiceExt::oneshot(
             app,
@@ -1010,14 +1011,14 @@ mod tests {
         .unwrap();
         assert_eq!(pause.status(), axum::http::StatusCode::OK);
 
-        let second = assemble_with_fake_ports(&config).await.unwrap();
+        let second = assemble_with_fake_ports(&config, instance_dir.path())
+            .await
+            .unwrap();
         let manager_handle = second.state().write_service.manager();
         let manager = manager_handle.read().await;
         let track = manager.get_track("btc-core").unwrap();
 
         assert_eq!(track.status(), &poise_engine::runtime::TrackStatus::Paused);
-
-        let _ = std::fs::remove_dir_all(std::path::Path::new(".data").join(&suffix));
     }
 
     #[tokio::test]
@@ -1114,9 +1115,11 @@ mod tests {
         test_platform_with_repository(storage)
     }
 
-    async fn assemble_with_fake_ports(config: &Config) -> Result<ServerPlatform> {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
+    async fn assemble_with_fake_ports(
+        config: &Config,
+        instance_dir: &std::path::Path,
+    ) -> Result<ServerPlatform> {
+        let db_path = crate::instance_dir::InstanceDir::new(instance_dir).db_path(&config.environment);
         super::ensure_parent_dir(&db_path)?;
         let repository = Arc::new(SqliteStorage::new(&db_path)?);
         super::assemble_with_components(
