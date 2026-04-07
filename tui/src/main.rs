@@ -151,11 +151,8 @@ fn parse_tracing_destination(value: Option<&str>) -> TracingDestination {
 impl RuntimeConfig {
     fn from_env() -> Result<Self> {
         let base_url = env_value("POISE_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        let ws_url = match env_value("POISE_TUI_WS_URL").or_else(|| env_value("POISE_WS_URL")) {
-            Some(url) => url,
-            None => derive_ws_url(&base_url)
-                .with_context(|| format!("failed to derive websocket url from `{base_url}`"))?,
-        };
+        let ws_url = derive_ws_url(&base_url)
+            .with_context(|| format!("failed to derive websocket url from `{base_url}`"))?;
 
         Ok(Self { base_url, ws_url })
     }
@@ -545,7 +542,7 @@ mod tests {
     use std::io::Read;
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex as StdMutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
@@ -1143,6 +1140,20 @@ mod tests {
         let url = derive_ws_url("http://127.0.0.1:8000").unwrap();
 
         assert_eq!(url, "ws://127.0.0.1:8000/ws");
+    }
+
+    #[test]
+    fn runtime_config_ignores_removed_ws_env_vars() {
+        with_runtime_env(
+            Some("http://127.0.0.1:9000"),
+            Some("ws://127.0.0.1:9999/other"),
+            Some("ws://127.0.0.1:9999/other"),
+            || {
+                let config = super::RuntimeConfig::from_env().unwrap();
+                assert_eq!(config.base_url, "http://127.0.0.1:9000");
+                assert_eq!(config.ws_url, "ws://127.0.0.1:9000/ws");
+            },
+        );
     }
 
     #[test]
@@ -2287,10 +2298,9 @@ out_of_band_policy = "hold"
             .unwrap();
 
         let base_url = format!("http://{bind_address}");
-        let ws_url = format!("ws://{bind_address}/ws");
         wait_for_http_ready(&base_url, &mut server).await;
         let session = TmuxSession::start(&format!(
-            "env POISE_BASE_URL={base_url} POISE_TUI_WS_URL={ws_url} {}",
+            "env POISE_BASE_URL={base_url} {}",
             tui_binary.display()
         ));
 
@@ -2327,5 +2337,42 @@ out_of_band_policy = "hold"
 
         let _ = server.kill();
         let _ = server.wait();
+    }
+
+    fn runtime_env_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    fn with_runtime_env<T>(
+        base_url: Option<&str>,
+        ws_url: Option<&str>,
+        tui_ws_url: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = runtime_env_lock().lock().unwrap();
+
+        unsafe {
+            set_env_var("POISE_BASE_URL", base_url);
+            set_env_var("POISE_WS_URL", ws_url);
+            set_env_var("POISE_TUI_WS_URL", tui_ws_url);
+        }
+
+        let result = f();
+
+        unsafe {
+            std::env::remove_var("POISE_BASE_URL");
+            std::env::remove_var("POISE_WS_URL");
+            std::env::remove_var("POISE_TUI_WS_URL");
+        }
+
+        result
+    }
+
+    unsafe fn set_env_var(name: &str, value: Option<&str>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
     }
 }
