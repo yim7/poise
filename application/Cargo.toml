@@ -10,3 +10,4 @@ chrono.workspace = true
 poise-core = { path = "../core" }
 poise-engine = { path = "../engine" }
 serde.workspace = true
+tokio.workspace = true

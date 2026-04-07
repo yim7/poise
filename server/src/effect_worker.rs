@@ -512,7 +512,7 @@ mod tests {
     use crate::assembly::build_server_state;
     use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
+    use poise_application::TrackQueryService;
     use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision};
     use crate::write_service::TrackWriteService;
 

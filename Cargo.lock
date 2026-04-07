@@ -1203,6 +1203,7 @@ dependencies = [
  "poise-core",
  "poise-engine",
  "serde",
+ "tokio",
 ]
 
 [[package]]

@@ -1,4 +1,5 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
+use poise_application::AccountMonitorConfig;
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
 use poise_engine::track::{Instrument, TrackId, Venue};
@@ -44,22 +45,6 @@ pub struct ExchangeConfig {
     pub api_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct AccountMonitorConfig {
-    #[serde(default = "default_day_change_attention_pct")]
-    pub day_change_attention_pct: f64,
-    #[serde(default = "default_day_change_critical_pct")]
-    pub day_change_critical_pct: f64,
-    #[serde(default = "default_available_ratio_attention_pct")]
-    pub available_ratio_attention_pct: f64,
-    #[serde(default = "default_available_ratio_critical_pct")]
-    pub available_ratio_critical_pct: f64,
-    #[serde(default = "default_unrealized_loss_attention_pct")]
-    pub unrealized_loss_attention_pct: f64,
-    #[serde(default = "default_unrealized_loss_critical_pct")]
-    pub unrealized_loss_critical_pct: f64,
-}
-
 pub fn load_config(path: &str) -> Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file `{path}`"))?;
@@ -81,19 +66,6 @@ impl Config {
         std::path::Path::new(".data")
             .join(&self.environment)
             .join("poise-server.sqlite")
-    }
-}
-
-impl Default for AccountMonitorConfig {
-    fn default() -> Self {
-        Self {
-            day_change_attention_pct: default_day_change_attention_pct(),
-            day_change_critical_pct: default_day_change_critical_pct(),
-            available_ratio_attention_pct: default_available_ratio_attention_pct(),
-            available_ratio_critical_pct: default_available_ratio_critical_pct(),
-            unrealized_loss_attention_pct: default_unrealized_loss_attention_pct(),
-            unrealized_loss_critical_pct: default_unrealized_loss_critical_pct(),
-        }
     }
 }
 
@@ -134,31 +106,6 @@ impl TrackDefinition {
     }
 }
 
-impl AccountMonitorConfig {
-    fn validate(&self) -> Result<()> {
-        validate_threshold_pair(
-            "day_change_attention_pct",
-            self.day_change_attention_pct,
-            "day_change_critical_pct",
-            self.day_change_critical_pct,
-        )?;
-        validate_threshold_pair(
-            "available_ratio_attention_pct",
-            self.available_ratio_attention_pct,
-            "available_ratio_critical_pct",
-            self.available_ratio_critical_pct,
-        )?;
-        validate_threshold_pair(
-            "unrealized_loss_attention_pct",
-            self.unrealized_loss_attention_pct,
-            "unrealized_loss_critical_pct",
-            self.unrealized_loss_critical_pct,
-        )?;
-
-        Ok(())
-    }
-}
-
 fn default_bind_address() -> String {
     "127.0.0.1:8000".to_string()
 }
@@ -173,45 +120,6 @@ fn default_out_of_band_policy() -> OutOfBandPolicy {
 
 fn default_min_rebalance_units() -> f64 {
     poise_core::strategy::DEFAULT_MIN_REBALANCE_UNITS
-}
-
-fn default_day_change_attention_pct() -> f64 {
-    -3.0
-}
-
-fn default_day_change_critical_pct() -> f64 {
-    -5.0
-}
-
-fn default_available_ratio_attention_pct() -> f64 {
-    30.0
-}
-
-fn default_available_ratio_critical_pct() -> f64 {
-    15.0
-}
-
-fn default_unrealized_loss_attention_pct() -> f64 {
-    -5.0
-}
-
-fn default_unrealized_loss_critical_pct() -> f64 {
-    -10.0
-}
-
-fn validate_threshold_pair(
-    attention_name: &str,
-    attention: f64,
-    critical_name: &str,
-    critical: f64,
-) -> Result<()> {
-    ensure!(attention.is_finite(), "{attention_name} must be finite");
-    ensure!(critical.is_finite(), "{critical_name} must be finite");
-    ensure!(
-        attention >= critical,
-        "{attention_name} must be greater than or equal to {critical_name}"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

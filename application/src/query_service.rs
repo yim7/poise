@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_application::TrackQueryStore;
 use poise_engine::track::TrackId;
 
-use crate::read_model::TrackReadModel;
+use crate::{TrackQueryStore, TrackReadModel};
 
 const LIST_EFFECTS_LIMIT: usize = 20;
 const DETAIL_EVENTS_LIMIT: usize = 20;
@@ -84,10 +83,6 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_application::{
-        EffectStatus, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
-        TrackQueryStore,
-    };
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -97,8 +92,9 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
-    use crate::projector::TrackProjector;
-    use crate::read_model::TrackReadModel;
+    use crate::{
+        EffectStatus, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
+    };
 
     use super::TrackQueryService;
 
@@ -140,119 +136,6 @@ mod tests {
         assert_eq!(source.recent_effects.len(), 1);
     }
 
-    #[test]
-    fn read_model_from_snapshot_flattens_runtime_state() {
-        let repository = FakeReadRepository::new();
-        let stored = repository
-            .snapshots
-            .get("btc-core")
-            .expect("seeded snapshot should exist");
-        let event = repository.events.get("btc-core").unwrap()[0].clone();
-        let effect = repository.effects.get("btc-core").unwrap()[0].clone();
-
-        let read_model = TrackReadModel::from_snapshot(
-            stored.snapshot.clone(),
-            stored.updated_at,
-            vec![event],
-            vec![effect],
-        );
-
-        assert_eq!(read_model.track_id, "btc-core");
-        assert_eq!(read_model.venue, "binance");
-        assert_eq!(read_model.symbol, "BTCUSDT");
-        assert_eq!(read_model.reference_price, Some(101.25));
-        assert_eq!(read_model.current_exposure, 3.5);
-        assert_eq!(read_model.desired_exposure, Some(4.0));
-        assert_eq!(read_model.executor_mode, ExecutionMode::Passive);
-        assert_eq!(read_model.inventory_gap, 0.5);
-        assert_eq!(read_model.max_inventory_gap_abs, 0.5);
-        assert_eq!(read_model.slots.len(), 1);
-        assert_eq!(read_model.slots[0].label, "inventory");
-        assert!(!read_model.slots[0].is_submit_pending);
-        assert_eq!(read_model.recent_track_events.len(), 1);
-        assert_eq!(read_model.recent_effects.len(), 1);
-    }
-
-    #[test]
-    fn query_service_projects_desired_exposure_for_clients() {
-        let read_model = TrackReadModel::from_snapshot(
-            TrackRuntimeSnapshot {
-                track_id: TrackId::new("btc-core"),
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                config: TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: OutOfBandPolicy::Freeze,
-                },
-                status: TrackStatus::Active,
-                current_exposure: Exposure(3.5),
-                desired_exposure: Some(Exposure(4.0)),
-                manual_target_override: None,
-                executor_state: ExecutorState {
-                    active_round: Some(poise_engine::runtime::ExecutionRound {
-                        desired_exposure: Exposure(4.0),
-                        mode: ExecutionMode::Passive,
-                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    }),
-                    diagnostics: poise_engine::runtime::ExecutorDiagnostics {
-                        mode: ExecutionMode::Passive,
-                        inventory_gap: Exposure(0.5),
-                        gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                        last_reprice_at: None,
-                        last_execution_reason: None,
-                        recovery_anomaly: None,
-                    },
-                    slots: vec![ExecutionSlot {
-                        slot: OrderSlot::new("inventory_core"),
-                        state: SlotState::Working,
-                        working_order: Some(WorkingOrder {
-                            order_id: Some("order-1".into()),
-                            client_order_id: "client-1".into(),
-                            side: Side::Buy,
-                            price: 100.5,
-                            quantity: 0.1,
-                            status: OrderStatus::New,
-                            role: OrderRole::IncreaseInventory,
-                        }),
-                    }],
-                    recent_terminal_orders: Vec::new(),
-                    stats: ExecutionStats {
-                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                        max_inventory_gap_abs: Exposure(0.5),
-                        max_gap_age_ms: 0,
-                    },
-                },
-                ledger_state: Default::default(),
-                replacement_gate_reason: None,
-                risk: RiskState {
-                    realized_pnl_day: None,
-                    realized_pnl_today: 0.0,
-                    realized_pnl_cumulative: 0.0,
-                    unrealized_pnl: 0.0,
-                    ..RiskState::default()
-                },
-                observed: ObservedState {
-                    reference_price: Some(101.25),
-                    out_of_band_since: None,
-                    last_tick_at: None,
-                    market_data_stale_since: None,
-                },
-            },
-            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert_eq!(read_model.desired_exposure, Some(4.0));
-        let projected = TrackProjector::new().project_detail(&read_model);
-        assert_eq!(projected.position.desired_exposure, Some(4.0));
-    }
-
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
         let repository = Arc::new(FakeReadRepository::new());
         let service = TrackQueryService::new(repository.clone());
@@ -269,52 +152,54 @@ mod tests {
     impl FakeReadRepository {
         fn new() -> Self {
             let snapshot = test_snapshot();
-            let track_id = snapshot.track_id.as_str().to_string();
-            let snapshot_updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
-
-            let event = StoredTrackEvent {
-                id: 1,
-                track_id: snapshot.track_id.clone(),
-                event: DomainEvent::BandBreached {
-                    boundary: poise_core::strategy::BandBoundary::Above,
-                    price: 120.0,
-                },
-                created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
-            };
-
-            let effect = PersistedTrackEffect {
-                effect_id: "btc-core:batch-1:0".into(),
-                track_id: snapshot.track_id.clone(),
-                batch_id: "batch-1".into(),
-                sequence: 0,
-                effect: TrackEffect::SubmitOrder {
-                    request: OrderRequest {
-                        instrument: snapshot.instrument.clone(),
-                        side: Side::Buy,
-                        price: 100.5,
-                        quantity: 0.1,
-                        client_order_id: "client-1".into(),
-                        reduce_only: false,
-                    },
-                    desired_exposure: Exposure(4.0),
-                },
-                status: EffectStatus::Executing,
-                attempt_count: 1,
-                last_error: None,
-                created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-                updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            };
+            let track_id = snapshot.track_id.clone();
+            let updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
 
             Self {
                 snapshots: HashMap::from([(
-                    track_id.clone(),
+                    track_id.as_str().to_string(),
                     StoredTrackSnapshot {
                         snapshot,
-                        updated_at: snapshot_updated_at,
+                        updated_at,
                     },
                 )]),
-                events: HashMap::from([(track_id.clone(), vec![event])]),
-                effects: HashMap::from([(track_id, vec![effect])]),
+                events: HashMap::from([(
+                    track_id.as_str().to_string(),
+                    vec![StoredTrackEvent {
+                        id: 1,
+                        track_id: track_id.clone(),
+                        event: DomainEvent::ExposureTargetChanged {
+                            from: Exposure(3.5),
+                            to: Exposure(4.0),
+                        },
+                        created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
+                    }],
+                )]),
+                effects: HashMap::from([(
+                    track_id.as_str().to_string(),
+                    vec![PersistedTrackEffect {
+                        effect_id: "btc-core:batch-1:0".into(),
+                        track_id,
+                        batch_id: "batch-1".into(),
+                        sequence: 0,
+                        effect: TrackEffect::SubmitOrder {
+                            request: OrderRequest {
+                                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                                side: Side::Buy,
+                                price: 100.5,
+                                quantity: 0.1,
+                                client_order_id: "client-1".into(),
+                                reduce_only: false,
+                            },
+                            desired_exposure: Exposure(4.0),
+                        },
+                        status: EffectStatus::Executing,
+                        attempt_count: 1,
+                        last_error: None,
+                        created_at: updated_at,
+                        updated_at,
+                    }],
+                )]),
                 effect_limits: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -342,11 +227,7 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredTrackEvent>> {
-            Ok(self
-                .events
-                .get(track_id.as_str())
-                .cloned()
-                .unwrap_or_default())
+            Ok(self.events.get(track_id.as_str()).cloned().unwrap_or_default())
         }
 
         async fn list_recent_track_effects(
@@ -359,10 +240,7 @@ mod tests {
                 .effects
                 .get(track_id.as_str())
                 .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .take(limit)
-                .collect())
+                .unwrap_or_default())
         }
     }
 
@@ -423,8 +301,8 @@ mod tests {
             risk: RiskState {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,
-                realized_pnl_cumulative: 0.0,
-                unrealized_pnl: 0.0,
+                realized_pnl_cumulative: 980.1,
+                unrealized_pnl: 265.2,
                 ..RiskState::default()
             },
             observed: ObservedState {

@@ -4,9 +4,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
+use poise_application::DiagnosticSeverity;
 use poise_protocol::{
-    AccountSummaryView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-    TrackDetailView, TrackDiagnosticsView, TrackListResponse,
+    AccountSummaryView, ActivityLevelView, TrackCommandAccepted, TrackCommandRequest,
+    TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
+    TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -128,7 +130,16 @@ async fn get_track_diagnostics(
         .map_err(map_query_error)?
         .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
 
-    Ok(Json(diagnostics))
+    Ok(Json(TrackDiagnosticsView {
+        items: diagnostics
+            .into_iter()
+            .map(|item| TrackDiagnosticItemView {
+                ts: item.observed_at.to_rfc3339(),
+                message: item.message,
+                level: project_diagnostic_severity(item.severity),
+            })
+            .collect(),
+    }))
 }
 
 async fn submit_command(
@@ -190,6 +201,13 @@ fn map_query_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     internal_error(error.to_string())
 }
 
+fn project_diagnostic_severity(severity: DiagnosticSeverity) -> ActivityLevelView {
+    match severity {
+        DiagnosticSeverity::Info => ActivityLevelView::Info,
+        DiagnosticSeverity::Warn => ActivityLevelView::Warn,
+    }
+}
+
 fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     match error.downcast::<TrackMutationError>() {
         Ok(TrackMutationError::LoadedTrackInvariant { track_id }) => {
@@ -233,17 +251,14 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
-    use crate::account_monitor::AccountMonitor;
-    use crate::account_monitor_store::{
-        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    use poise_application::{
+        AccountMonitor, AccountMonitorStore, AccountMonitorConfig, ApplicationNotification,
+        StoredAccountMonitorState, TrackQueryService,
     };
     use crate::assembly::{
         ServerState, build_server_state, build_server_state_with_account_monitor,
     };
-    use crate::config::AccountMonitorConfig;
-    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
 
     use super::router;
@@ -356,7 +371,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
@@ -400,7 +415,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
@@ -412,9 +427,8 @@ mod tests {
             notifications.clone(),
             account_margin_guard.clone(),
         ));
-        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
-            SqliteStorage::in_memory().unwrap(),
-        )));
+        let account_store: Arc<dyn AccountMonitorStore> =
+            Arc::new(SqliteStorage::in_memory().unwrap());
         account_store
             .save_state(&StoredAccountMonitorState {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
@@ -834,7 +848,7 @@ mod tests {
                 .snapshot("btc-core")
                 .expect("seeded manager should expose runtime snapshot"),
         );
-        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let query_service =

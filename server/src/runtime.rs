@@ -20,7 +20,7 @@ use tokio::time::{Instant, MissedTickBehavior, sleep};
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
 use crate::exchange_freshness::ExchangeFreshnessReason;
-use crate::notifications::ServerNotification;
+use poise_application::ApplicationNotification;
 use crate::order_outcome::{
     ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
 };
@@ -565,7 +565,7 @@ impl ServerRuntime {
                     }
                     notification = notifications.recv() => {
                         match notification {
-                            Ok(ServerNotification::TrackChanged { track_id }) => {
+                            Ok(ApplicationNotification::TrackChanged { track_id }) => {
                                 let recovery_anomaly_active =
                                     load_recovery_anomaly_active(&state, track_id.as_str()).await;
                                 update_recovery_tracking(
@@ -583,7 +583,7 @@ impl ServerRuntime {
                                     );
                                 }
                             }
-                            Ok(ServerNotification::AccountChanged) => {
+                            Ok(ApplicationNotification::AccountChanged) => {
                                 if let Err(error) = reconcile_submit_preflight_state(&state).await {
                                     tracing::warn!(
                                         "failed to reconcile submit preflight state after account change: {}",
@@ -1062,18 +1062,16 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
-    use crate::account_monitor::AccountMonitor;
-    use crate::account_monitor_store::{
-        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, StoredAccountMonitorState,
+        TrackQueryService,
     };
     use crate::assembly::{
         ServerState, build_server_state, build_server_state_with_account_monitor,
     };
-    use crate::config::AccountMonitorConfig;
     use crate::effect_worker::EffectWorker;
     use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
 
     use super::{AccountMarginGuardStore, RuntimeHandles, ServerRuntime};
@@ -3255,7 +3253,7 @@ mod tests {
                 .unwrap();
             if matches!(
                 event,
-                crate::notifications::ServerNotification::TrackChanged { .. }
+                poise_application::ApplicationNotification::TrackChanged { .. }
             ) {
                 saw_effect_state_changed = true;
                 break;
@@ -3294,7 +3292,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::ServerNotification::TrackChanged { .. }
+            poise_application::ApplicationNotification::TrackChanged { .. }
         ));
         worker.run_once().await.unwrap();
 
@@ -3304,7 +3302,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed,
-            crate::notifications::ServerNotification::TrackChanged { .. }
+            poise_application::ApplicationNotification::TrackChanged { .. }
         ));
     }
 
@@ -3673,7 +3671,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::ServerNotification::TrackChanged { .. }
+            poise_application::ApplicationNotification::TrackChanged { .. }
         ));
 
         shutdown(handles).await;
@@ -3843,7 +3841,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             event,
-            crate::notifications::ServerNotification::TrackChanged { .. }
+            poise_application::ApplicationNotification::TrackChanged { .. }
         ));
 
         shutdown(handles).await;
@@ -5802,11 +5800,10 @@ mod tests {
 
     async fn build_test_account_monitor(
         exchange: Arc<dyn ExchangePort>,
-        notifications: broadcast::Sender<crate::notifications::ServerNotification>,
+        notifications: broadcast::Sender<poise_application::ApplicationNotification>,
     ) -> Arc<AccountMonitor> {
-        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
-            poise_storage::sqlite::SqliteStorage::in_memory().unwrap(),
-        )));
+        let account_store: Arc<dyn AccountMonitorStore> =
+            Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap());
         account_store
             .save_state(&StoredAccountMonitorState {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap(),

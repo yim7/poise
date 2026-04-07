@@ -9,21 +9,20 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_binance::BinanceAdapter;
-use poise_application::{TrackEffectStore, TrackMutationStore};
+use poise_application::{
+    AccountMonitor, TrackDebugQueryService, TrackEffectStore, TrackMutationStore,
+    TrackQueryService,
+};
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{ClockPort, ExchangePort, MarketDataPort};
 use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
-use crate::account_monitor::AccountMonitor;
-use crate::account_monitor_store::SqliteAccountMonitorStore;
 use crate::account_projector::AccountProjector;
 use crate::config::Config;
-use crate::debug_query_service::TrackDebugQueryService;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
-use crate::query_service::TrackQueryService;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
@@ -246,10 +245,11 @@ async fn assemble_with_state_store(
     let projector = Arc::new(TrackProjector::new());
     let account_monitor = if let Some(sqlite_storage) = repositories.sqlite_storage() {
         let account_summary: Arc<dyn poise_engine::ports::AccountSummaryPort> = exchange.clone();
+        let account_store: Arc<dyn poise_application::AccountMonitorStore> = sqlite_storage;
         Arc::new(
             AccountMonitor::restore(
                 account_summary,
-                Arc::new(SqliteAccountMonitorStore::new(sqlite_storage)),
+                account_store,
                 write_service.notification_sender(),
                 config.account_monitor.clone(),
             )
@@ -380,7 +380,7 @@ pub(crate) fn build_server_state(
 ) -> ServerState {
     let account_monitor = Arc::new(AccountMonitor::unavailable(
         write_service.notification_sender(),
-        crate::config::AccountMonitorConfig::default(),
+        poise_application::AccountMonitorConfig::default(),
     ));
     build_server_state_with_account_monitor(
         write_service,
@@ -455,7 +455,7 @@ mod tests {
     use crate::config::{Config, ExchangeConfig, TrackDefinition};
     use crate::http::router;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
+    use poise_application::TrackQueryService;
     use crate::state_bootstrap::StateRepositories;
     use crate::write_service::TrackWriteService;
 

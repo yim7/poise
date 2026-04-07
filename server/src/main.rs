@@ -1,22 +1,13 @@
-mod account_monitor;
-mod account_monitor_store;
 mod account_projector;
-mod account_read_model;
 mod assembly;
 mod config;
-mod debug_query_service;
 mod effect_worker;
 mod event_presentation;
 mod exchange_freshness;
 mod http;
-mod notifications;
 mod order_outcome;
 #[allow(dead_code)]
 mod projector;
-#[allow(dead_code)]
-mod query_service;
-#[allow(dead_code)]
-mod read_model;
 mod runtime;
 mod state_bootstrap;
 mod submit_preflight;

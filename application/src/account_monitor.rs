@@ -1,16 +1,33 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use poise_engine::ports::{AccountSummaryPort, AccountSummarySnapshot};
+use serde::Deserialize;
 use tokio::sync::{RwLock, broadcast};
 
-use crate::account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
-use crate::account_read_model::{AccountReadModel, AccountRiskSignal};
-use crate::config::AccountMonitorConfig;
-use crate::notifications::ServerNotification;
+use crate::{
+    AccountMonitorStore, AccountReadModel, AccountRiskSignal, ApplicationNotification,
+    StoredAccountMonitorState,
+};
 
 pub type ObservedAccountSnapshot = AccountSummarySnapshot;
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AccountMonitorConfig {
+    #[serde(default = "default_day_change_attention_pct")]
+    pub day_change_attention_pct: f64,
+    #[serde(default = "default_day_change_critical_pct")]
+    pub day_change_critical_pct: f64,
+    #[serde(default = "default_available_ratio_attention_pct")]
+    pub available_ratio_attention_pct: f64,
+    #[serde(default = "default_available_ratio_critical_pct")]
+    pub available_ratio_critical_pct: f64,
+    #[serde(default = "default_unrealized_loss_attention_pct")]
+    pub unrealized_loss_attention_pct: f64,
+    #[serde(default = "default_unrealized_loss_critical_pct")]
+    pub unrealized_loss_critical_pct: f64,
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct InMemoryAccountMonitorState {
@@ -23,14 +40,51 @@ pub(crate) struct InMemoryAccountMonitorState {
 pub struct AccountMonitor {
     account_summary: Arc<dyn AccountSummaryPort>,
     store: Arc<dyn AccountMonitorStore>,
-    notifications: broadcast::Sender<ServerNotification>,
+    notifications: broadcast::Sender<ApplicationNotification>,
     config: AccountMonitorConfig,
     state: RwLock<InMemoryAccountMonitorState>,
 }
 
+impl Default for AccountMonitorConfig {
+    fn default() -> Self {
+        Self {
+            day_change_attention_pct: default_day_change_attention_pct(),
+            day_change_critical_pct: default_day_change_critical_pct(),
+            available_ratio_attention_pct: default_available_ratio_attention_pct(),
+            available_ratio_critical_pct: default_available_ratio_critical_pct(),
+            unrealized_loss_attention_pct: default_unrealized_loss_attention_pct(),
+            unrealized_loss_critical_pct: default_unrealized_loss_critical_pct(),
+        }
+    }
+}
+
+impl AccountMonitorConfig {
+    pub fn validate(&self) -> Result<()> {
+        validate_threshold_pair(
+            "day_change_attention_pct",
+            self.day_change_attention_pct,
+            "day_change_critical_pct",
+            self.day_change_critical_pct,
+        )?;
+        validate_threshold_pair(
+            "available_ratio_attention_pct",
+            self.available_ratio_attention_pct,
+            "available_ratio_critical_pct",
+            self.available_ratio_critical_pct,
+        )?;
+        validate_threshold_pair(
+            "unrealized_loss_attention_pct",
+            self.unrealized_loss_attention_pct,
+            "unrealized_loss_critical_pct",
+            self.unrealized_loss_critical_pct,
+        )?;
+        Ok(())
+    }
+}
+
 impl AccountMonitor {
     pub fn unavailable(
-        notifications: broadcast::Sender<ServerNotification>,
+        notifications: broadcast::Sender<ApplicationNotification>,
         config: AccountMonitorConfig,
     ) -> Self {
         Self {
@@ -45,7 +99,7 @@ impl AccountMonitor {
     pub async fn restore(
         account_summary: Arc<dyn AccountSummaryPort>,
         store: Arc<dyn AccountMonitorStore>,
-        notifications: broadcast::Sender<ServerNotification>,
+        notifications: broadcast::Sender<ApplicationNotification>,
         config: AccountMonitorConfig,
     ) -> Result<Self> {
         let restored_state = store
@@ -89,7 +143,9 @@ impl AccountMonitor {
         }
 
         if before != after && after.is_some() {
-            let _ = self.notifications.send(ServerNotification::AccountChanged);
+            let _ = self
+                .notifications
+                .send(ApplicationNotification::AccountChanged);
         }
 
         Ok(())
@@ -132,7 +188,6 @@ fn apply_snapshot(state: &mut InMemoryAccountMonitorState, snapshot: ObservedAcc
 }
 
 fn trading_day_for(observed_at: DateTime<Utc>) -> NaiveDate {
-    // 首版按固定的 Asia/Shanghai 自然日口径计算日基准。
     observed_at
         .with_timezone(&FixedOffset::east_opt(8 * 60 * 60).expect("valid fixed offset"))
         .date_naive()
@@ -240,6 +295,45 @@ fn severity(signal: AccountRiskSignal) -> u8 {
     }
 }
 
+fn validate_threshold_pair(
+    attention_name: &str,
+    attention: f64,
+    critical_name: &str,
+    critical: f64,
+) -> Result<()> {
+    ensure!(attention.is_finite(), "{attention_name} must be finite");
+    ensure!(critical.is_finite(), "{critical_name} must be finite");
+    ensure!(
+        attention >= critical,
+        "{attention_name} must be greater than or equal to {critical_name}"
+    );
+    Ok(())
+}
+
+fn default_day_change_attention_pct() -> f64 {
+    -3.0
+}
+
+fn default_day_change_critical_pct() -> f64 {
+    -5.0
+}
+
+fn default_available_ratio_attention_pct() -> f64 {
+    30.0
+}
+
+fn default_available_ratio_critical_pct() -> f64 {
+    15.0
+}
+
+fn default_unrealized_loss_attention_pct() -> f64 {
+    -5.0
+}
+
+fn default_unrealized_loss_critical_pct() -> f64 {
+    -10.0
+}
+
 struct InMemoryAccountMonitorStore;
 
 #[async_trait::async_trait]
@@ -273,11 +367,10 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::{
-        AccountMonitor, InMemoryAccountMonitorState, InMemoryAccountMonitorStore,
-        ObservedAccountSnapshot, build_read_model,
+        AccountMonitor, AccountMonitorConfig, InMemoryAccountMonitorState,
+        InMemoryAccountMonitorStore, ObservedAccountSnapshot, build_read_model,
     };
-    use crate::account_read_model::AccountRiskSignal;
-    use crate::config::AccountMonitorConfig;
+    use crate::{AccountRiskSignal, ApplicationNotification};
     use poise_engine::ports::AccountSummarySnapshot;
 
     #[test]
@@ -364,12 +457,39 @@ mod tests {
             .refresh_once()
             .await
             .expect("summary-only source should refresh");
-        let summary = monitor
-            .current_summary()
-            .await
-            .expect("summary should exist");
+        let summary = monitor.current_summary().await.expect("summary should exist");
         assert_eq!(summary.equity, 12_500.0);
         assert_eq!(summary.available, 9_000.0);
         assert_eq!(summary.unrealized_pnl, -350.0);
+    }
+
+    #[tokio::test]
+    async fn refresh_once_emits_account_changed_notification() {
+        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
+            Arc::new(SummaryOnlySource {
+                snapshot: AccountSummarySnapshot {
+                    equity: 12_500.0,
+                    available: 9_000.0,
+                    unrealized_pnl: -350.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                },
+            });
+        let (notifications, _) = broadcast::channel(1);
+        let monitor = AccountMonitor::restore(
+            source,
+            Arc::new(InMemoryAccountMonitorStore),
+            notifications.clone(),
+            AccountMonitorConfig::default(),
+        )
+        .await
+        .unwrap();
+        let mut receiver = notifications.subscribe();
+
+        monitor.refresh_once().await.unwrap();
+
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            ApplicationNotification::AccountChanged
+        );
     }
 }

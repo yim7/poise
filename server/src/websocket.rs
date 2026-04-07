@@ -4,7 +4,7 @@ use axum::response::Response;
 use poise_protocol::StreamEvent;
 
 use crate::assembly::ServerState;
-use crate::notifications::ServerNotification;
+use poise_application::ApplicationNotification;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -15,12 +15,12 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 
     loop {
         match receiver.recv().await {
-            Ok(ServerNotification::TrackChanged { track_id }) => {
+            Ok(ApplicationNotification::TrackChanged { track_id }) => {
                 if !push_projected_updates(&mut socket, &state, track_id).await {
                     break;
                 }
             }
-            Ok(ServerNotification::AccountChanged) => {
+            Ok(ApplicationNotification::AccountChanged) => {
                 if !push_account_summary(&mut socket, &state).await {
                     break;
                 }
@@ -151,18 +151,15 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::account_monitor::AccountMonitor;
-    use crate::account_monitor_store::{
-        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
+        StoredAccountMonitorState, TrackQueryService,
     };
     use crate::assembly::{
         ServerState, build_server_state, build_server_state_with_account_monitor,
     };
-    use crate::config::AccountMonitorConfig;
     use crate::effect_worker::EffectWorker;
-    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
     use crate::write_service::TrackWriteService;
 
     use super::ws_handler;
@@ -274,11 +271,10 @@ mod tests {
     }
 
     async fn seeded_account_monitor(
-        notifications: tokio::sync::broadcast::Sender<ServerNotification>,
+        notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
     ) -> Arc<AccountMonitor> {
-        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
-            poise_storage::sqlite::SqliteStorage::in_memory().unwrap(),
-        )));
+        let account_store: Arc<dyn AccountMonitorStore> =
+            Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap());
         account_store
             .save_state(&StoredAccountMonitorState {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
@@ -315,7 +311,7 @@ mod tests {
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(ServerNotification::TrackChanged {
+        service.emit_internal_notification(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -337,7 +333,7 @@ mod tests {
         let (_, mut stream) = client.split();
 
         service.emit_internal_notification(
-            crate::notifications::ServerNotification::TrackChanged {
+            poise_application::ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             },
         );
@@ -366,7 +362,7 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ServerNotification::AccountChanged);
+        service.emit_internal_notification(ApplicationNotification::AccountChanged);
 
         let event = recv_event(&mut stream).await;
 
@@ -475,7 +471,7 @@ mod tests {
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(ServerNotification::TrackChanged {
+            service.emit_internal_notification(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             });
         }
@@ -508,7 +504,7 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ServerNotification::TrackChanged {
+        service.emit_internal_notification(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -540,7 +536,7 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ServerNotification::TrackChanged {
+        service.emit_internal_notification(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 

@@ -22,7 +22,7 @@ use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
-use crate::notifications::ServerNotification;
+use poise_application::ApplicationNotification;
 use crate::runtime::AccountMarginGuardStore;
 
 pub type SharedManager = Arc<RwLock<TrackManager>>;
@@ -53,7 +53,7 @@ pub struct TrackWriteService {
     mutation_store: Arc<dyn TrackMutationStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     mutation_guards: Arc<TrackMutationGuards>,
-    notifications: broadcast::Sender<ServerNotification>,
+    notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
 }
 
@@ -178,7 +178,7 @@ impl TrackWriteService {
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
         effect_store: Arc<dyn TrackEffectStore>,
-        notifications: broadcast::Sender<ServerNotification>,
+        notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<AccountMarginGuardStore>,
     ) -> Self {
         Self {
@@ -196,11 +196,11 @@ impl TrackWriteService {
         Arc::clone(&self.manager)
     }
 
-    pub fn subscribe_notifications(&self) -> broadcast::Receiver<ServerNotification> {
+    pub fn subscribe_notifications(&self) -> broadcast::Receiver<ApplicationNotification> {
         self.notifications.subscribe()
     }
 
-    pub fn notification_sender(&self) -> broadcast::Sender<ServerNotification> {
+    pub fn notification_sender(&self) -> broadcast::Sender<ApplicationNotification> {
         self.notifications.clone()
     }
 
@@ -216,7 +216,7 @@ impl TrackWriteService {
         Arc::clone(&self.account_margin_guard)
     }
 
-    pub(crate) fn emit_internal_notification(&self, notification: ServerNotification) {
+    pub(crate) fn emit_internal_notification(&self, notification: ApplicationNotification) {
         let _ = self.notifications.send(notification);
     }
 
@@ -977,7 +977,7 @@ impl TrackWriteService {
         }
 
         if has_track_write || has_effect_status_update {
-            self.emit_internal_notification(ServerNotification::TrackChanged {
+            self.emit_internal_notification(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new(id),
             });
         }
@@ -1082,7 +1082,7 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
-    use crate::notifications::ServerNotification;
+    use poise_application::ApplicationNotification;
     use crate::runtime::AccountMarginGuardStore;
     use crate::write_service::FollowUpRetirementRequest;
 
@@ -1112,7 +1112,7 @@ mod tests {
         let notification = receiver.recv().await.unwrap();
         assert_eq!(
             notification,
-            ServerNotification::TrackChanged {
+            ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             }
         );
@@ -1241,7 +1241,7 @@ mod tests {
         let notification = receiver.recv().await.unwrap();
         assert_eq!(
             notification,
-            ServerNotification::TrackChanged {
+            ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             }
         );
@@ -1281,7 +1281,7 @@ mod tests {
 
         assert_eq!(
             receiver.recv().await.unwrap(),
-            ServerNotification::TrackChanged {
+            ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             }
         );

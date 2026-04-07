@@ -4,36 +4,27 @@ use poise_application::{EffectStatus, PersistedTrackEffect};
 use poise_engine::transition::TrackEffect;
 use poise_protocol::ActivityLevelView;
 
-use crate::read_model::TrackReadModel;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentationAudience {
-    Activity,
-    Diagnostics,
-}
+use poise_application::TrackReadModel;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresentedEvent {
     pub ts: DateTime<Utc>,
     pub message: String,
     pub level: ActivityLevelView,
-    pub audience: PresentationAudience,
 }
 
-pub fn classify_track_events(source: &TrackReadModel) -> Vec<PresentedEvent> {
+pub fn project_activity_events(source: &TrackReadModel) -> Vec<PresentedEvent> {
     let mut items = Vec::new();
 
     for event in &source.recent_track_events {
-        let audience = match event.event {
-            DomainEvent::ExposureTargetChanged { .. } => PresentationAudience::Diagnostics,
-            _ => PresentationAudience::Activity,
-        };
+        if matches!(event.event, DomainEvent::ExposureTargetChanged { .. }) {
+            continue;
+        }
 
         items.push(PresentedEvent {
             ts: event.created_at,
             message: project_domain_event_message(&event.event),
             level: project_domain_event_level(&event.event),
-            audience,
         });
     }
 
@@ -42,7 +33,6 @@ pub fn classify_track_events(source: &TrackReadModel) -> Vec<PresentedEvent> {
             ts: effect.updated_at,
             message: project_effect_message(effect),
             level: project_effect_level(effect.status),
-            audience: PresentationAudience::Activity,
         });
     }
 
