@@ -217,7 +217,7 @@ git commit -m "refactor: introduce poise-application shared domain boundary"
 ```
 
 Task 1 code commit:
-`<fill during execution>`
+`9e64514`
 
 ---
 
