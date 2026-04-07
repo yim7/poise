@@ -268,7 +268,7 @@ Task 2 code commit:
 - Delete: `ops/zellij/poise-paper.kdl`
 - Test: `server/src/main.rs`
 
-- [ ] **Step 1: 先写失败测试，固定新脚本和新 layout 的 dry-run 输出**
+- [x] **Step 1: 先写失败测试，固定新脚本和新 layout 的 dry-run 输出**
 
 在 `server/src/main.rs` 现有脚本测试旁新增：
 
@@ -310,7 +310,7 @@ fn start_instance_zellij_dry_run_exports_instance_dir_and_base_url() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前脚本入口和命名仍是旧模型**
+- [x] **Step 2: 运行定向测试，确认当前脚本入口和命名仍是旧模型**
 
 Run:
 `cargo test -p poise-server tests::run_instance_server_script_dry_run_uses_instance_dir -- --exact`
@@ -324,7 +324,7 @@ Run:
 Expected:
 - FAIL，原因是 layout 和脚本仍然是 `paper` 旧命名
 
-- [ ] **Step 3: 实现新脚本和实例目录默认路径**
+- [x] **Step 3: 实现新脚本和实例目录默认路径**
 
 要求：
 - 新脚本统一接收 `POISE_INSTANCE_DIR`
@@ -337,7 +337,7 @@ Expected:
 - `ops/zellij/poise-instance.kdl` 调用新脚本，不再写死 `paper`
 - 删除旧 `paper` 脚本和旧 layout 文件
 
-- [ ] **Step 4: 运行脚本 dry-run 与健康巡检回归**
+- [x] **Step 4: 运行脚本 dry-run 与健康巡检回归**
 
 Run:
 `cargo test -p poise-server tests::run_instance_server_script_dry_run_uses_instance_dir -- --exact`
@@ -347,7 +347,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add scripts/run-instance-server.sh scripts/run-instance-tui.sh scripts/start-instance-zellij.sh scripts/probe-health.sh ops/zellij/poise-instance.kdl server/src/main.rs
@@ -355,8 +355,12 @@ git rm scripts/run-paper-server.sh scripts/run-paper-tui.sh scripts/start-paper-
 git commit -m "refactor: switch runtime scripts to instance dir model"
 ```
 
+执行备注：
+- 初始实现提交：`2c6eeee`
+- 补充修正提交：`56006bb`，恢复新脚本的可执行位，保证 `./scripts/...` 直接调用可用
+
 Task 3 code commit:
-`TODO`
+`56006bb`
 
 ---
 
