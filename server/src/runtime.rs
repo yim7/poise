@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use poise_application::{ApplicationNotification, TrackInstrument, TrackMutationError};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
@@ -20,11 +21,9 @@ use tokio::time::{Instant, MissedTickBehavior, sleep};
 use crate::assembly::ServerState;
 use crate::effect_worker::EffectWorker;
 use crate::exchange_freshness::ExchangeFreshnessReason;
-use poise_application::ApplicationNotification;
 use crate::order_outcome::{
     ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
 };
-use crate::write_service::TrackMutationError;
 
 #[derive(Clone)]
 pub struct ServerRuntime {
@@ -107,6 +106,12 @@ impl AccountMarginGuardStore {
             blocked_reason: block.blocked_reason,
             max_increase_notional: snapshot.map(|snapshot| snapshot.max_increase_notional),
         }
+    }
+}
+
+impl poise_application::AccountCapacityGuard for AccountMarginGuardStore {
+    fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
+        self.constraint_for(instrument)
     }
 }
 
@@ -305,7 +310,7 @@ impl ServerRuntime {
             let _ = handles.effect_task.await;
         }
 
-        let tracks = self.state.write_service.track_instruments().await;
+        let tracks = self.state.observation_service.track_instruments().await;
         for track in &tracks {
             if let Err(error) = self.exchange.cancel_all(&track.instrument).await {
                 tracing::warn!(
@@ -345,11 +350,11 @@ impl ServerRuntime {
     }
 
     async fn startup_sync(&self) -> Result<()> {
-        for track in self.state.write_service.track_instruments().await {
+        for track in self.state.observation_service.track_instruments().await {
             let position = self.exchange.get_position(&track.instrument).await?;
             let open_orders = self.exchange.get_open_orders(&track.instrument).await?;
             self.state
-                .write_service
+                .observation_service
                 .sync_exchange_state(
                     &track.id,
                     position_observation(&position),
@@ -375,7 +380,11 @@ impl ServerRuntime {
         for event in buffered_events {
             if event.event_time > startup_cutoff {
                 let instrument = event.instrument().clone();
-                let Some(track_id) = self.state.write_service.resolve_track_id(&instrument).await
+                let Some(track_id) = self
+                    .state
+                    .observation_service
+                    .resolve_track_id(&instrument)
+                    .await
                 else {
                     tracing::warn!(
                         "received user data for unknown instrument {}:{}",
@@ -398,7 +407,7 @@ impl ServerRuntime {
         let market_data = Arc::clone(&self.market_data);
 
         tokio::spawn(async move {
-            let tracks = state.write_service.track_instruments().await;
+            let tracks = state.observation_service.track_instruments().await;
             let mut workers = JoinSet::new();
 
             for track in tracks {
@@ -430,7 +439,7 @@ impl ServerRuntime {
                                         };
 
                                         match state
-                                            .write_service
+                                            .observation_service
                                             .observe_market(&track.id, tick.reference_price)
                                             .await
                                         {
@@ -482,13 +491,13 @@ impl ServerRuntime {
         let audit_interval = self.audit_interval;
 
         tokio::spawn(async move {
-            let instruments = state.write_service.track_instruments().await;
+            let instruments = state.observation_service.track_instruments().await;
             let mut tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
             let mut next_audit_at = instruments
                 .iter()
                 .map(|track| (track.id.clone(), Instant::now() + audit_interval))
                 .collect::<std::collections::HashMap<_, _>>();
-            let mut notifications = state.write_service.subscribe_notifications();
+            let mut notifications = state.notifications.subscribe();
             let mut ticker = tokio::time::interval(Duration::from_millis(50));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -507,7 +516,7 @@ impl ServerRuntime {
                     _ = ticker.tick() => {
                         for track in &instruments {
                             if let Err(error) = state
-                                .write_service
+                                .observation_service
                                 .refresh_market_data_health(&track.id)
                                 .await
                             {
@@ -670,7 +679,11 @@ impl ServerRuntime {
                 }
 
                 let instrument = event.instrument().clone();
-                let Some(track_id) = state.write_service.resolve_track_id(&instrument).await else {
+                let Some(track_id) = state
+                    .observation_service
+                    .resolve_track_id(&instrument)
+                    .await
+                else {
                     tracing::warn!(
                         "received user data for unknown instrument {}:{}",
                         instrument.venue.as_str(),
@@ -732,14 +745,14 @@ async fn apply_user_data_event(
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
-                .write_service
+                .observation_service
                 .observe_position(track_id, position_observation(&position))
                 .await
                 .map_err(preserve_track_mutation_error)?;
         }
         UserDataPayload::OrderUpdate(order) => {
             let (_, absorb_result): (_, poise_engine::executor::OrderUpdateAbsorbResult) = state
-                .write_service
+                .observation_service
                 .observe_order_with_absorb_result(track_id, order_observation(&order))
                 .await
                 .map_err(preserve_track_mutation_error)?;
@@ -767,11 +780,12 @@ async fn apply_user_data_event(
         }
         UserDataPayload::TrackLedger(update) => {
             let result = state
-                .write_service
+                .observation_service
                 .apply_track_ledger_event(track_id, update.event)
                 .await
                 .map_err(preserve_track_mutation_error)?;
-            if result.absorb_result == Some(poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed)
+            if result.absorb_result
+                == Some(poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed)
             {
                 state
                     .exchange_freshness
@@ -865,7 +879,7 @@ async fn sync_exchange_state_from_exchange(
 
     if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
         let _ = state
-            .write_service
+            .observation_service
             .sync_exchange_state(
                 track_id,
                 position_observation(&position),
@@ -875,7 +889,7 @@ async fn sync_exchange_state_from_exchange(
             .map_err(preserve_track_mutation_error)?;
     } else {
         let _ = state
-            .write_service
+            .observation_service
             .sync_exchange_state_without_reconcile(
                 track_id,
                 position_observation(&position),
@@ -924,7 +938,7 @@ fn should_cancel_unknown_live_orders(
 
 fn update_recovery_tracking(
     tracked: &mut std::collections::HashMap<String, RecoveryTrackedTrack>,
-    instruments: &[crate::write_service::TrackInstrument],
+    instruments: &[TrackInstrument],
     track_id: &str,
     recovery_anomaly_active: bool,
     retry_interval: Duration,
@@ -952,7 +966,7 @@ fn update_recovery_tracking(
 
 async fn seed_recovery_tracking(
     state: &ServerState,
-    instruments: &[crate::write_service::TrackInstrument],
+    instruments: &[TrackInstrument],
     retry_interval: Duration,
 ) -> std::collections::HashMap<String, RecoveryTrackedTrack> {
     let mut tracked = std::collections::HashMap::new();
@@ -1062,10 +1076,6 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
-    use poise_application::{
-        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, StoredAccountMonitorState,
-        TrackQueryService,
-    };
     use crate::assembly::{
         ServerState, build_server_state, build_server_state_with_account_monitor,
     };
@@ -1073,6 +1083,10 @@ mod tests {
     use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
     use crate::write_service::TrackWriteService;
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, StoredAccountMonitorState,
+        TrackQueryService,
+    };
 
     use super::{AccountMarginGuardStore, RuntimeHandles, ServerRuntime};
 
@@ -1164,7 +1178,6 @@ mod tests {
         let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
         let snapshot = fixture
             .state
-            .write_service
             .manager()
             .read()
             .await
@@ -1237,7 +1250,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1271,7 +1284,7 @@ mod tests {
 
         let transition = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1334,7 +1347,7 @@ mod tests {
         );
 
         let first = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1344,7 +1357,7 @@ mod tests {
         ));
 
         let second = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 92.5)
             .await
             .unwrap();
@@ -1405,7 +1418,7 @@ mod tests {
         );
 
         let first = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
@@ -1420,7 +1433,7 @@ mod tests {
         };
 
         let second = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.125)
             .await
             .unwrap();
@@ -1486,7 +1499,7 @@ mod tests {
         );
 
         let first = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
@@ -1502,7 +1515,7 @@ mod tests {
         worker.run_once().await.unwrap();
 
         let second = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.125)
             .await
             .unwrap();
@@ -1568,7 +1581,7 @@ mod tests {
         );
 
         let first = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
@@ -1589,7 +1602,7 @@ mod tests {
         let remaining_quantity = first_order.quantity - 0.4;
 
         state
-            .write_service
+            .observation_service
             .observe_position(
                 "BTCUSDT",
                 super::position_observation(&btc_position(2.4, 0.0)),
@@ -1597,7 +1610,7 @@ mod tests {
             .await
             .unwrap();
         state
-            .write_service
+            .observation_service
             .observe_order_with_absorb_result(
                 "BTCUSDT",
                 super::order_observation(&btc_exchange_order(
@@ -1613,7 +1626,7 @@ mod tests {
             .await
             .unwrap();
         let second = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.125)
             .await
             .unwrap();
@@ -1686,7 +1699,7 @@ mod tests {
 
         let first = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.5)
             .await
             .unwrap();
@@ -1699,7 +1712,7 @@ mod tests {
         clock.set(test_server_time() + chrono::Duration::seconds(70));
         let second = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.4)
             .await
             .unwrap();
@@ -1715,7 +1728,7 @@ mod tests {
         clock.set(test_server_time() + chrono::Duration::seconds(71));
         let third = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 96.35)
             .await
             .unwrap();
@@ -1734,7 +1747,7 @@ mod tests {
 
         fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1781,7 +1794,7 @@ mod tests {
 
         fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1867,7 +1880,7 @@ mod tests {
         );
 
         state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1924,7 +1937,7 @@ mod tests {
         );
 
         state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -1990,7 +2003,7 @@ mod tests {
             .await
             .unwrap();
         state
-            .write_service
+            .observation_service
             .observe_position(
                 "BTCUSDT",
                 super::position_observation(&btc_position(0.0, 0.0)),
@@ -2090,7 +2103,7 @@ mod tests {
             .await
             .unwrap();
         state
-            .write_service
+            .observation_service
             .observe_position(
                 "BTCUSDT",
                 super::position_observation(&btc_position(0.0, 0.0)),
@@ -2176,7 +2189,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -2237,7 +2250,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -2297,7 +2310,7 @@ mod tests {
         );
 
         state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -2313,7 +2326,7 @@ mod tests {
         .await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -2389,7 +2402,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -2417,7 +2430,7 @@ mod tests {
 
         let transition = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -2428,7 +2441,7 @@ mod tests {
 
         fixture
             .state
-            .write_service
+            .command_service
             .command("BTCUSDT", TrackCommand::Pause)
             .await
             .unwrap();
@@ -2723,7 +2736,7 @@ mod tests {
             .unwrap();
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_position(
                 "BTCUSDT",
                 super::position_observation(&btc_position(0.0, 0.0)),
@@ -2988,7 +3001,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 90.0)
             .await
             .unwrap();
@@ -3057,7 +3070,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_position(
                 "BTCUSDT",
                 super::position_observation(&btc_position(-22.5, 0.0)),
@@ -3095,7 +3108,7 @@ mod tests {
         assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
 
         state
-            .write_service
+            .observation_service
             .observe_order_with_absorb_result(
                 "BTCUSDT",
                 super::order_observation(&btc_exchange_order(
@@ -3143,7 +3156,7 @@ mod tests {
         );
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -3241,7 +3254,7 @@ mod tests {
             .submit_preflight
             .seed_startup_pending_submit_effects(["BTCUSDT:recovery:0".to_string()])
             .await;
-        let mut receiver = state.write_service.subscribe_notifications();
+        let mut receiver = state.notifications.subscribe();
 
         worker.run_once().await.unwrap();
 
@@ -3279,10 +3292,10 @@ mod tests {
             exchange as Arc<dyn ExchangePort>,
             Duration::from_millis(10),
         );
-        let mut receiver = state.write_service.subscribe_notifications();
+        let mut receiver = state.notifications.subscribe();
 
         state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -3331,7 +3344,7 @@ mod tests {
         );
 
         state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -3654,7 +3667,7 @@ mod tests {
         .await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        let mut receiver = fixture.state.write_service.subscribe_notifications();
+        let mut receiver = fixture.state.notifications.subscribe();
         fixture
             .user_sender
             .send(position_event_at(
@@ -3817,7 +3830,7 @@ mod tests {
         .await;
 
         let handles = fixture.runtime.start().await.unwrap();
-        let mut receiver = fixture.state.write_service.subscribe_notifications();
+        let mut receiver = fixture.state.notifications.subscribe();
         fixture
             .user_sender
             .send(order_event_at(
@@ -4199,7 +4212,7 @@ mod tests {
 
         let transition = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -4306,7 +4319,7 @@ mod tests {
 
         let transition = fixture
             .state
-            .write_service
+            .observation_service
             .observe_market("BTCUSDT", 95.0)
             .await
             .unwrap();
@@ -5780,7 +5793,7 @@ mod tests {
     }
 
     async fn current_instance(state: &ServerState) -> poise_engine::snapshot::TrackRuntimeSnapshot {
-        let manager_handle = state.write_service.manager();
+        let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         manager.get_track("BTCUSDT").unwrap().snapshot()
     }
@@ -6036,7 +6049,11 @@ mod tests {
         }
     }
 
-    fn set_executor_state(snapshot: &mut TrackRuntimeSnapshot, order: WorkingOrder, state: SlotState) {
+    fn set_executor_state(
+        snapshot: &mut TrackRuntimeSnapshot,
+        order: WorkingOrder,
+        state: SlotState,
+    ) {
         let desired_exposure = snapshot
             .desired_exposure
             .clone()

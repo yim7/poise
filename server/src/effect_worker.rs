@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use poise_application::{FollowUpRetirementRequest, PersistedTrackEffect};
+use poise_application::{
+    FollowUpRetirementRequest, PersistedTrackEffect, PreparedSubmitExecution,
+    is_loaded_track_invariant_violation,
+};
 use poise_engine::ports::{ExchangePort, OrderRequest};
 use poise_engine::track::Instrument;
 use poise_engine::transition::TrackEffect;
@@ -145,7 +148,7 @@ impl EffectWorker {
             }
             TrackEffect::NoOp => {
                 self.state
-                    .write_service
+                    .effect_service
                     .complete_effect_succeeded(persisted.track_id.as_str(), &persisted.effect_id)
                     .await?;
                 Ok(())
@@ -200,7 +203,7 @@ impl EffectWorker {
             Ok(receipt) => {
                 if let Err(error) = self
                     .state
-                    .write_service
+                    .effect_service
                     .complete_submit_execution(
                         persisted.track_id.as_str(),
                         &persisted.effect_id,
@@ -221,7 +224,7 @@ impl EffectWorker {
                         .await?;
                     }
                     self.state
-                        .write_service
+                        .effect_service
                         .complete_effect_failed(
                             persisted.track_id.as_str(),
                             &persisted.effect_id,
@@ -255,7 +258,7 @@ impl EffectWorker {
                 }
                 match self
                     .state
-                    .write_service
+                    .effect_service
                     .record_submit_failure(
                         persisted.track_id.as_str(),
                         &persisted.effect_id,
@@ -265,11 +268,7 @@ impl EffectWorker {
                     .await
                 {
                     Ok(()) => Err(anyhow!(failure_message)),
-                    Err(clear_error)
-                        if crate::write_service::is_loaded_track_invariant_violation(
-                            &clear_error,
-                        ) =>
-                    {
+                    Err(clear_error) if is_loaded_track_invariant_violation(&clear_error) => {
                         Err(clear_error)
                     }
                     Err(clear_error) => Err(anyhow!(
@@ -286,7 +285,7 @@ impl EffectWorker {
         request: &OrderRequest,
         desired_exposure: poise_core::types::Exposure,
         preflight_decision: SubmitPreflightDecision,
-    ) -> Result<Option<crate::write_service::PreparedSubmitExecution>> {
+    ) -> Result<Option<PreparedSubmitExecution>> {
         let live_order = match preflight_decision {
             SubmitPreflightDecision::Direct => None,
             SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => Some(
@@ -300,7 +299,7 @@ impl EffectWorker {
         };
 
         self.state
-            .write_service
+            .effect_service
             .prepare_submit_execution(
                 persisted.track_id.as_str(),
                 &persisted.effect_id,
@@ -345,7 +344,7 @@ impl EffectWorker {
                 let writeback = match &cancellation {
                     Cancellation::One { order_id, .. } => {
                         self.state
-                            .write_service
+                            .effect_service
                             .record_cancel_order_success(
                                 persisted.track_id.as_str(),
                                 &persisted.effect_id,
@@ -357,7 +356,7 @@ impl EffectWorker {
                     }
                     Cancellation::All { .. } => {
                         self.state
-                            .write_service
+                            .effect_service
                             .record_cancel_all_success(
                                 persisted.track_id.as_str(),
                                 &persisted.effect_id,
@@ -367,7 +366,7 @@ impl EffectWorker {
                 };
                 if let Err(error) = writeback {
                     self.state
-                        .write_service
+                        .effect_service
                         .complete_effect_failed(
                             persisted.track_id.as_str(),
                             &persisted.effect_id,
@@ -389,7 +388,7 @@ impl EffectWorker {
                     if let Cancellation::One { order_id, .. } = &cancellation
                         && let Err(retirement_error) = self
                             .state
-                            .write_service
+                            .effect_service
                             .request_follow_up_retirement(
                                 persisted.track_id.as_str(),
                                 FollowUpRetirementRequest {
@@ -408,7 +407,7 @@ impl EffectWorker {
                     }
                 }
                 self.state
-                    .write_service
+                    .effect_service
                     .complete_effect_failed(
                         persisted.track_id.as_str(),
                         &persisted.effect_id,
@@ -485,14 +484,14 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_application::{
         CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
         PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
         TrackMutationStore, TrackQueryStore,
     };
+    use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::OrderObservation;
@@ -512,9 +511,9 @@ mod tests {
     use crate::assembly::build_server_state;
     use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
-    use poise_application::TrackQueryService;
     use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision};
     use crate::write_service::TrackWriteService;
+    use poise_application::TrackQueryService;
 
     use super::{Cancellation, EffectWorker};
 
@@ -525,7 +524,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -535,7 +534,7 @@ mod tests {
         ));
 
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.snapshot("btc-core").unwrap();
             snapshot
@@ -557,7 +556,7 @@ mod tests {
         );
         worker.run_once().await.unwrap();
 
-        let manager_handle = state.write_service.manager();
+        let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
         let slot = snapshot
@@ -595,7 +594,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -619,7 +618,7 @@ mod tests {
         );
         worker.run_once().await.unwrap();
 
-        let manager_handle = state.write_service.manager();
+        let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
         let executor = serde_json::to_value(&snapshot).unwrap()["executor_state"]
@@ -651,7 +650,7 @@ mod tests {
         let state = test_state(repository, exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -677,7 +676,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -724,7 +723,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -786,7 +785,7 @@ mod tests {
             })
             .await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager
                 .restore_track_state(&snapshot_with_recovery_anomaly())
@@ -860,7 +859,7 @@ mod tests {
             .await;
 
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             let snapshot = snapshot_with_recovery_anomaly();
             manager.restore_track_state(&snapshot).unwrap();
@@ -892,7 +891,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -921,7 +920,7 @@ mod tests {
         );
         worker.run_once().await.unwrap();
 
-        let manager_handle = state.write_service.manager();
+        let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(
@@ -951,7 +950,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1007,7 +1006,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1065,7 +1064,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1111,7 +1110,7 @@ mod tests {
         let submit_exchange = Arc::new(FakeExchange::default());
         let submit_state = test_state(submit_repository.clone(), submit_exchange.clone()).await;
         submit_state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -1134,7 +1133,7 @@ mod tests {
             .seed_snapshot("btc-core", snapshot.clone())
             .await;
         {
-            let manager_handle = cancel_state.write_service.manager();
+            let manager_handle = cancel_state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1189,7 +1188,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1261,7 +1260,7 @@ mod tests {
         );
 
         state
-            .write_service
+            .observation_service
             .observe_order_with_absorb_result(
                 "btc-core",
                 OrderObservation {
@@ -1311,7 +1310,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1434,7 +1433,7 @@ mod tests {
 
         repository.seed_snapshot("btc-core", snapshot.clone()).await;
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             manager.restore_track_state(&snapshot).unwrap();
         }
@@ -1470,7 +1469,7 @@ mod tests {
         );
         worker.run_once().await.unwrap();
 
-        let manager_handle = state.write_service.manager();
+        let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(
@@ -1495,7 +1494,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -1570,7 +1569,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -1589,7 +1588,7 @@ mod tests {
         submit_started.notified().await;
 
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.snapshot("btc-core").unwrap();
             snapshot.executor_state.slots = vec![poise_engine::runtime::ExecutionSlot {
@@ -1603,7 +1602,7 @@ mod tests {
         release_submit.notify_waiters();
         task.await.unwrap().unwrap();
 
-        let manager_handle = state.write_service.manager();
+        let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
         assert_eq!(snapshot.current_exposure, Exposure(4.0));
@@ -1650,7 +1649,7 @@ mod tests {
         let state = test_state(repository.clone(), exchange.clone()).await;
 
         let transition = state
-            .write_service
+            .observation_service
             .observe_market("btc-core", 95.0)
             .await
             .unwrap();
@@ -1669,7 +1668,7 @@ mod tests {
         submit_started.notified().await;
 
         {
-            let manager_handle = state.write_service.manager();
+            let manager_handle = state.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.snapshot("btc-core").unwrap();
             snapshot.executor_state.slots = vec![poise_engine::runtime::ExecutionSlot {
@@ -2214,7 +2213,6 @@ mod tests {
         ) -> Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
-
     }
 
     #[async_trait::async_trait]

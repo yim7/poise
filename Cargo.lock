@@ -1204,6 +1204,7 @@ dependencies = [
  "poise-engine",
  "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

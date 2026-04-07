@@ -11,7 +11,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) 
 }
 
 async fn handle_socket(mut socket: WebSocket, state: ServerState) {
-    let mut receiver = state.write_service.subscribe_notifications();
+    let mut receiver = state.notifications.subscribe();
 
     loop {
         match receiver.recv().await {
@@ -140,8 +140,8 @@ mod tests {
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountSummarySnapshot, ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort,
-        OrderReceipt, OrderRequest, Position,
+        AccountSummarySnapshot, ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
+        OrderRequest, Position,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -151,16 +151,16 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use poise_application::{
-        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackQueryService,
-    };
     use crate::assembly::{
         ServerState, build_server_state, build_server_state_with_account_monitor,
     };
     use crate::effect_worker::EffectWorker;
     use crate::projector::TrackProjector;
     use crate::write_service::TrackWriteService;
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
+        StoredAccountMonitorState, TrackQueryService,
+    };
 
     use super::ws_handler;
 

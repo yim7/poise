@@ -2,9 +2,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use poise_application::{DiagnosticSeverity, TrackMutationError};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
-use poise_application::DiagnosticSeverity;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, TrackCommandAccepted, TrackCommandRequest,
     TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
@@ -14,7 +14,6 @@ use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
 use crate::assembly::ServerState;
-use crate::write_service::TrackMutationError;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ErrorResponse {
@@ -147,13 +146,13 @@ async fn submit_command(
     State(state): State<ServerState>,
     Json(request): Json<TrackCommandRequest>,
 ) -> Result<Json<TrackCommandAccepted>, (StatusCode, Json<ErrorResponse>)> {
-    if !state.write_service.has_track(&id).await {
+    if !state.command_service.has_track(&id).await {
         return Err(not_found(format!("track `{id}` not found")));
     }
 
     let command = map_command(request.command)?;
     state
-        .write_service
+        .command_service
         .command(&id, command)
         .await
         .map_err(map_command_error)?;
@@ -228,9 +227,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest,
-        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
-        TrackMutationStore, TrackQueryStore,
+        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
+        StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationStore,
+        TrackQueryStore,
     };
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
@@ -251,15 +250,15 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
-    use poise_application::{
-        AccountMonitor, AccountMonitorStore, AccountMonitorConfig, ApplicationNotification,
-        StoredAccountMonitorState, TrackQueryService,
-    };
     use crate::assembly::{
         ServerState, build_server_state, build_server_state_with_account_monitor,
     };
     use crate::projector::TrackProjector;
     use crate::write_service::TrackWriteService;
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
+        StoredAccountMonitorState, TrackQueryService,
+    };
 
     use super::router;
 
@@ -851,8 +850,9 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
-        let query_service =
-            Arc::new(TrackQueryService::new(repository.clone() as Arc<dyn TrackQueryStore>));
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>
+        ));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let app = router(build_server_state(
             Arc::new(TrackWriteService::new(
@@ -1081,7 +1081,6 @@ mod tests {
         ) -> anyhow::Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
-
     }
 
     #[async_trait::async_trait]
