@@ -559,7 +559,7 @@ Task 4 code commit:
 - Test: `server/src/runtime/mod.rs`
 - Test: `server/src/effect_worker/mod.rs`
 
-- [ ] **Step 1: 先写失败测试，固定每个角色只拿自己需要的依赖**
+- [x] **Step 1: 先写失败测试，固定每个角色只拿自己需要的依赖**
 
 增加或改写这些测试：
 
@@ -577,7 +577,7 @@ async fn runtime_state_exposes_observation_and_account_paths_only() { /* ... */ 
 async fn effect_worker_state_exposes_effect_execution_paths_only() { /* ... */ }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前仍被 `ServerState` 绑定**
+- [x] **Step 2: 运行定向测试，确认当前仍被 `ServerState` 绑定**
 
 Run:
 `cargo test -p poise-server http::tests::router_accepts_http_state_without_runtime_dependencies -- --exact`
@@ -591,7 +591,7 @@ Run:
 Expected:
 - FAIL 或编译失败，提示 assembly 仍导出统一 `ServerState`
 
-- [ ] **Step 3: 实现角色化 context 和目录模块拆分**
+- [x] **Step 3: 实现角色化 context 和目录模块拆分**
 
 要求：
 - 新增 `HttpState`、`WebSocketState`、`RuntimeState`、`EffectWorkerState`
@@ -609,7 +609,7 @@ Expected:
   - retry / retirement
 - 顶层 `mod.rs` 只保留公开入口和少量编排
 
-- [ ] **Step 4: 运行 server 包的角色与模块边界回归**
+- [x] **Step 4: 运行 server 包的角色与模块边界回归**
 
 Run:
 `cargo test -p poise-server http::tests:: -- --nocapture`
@@ -621,7 +621,7 @@ Run:
 Expected:
 - PASS，`ServerState` 已删除，`runtime` / `effect_worker` 已按稳定职责组织
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/server_context.rs server/src/runtime server/src/effect_worker server/src/assembly.rs server/src/http.rs server/src/websocket.rs server/src/main.rs
@@ -630,7 +630,7 @@ git commit -m "refactor: replace server state bag with role-specific contexts"
 ```
 
 Task 5 code commit:
-`<fill during execution>`
+`083b5e5`
 
 ---
 
