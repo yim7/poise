@@ -426,7 +426,7 @@ git commit -m "refactor: move query and account application services into poise-
 ```
 
 Task 3 code commit:
-`<fill during execution>`
+`ffa4985`
 
 ---
 
