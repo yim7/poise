@@ -641,7 +641,7 @@ Task 5 code commit:
 - Modify: `docs/superpowers/specs/2026-04-06-server-boundary-convergence-design.md` (only if implementation names drift)
 - Modify: `Cargo.toml` / crate `Cargo.toml` files (only if final cleanup needed)
 
-- [ ] **Step 1: 做一次死代码和边界残留检查**
+- [x] **Step 1: 做一次死代码和边界残留检查**
 
 Run:
 `rg -n "ServerState|TrackWriteService|TrackReadRepositoryPort|ServerNotification|server::read_model|server::query_service" .`
@@ -650,7 +650,7 @@ Expected:
 - 只剩计划文档或 spec 中的历史描述
 - 生产代码中不存在这些旧 owner / 旧入口
 
-- [ ] **Step 2: 运行格式化和 workspace 全量验收**
+- [x] **Step 2: 运行格式化和 workspace 全量验收**
 
 Run:
 `cargo fmt --all`
@@ -661,14 +661,14 @@ Run:
 Expected:
 - PASS，workspace 全绿
 
-- [ ] **Step 3: 回写计划勾选状态和 commit SHA**
+- [x] **Step 3: 回写计划勾选状态和 commit SHA**
 
 要求：
 - 把本文件所有已完成步骤勾选
 - 把每个 task 的 commit SHA 回填到对应位置
 - 如果实现文件名与 spec 有偏差，更新 spec 文档中的最终命名
 
-- [ ] **Step 4: 提交最终清理**
+- [x] **Step 4: 提交最终清理**
 
 ```bash
 git add docs/superpowers/plans/2026-04-06-server-boundary-convergence.md docs/superpowers/specs/2026-04-06-server-boundary-convergence-design.md Cargo.toml application/Cargo.toml server/Cargo.toml storage/Cargo.toml
@@ -676,17 +676,17 @@ git commit -m "docs: finalize server boundary convergence implementation notes"
 ```
 
 Task 6 code commit:
-`<fill during execution>`
+`33c5afd`
 
 ---
 
 ## Acceptance Checklist
 
-- [ ] `poise-application` 已成为 query、effect store、mutation store、account monitor store、notifications、read models、diagnostics 和写侧服务的 owner
-- [ ] `engine::ports` 不再承载 read-side 和 effect queue / follow-up retirement 契约
-- [ ] `poise-storage` 通过 application-owned stores 暴露 SQLite 能力
-- [ ] `server` 不再持有 `ServerState`
-- [ ] `server` 不再持有 `TrackWriteService`
-- [ ] `runtime` 与 `effect_worker` 已拆成按稳定职责组织的目录模块
-- [ ] `TrackDebugQueryService` 返回 application model，protocol DTO 映射留在 `server`
-- [ ] `cargo test --workspace --quiet` 通过
+- [x] `poise-application` 已成为 query、effect store、mutation store、account monitor store、notifications、read models、diagnostics 和写侧服务的 owner
+- [x] `engine::ports` 不再承载 read-side 和 effect queue / follow-up retirement 契约
+- [x] `poise-storage` 通过 application-owned stores 暴露 SQLite 能力
+- [x] `server` 不再持有 `ServerState`
+- [x] `server` 不再持有 `TrackWriteService`
+- [x] `runtime` 与 `effect_worker` 已拆成按稳定职责组织的目录模块
+- [x] `TrackDebugQueryService` 返回 application model，protocol DTO 映射留在 `server`
+- [x] `cargo test --workspace --quiet` 通过
