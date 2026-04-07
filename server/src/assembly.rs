@@ -11,7 +11,7 @@ use chrono::Utc;
 use poise_application::{
     AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
     TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
-    TrackQueryService, TrackWriteServices,
+    TrackQueryService, TrackServiceSet,
 };
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
@@ -29,21 +29,21 @@ use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
+#[cfg(test)]
+pub(crate) use crate::server_context::TestServerContext;
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
 };
-#[cfg(test)]
-pub(crate) use crate::server_context::ServerState;
 use crate::state_bootstrap::StateRepositories;
 use crate::submit_preflight::SubmitPreflight;
 #[cfg(test)]
-use crate::write_service::TrackWriteService;
+use crate::write_service::TrackWriteHarness;
 
 pub struct ServerPlatform {
     http_state: HttpState,
     websocket_state: WebSocketState,
     #[cfg(test)]
-    state: ServerState,
+    state: TestServerContext,
     pub runtime: ServerRuntime,
 }
 
@@ -228,7 +228,7 @@ async fn assemble_with_state_store(
     let query_store = repositories.query_store();
     let effect_store = repositories.effect_store();
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    let write_services = TrackWriteServices::new(
+    let write_services = TrackServiceSet::new(
         manager,
         mutation_store.clone(),
         effect_store.clone(),
@@ -293,7 +293,7 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
     );
     #[cfg(test)]
-    let state = build_server_state_parts(
+    let state = build_test_context_parts(
         command_service,
         observation_service,
         effect_service.clone(),
@@ -394,7 +394,7 @@ impl ServerPlatform {
     }
 
     #[cfg(test)]
-    pub fn state(&self) -> ServerState {
+    pub fn state(&self) -> TestServerContext {
         self.state.clone()
     }
 
@@ -500,7 +500,7 @@ fn build_effect_worker_state(
 }
 
 #[cfg(test)]
-fn build_server_state_parts(
+fn build_test_context_parts(
     command_service: Arc<TrackCommandService>,
     observation_service: Arc<TrackObservationService>,
     effect_service: Arc<TrackEffectService>,
@@ -511,9 +511,9 @@ fn build_server_state_parts(
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
-) -> ServerState {
+) -> TestServerContext {
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
-    ServerState {
+    TestServerContext {
         command_service,
         observation_service,
         effect_service,
@@ -533,7 +533,7 @@ fn build_server_state_parts(
 }
 
 #[cfg(test)]
-fn build_server_state_parts_with_account_monitor(
+fn build_test_context_parts_with_account_monitor(
     command_service: Arc<TrackCommandService>,
     observation_service: Arc<TrackObservationService>,
     effect_service: Arc<TrackEffectService>,
@@ -544,8 +544,8 @@ fn build_server_state_parts_with_account_monitor(
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
-) -> ServerState {
-    build_server_state_parts(
+) -> TestServerContext {
+    build_test_context_parts(
         command_service,
         observation_service,
         effect_service,
@@ -560,19 +560,19 @@ fn build_server_state_parts_with_account_monitor(
 }
 
 #[cfg(test)]
-pub(crate) fn build_server_state(
-    write_service: Arc<TrackWriteService>,
+pub(crate) fn build_test_context(
+    write_service: Arc<TrackWriteHarness>,
     mutation_store: Arc<dyn TrackMutationStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
-) -> ServerState {
+) -> TestServerContext {
     let account_monitor = Arc::new(AccountMonitor::unavailable(
         write_service.notification_sender(),
         poise_application::AccountMonitorConfig::default(),
     ));
-    build_server_state_with_account_monitor(
+    build_test_context_with_account_monitor(
         write_service,
         mutation_store,
         effect_store,
@@ -584,20 +584,20 @@ pub(crate) fn build_server_state(
 }
 
 #[cfg(test)]
-pub(crate) fn build_server_state_with_account_monitor(
-    write_service: Arc<TrackWriteService>,
+pub(crate) fn build_test_context_with_account_monitor(
+    write_service: Arc<TrackWriteHarness>,
     mutation_store: Arc<dyn TrackMutationStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
-) -> ServerState {
+) -> TestServerContext {
     assert!(
         write_service.uses_account_margin_guard(&account_margin_guard),
         "account margin guard mismatch"
     );
-    build_server_state_parts_with_account_monitor(
+    build_test_context_parts_with_account_monitor(
         write_service.command_service(),
         write_service.observation_service(),
         write_service.effect_service(),
@@ -612,7 +612,7 @@ pub(crate) fn build_server_state_with_account_monitor(
 }
 
 #[cfg(test)]
-impl ServerState {
+impl TestServerContext {
     pub(crate) fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.command_service.manager()
     }
@@ -651,11 +651,11 @@ mod tests {
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
-    use crate::write_service::TrackWriteService;
+    use crate::write_service::TrackWriteHarness;
     use poise_application::TrackQueryService;
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_server_state, resolve_binance_endpoints,
+        ServerPlatform, SystemClock, assemble, build_test_context, resolve_binance_endpoints,
         resolve_binance_endpoints_with_lookup, validate_exchange_runtime_config,
         validate_unique_instruments, validate_unique_track_ids,
     };
@@ -1013,7 +1013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_server_state_reuses_explicit_account_margin_guard() {
+    async fn build_test_context_reuses_explicit_account_margin_guard() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
@@ -1043,7 +1043,7 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -1051,7 +1051,7 @@ mod tests {
             account_margin_guard.clone(),
         ));
 
-        let state = build_server_state(
+        let state = build_test_context(
             write_service,
             mutation_store,
             effect_store,
@@ -1068,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     #[should_panic(expected = "account margin guard mismatch")]
-    async fn build_server_state_rejects_mismatched_account_margin_guard() {
+    async fn build_test_context_rejects_mismatched_account_margin_guard() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
@@ -1099,7 +1099,7 @@ mod tests {
         let query_store: Arc<dyn TrackQueryStore> = repository;
         let write_service_guard = Arc::new(AccountMarginGuardStore::default());
         let server_state_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -1107,7 +1107,7 @@ mod tests {
             write_service_guard,
         ));
 
-        let _ = build_server_state(
+        let _ = build_test_context(
             write_service,
             mutation_store,
             effect_store,
@@ -1241,7 +1241,12 @@ mod tests {
         let state = platform.state().runtime_state();
 
         assert_eq!(
-            state.reconcile.observation_service.track_instruments().await.len(),
+            state
+                .reconcile
+                .observation_service
+                .track_instruments()
+                .await
+                .len(),
             1
         );
         assert!(state.account_monitor.current_summary().await.is_none());
@@ -1253,13 +1258,15 @@ mod tests {
         let (platform, _) = test_platform();
         let state = platform.state().effect_worker_state();
 
-        assert!(state
-            .reconcile
-            .effect_store
-            .list_dispatchable_effects()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            state
+                .reconcile
+                .effect_store
+                .list_dispatchable_effects()
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let _ = state
             .account_margin_guard
             .constraint_for(&Instrument::new(Venue::Binance, "BTCUSDT"));
@@ -1348,7 +1355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_server_state_initializes_fresh_exchange_freshness_store() {
+    async fn build_test_context_initializes_fresh_exchange_freshness_store() {
         let (platform, _) = test_platform();
 
         assert!(!platform.state.exchange_freshness.is_stale("btc-core").await);
@@ -1415,7 +1422,7 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -1423,7 +1430,7 @@ mod tests {
             account_margin_guard.clone(),
         ));
         let query_service = Arc::new(TrackQueryService::new(query_store));
-        let state = build_server_state(
+        let state = build_test_context(
             write_service,
             mutation_store,
             effect_store,

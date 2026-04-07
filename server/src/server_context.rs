@@ -59,7 +59,7 @@ pub struct EffectWorkerState {
 
 #[cfg(test)]
 #[derive(Clone)]
-pub struct ServerState {
+pub struct TestServerContext {
     pub command_service: Arc<TrackCommandService>,
     pub observation_service: Arc<TrackObservationService>,
     pub effect_service: Arc<TrackEffectService>,
@@ -78,7 +78,7 @@ pub struct ServerState {
 }
 
 #[cfg(test)]
-impl ServerState {
+impl TestServerContext {
     pub fn http_state(&self) -> HttpState {
         HttpState {
             command_service: Arc::clone(&self.command_service),
@@ -130,29 +130,29 @@ impl ServerState {
 }
 
 #[cfg(test)]
-impl From<ServerState> for HttpState {
-    fn from(value: ServerState) -> Self {
+impl From<TestServerContext> for HttpState {
+    fn from(value: TestServerContext) -> Self {
         value.http_state()
     }
 }
 
 #[cfg(test)]
-impl From<ServerState> for WebSocketState {
-    fn from(value: ServerState) -> Self {
+impl From<TestServerContext> for WebSocketState {
+    fn from(value: TestServerContext) -> Self {
         value.websocket_state()
     }
 }
 
 #[cfg(test)]
-impl From<ServerState> for RuntimeState {
-    fn from(value: ServerState) -> Self {
+impl From<TestServerContext> for RuntimeState {
+    fn from(value: TestServerContext) -> Self {
         value.runtime_state()
     }
 }
 
 #[cfg(test)]
-impl From<ServerState> for EffectWorkerState {
-    fn from(value: ServerState) -> Self {
+impl From<TestServerContext> for EffectWorkerState {
+    fn from(value: TestServerContext) -> Self {
         value.effect_worker_state()
     }
 }

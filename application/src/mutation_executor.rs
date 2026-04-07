@@ -23,7 +23,7 @@ use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
-pub struct TrackWriteServices {
+pub struct TrackServiceSet {
     pub command: crate::TrackCommandService,
     pub observation: crate::TrackObservationService,
     pub effect: crate::TrackEffectService,
@@ -233,7 +233,7 @@ impl MutationExecutor {
     }
 }
 
-impl TrackWriteServices {
+impl TrackServiceSet {
     pub fn new(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
@@ -1087,7 +1087,7 @@ pub(crate) mod test_support {
         FollowUpRetirementRequest, PersistedTrackEffect, TrackEffectStore, TrackMutationStore,
     };
 
-    use super::{AccountCapacityGuard, TrackWriteServices};
+    use super::{AccountCapacityGuard, TrackServiceSet};
 
     #[derive(Default)]
     pub(crate) struct NoopGuard;
@@ -1334,12 +1334,9 @@ pub(crate) mod test_support {
     pub(crate) fn track_write_services(
         manager: TrackManager,
         repository: Arc<MemoryRepository>,
-    ) -> (
-        TrackWriteServices,
-        broadcast::Sender<ApplicationNotification>,
-    ) {
+    ) -> (TrackServiceSet, broadcast::Sender<ApplicationNotification>) {
         let (notifications, _) = broadcast::channel(16);
-        let services = TrackWriteServices::new(
+        let services = TrackServiceSet::new(
             manager,
             repository.clone(),
             repository,

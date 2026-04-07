@@ -254,12 +254,12 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::assembly::{
-        ServerState, build_server_state, build_server_state_with_account_monitor,
+        TestServerContext, build_test_context, build_test_context_with_account_monitor,
     };
     use crate::projector::TrackProjector;
-    use crate::write_service::TrackWriteService;
+    use crate::write_service::TrackWriteHarness;
 
-    fn router(state: ServerState) -> axum::Router {
+    fn router(state: TestServerContext) -> axum::Router {
         super::router(state.http_state(), state.websocket_state())
     }
     use poise_application::{
@@ -349,12 +349,12 @@ mod tests {
         }
     }
 
-    async fn app_state() -> ServerState {
+    async fn app_state() -> TestServerContext {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         build_test_state(repository).await
     }
 
-    async fn build_test_state<R>(repository: Arc<R>) -> ServerState
+    async fn build_test_state<R>(repository: Arc<R>) -> TestServerContext
     where
         R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
@@ -380,7 +380,7 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -389,7 +389,7 @@ mod tests {
         ));
 
         let query_service = Arc::new(TrackQueryService::new(query_store));
-        build_server_state(
+        build_test_context(
             write_service,
             mutation_store,
             effect_store,
@@ -399,7 +399,7 @@ mod tests {
         )
     }
 
-    async fn app_state_with_account_summary() -> ServerState {
+    async fn app_state_with_account_summary() -> TestServerContext {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = test_manager();
         let mut snapshot = manager
@@ -424,7 +424,7 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -458,7 +458,7 @@ mod tests {
             .unwrap(),
         );
 
-        build_server_state_with_account_monitor(
+        build_test_context_with_account_monitor(
             write_service,
             mutation_store,
             effect_store,
@@ -874,8 +874,8 @@ mod tests {
             repository.clone() as Arc<dyn TrackQueryStore>
         ));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let app = router(build_server_state(
-            Arc::new(TrackWriteService::new(
+        let app = router(build_test_context(
+            Arc::new(TrackWriteHarness::new(
                 manager,
                 mutation_store.clone(),
                 effect_store.clone(),

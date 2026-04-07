@@ -10,9 +10,9 @@ pub async fn ws_handler(ws: WebSocketUpgrade, state: WebSocketState) -> Response
 }
 
 #[cfg(test)]
-pub async fn ws_handler_with_server_state(
+pub async fn ws_handler_with_test_context(
     ws: WebSocketUpgrade,
-    axum::extract::State(state): axum::extract::State<crate::server_context::ServerState>,
+    axum::extract::State(state): axum::extract::State<crate::server_context::TestServerContext>,
 ) -> Response {
     ws_handler(ws, state.websocket_state()).await
 }
@@ -159,17 +159,17 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::assembly::{
-        ServerState, build_server_state, build_server_state_with_account_monitor,
+        TestServerContext, build_test_context, build_test_context_with_account_monitor,
     };
     use crate::effect_worker::EffectWorker;
     use crate::projector::TrackProjector;
-    use crate::write_service::TrackWriteService;
+    use crate::write_service::TrackWriteHarness;
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
         StoredAccountMonitorState, TrackQueryService,
     };
 
-    use super::ws_handler_with_server_state;
+    use super::ws_handler_with_test_context;
 
     type ClientStream = futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
@@ -179,7 +179,7 @@ mod tests {
 
     async fn spawn_server(
         repository: Arc<TestRepository>,
-    ) -> (String, Arc<TrackWriteService>, ServerState) {
+    ) -> (String, Arc<TrackWriteHarness>, TestServerContext) {
         spawn_server_with_capacity(repository, 16).await
     }
 
@@ -207,21 +207,21 @@ mod tests {
     async fn spawn_server_with_capacity(
         repository: Arc<TestRepository>,
         notification_capacity: usize,
-    ) -> (String, Arc<TrackWriteService>, ServerState) {
+    ) -> (String, Arc<TrackWriteHarness>, TestServerContext) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let service = Arc::new(TrackWriteService::new(
+        let service = Arc::new(TrackWriteHarness::new(
             test_manager(),
             mutation_store.clone(),
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
         ));
-        let state = build_server_state(
+        let state = build_test_context(
             Arc::clone(&service),
             mutation_store,
             effect_store,
@@ -232,7 +232,7 @@ mod tests {
             account_margin_guard,
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler_with_server_state))
+            .route("/ws", axum::routing::get(ws_handler_with_test_context))
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -245,21 +245,21 @@ mod tests {
     async fn spawn_server_with_account_monitor(
         repository: Arc<TestRepository>,
         account_monitor: Arc<AccountMonitor>,
-    ) -> (String, Arc<TrackWriteService>, ServerState) {
+    ) -> (String, Arc<TrackWriteHarness>, TestServerContext) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let service = Arc::new(TrackWriteService::new(
+        let service = Arc::new(TrackWriteHarness::new(
             test_manager(),
             mutation_store.clone(),
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
         ));
-        let state = build_server_state_with_account_monitor(
+        let state = build_test_context_with_account_monitor(
             Arc::clone(&service),
             mutation_store,
             effect_store,
@@ -271,7 +271,7 @@ mod tests {
             account_margin_guard,
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler_with_server_state))
+            .route("/ws", axum::routing::get(ws_handler_with_test_context))
             .with_state(state.clone());
 
         tokio::spawn(async move {

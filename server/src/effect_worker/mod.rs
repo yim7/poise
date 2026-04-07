@@ -12,7 +12,7 @@ use tokio::time::sleep;
 use crate::order_outcome::OutcomeUnknownRecovery;
 use crate::server_context::EffectWorkerState;
 #[cfg(test)]
-use crate::server_context::ServerState;
+use crate::server_context::TestServerContext;
 use crate::submit_preflight::SubmitPreflightDecision;
 
 mod dispatch;
@@ -29,12 +29,17 @@ pub struct EffectWorker {
 impl EffectWorker {
     #[cfg(test)]
     pub fn new(
-        state: ServerState,
+        state: TestServerContext,
         exchange: Arc<dyn ExchangePort>,
         poll_interval: Duration,
     ) -> Self {
         let (_, shutdown_rx) = watch::channel(false);
-        Self::with_shutdown_rx(state.effect_worker_state(), exchange, poll_interval, shutdown_rx)
+        Self::with_shutdown_rx(
+            state.effect_worker_state(),
+            exchange,
+            poll_interval,
+            shutdown_rx,
+        )
     }
 
     pub fn with_shutdown_rx(
@@ -198,11 +203,11 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
     use tokio::time::timeout;
 
-    use crate::assembly::build_server_state;
+    use crate::assembly::build_test_context;
     use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
     use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision};
-    use crate::write_service::TrackWriteService;
+    use crate::write_service::TrackWriteHarness;
     use poise_application::TrackQueryService;
 
     use super::{Cancellation, EffectWorker};
@@ -1381,7 +1386,7 @@ mod tests {
     async fn test_state(
         repository: Arc<MemoryRepository>,
         exchange: Arc<FakeExchange>,
-    ) -> crate::assembly::ServerState {
+    ) -> crate::assembly::TestServerContext {
         test_state_with_track(
             repository,
             exchange,
@@ -1403,7 +1408,7 @@ mod tests {
         _exchange: Arc<FakeExchange>,
         config: TrackConfig,
         exchange_rules: ExchangeRules,
-    ) -> crate::assembly::ServerState {
+    ) -> crate::assembly::TestServerContext {
         let clock = Arc::new(FixedClock(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
         ));
@@ -1424,14 +1429,14 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
             notifications.clone(),
             account_margin_guard.clone(),
         ));
-        build_server_state(
+        build_test_context(
             write_service,
             mutation_store,
             effect_store,

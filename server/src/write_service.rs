@@ -7,7 +7,7 @@ use anyhow::Result;
 use poise_application::{
     AccountCapacityGuard, ApplicationNotification, ApplyTrackLedgerEventResult,
     FollowUpRetirementRequest, PreparedSubmitExecution, TrackEffectService, TrackEffectStore,
-    TrackInstrument, TrackMutationStore, TrackObservationService, TrackWriteServices,
+    TrackInstrument, TrackMutationStore, TrackObservationService, TrackServiceSet,
 };
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::{OrderUpdateAbsorbResult, SubmitRecoveryResolution};
@@ -22,7 +22,7 @@ use tokio::sync::{RwLock, broadcast};
 use crate::runtime::AccountMarginGuardStore;
 
 #[derive(Clone)]
-pub struct TrackWriteService {
+pub struct TrackWriteHarness {
     command_service: Arc<poise_application::TrackCommandService>,
     observation_service: Arc<TrackObservationService>,
     effect_service: Arc<TrackEffectService>,
@@ -30,7 +30,7 @@ pub struct TrackWriteService {
     account_margin_guard: Arc<AccountMarginGuardStore>,
 }
 
-impl TrackWriteService {
+impl TrackWriteHarness {
     pub fn new(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
@@ -38,7 +38,7 @@ impl TrackWriteService {
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<AccountMarginGuardStore>,
     ) -> Self {
-        let services = TrackWriteServices::new(
+        let services = TrackServiceSet::new(
             manager,
             mutation_store,
             effect_store,

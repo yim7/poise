@@ -3,6 +3,11 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::effect_worker::EffectWorker;
+use crate::order_outcome::{ReconcileExecution, ReconcileRequest};
+#[cfg(test)]
+use crate::server_context::TestServerContext;
+use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_engine::manager::ExchangeSyncMode;
@@ -13,11 +18,6 @@ use poise_engine::ports::{
 use poise_engine::track::Instrument;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use crate::effect_worker::EffectWorker;
-use crate::order_outcome::{ReconcileExecution, ReconcileRequest};
-use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
-#[cfg(test)]
-use crate::server_context::ServerState;
 
 mod account_refresh;
 mod guards;
@@ -63,7 +63,7 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 impl ServerRuntime {
     #[cfg(test)]
     pub fn new(
-        state: ServerState,
+        state: TestServerContext,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
@@ -101,7 +101,7 @@ impl ServerRuntime {
 
     #[cfg(test)]
     fn with_reconcile_intervals(
-        state: ServerState,
+        state: TestServerContext,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
@@ -121,7 +121,7 @@ impl ServerRuntime {
 
     #[cfg(test)]
     fn with_reconcile_and_account_refresh_intervals(
-        state: ServerState,
+        state: TestServerContext,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
@@ -218,7 +218,12 @@ impl ServerRuntime {
             let _ = handles.effect_task.await;
         }
 
-        let tracks = self.state.reconcile.observation_service.track_instruments().await;
+        let tracks = self
+            .state
+            .reconcile
+            .observation_service
+            .track_instruments()
+            .await;
         for track in &tracks {
             if let Err(error) = self.exchange.cancel_all(&track.instrument).await {
                 tracing::warn!(
@@ -312,7 +317,7 @@ impl ReconcileStateAccess for ReconcileState {
 }
 
 #[cfg(test)]
-impl ReconcileStateAccess for ServerState {
+impl ReconcileStateAccess for TestServerContext {
     fn reconcile_state_view(&self) -> ReconcileState {
         self.reconcile_state()
     }
@@ -426,12 +431,12 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use crate::assembly::{
-        ServerState, build_server_state, build_server_state_with_account_monitor,
+        TestServerContext, build_test_context, build_test_context_with_account_monitor,
     };
     use crate::effect_worker::EffectWorker;
     use crate::exchange_freshness::ExchangeFreshnessReason;
     use crate::projector::TrackProjector;
-    use crate::write_service::TrackWriteService;
+    use crate::write_service::TrackWriteHarness;
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, StoredAccountMonitorState,
         TrackQueryService,
@@ -2743,8 +2748,8 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = persistence.clone();
         let query_store: Arc<dyn TrackQueryStore> = persistence.clone();
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let state = build_server_state(
-            Arc::new(TrackWriteService::new(
+        let state = build_test_context(
+            Arc::new(TrackWriteHarness::new(
                 manager,
                 mutation_store.clone(),
                 effect_store.clone(),
@@ -2849,14 +2854,14 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             persistence.clone(),
             persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
-        let state = build_server_state(
+        let state = build_test_context(
             write_service,
             persistence.clone(),
             persistence.clone(),
@@ -2943,14 +2948,14 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             persistence.clone(),
             persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
-        let state = build_server_state(
+        let state = build_test_context(
             write_service,
             persistence.clone(),
             persistence.clone(),
@@ -4248,14 +4253,14 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             persistence.clone(),
             persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
-        let state = build_server_state(
+        let state = build_test_context(
             write_service,
             persistence.clone(),
             persistence.clone(),
@@ -4291,8 +4296,8 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::default());
         let (events, _) = broadcast::channel(16);
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let state = build_server_state(
-            Arc::new(TrackWriteService::new(
+        let state = build_test_context(
+            Arc::new(TrackWriteHarness::new(
                 manager,
                 persistence.clone() as Arc<dyn TrackMutationStore>,
                 persistence.clone() as Arc<dyn TrackEffectStore>,
@@ -4821,14 +4826,14 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             persistence.clone(),
             persistence.clone(),
             events.clone(),
             account_margin_guard.clone(),
         ));
-        let state = build_server_state(
+        let state = build_test_context(
             write_service,
             persistence.clone(),
             persistence.clone(),
@@ -4851,7 +4856,7 @@ mod tests {
 
     struct RuntimeFixture {
         runtime: ServerRuntime,
-        state: ServerState,
+        state: TestServerContext,
         exchange: Arc<FakeExchange>,
         persistence: Arc<MemoryPersistence>,
         price_sender: mpsc::Sender<PriceTick>,
@@ -4999,7 +5004,7 @@ mod tests {
 
         let (events, _) = broadcast::channel(16);
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             persistence.clone(),
             persistence.clone(),
@@ -5009,7 +5014,7 @@ mod tests {
         let account_monitor =
             build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events.clone())
                 .await;
-        let state = build_server_state_with_account_monitor(
+        let state = build_test_context_with_account_monitor(
             write_service,
             persistence.clone(),
             persistence.clone(),
@@ -5043,7 +5048,7 @@ mod tests {
         persistence: Arc<R>,
         restored_snapshot: Option<TrackRuntimeSnapshot>,
         budget: CapacityBudget,
-    ) -> ServerState
+    ) -> TestServerContext
     where
         R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
@@ -5070,7 +5075,7 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = persistence.clone();
         let query_store: Arc<dyn TrackQueryStore> = persistence;
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -5078,7 +5083,7 @@ mod tests {
             account_margin_guard.clone(),
         ));
         let account_monitor = build_test_account_monitor(exchange, events).await;
-        build_server_state_with_account_monitor(
+        build_test_context_with_account_monitor(
             write_service,
             mutation_store,
             effect_store,
@@ -5095,7 +5100,7 @@ mod tests {
         restored_snapshot: Option<TrackRuntimeSnapshot>,
         budget: CapacityBudget,
         config: TrackConfig,
-    ) -> ServerState
+    ) -> TestServerContext
     where
         R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
@@ -5122,7 +5127,7 @@ mod tests {
         let effect_store: Arc<dyn TrackEffectStore> = persistence.clone();
         let query_store: Arc<dyn TrackQueryStore> = persistence;
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let write_service = Arc::new(TrackWriteHarness::new(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
@@ -5130,7 +5135,7 @@ mod tests {
             account_margin_guard.clone(),
         ));
         let account_monitor = build_test_account_monitor(exchange, events).await;
-        build_server_state_with_account_monitor(
+        build_test_context_with_account_monitor(
             write_service,
             mutation_store,
             effect_store,
@@ -5141,7 +5146,9 @@ mod tests {
         )
     }
 
-    async fn current_instance(state: &ServerState) -> poise_engine::snapshot::TrackRuntimeSnapshot {
+    async fn current_instance(
+        state: &TestServerContext,
+    ) -> poise_engine::snapshot::TrackRuntimeSnapshot {
         let manager_handle = state.manager();
         let manager = manager_handle.read().await;
         manager.get_track("BTCUSDT").unwrap().snapshot()
@@ -5204,7 +5211,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn wait_until_instance<F>(state: &ServerState, predicate: F)
+    async fn wait_until_instance<F>(state: &TestServerContext, predicate: F)
     where
         F: Fn(&poise_engine::snapshot::TrackRuntimeSnapshot) -> bool,
     {
