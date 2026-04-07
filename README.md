@@ -25,18 +25,27 @@
 - 同一交易所内，同一 `symbol` 只允许一个轨道
 - `track_id` 是显式配置的稳定标识，不由 `symbol` 派生
 - HTTP / WebSocket 以 `track_id` 作为一等标识
-- SQLite 默认路径是 `.data/<environment>/poise-server.sqlite`
+- SQLite 默认路径是 `<instance-dir>/.data/<environment>/poise-server.sqlite`
 - Binance 适配层当前用 `mark price` 作为策略 `reference_price`
 
 ## 快速开始
 
-### 1. 准备配置
+### 1. 准备实例目录
 
-服务端启动时必须传 `--config <path>`，并可选追加 `--rebuild-state`。
+服务端启动时必须传 `--instance-dir <path>`，并从该目录读取 `config.toml`。每个实例目录对应一个独立运行实例，配置、数据库、日志和状态备份都落在这个目录下面。
 
-- 手工联调 Binance USDⓈ-M Futures 测试网时，先复制 [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 为本地未跟踪文件，例如 `configs/binance-testnet.local.toml`
+手工联调 Binance USDⓈ-M Futures 测试网时，先准备实例目录：
+
+```bash
+mkdir -p instances/testnet-demo
+cp configs/binance-testnet.demo.toml instances/testnet-demo/config.toml
+```
+
+补充说明：
+
+- [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 和 [`configs/binance-mainnet.demo.toml`](configs/binance-mainnet.demo.toml) 只作为模板
 - [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，里面是本地假地址，不能直接拿来连 Binance
-- 仓库默认忽略 `configs/*.local.toml`
+- 真实运行时推荐把本地凭证和实例配置都放在实例目录，不再把 `*.local.toml` 留在仓库配置目录里
 
 下面给的是一份字段完整的 `track` 示例，当前支持的参数都显式写出来：
 
@@ -90,25 +99,21 @@ tick_timeout_secs = 30
 
 `Poise` 服务端通过 `poise-server` 二进制启动。
 
-```bash
-cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
-```
-
-把 `configs/binance-testnet.local.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后按默认严格模式启动：
+把 `instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后按默认严格模式启动：
 
 ```bash
-cargo run -p poise-server -- --config configs/binance-testnet.local.toml
+cargo run -p poise-server -- --instance-dir instances/testnet-demo
 ```
 
 如果当前本地 SQLite 快照和新的配置不一致，默认会拒绝启动。这时如果你确认要丢弃旧本地快照，并按交易所真实仓位和挂单重建本地状态，再加 `--rebuild-state`：
 
 ```bash
-cargo run -p poise-server -- --config configs/binance-testnet.local.toml --rebuild-state
+cargo run -p poise-server -- --instance-dir instances/testnet-demo --rebuild-state
 ```
 
 `--rebuild-state` 的语义是：
 
-- 先备份当前 `.data/<environment>/poise-server.sqlite`
+- 先备份当前 `<instance-dir>/.data/<environment>/poise-server.sqlite`
 - 删除旧本地快照对应的 SQLite sidecar 文件
 - 用当前配置重新初始化本地状态
 - 启动后再按交易所真实仓位和挂单继续接管
@@ -133,17 +138,14 @@ cargo run -p poise-tui
 - HTTP：`http://127.0.0.1:8000`
 - WebSocket：`ws://127.0.0.1:8000/ws`
 
-如果要改地址，可以在启动前设置：
-
-环境变量使用 `POISE_BASE_URL` 和 `POISE_WS_URL`。
+如果要改地址，可以在启动前设置 `POISE_BASE_URL`：
 
 ```bash
 export POISE_BASE_URL=http://127.0.0.1:9000
-export POISE_WS_URL=ws://127.0.0.1:9000/ws
 cargo run -p poise-tui
 ```
 
-`poise-tui` 会先请求 `/tracks`，再加载当前轨道详情，并订阅 `/ws`。
+`poise-tui` 会先请求 `/tracks`，再加载当前轨道详情，并从 `POISE_BASE_URL` 自动推导 `/ws` 订阅地址。
 
 ### 4. 用 HTTP 快速确认
 
@@ -173,7 +175,23 @@ curl http://127.0.0.1:8000/tracks/btc-core
 
 ## 数据
 
-- 服务端按 `environment` 使用单个 SQLite 文件保存全部轨道状态
+- 服务端按实例目录和 `environment` 使用单个 SQLite 文件保存全部轨道状态
+
+多账号主网运行时，目录应该显式分开，例如：
+
+```text
+instances/mainnet-account-a/
+  config.toml
+  .data/
+  .logs/
+
+instances/mainnet-account-b/
+  config.toml
+  .data/
+  .logs/
+```
+
+只要实例目录不同，即使两个配置都写 `environment = "mainnet"`，数据库和日志也不会共享。
 
 ## 开发与验证
 
@@ -217,32 +235,34 @@ cargo test
 
 这套方式适合本机连续值守测试网。它解决的是“会话托管”和“固定巡检”，不替代系统级 supervisor。
 
-仓库内置了 3 个运行资产：
+仓库内置了 4 个运行资产：
 
-- [`scripts/start-paper-zellij.sh`](scripts/start-paper-zellij.sh)：创建或附着到 `zellij` session
-- [`scripts/run-paper-tui.sh`](scripts/run-paper-tui.sh)：启动 `poise-tui`
-- [`scripts/run-paper-server.sh`](scripts/run-paper-server.sh)：启动 `poise-server` 并把日志落到本地
+- [`scripts/start-instance-zellij.sh`](scripts/start-instance-zellij.sh)：创建或附着到 `zellij` session
+- [`scripts/run-instance-tui.sh`](scripts/run-instance-tui.sh)：启动 `poise-tui`
+- [`scripts/run-instance-server.sh`](scripts/run-instance-server.sh)：启动 `poise-server` 并把日志落到实例目录
 - [`scripts/probe-health.sh`](scripts/probe-health.sh)：循环探测 `GET /health`
 
-对应布局文件在 [`ops/zellij/poise-paper.kdl`](ops/zellij/poise-paper.kdl)。
+对应布局文件在 [`ops/zellij/poise-instance.kdl`](ops/zellij/poise-instance.kdl)。
 
 ### 1. 先准备本地配置
 
 ```bash
-cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
+mkdir -p instances/testnet-demo
+cp configs/binance-testnet.demo.toml instances/testnet-demo/config.toml
 ```
 
-把 `configs/binance-testnet.local.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证。
+把 `instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证。
 
 ### 2. 启动 zellij 会话
 
 先确保本机已经安装 `zellij`，然后执行：
 
 ```bash
-./scripts/start-paper-zellij.sh
+export POISE_INSTANCE_DIR=instances/testnet-demo
+./scripts/start-instance-zellij.sh
 ```
 
-默认会创建或附着到名为 `poise-paper` 的 session。布局里有 3 个 pane：
+默认会创建或附着到名为 `poise-testnet-demo` 的 session。布局里有 3 个 pane：
 
 - 左侧主 pane：`poise-tui`
 - 右上：`poise-server`
@@ -253,22 +273,22 @@ cp configs/binance-testnet.demo.toml configs/binance-testnet.local.toml
 如果你想改默认值，可以在启动前设置：
 
 ```bash
-export POISE_CONFIG_PATH=configs/binance-testnet.local.toml
-export POISE_HEALTH_BASE_URL=http://127.0.0.1:8000
-export POISE_LOG_DIR=.logs/paper
+export POISE_INSTANCE_DIR=instances/testnet-demo
+export POISE_BASE_URL=http://127.0.0.1:8000
+export POISE_LOG_DIR=instances/testnet-demo/.logs
 export POISE_REBUILD_STATE=0
 export POISE_HEALTH_FAILURE_THRESHOLD=3
-export POISE_TUI_LOG=.logs/paper/poise-tui.log
-export POISE_ZELLIJ_SESSION_NAME=poise-paper
-./scripts/start-paper-zellij.sh
+export POISE_TUI_LOG=instances/testnet-demo/.logs/poise-tui.log
+export POISE_ZELLIJ_SESSION_NAME=poise-testnet-demo
+./scripts/start-instance-zellij.sh
 ```
 
-如果你要通过脚本方式重建本地状态，可以把 `POISE_REBUILD_STATE=1`，这样 `run-paper-server.sh` 会自动在 `poise-server` 启动命令后追加 `--rebuild-state`：
+如果你要通过脚本方式重建本地状态，可以把 `POISE_REBUILD_STATE=1`，这样 `run-instance-server.sh` 会自动在 `poise-server` 启动命令后追加 `--rebuild-state`：
 
 ```bash
-export POISE_CONFIG_PATH=configs/binance-testnet.local.toml
+export POISE_INSTANCE_DIR=instances/testnet-demo
 export POISE_REBUILD_STATE=1
-./scripts/run-paper-server.sh
+./scripts/run-instance-server.sh
 ```
 
 如果你想在连续失败达到阈值时触发外部通知，还可以额外设置：
@@ -279,11 +299,11 @@ export POISE_HEALTH_ALERT_HOOK='printf "alert:%s:%s\n" "$POISE_HEALTH_FAILURE_CO
 
 ### 4. 日志位置
 
-默认日志目录是 `.logs/paper/`，主要看这两个文件：
+默认日志目录是 `<instance-dir>/.logs/`，主要看这三个文件：
 
-- `.logs/paper/poise-tui.log`
-- `.logs/paper/poise-server.log`
-- `.logs/paper/health-probe.log`
+- `instances/testnet-demo/.logs/poise-tui.log`
+- `instances/testnet-demo/.logs/poise-server.log`
+- `instances/testnet-demo/.logs/health-probe.log`
 
 ### 5. 巡检脚本
 
@@ -296,8 +316,9 @@ export POISE_HEALTH_ALERT_HOOK='printf "alert:%s:%s\n" "$POISE_HEALTH_FAILURE_CO
 只看脚本会用什么参数，不真正启动：
 
 ```bash
-./scripts/start-paper-zellij.sh --dry-run
-./scripts/run-paper-server.sh --dry-run
+POISE_INSTANCE_DIR=instances/testnet-demo ./scripts/start-instance-zellij.sh --dry-run
+POISE_INSTANCE_DIR=instances/testnet-demo ./scripts/run-instance-server.sh --dry-run
+POISE_INSTANCE_DIR=instances/testnet-demo ./scripts/run-instance-tui.sh --dry-run
 ./scripts/probe-health.sh --dry-run
 ```
 
@@ -312,13 +333,13 @@ zellij list-sessions
 重新附着：
 
 ```bash
-zellij attach poise-paper
+zellij attach poise-testnet-demo
 ```
 
 结束这套模拟仓会话：
 
 ```bash
-zellij kill-sessions poise-paper
+zellij kill-sessions poise-testnet-demo
 ```
 
 ## 当前文档

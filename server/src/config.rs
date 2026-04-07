@@ -216,6 +216,13 @@ mod tests {
     use super::{AccountMonitorConfig, default_bind_address, parse_config};
 
     #[test]
+    fn config_module_examples_do_not_use_paper_environment() {
+        let source = include_str!("config.rs");
+
+        assert!(!source.contains("environment = \"paper\""));
+    }
+
+    #[test]
     fn parses_config_file_with_tracks_and_exchange() {
         let config = parse_config(
             r#"
@@ -269,10 +276,10 @@ out_of_band_policy = "hold"
     }
 
     #[test]
-    fn defaults_bind_address_and_exchange_credentials() {
+    fn defaults_bind_address_and_exchange_credentials_for_testnet() {
         let config = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -305,7 +312,7 @@ notional_per_unit = 375.0
     fn defaults_min_rebalance_units_to_point_five() {
         let config = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -327,7 +334,7 @@ notional_per_unit = 375.0
     fn rejects_negative_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -350,7 +357,7 @@ min_rebalance_units = -0.1
     fn rejects_non_finite_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -373,7 +380,7 @@ min_rebalance_units = nan
     fn parses_optional_tick_timeout_secs() {
         let config = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -396,7 +403,7 @@ tick_timeout_secs = 45
     fn parses_snake_case_strategy_enums() {
         let config = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -477,7 +484,7 @@ notional_per_unit = 375.0
     fn parses_explicit_track_id_from_config_instead_of_deriving_from_symbol() {
         let config = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -540,7 +547,7 @@ notional_per_unit = 375.0
     fn defaults_account_monitor_thresholds() {
         let config = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
@@ -562,7 +569,7 @@ notional_per_unit = 375.0
     fn rejects_inverted_account_monitor_thresholds() {
         let error = parse_config(
             r#"
-environment = "paper"
+environment = "testnet"
 
 [account_monitor]
 day_change_attention_pct = -6.0
