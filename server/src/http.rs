@@ -13,7 +13,7 @@ use poise_protocol::{
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
-use crate::assembly::ServerState;
+use crate::server_context::{HttpState, WebSocketState};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ErrorResponse {
@@ -27,7 +27,7 @@ struct HealthResponse {
     attention_required_count: usize,
 }
 
-pub fn router(state: ServerState) -> Router {
+pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/account", get(get_account))
@@ -35,13 +35,16 @@ pub fn router(state: ServerState) -> Router {
         .route("/tracks/:id", get(get_track_detail))
         .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
         .route("/tracks/:id/commands", post(submit_command))
-        .route("/ws", get(crate::websocket::ws_handler))
+        .route(
+            "/ws",
+            get(move |ws| crate::websocket::ws_handler(ws, websocket_state.clone())),
+        )
         .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(http_state)
 }
 
 async fn list_tracks(
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<TrackListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let sources = state
         .query_service
@@ -56,7 +59,7 @@ async fn list_tracks(
 }
 
 async fn health(
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<(StatusCode, Json<HealthResponse>), (StatusCode, Json<ErrorResponse>)> {
     let sources = state
         .query_service
@@ -92,7 +95,7 @@ async fn health(
 }
 
 async fn get_account(
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<AccountSummaryView>, (StatusCode, Json<ErrorResponse>)> {
     let summary = state
         .account_monitor
@@ -105,7 +108,7 @@ async fn get_account(
 
 async fn get_track_detail(
     Path(id): Path<String>,
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<TrackDetailView>, (StatusCode, Json<ErrorResponse>)> {
     let track_id = TrackId::new(id.clone());
     let source = state
@@ -119,7 +122,7 @@ async fn get_track_detail(
 
 async fn get_track_diagnostics(
     Path(id): Path<String>,
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<TrackDiagnosticsView>, (StatusCode, Json<ErrorResponse>)> {
     let track_id = TrackId::new(id.clone());
     let diagnostics = state
@@ -143,7 +146,7 @@ async fn get_track_diagnostics(
 
 async fn submit_command(
     Path(id): Path<String>,
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
     Json(request): Json<TrackCommandRequest>,
 ) -> Result<Json<TrackCommandAccepted>, (StatusCode, Json<ErrorResponse>)> {
     if !state.command_service.has_track(&id).await {
@@ -255,12 +258,14 @@ mod tests {
     };
     use crate::projector::TrackProjector;
     use crate::write_service::TrackWriteService;
+
+    fn router(state: ServerState) -> axum::Router {
+        super::router(state.http_state(), state.websocket_state())
+    }
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
         StoredAccountMonitorState, TrackQueryService,
     };
-
-    use super::router;
 
     fn test_exchange_rules() -> ExchangeRules {
         ExchangeRules {
@@ -539,6 +544,21 @@ mod tests {
                 source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
             },
         ];
+    }
+
+    #[tokio::test]
+    async fn router_accepts_http_state_without_runtime_dependencies() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

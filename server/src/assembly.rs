@@ -29,33 +29,20 @@ use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
+use crate::server_context::{
+    EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
+};
+#[cfg(test)]
+pub(crate) use crate::server_context::ServerState;
 use crate::state_bootstrap::StateRepositories;
 use crate::submit_preflight::SubmitPreflight;
 #[cfg(test)]
 use crate::write_service::TrackWriteService;
-#[derive(Clone)]
-pub struct ServerState {
-    pub command_service: Arc<TrackCommandService>,
-    pub observation_service: Arc<TrackObservationService>,
-    pub effect_service: Arc<TrackEffectService>,
-    pub notifications: broadcast::Sender<ApplicationNotification>,
-    pub mutation_store: Arc<dyn TrackMutationStore>,
-    pub effect_store: Arc<dyn TrackEffectStore>,
-    pub exchange_freshness: Arc<ExchangeFreshness>,
-    #[allow(dead_code)]
-    pub query_service: Arc<TrackQueryService>,
-    #[allow(dead_code)]
-    pub debug_query_service: Arc<TrackDebugQueryService>,
-    #[allow(dead_code)]
-    pub projector: Arc<TrackProjector>,
-    pub account_monitor: Arc<AccountMonitor>,
-    pub account_projector: Arc<AccountProjector>,
-    pub account_margin_guard: Arc<AccountMarginGuardStore>,
-    pub reconcile_guards: Arc<TrackReconcileGuards>,
-    pub submit_preflight: Arc<SubmitPreflight>,
-}
 
 pub struct ServerPlatform {
+    http_state: HttpState,
+    websocket_state: WebSocketState,
+    #[cfg(test)]
     state: ServerState,
     pub runtime: ServerRuntime,
 }
@@ -252,7 +239,9 @@ async fn assemble_with_state_store(
     let observation_service = Arc::new(write_services.observation);
     let effect_service = Arc::new(write_services.effect);
     let query_service = Arc::new(TrackQueryService::new(query_store));
+    let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     let projector = Arc::new(TrackProjector::new());
+    let account_projector = Arc::new(AccountProjector::new());
     let account_monitor = if let Some(sqlite_storage) = repositories.sqlite_storage() {
         let account_summary: Arc<dyn poise_engine::ports::AccountSummaryPort> = exchange.clone();
         let account_store: Arc<dyn poise_application::AccountMonitorStore> = sqlite_storage;
@@ -271,23 +260,64 @@ async fn assemble_with_state_store(
             config.account_monitor.clone(),
         ))
     };
-    let server_state = build_server_state_parts(
+    let exchange_freshness = Arc::new(ExchangeFreshness::default());
+    let reconcile_guards = Arc::new(TrackReconcileGuards::default());
+    let submit_preflight = Arc::new(SubmitPreflight::new());
+    let reconcile_state = build_reconcile_state(
+        observation_service.clone(),
+        mutation_store.clone(),
+        effect_store.clone(),
+        exchange_freshness.clone(),
+        reconcile_guards.clone(),
+        submit_preflight.clone(),
+    );
+    let http_state = build_http_state(
+        command_service.clone(),
+        query_service.clone(),
+        debug_query_service.clone(),
+        projector.clone(),
+        account_monitor.clone(),
+        account_projector.clone(),
+    );
+    let websocket_state = build_websocket_state(
+        notifications.clone(),
+        query_service.clone(),
+        projector.clone(),
+        account_monitor.clone(),
+        account_projector.clone(),
+    );
+    let runtime_state = build_runtime_state(
+        reconcile_state.clone(),
+        notifications.clone(),
+        account_monitor.clone(),
+        account_margin_guard.clone(),
+    );
+    #[cfg(test)]
+    let state = build_server_state_parts(
         command_service,
         observation_service,
-        effect_service,
+        effect_service.clone(),
         notifications,
         mutation_store,
         effect_store,
         query_service,
         projector,
         account_monitor,
-        account_margin_guard,
+        account_margin_guard.clone(),
     );
 
     Ok(ServerPlatform {
-        state: server_state.clone(),
+        http_state,
+        websocket_state,
+        #[cfg(test)]
+        state,
         runtime: ServerRuntime::with_account_capacity_snapshots(
-            server_state,
+            runtime_state,
+            build_effect_worker_state(
+                reconcile_state,
+                effect_service,
+                account_margin_guard.clone(),
+            ),
             exchange,
             market_data,
             account_capacity_snapshots,
@@ -355,6 +385,15 @@ async fn load_account_capacity_snapshot_with_retry(
 }
 
 impl ServerPlatform {
+    pub fn http_state(&self) -> HttpState {
+        self.http_state.clone()
+    }
+
+    pub fn websocket_state(&self) -> WebSocketState {
+        self.websocket_state.clone()
+    }
+
+    #[cfg(test)]
     pub fn state(&self) -> ServerState {
         self.state.clone()
     }
@@ -382,6 +421,85 @@ impl ClockPort for SystemClock {
     }
 }
 
+fn build_http_state(
+    command_service: Arc<TrackCommandService>,
+    query_service: Arc<TrackQueryService>,
+    debug_query_service: Arc<TrackDebugQueryService>,
+    projector: Arc<TrackProjector>,
+    account_monitor: Arc<AccountMonitor>,
+    account_projector: Arc<AccountProjector>,
+) -> HttpState {
+    HttpState {
+        command_service,
+        query_service,
+        debug_query_service,
+        projector,
+        account_monitor,
+        account_projector,
+    }
+}
+
+fn build_websocket_state(
+    notifications: broadcast::Sender<ApplicationNotification>,
+    query_service: Arc<TrackQueryService>,
+    projector: Arc<TrackProjector>,
+    account_monitor: Arc<AccountMonitor>,
+    account_projector: Arc<AccountProjector>,
+) -> WebSocketState {
+    WebSocketState {
+        notifications,
+        query_service,
+        projector,
+        account_monitor,
+        account_projector,
+    }
+}
+
+fn build_reconcile_state(
+    observation_service: Arc<TrackObservationService>,
+    mutation_store: Arc<dyn TrackMutationStore>,
+    effect_store: Arc<dyn TrackEffectStore>,
+    exchange_freshness: Arc<ExchangeFreshness>,
+    reconcile_guards: Arc<TrackReconcileGuards>,
+    submit_preflight: Arc<SubmitPreflight>,
+) -> ReconcileState {
+    ReconcileState {
+        observation_service,
+        mutation_store,
+        effect_store,
+        exchange_freshness,
+        reconcile_guards,
+        submit_preflight,
+    }
+}
+
+fn build_runtime_state(
+    reconcile: ReconcileState,
+    notifications: broadcast::Sender<ApplicationNotification>,
+    account_monitor: Arc<AccountMonitor>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
+) -> RuntimeState {
+    RuntimeState {
+        reconcile,
+        notifications,
+        account_monitor,
+        account_margin_guard,
+    }
+}
+
+fn build_effect_worker_state(
+    reconcile: ReconcileState,
+    effect_service: Arc<TrackEffectService>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
+) -> EffectWorkerState {
+    EffectWorkerState {
+        reconcile,
+        effect_service,
+        account_margin_guard,
+    }
+}
+
+#[cfg(test)]
 fn build_server_state_parts(
     command_service: Arc<TrackCommandService>,
     observation_service: Arc<TrackObservationService>,
@@ -414,8 +532,8 @@ fn build_server_state_parts(
     }
 }
 
-#[cfg(not(test))]
-fn build_server_state_with_account_monitor(
+#[cfg(test)]
+fn build_server_state_parts_with_account_monitor(
     command_service: Arc<TrackCommandService>,
     observation_service: Arc<TrackObservationService>,
     effect_service: Arc<TrackEffectService>,
@@ -479,7 +597,7 @@ pub(crate) fn build_server_state_with_account_monitor(
         write_service.uses_account_margin_guard(&account_margin_guard),
         "account margin guard mismatch"
     );
-    build_server_state_parts(
+    build_server_state_parts_with_account_monitor(
         write_service.command_service(),
         write_service.observation_service(),
         write_service.effect_service(),
@@ -1018,7 +1136,7 @@ mod tests {
         let (platform, btc_sender) = test_platform();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app = router(platform.state());
+        let app = router(platform.http_state(), platform.websocket_state());
 
         let handles = platform.start_market_data_tasks().await.unwrap();
         let server = tokio::spawn(async move {
@@ -1091,7 +1209,7 @@ mod tests {
         };
 
         let first = assemble_with_fake_ports(&config).await.unwrap();
-        let app = router(first.state());
+        let app = router(first.http_state(), first.websocket_state());
         let pause = tower::ServiceExt::oneshot(
             app,
             axum::http::Request::builder()
@@ -1118,10 +1236,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_state_exposes_observation_and_account_paths_only() {
+        let (platform, _) = test_platform();
+        let state = platform.state().runtime_state();
+
+        assert_eq!(
+            state.reconcile.observation_service.track_instruments().await.len(),
+            1
+        );
+        assert!(state.account_monitor.current_summary().await.is_none());
+        let _receiver = state.notifications.subscribe();
+    }
+
+    #[tokio::test]
+    async fn effect_worker_state_exposes_effect_execution_paths_only() {
+        let (platform, _) = test_platform();
+        let state = platform.state().effect_worker_state();
+
+        assert!(state
+            .reconcile
+            .effect_store
+            .list_dispatchable_effects()
+            .await
+            .unwrap()
+            .is_empty());
+        let _ = state
+            .account_margin_guard
+            .constraint_for(&Instrument::new(Venue::Binance, "BTCUSDT"));
+    }
+
+    #[tokio::test]
     async fn newer_tick_snapshot_is_not_overwritten_by_older_command_snapshot() {
         let persistence = Arc::new(BlockingPersistence::default());
         let (platform, _btc_sender) = test_platform_with_repository(persistence.clone());
-        let app = router(platform.state());
+        let app = router(platform.http_state(), platform.websocket_state());
 
         {
             let manager_handle = platform.state.manager();
@@ -1286,6 +1434,8 @@ mod tests {
 
         (
             ServerPlatform {
+                http_state: state.http_state(),
+                websocket_state: state.websocket_state(),
                 state: state.clone(),
                 runtime: crate::runtime::ServerRuntime::new(state, exchange, market_data),
             },

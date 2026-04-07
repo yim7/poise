@@ -1,16 +1,23 @@
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
+use poise_application::ApplicationNotification;
 use poise_protocol::StreamEvent;
 
-use crate::assembly::ServerState;
-use poise_application::ApplicationNotification;
+use crate::server_context::WebSocketState;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, state: WebSocketState) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: ServerState) {
+#[cfg(test)]
+pub async fn ws_handler_with_server_state(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<crate::server_context::ServerState>,
+) -> Response {
+    ws_handler(ws, state.websocket_state()).await
+}
+
+async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
     let mut receiver = state.notifications.subscribe();
 
     loop {
@@ -39,7 +46,7 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 
 async fn push_projected_updates(
     socket: &mut WebSocket,
-    state: &ServerState,
+    state: &WebSocketState,
     track_id: poise_engine::track::TrackId,
 ) -> bool {
     let source = match state
@@ -93,7 +100,7 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
-async fn push_account_summary(socket: &mut WebSocket, state: &ServerState) -> bool {
+async fn push_account_summary(socket: &mut WebSocket, state: &WebSocketState) -> bool {
     let Some(summary) = state.account_monitor.current_summary().await else {
         return true;
     };
@@ -127,7 +134,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use axum::Router;
     use chrono::{TimeZone, Utc};
-    use futures_util::StreamExt;
+    use futures_util::{SinkExt, StreamExt};
     use poise_application::{
         CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
         PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
@@ -162,7 +169,7 @@ mod tests {
         StoredAccountMonitorState, TrackQueryService,
     };
 
-    use super::ws_handler;
+    use super::ws_handler_with_server_state;
 
     type ClientStream = futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
@@ -174,6 +181,27 @@ mod tests {
         repository: Arc<TestRepository>,
     ) -> (String, Arc<TrackWriteService>, ServerState) {
         spawn_server_with_capacity(repository, 16).await
+    }
+
+    #[tokio::test]
+    async fn websocket_accepts_websocket_state_without_effect_worker_dependencies() {
+        let repository = Arc::new(TestRepository::default());
+        let (_url, _service, state) = spawn_server(repository).await;
+        let websocket_state = state.websocket_state();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws| super::ws_handler(ws, websocket_state.clone())),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let (mut sink, _) = client.split();
+        sink.close().await.unwrap();
     }
 
     async fn spawn_server_with_capacity(
@@ -204,7 +232,7 @@ mod tests {
             account_margin_guard,
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler))
+            .route("/ws", axum::routing::get(ws_handler_with_server_state))
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -243,7 +271,7 @@ mod tests {
             account_margin_guard,
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler))
+            .route("/ws", axum::routing::get(ws_handler_with_server_state))
             .with_state(state.clone());
 
         tokio::spawn(async move {

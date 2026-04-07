@@ -1,55 +1,50 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use chrono::Utc;
-use poise_application::{
-    FollowUpRetirementRequest, PersistedTrackEffect, PreparedSubmitExecution,
-    is_loaded_track_invariant_violation,
-};
+use anyhow::Result;
+use poise_application::{PersistedTrackEffect, PreparedSubmitExecution};
 use poise_engine::ports::{ExchangePort, OrderRequest};
 use poise_engine::track::Instrument;
-use poise_engine::transition::TrackEffect;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::assembly::ServerState;
-use crate::exchange_freshness::FreshnessGateDecision;
-use crate::order_outcome::{
-    OutcomeClass, OutcomeUnknownRecovery, ReconcileRequest, classify_cancel_error,
-    classify_submit_receipt_writeback_error,
-};
-use crate::runtime;
+use crate::order_outcome::OutcomeUnknownRecovery;
+use crate::server_context::EffectWorkerState;
+#[cfg(test)]
+use crate::server_context::ServerState;
 use crate::submit_preflight::SubmitPreflightDecision;
+
+mod dispatch;
+mod execute;
+mod retry;
 #[derive(Clone)]
 pub struct EffectWorker {
-    state: ServerState,
+    state: EffectWorkerState,
     exchange: Arc<dyn ExchangePort>,
     poll_interval: Duration,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl EffectWorker {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn new(
         state: ServerState,
         exchange: Arc<dyn ExchangePort>,
         poll_interval: Duration,
     ) -> Self {
         let (_, shutdown_rx) = watch::channel(false);
-        Self::with_shutdown_rx(state, exchange, poll_interval, shutdown_rx)
+        Self::with_shutdown_rx(state.effect_worker_state(), exchange, poll_interval, shutdown_rx)
     }
 
     pub fn with_shutdown_rx(
-        state: ServerState,
+        state: impl Into<EffectWorkerState>,
         exchange: Arc<dyn ExchangePort>,
         poll_interval: Duration,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
-            state,
+            state: state.into(),
             exchange,
             poll_interval,
             shutdown_rx,
@@ -88,72 +83,11 @@ impl EffectWorker {
     }
 
     pub async fn run_once(&self) -> Result<()> {
-        let mut seen_effects = HashSet::new();
-
-        loop {
-            if *self.shutdown_rx.borrow() {
-                break;
-            }
-
-            let Some(effect) = self
-                .state
-                .effect_store
-                .list_dispatchable_effects()
-                .await?
-                .into_iter()
-                .find(|effect| !seen_effects.contains(&effect.effect_id))
-            else {
-                break;
-            };
-            let effect_id = effect.effect_id.clone();
-            if let Err(error) = self.process_effect(effect).await {
-                tracing::warn!("failed to process persisted effect: {error}");
-            }
-            seen_effects.insert(effect_id);
-        }
-
-        Ok(())
+        dispatch::run_once(self).await
     }
 
     async fn process_effect(&self, persisted: PersistedTrackEffect) -> Result<()> {
-        match persisted.effect {
-            TrackEffect::SubmitOrder {
-                ref request,
-                ref desired_exposure,
-            } => {
-                self.execute_submit(&persisted, request.clone(), desired_exposure.clone())
-                    .await
-            }
-            TrackEffect::CancelOrder {
-                ref instrument,
-                ref order_id,
-            } => {
-                self.execute_cancellation(
-                    &persisted,
-                    Cancellation::One {
-                        instrument: instrument.clone(),
-                        order_id: order_id.clone(),
-                    },
-                )
-                .await
-            }
-            TrackEffect::CancelAll { ref instrument } => {
-                self.execute_cancellation(
-                    &persisted,
-                    Cancellation::All {
-                        instrument: instrument.clone(),
-                    },
-                )
-                .await
-            }
-            TrackEffect::NoOp => {
-                self.state
-                    .effect_service
-                    .complete_effect_succeeded(persisted.track_id.as_str(), &persisted.effect_id)
-                    .await?;
-                Ok(())
-            }
-        }
+        dispatch::process_effect(self, persisted).await
     }
 
     async fn execute_submit(
@@ -162,121 +96,7 @@ impl EffectWorker {
         request: OrderRequest,
         desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
-        if matches!(
-            self.state
-                .exchange_freshness
-                .decide_effect(persisted.track_id.as_str(), &persisted.effect)
-                .await,
-            FreshnessGateDecision::ReconcileFirst
-        ) {
-            self.trigger_immediate_reconcile(
-                persisted.track_id.as_str(),
-                &request.instrument,
-                crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let preflight_decision = self
-            .state
-            .submit_preflight
-            .decide(&persisted.effect_id, &request.client_order_id)
-            .await;
-        let Some(prepared_submit) = self
-            .prepare_submit_execution(
-                persisted,
-                &request,
-                desired_exposure.clone(),
-                preflight_decision,
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        self.state
-            .submit_preflight
-            .mark_submit_started(&persisted.effect_id)
-            .await;
-
-        match self.exchange.submit_order(request.clone()).await {
-            Ok(receipt) => {
-                if let Err(error) = self
-                    .state
-                    .effect_service
-                    .complete_submit_execution(
-                        persisted.track_id.as_str(),
-                        &persisted.effect_id,
-                        &request,
-                        prepared_submit.desired_exposure,
-                        &receipt,
-                    )
-                    .await
-                {
-                    if let OutcomeClass::OutcomeUnknown(recovery) =
-                        classify_submit_receipt_writeback_error(&error)
-                    {
-                        self.recover_unknown_outcome(
-                            persisted.track_id.as_str(),
-                            &request.instrument,
-                            recovery,
-                        )
-                        .await?;
-                    }
-                    self.state
-                        .effect_service
-                        .complete_effect_failed(
-                            persisted.track_id.as_str(),
-                            &persisted.effect_id,
-                            &error.to_string(),
-                        )
-                        .await?;
-                    return Err(error);
-                }
-
-                Ok(())
-            }
-            Err(error) => {
-                let failure_message = error.to_string();
-                if is_insufficient_margin_failure(&failure_message) {
-                    self.state
-                        .account_margin_guard
-                        .activate_insufficient_margin(
-                            &request.instrument,
-                            "insufficient_margin",
-                            Utc::now(),
-                        );
-                    if let Ok(snapshot) = self
-                        .exchange
-                        .get_account_capacity_snapshot(&request.instrument)
-                        .await
-                    {
-                        self.state
-                            .account_margin_guard
-                            .update_snapshot(request.instrument.clone(), snapshot);
-                    }
-                }
-                match self
-                    .state
-                    .effect_service
-                    .record_submit_failure(
-                        persisted.track_id.as_str(),
-                        &persisted.effect_id,
-                        &request.client_order_id,
-                        &failure_message,
-                    )
-                    .await
-                {
-                    Ok(()) => Err(anyhow!(failure_message)),
-                    Err(clear_error) if is_loaded_track_invariant_violation(&clear_error) => {
-                        Err(clear_error)
-                    }
-                    Err(clear_error) => Err(anyhow!(
-                        "submit order failed: {error}; failed to record submit failure: {clear_error}"
-                    )),
-                }
-            }
-        }
+        execute::execute_submit(self, persisted, request, desired_exposure).await
     }
 
     async fn prepare_submit_execution(
@@ -286,28 +106,14 @@ impl EffectWorker {
         desired_exposure: poise_core::types::Exposure,
         preflight_decision: SubmitPreflightDecision,
     ) -> Result<Option<PreparedSubmitExecution>> {
-        let live_order = match preflight_decision {
-            SubmitPreflightDecision::Direct => None,
-            SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => Some(
-                self.exchange
-                    .get_open_orders(&request.instrument)
-                    .await?
-                    .into_iter()
-                    .find(|order| order.client_order_id == request.client_order_id),
-            )
-            .flatten(),
-        };
-
-        self.state
-            .effect_service
-            .prepare_submit_execution(
-                persisted.track_id.as_str(),
-                &persisted.effect_id,
-                request,
-                desired_exposure.clone(),
-                live_order.as_ref(),
-            )
-            .await
+        execute::prepare_submit_execution(
+            self,
+            persisted,
+            request,
+            desired_exposure,
+            preflight_decision,
+        )
+        .await
     }
 
     async fn execute_cancellation(
@@ -315,108 +121,7 @@ impl EffectWorker {
         persisted: &PersistedTrackEffect,
         cancellation: Cancellation,
     ) -> Result<()> {
-        let instrument = cancellation.instrument().clone();
-        if matches!(
-            self.state
-                .exchange_freshness
-                .decide_effect(persisted.track_id.as_str(), &persisted.effect)
-                .await,
-            FreshnessGateDecision::ReconcileFirst
-        ) {
-            self.trigger_immediate_reconcile(
-                persisted.track_id.as_str(),
-                &instrument,
-                crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
-            )
-            .await?;
-            return Ok(());
-        }
-        let result = match cancellation {
-            Cancellation::One {
-                ref instrument,
-                ref order_id,
-            } => self.exchange.cancel_order(instrument, order_id).await,
-            Cancellation::All { ref instrument } => self.exchange.cancel_all(instrument).await,
-        };
-
-        match result {
-            Ok(()) => {
-                let writeback = match &cancellation {
-                    Cancellation::One { order_id, .. } => {
-                        self.state
-                            .effect_service
-                            .record_cancel_order_success(
-                                persisted.track_id.as_str(),
-                                &persisted.effect_id,
-                                &persisted.batch_id,
-                                persisted.sequence,
-                                order_id,
-                            )
-                            .await
-                    }
-                    Cancellation::All { .. } => {
-                        self.state
-                            .effect_service
-                            .record_cancel_all_success(
-                                persisted.track_id.as_str(),
-                                &persisted.effect_id,
-                            )
-                            .await
-                    }
-                };
-                if let Err(error) = writeback {
-                    self.state
-                        .effect_service
-                        .complete_effect_failed(
-                            persisted.track_id.as_str(),
-                            &persisted.effect_id,
-                            &error.to_string(),
-                        )
-                        .await?;
-                    return Err(error);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                if let OutcomeClass::OutcomeUnknown(recovery) = classify_cancel_error(&error) {
-                    self.recover_unknown_outcome(
-                        persisted.track_id.as_str(),
-                        &instrument,
-                        recovery,
-                    )
-                    .await?;
-                    if let Cancellation::One { order_id, .. } = &cancellation
-                        && let Err(retirement_error) = self
-                            .state
-                            .effect_service
-                            .request_follow_up_retirement(
-                                persisted.track_id.as_str(),
-                                FollowUpRetirementRequest {
-                                    batch_id: persisted.batch_id.clone(),
-                                    blocked_sequence: persisted.sequence,
-                                    closed_order_id: order_id.clone(),
-                                },
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            track_id = %persisted.track_id.as_str(),
-                            order_id = %order_id,
-                            "failed to request follow-up retirement after unknown cancel outcome: {retirement_error}"
-                        );
-                    }
-                }
-                self.state
-                    .effect_service
-                    .complete_effect_failed(
-                        persisted.track_id.as_str(),
-                        &persisted.effect_id,
-                        &error.to_string(),
-                    )
-                    .await?;
-                Err(error)
-            }
-        }
+        execute::execute_cancellation(self, persisted, cancellation).await
     }
 
     async fn trigger_immediate_reconcile(
@@ -425,17 +130,7 @@ impl EffectWorker {
         instrument: &Instrument,
         reason: crate::order_outcome::ReconcileReason,
     ) -> Result<()> {
-        runtime::enqueue_reconcile_request(
-            &self.state,
-            &self.exchange,
-            ReconcileRequest {
-                track_id: track_id.to_string(),
-                reason,
-            },
-            instrument,
-        )
-        .await?;
-        Ok(())
+        retry::trigger_immediate_reconcile(self, track_id, instrument, reason).await
     }
 
     async fn recover_unknown_outcome(
@@ -444,12 +139,7 @@ impl EffectWorker {
         instrument: &Instrument,
         recovery: OutcomeUnknownRecovery,
     ) -> Result<()> {
-        self.state
-            .exchange_freshness
-            .mark_stale(track_id, recovery.freshness_reason)
-            .await;
-        self.trigger_immediate_reconcile(track_id, instrument, recovery.reconcile_reason)
-            .await
+        retry::recover_unknown_outcome(self, track_id, instrument, recovery).await
     }
 }
 

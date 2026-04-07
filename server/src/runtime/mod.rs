@@ -1,118 +1,43 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
-use poise_application::{ApplicationNotification, TrackInstrument, TrackMutationError};
+use anyhow::{Result, anyhow};
+use poise_application::TrackMutationError;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
     AccountCapacitySnapshot, ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent,
-    UserDataPayload,
 };
-use poise_engine::runtime::AccountCapacityConstraint;
 use poise_engine::track::Instrument;
-use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
-use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{Instant, MissedTickBehavior, sleep};
-
-use crate::assembly::ServerState;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use crate::effect_worker::EffectWorker;
-use crate::exchange_freshness::ExchangeFreshnessReason;
-use crate::order_outcome::{
-    ReconcileExecution, ReconcileReason, ReconcileRequest, reconcile_execution,
-};
+use crate::order_outcome::{ReconcileExecution, ReconcileRequest};
+use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
+#[cfg(test)]
+use crate::server_context::ServerState;
+
+mod account_refresh;
+mod guards;
+mod market_data;
+mod reconcile;
+mod startup_sync;
+mod user_data;
+
+pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
 
 #[derive(Clone)]
 pub struct ServerRuntime {
-    state: ServerState,
+    state: RuntimeState,
+    effect_worker_state: EffectWorkerState,
     exchange: Arc<dyn ExchangePort>,
     market_data: Arc<dyn MarketDataPort>,
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     account_refresh_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct VenueMarginBlock {
-    pub increase_blocked: bool,
-    pub blocked_reason: Option<String>,
-    pub blocked_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Default)]
-pub(crate) struct AccountMarginGuardStore {
-    snapshots_by_instrument: std::sync::Mutex<HashMap<Instrument, AccountCapacitySnapshot>>,
-    blocks_by_venue: std::sync::Mutex<HashMap<poise_engine::track::Venue, VenueMarginBlock>>,
-}
-
-impl AccountMarginGuardStore {
-    pub(crate) fn replace_snapshots(
-        &self,
-        snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
-    ) {
-        let mut stored_snapshots = self.snapshots_by_instrument.lock().unwrap();
-        stored_snapshots.extend(snapshots);
-    }
-
-    pub(crate) fn update_snapshot(
-        &self,
-        instrument: Instrument,
-        snapshot: AccountCapacitySnapshot,
-    ) {
-        self.snapshots_by_instrument
-            .lock()
-            .unwrap()
-            .insert(instrument, snapshot);
-    }
-
-    pub(crate) fn activate_insufficient_margin(
-        &self,
-        instrument: &Instrument,
-        reason: impl Into<String>,
-        blocked_at: DateTime<Utc>,
-    ) {
-        let reason = reason.into();
-        self.blocks_by_venue.lock().unwrap().insert(
-            instrument.venue,
-            VenueMarginBlock {
-                increase_blocked: true,
-                blocked_reason: Some(reason),
-                blocked_at: Some(blocked_at),
-            },
-        );
-    }
-
-    pub(crate) fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
-        let snapshot = self
-            .snapshots_by_instrument
-            .lock()
-            .unwrap()
-            .get(instrument)
-            .cloned();
-        let block = self
-            .blocks_by_venue
-            .lock()
-            .unwrap()
-            .get(&instrument.venue)
-            .cloned()
-            .unwrap_or_default();
-
-        AccountCapacityConstraint {
-            increase_blocked: block.increase_blocked,
-            blocked_reason: block.blocked_reason,
-            max_increase_notional: snapshot.map(|snapshot| snapshot.max_increase_notional),
-        }
-    }
-}
-
-impl poise_application::AccountCapacityGuard for AccountMarginGuardStore {
-    fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
-        self.constraint_for(instrument)
-    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -135,32 +60,6 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(1);
 #[cfg(not(test))]
 const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone)]
-struct RecoveryTrackedTrack {
-    instrument: poise_engine::track::Instrument,
-    next_retry_at: Instant,
-}
-
-#[derive(Default)]
-pub struct TrackReconcileGuards {
-    locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
-}
-
-impl TrackReconcileGuards {
-    pub async fn lock(&self, track_id: &str) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.locks.lock().await;
-            Arc::clone(
-                locks
-                    .entry(track_id.to_string())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
-        };
-
-        lock.lock_owned().await
-    }
-}
-
 impl ServerRuntime {
     #[cfg(test)]
     pub fn new(
@@ -169,7 +68,8 @@ impl ServerRuntime {
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
-            state,
+            state.runtime_state(),
+            state.effect_worker_state(),
             exchange,
             market_data,
             HashMap::new(),
@@ -180,7 +80,8 @@ impl ServerRuntime {
     }
 
     pub(crate) fn with_account_capacity_snapshots(
-        state: ServerState,
+        state: RuntimeState,
+        effect_worker_state: EffectWorkerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
@@ -188,6 +89,7 @@ impl ServerRuntime {
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
+            effect_worker_state,
             exchange,
             market_data,
             account_capacity_snapshots,
@@ -206,7 +108,8 @@ impl ServerRuntime {
         audit_interval: Duration,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
-            state,
+            state.runtime_state(),
+            state.effect_worker_state(),
             exchange,
             market_data,
             HashMap::new(),
@@ -226,7 +129,8 @@ impl ServerRuntime {
         account_refresh_interval: Duration,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
-            state,
+            state.runtime_state(),
+            state.effect_worker_state(),
             exchange,
             market_data,
             HashMap::new(),
@@ -237,7 +141,8 @@ impl ServerRuntime {
     }
 
     fn with_reconcile_intervals_and_account_capacity_snapshots(
-        state: ServerState,
+        state: RuntimeState,
+        effect_worker_state: EffectWorkerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
@@ -251,6 +156,7 @@ impl ServerRuntime {
             .replace_snapshots(account_capacity_snapshots);
         Self {
             state,
+            effect_worker_state,
             exchange,
             market_data,
             recovery_retry_interval,
@@ -269,10 +175,12 @@ impl ServerRuntime {
             .await?;
         let startup_pending_submit_effects = self
             .state
+            .reconcile
             .effect_store
             .list_all_pending_submit_effects()
             .await?;
         self.state
+            .reconcile
             .submit_preflight
             .seed_startup_pending_submit_effects(
                 startup_pending_submit_effects
@@ -310,7 +218,7 @@ impl ServerRuntime {
             let _ = handles.effect_task.await;
         }
 
-        let tracks = self.state.observation_service.track_instruments().await;
+        let tracks = self.state.reconcile.observation_service.track_instruments().await;
         for track in &tracks {
             if let Err(error) = self.exchange.cancel_all(&track.instrument).await {
                 tracing::warn!(
@@ -321,7 +229,7 @@ impl ServerRuntime {
             }
 
             if let Err(error) = sync_exchange_state_from_exchange(
-                &self.state,
+                &self.state.reconcile,
                 &self.exchange,
                 &track.id,
                 &track.instrument,
@@ -350,20 +258,7 @@ impl ServerRuntime {
     }
 
     async fn startup_sync(&self) -> Result<()> {
-        for track in self.state.observation_service.track_instruments().await {
-            let position = self.exchange.get_position(&track.instrument).await?;
-            let open_orders = self.exchange.get_open_orders(&track.instrument).await?;
-            self.state
-                .observation_service
-                .sync_exchange_state(
-                    &track.id,
-                    position_observation(&position),
-                    open_orders.iter().map(order_observation).collect(),
-                )
-                .await?;
-        }
-
-        Ok(())
+        startup_sync::startup_sync(self).await
     }
 
     async fn replay_startup_user_data(
@@ -371,112 +266,16 @@ impl ServerRuntime {
         receiver: &mut mpsc::Receiver<UserDataEvent>,
         startup_cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        let mut buffered_events = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
-            buffered_events.push(event);
-        }
-
-        buffered_events.sort_by_key(|event| event.event_time);
-        for event in buffered_events {
-            if event.event_time > startup_cutoff {
-                let instrument = event.instrument().clone();
-                let Some(track_id) = self
-                    .state
-                    .observation_service
-                    .resolve_track_id(&instrument)
-                    .await
-                else {
-                    tracing::warn!(
-                        "received user data for unknown instrument {}:{}",
-                        instrument.venue.as_str(),
-                        instrument.symbol
-                    );
-                    continue;
-                };
-                apply_user_data_event(&self.state, &self.exchange, &track_id, event)
-                    .await
-                    .map_err(mutate_error)?;
-            }
-        }
-
-        Ok(())
+        startup_sync::replay_startup_user_data(self, receiver, startup_cutoff).await
     }
 
     fn spawn_market_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
-        let state = self.state.clone();
-        let market_data = Arc::clone(&self.market_data);
-
-        tokio::spawn(async move {
-            let tracks = state.observation_service.track_instruments().await;
-            let mut workers = JoinSet::new();
-
-            for track in tracks {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-
-                let instrument = track.instrument.clone();
-                match market_data.subscribe_prices(&instrument).await {
-                    Ok(mut receiver) => {
-                        let state = state.clone();
-                        let mut worker_shutdown_rx = shutdown_rx.clone();
-                        workers.spawn(async move {
-                            loop {
-                                if *worker_shutdown_rx.borrow() {
-                                    break;
-                                }
-
-                                tokio::select! {
-                                    biased;
-                                    changed = worker_shutdown_rx.changed() => {
-                                        if changed.is_err() || *worker_shutdown_rx.borrow() {
-                                            break;
-                                        }
-                                    }
-                                    tick = receiver.recv() => {
-                                        let Some(tick) = tick else {
-                                            break;
-                                        };
-
-                                        match state
-                                            .observation_service
-                                            .observe_market(&track.id, tick.reference_price)
-                                            .await
-                                        {
-                                            Ok(_) => {}
-                                            Err(error) => {
-                                                tracing::warn!(
-                                                    "failed to apply market data update for {}: {}",
-                                                    instrument.symbol,
-                                                    error
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            "failed to subscribe market data for {}: {error}",
-                            instrument.symbol
-                        );
-                    }
-                }
-            }
-
-            while let Some(result) = workers.join_next().await {
-                if let Err(error) = result {
-                    tracing::warn!("market worker join error: {error}");
-                }
-            }
-        })
+        market_data::spawn_market_task(self, shutdown_rx)
     }
 
     fn spawn_effect_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         EffectWorker::with_shutdown_rx(
-            self.state.clone(),
+            self.effect_worker_state.clone(),
             Arc::clone(&self.exchange),
             Duration::from_millis(10),
             shutdown_rx,
@@ -484,526 +283,76 @@ impl ServerRuntime {
         .spawn()
     }
 
-    fn spawn_recovery_task(&self, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
-        let state = self.state.clone();
-        let exchange = Arc::clone(&self.exchange);
-        let retry_interval = self.recovery_retry_interval;
-        let audit_interval = self.audit_interval;
-
-        tokio::spawn(async move {
-            let instruments = state.observation_service.track_instruments().await;
-            let mut tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
-            let mut next_audit_at = instruments
-                .iter()
-                .map(|track| (track.id.clone(), Instant::now() + audit_interval))
-                .collect::<std::collections::HashMap<_, _>>();
-            let mut notifications = state.notifications.subscribe();
-            let mut ticker = tokio::time::interval(Duration::from_millis(50));
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-
-                tokio::select! {
-                    biased;
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        for track in &instruments {
-                            if let Err(error) = state
-                                .observation_service
-                                .refresh_market_data_health(&track.id)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "failed to refresh market data health for {}: {}",
-                                    track.instrument.symbol,
-                                    error
-                                );
-                            }
-                        }
-
-                        let now = Instant::now();
-                        let due_anomaly_tracks: Vec<(String, poise_engine::track::Instrument)> = tracked
-                            .iter()
-                            .filter(|(_, tracked_track)| tracked_track.next_retry_at <= now)
-                            .map(|(track_id, tracked_track)| (track_id.clone(), tracked_track.instrument.clone()))
-                            .collect();
-                        let due_audit_tracks: Vec<(String, poise_engine::track::Instrument)> = instruments
-                            .iter()
-                            .filter(|track| {
-                                next_audit_at
-                                    .get(&track.id)
-                                    .is_some_and(|next_audit| *next_audit <= now)
-                            })
-                            .map(|track| (track.id.clone(), track.instrument.clone()))
-                            .collect();
-
-                        let mut due_tracks = due_audit_tracks
-                            .into_iter()
-                            .collect::<std::collections::HashMap<_, _>>();
-                        for (track_id, instrument) in due_anomaly_tracks {
-                            due_tracks.insert(track_id, instrument);
-                        }
-
-                        for (track_id, instrument) in due_tracks {
-                            if let Some(tracked_track) = tracked.get_mut(&track_id) {
-                                tracked_track.next_retry_at = Instant::now() + retry_interval;
-                            }
-                            next_audit_at.insert(track_id.clone(), Instant::now() + audit_interval);
-                            if let Err(error) = sync_exchange_state_from_exchange(
-                                &state,
-                                &exchange,
-                                &track_id,
-                                &instrument,
-                                ExchangeSyncMode::RecoverAndReconcile,
-                            )
-                            .await {
-                                tracing::warn!(
-                                    "failed to auto-resync recovery anomaly for {}: {}",
-                                    instrument.symbol,
-                                    error.message()
-                                );
-                            }
-                        }
-                    }
-                    notification = notifications.recv() => {
-                        match notification {
-                            Ok(ApplicationNotification::TrackChanged { track_id }) => {
-                                let recovery_anomaly_active =
-                                    load_recovery_anomaly_active(&state, track_id.as_str()).await;
-                                update_recovery_tracking(
-                                    &mut tracked,
-                                    &instruments,
-                                    track_id.as_str(),
-                                    recovery_anomaly_active,
-                                    retry_interval,
-                                );
-                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
-                                    tracing::warn!(
-                                        "failed to reconcile submit preflight state after track change for {}: {}",
-                                        track_id.as_str(),
-                                        error.message()
-                                    );
-                                }
-                            }
-                            Ok(ApplicationNotification::AccountChanged) => {
-                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
-                                    tracing::warn!(
-                                        "failed to reconcile submit preflight state after account change: {}",
-                                        error.message()
-                                    );
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                tracing::warn!(
-                                    "recovery notification stream lagged by {skipped} messages; reseeding recovery tracking"
-                                );
-                                tracked = seed_recovery_tracking(&state, &instruments, retry_interval).await;
-                                if let Err(error) = reconcile_submit_preflight_state(&state).await {
-                                    tracing::warn!(
-                                        "failed to reconcile submit preflight state after notification lag: {}",
-                                        error.message()
-                                    );
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
-        })
+    fn spawn_recovery_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        reconcile::spawn_recovery_task(self, shutdown_rx)
     }
 
-    fn spawn_account_task(&self, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
-        let state = self.state.clone();
-        let refresh_interval = self.account_refresh_interval;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(refresh_interval);
-            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = interval.tick() => {
-                        if let Err(error) = state.account_monitor.refresh_once().await {
-                            tracing::warn!("account monitor refresh failed: {error}");
-                        }
-                    }
-                }
-            }
-        })
+    fn spawn_account_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        account_refresh::spawn_account_task(self, shutdown_rx)
     }
 
     fn spawn_user_task(
         &self,
-        mut receiver: mpsc::Receiver<UserDataEvent>,
+        receiver: mpsc::Receiver<UserDataEvent>,
         startup_cutoff: chrono::DateTime<chrono::Utc>,
-        mut shutdown_rx: watch::Receiver<bool>,
+        shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
-        let state = self.state.clone();
-        let exchange = Arc::clone(&self.exchange);
-
-        tokio::spawn(async move {
-            loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-
-                let event = tokio::select! {
-                    biased;
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                        continue;
-                    }
-                    event = receiver.recv() => event,
-                };
-
-                let Some(event) = event else {
-                    break;
-                };
-
-                if event.event_time <= startup_cutoff {
-                    continue;
-                }
-
-                let instrument = event.instrument().clone();
-                let Some(track_id) = state
-                    .observation_service
-                    .resolve_track_id(&instrument)
-                    .await
-                else {
-                    tracing::warn!(
-                        "received user data for unknown instrument {}:{}",
-                        instrument.venue.as_str(),
-                        instrument.symbol
-                    );
-                    continue;
-                };
-                if let Err(error) = apply_user_data_event(&state, &exchange, &track_id, event).await
-                {
-                    tracing::warn!(
-                        "failed to apply user data update for {}: {}",
-                        instrument.symbol,
-                        error.message()
-                    );
-                    continue;
-                }
-            }
-        })
+        user_data::spawn_user_task(self, receiver, startup_cutoff, shutdown_rx)
     }
 }
 
-async fn retry_startup_step<T, F, Fut>(step_name: &'static str, mut operation: F) -> Result<T>
+pub(crate) trait ReconcileStateAccess {
+    fn reconcile_state_view(&self) -> ReconcileState;
+}
+
+impl ReconcileStateAccess for ReconcileState {
+    fn reconcile_state_view(&self) -> ReconcileState {
+        self.clone()
+    }
+}
+
+#[cfg(test)]
+impl ReconcileStateAccess for ServerState {
+    fn reconcile_state_view(&self) -> ReconcileState {
+        self.reconcile_state()
+    }
+}
+
+async fn retry_startup_step<T, F, Fut>(step_name: &'static str, operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    let mut last_error = None;
-
-    for attempt in 0..STARTUP_RETRY_ATTEMPTS {
-        match operation().await {
-            Ok(value) => return Ok(value),
-            Err(error) => {
-                if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
-                    return Err(error);
-                }
-                tracing::warn!(
-                    step = step_name,
-                    attempt = attempt + 1,
-                    max_attempts = STARTUP_RETRY_ATTEMPTS,
-                    "startup step failed: {error}"
-                );
-                last_error = Some(error);
-            }
-        }
-
-        sleep(STARTUP_RETRY_DELAY).await;
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow!("startup step `{step_name}` failed")))
+    startup_sync::retry_startup_step(step_name, operation).await
 }
 
 async fn apply_user_data_event(
-    state: &ServerState,
+    state: &impl ReconcileStateAccess,
     exchange: &Arc<dyn ExchangePort>,
     track_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), TrackMutationError> {
-    let instrument = event.instrument().clone();
-    match event.payload {
-        UserDataPayload::PositionUpdate(position) => {
-            let _ = state
-                .observation_service
-                .observe_position(track_id, position_observation(&position))
-                .await
-                .map_err(preserve_track_mutation_error)?;
-        }
-        UserDataPayload::OrderUpdate(order) => {
-            let (_, absorb_result): (_, poise_engine::executor::OrderUpdateAbsorbResult) = state
-                .observation_service
-                .observe_order_with_absorb_result(track_id, order_observation(&order))
-                .await
-                .map_err(preserve_track_mutation_error)?;
-            if absorb_result == poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
-                    .await;
-                enqueue_reconcile_request(
-                    state,
-                    exchange,
-                    ReconcileRequest {
-                        track_id: track_id.to_string(),
-                        reason: ReconcileReason::UnabsorbedOrderUpdate,
-                    },
-                    &instrument,
-                )
-                .await?;
-            } else if order.status == poise_engine::ports::OrderStatus::Filled {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::FilledAwaitingSync)
-                    .await;
-            }
-        }
-        UserDataPayload::TrackLedger(update) => {
-            let result = state
-                .observation_service
-                .apply_track_ledger_event(track_id, update.event)
-                .await
-                .map_err(preserve_track_mutation_error)?;
-            if result.absorb_result
-                == Some(poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed)
-            {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
-                    .await;
-                enqueue_reconcile_request(
-                    state,
-                    exchange,
-                    ReconcileRequest {
-                        track_id: track_id.to_string(),
-                        reason: ReconcileReason::UnabsorbedOrderUpdate,
-                    },
-                    &instrument,
-                )
-                .await?;
-            } else if result.order_status == Some(poise_engine::ports::OrderStatus::Filled) {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::FilledAwaitingSync)
-                    .await;
-            }
-        }
-    }
-
-    Ok(())
+    let state = state.reconcile_state_view();
+    startup_sync::apply_user_data_event(&state, exchange, track_id, event).await
 }
 
 pub(crate) async fn enqueue_reconcile_request(
-    state: &ServerState,
+    state: &impl ReconcileStateAccess,
     exchange: &Arc<dyn ExchangePort>,
     request: ReconcileRequest,
     instrument: &poise_engine::track::Instrument,
 ) -> std::result::Result<ReconcileExecution, TrackMutationError> {
-    let execution = reconcile_execution(&request.track_id, vec![request.reason]);
-    sync_exchange_state_from_exchange(
-        state,
-        exchange,
-        &request.track_id,
-        instrument,
-        ExchangeSyncMode::RecoverAndReconcile,
-    )
-    .await?;
-    Ok(execution)
+    reconcile::enqueue_reconcile_request(state, exchange, request, instrument).await
 }
 
 async fn sync_exchange_state_from_exchange(
-    state: &ServerState,
+    state: &impl ReconcileStateAccess,
     exchange: &Arc<dyn ExchangePort>,
     track_id: &str,
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
-    let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
-    let sync_token = state.exchange_freshness.prepare_sync(track_id).await;
-    let snapshot = state
-        .mutation_store
-        .load_track_state(track_id)
-        .await
-        .map_err(TrackMutationError::Persistence)?;
-    let mut position = exchange
-        .get_position(instrument)
-        .await
-        .map_err(TrackMutationError::Persistence)?;
-    let mut open_orders = exchange
-        .get_open_orders(instrument)
-        .await
-        .map_err(TrackMutationError::Persistence)?;
-
-    if should_cancel_unknown_live_orders(snapshot.as_ref(), &open_orders) {
-        for order in &open_orders {
-            exchange
-                .cancel_order(instrument, &order.order_id)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to cancel unknown live order `{}` for {}",
-                        order.order_id, instrument.symbol
-                    )
-                })
-                .map_err(TrackMutationError::Persistence)?;
-        }
-        position = exchange
-            .get_position(instrument)
-            .await
-            .map_err(TrackMutationError::Persistence)?;
-        open_orders = exchange
-            .get_open_orders(instrument)
-            .await
-            .map_err(TrackMutationError::Persistence)?;
-    }
-
-    if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
-        let _ = state
-            .observation_service
-            .sync_exchange_state(
-                track_id,
-                position_observation(&position),
-                open_orders.iter().map(order_observation).collect(),
-            )
-            .await
-            .map_err(preserve_track_mutation_error)?;
-    } else {
-        let _ = state
-            .observation_service
-            .sync_exchange_state_without_reconcile(
-                track_id,
-                position_observation(&position),
-                open_orders.iter().map(order_observation).collect(),
-            )
-            .await
-            .map_err(preserve_track_mutation_error)?;
-    }
-    state.exchange_freshness.clear_if_current(sync_token).await;
-    Ok(())
-}
-
-async fn reconcile_submit_preflight_state(
-    state: &ServerState,
-) -> std::result::Result<(), TrackMutationError> {
-    let current_pending_submit_effect_ids: HashSet<String> = state
-        .effect_store
-        .list_all_pending_submit_effects()
-        .await
-        .map_err(TrackMutationError::Persistence)?
-        .into_iter()
-        .map(|effect| effect.effect_id)
-        .collect();
-    state
-        .submit_preflight
-        .reconcile_pending_submit_effects(&current_pending_submit_effect_ids)
-        .await;
-    Ok(())
-}
-
-fn should_cancel_unknown_live_orders(
-    snapshot: Option<&poise_engine::snapshot::TrackRuntimeSnapshot>,
-    open_orders: &[ExchangeOrder],
-) -> bool {
-    !open_orders.is_empty()
-        && snapshot.is_some_and(|snapshot| {
-            snapshot.executor_state.diagnostics.recovery_anomaly
-                == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
-                && snapshot
-                    .executor_state
-                    .slots
-                    .iter()
-                    .all(|slot| slot.working_order.is_none())
-        })
-}
-
-fn update_recovery_tracking(
-    tracked: &mut std::collections::HashMap<String, RecoveryTrackedTrack>,
-    instruments: &[TrackInstrument],
-    track_id: &str,
-    recovery_anomaly_active: bool,
-    retry_interval: Duration,
-) {
-    if !recovery_anomaly_active {
-        tracked.remove(track_id);
-        return;
-    }
-
-    let Some(instrument) = instruments
-        .iter()
-        .find(|track| track.id == track_id)
-        .map(|track| track.instrument.clone())
-    else {
-        return;
-    };
-
-    tracked
-        .entry(track_id.to_string())
-        .or_insert_with(|| RecoveryTrackedTrack {
-            instrument,
-            next_retry_at: Instant::now() + retry_interval,
-        });
-}
-
-async fn seed_recovery_tracking(
-    state: &ServerState,
-    instruments: &[TrackInstrument],
-    retry_interval: Duration,
-) -> std::collections::HashMap<String, RecoveryTrackedTrack> {
-    let mut tracked = std::collections::HashMap::new();
-    for track in instruments {
-        let Ok(Some(snapshot)) = state.mutation_store.load_track_state(&track.id).await else {
-            continue;
-        };
-        update_recovery_tracking(
-            &mut tracked,
-            instruments,
-            &track.id,
-            snapshot
-                .executor_state
-                .diagnostics
-                .recovery_anomaly
-                .is_some(),
-            retry_interval,
-        );
-    }
-    tracked
-}
-
-async fn load_recovery_anomaly_active(state: &ServerState, track_id: &str) -> bool {
-    match state.mutation_store.load_track_state(track_id).await {
-        Ok(Some(snapshot)) => snapshot
-            .executor_state
-            .diagnostics
-            .recovery_anomaly
-            .is_some(),
-        Ok(None) => false,
-        Err(error) => {
-            tracing::warn!(
-                "failed to load runtime snapshot for recovery tracking on `{track_id}`: {error}"
-            );
-            false
-        }
-    }
+    reconcile::sync_exchange_state_from_exchange(state, exchange, track_id, instrument, mode).await
 }
 
 fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {
