@@ -349,25 +349,46 @@ mod tests {
         workspace_root().join("scripts").join("probe-health.sh")
     }
 
-    fn run_paper_server_script_path() -> PathBuf {
-        workspace_root().join("scripts").join("run-paper-server.sh")
+    fn run_instance_server_script_path() -> PathBuf {
+        workspace_root().join("scripts").join("run-instance-server.sh")
+    }
+
+    fn start_instance_zellij_script_path() -> PathBuf {
+        workspace_root().join("scripts").join("start-instance-zellij.sh")
     }
 
     #[test]
-    fn run_paper_server_script_supports_rebuild_state_dry_run() {
+    fn run_instance_server_script_dry_run_uses_instance_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
         let output = Command::new("bash")
-            .arg(run_paper_server_script_path())
+            .arg(run_instance_server_script_path())
             .arg("--dry-run")
-            .env("POISE_REBUILD_STATE", "1")
+            .env("POISE_INSTANCE_DIR", temp_dir.path())
             .output()
             .unwrap();
 
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("rebuild_state=1"));
-        assert!(stdout.contains(
-            "command=cargo run -p poise-server -- --config configs/binance-testnet.local.toml --rebuild-state"
-        ));
+        assert!(stdout.contains("instance_dir="));
+        assert!(stdout.contains("--instance-dir"));
+        assert!(stdout.contains(".logs/poise-server.log"));
+    }
+
+    #[test]
+    fn start_instance_zellij_dry_run_exports_instance_dir_and_base_url() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output = Command::new("bash")
+            .arg(start_instance_zellij_script_path())
+            .arg("--dry-run")
+            .env("POISE_INSTANCE_DIR", temp_dir.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("instance_dir="));
+        assert!(stdout.contains("base_url="));
+        assert!(!stdout.contains("paper"));
     }
 
     async fn wait_for_child_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
@@ -410,7 +431,8 @@ mod tests {
 
         let mut child = Command::new("bash")
             .arg(probe_health_script_path())
-            .env("POISE_HEALTH_BASE_URL", format!("http://{bind_address}"))
+            .env("POISE_BASE_URL", format!("http://{bind_address}"))
+            .env("POISE_INSTANCE_DIR", temp_dir.path())
             .env("POISE_HEALTH_INTERVAL_SECS", "1")
             .env("POISE_HEALTH_FAILURE_THRESHOLD", "2")
             .env("POISE_HEALTH_LOG_DIR", &log_dir)

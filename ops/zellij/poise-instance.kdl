@@ -1,13 +1,13 @@
 layout {
-    cwd "/Users/yim/github/trading-lab/poise"
+    cwd "."
 
     pane split_direction="vertical" {
         pane size="72%" command="bash" {
-            args "-lc" "./scripts/run-paper-tui.sh"
+            args "-lc" "./scripts/run-instance-tui.sh"
         }
         pane split_direction="horizontal" size="28%" {
             pane size="68%" command="bash" {
-                args "-lc" "./scripts/run-paper-server.sh"
+                args "-lc" "./scripts/run-instance-server.sh"
             }
             pane size="32%" command="bash" {
                 args "-lc" "./scripts/probe-health.sh"

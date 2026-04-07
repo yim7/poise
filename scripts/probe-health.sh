@@ -2,14 +2,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-BASE_URL="${POISE_HEALTH_BASE_URL:-http://127.0.0.1:8000}"
+BASE_URL="${POISE_BASE_URL:-http://127.0.0.1:8000}"
+INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
 INTERVAL_SECS="${POISE_HEALTH_INTERVAL_SECS:-60}"
 FAILURE_THRESHOLD="${POISE_HEALTH_FAILURE_THRESHOLD:-3}"
 ALERT_HOOK="${POISE_HEALTH_ALERT_HOOK:-}"
-LOG_DIR="${POISE_LOG_DIR:-.logs/paper}"
+LOG_DIR="${POISE_LOG_DIR:-${INSTANCE_DIR}/.logs}"
 LOG_PATH="${POISE_HEALTH_LOG:-${LOG_DIR}/health-probe.log}"
 RUN_ONCE=0
 DRY_RUN=0
@@ -20,12 +18,13 @@ usage() {
   scripts/probe-health.sh [--once] [--dry-run]
 
 环境变量:
-  POISE_HEALTH_BASE_URL       服务端基地址，默认 http://127.0.0.1:8000
+  POISE_INSTANCE_DIR          实例目录，用于默认日志路径
+  POISE_BASE_URL              服务端基地址，默认 http://127.0.0.1:8000
   POISE_HEALTH_INTERVAL_SECS  巡检间隔秒数，默认 60
   POISE_HEALTH_FAILURE_THRESHOLD  连续失败阈值，默认 3
   POISE_HEALTH_ALERT_HOOK     达到失败阈值后执行的 shell command，可选
-  POISE_LOG_DIR               日志目录，默认 .logs/paper
-  POISE_HEALTH_LOG            巡检日志文件，默认 .logs/paper/health-probe.log
+  POISE_LOG_DIR               日志目录，默认 <instance-dir>/.logs
+  POISE_HEALTH_LOG            巡检日志文件，默认 <instance-dir>/.logs/health-probe.log
 EOF
 }
 
@@ -51,7 +50,12 @@ while (($# > 0)); do
   esac
 done
 
-cd "$REPO_ROOT"
+if [[ -z "$INSTANCE_DIR" && -z "${POISE_LOG_DIR:-}" ]]; then
+  echo "missing required POISE_INSTANCE_DIR or POISE_LOG_DIR" >&2
+  usage >&2
+  exit 1
+fi
+
 mkdir -p "$LOG_DIR"
 
 if [[ ! "$FAILURE_THRESHOLD" =~ ^[1-9][0-9]*$ ]]; then
@@ -125,7 +129,7 @@ emit_alert() {
       POISE_HEALTH_LAST_STATUS="$LAST_PROBE_STATUS" \
       POISE_HEALTH_LAST_BODY="$LAST_PROBE_BODY" \
       POISE_HEALTH_LAST_EXIT_CODE="$exit_code" \
-      POISE_HEALTH_BASE_URL="$BASE_URL" \
+      POISE_BASE_URL="$BASE_URL" \
       bash -lc "$ALERT_HOOK"; then
       printf '[%s] ALERT_HOOK_FAILED command=%s\n' "$now" "$ALERT_HOOK" | tee -a "$LOG_PATH" >&2
     fi
