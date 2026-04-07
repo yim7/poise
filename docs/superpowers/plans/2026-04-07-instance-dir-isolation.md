@@ -83,7 +83,7 @@
 - Test: `server/src/main.rs`
 - Test: `server/src/state_bootstrap.rs`
 
-- [ ] **Step 1: 先写失败测试，固定实例目录结构和启动参数**
+- [x] **Step 1: 先写失败测试，固定实例目录结构和启动参数**
 
 在 `server/src/instance_dir.rs` 新增测试：
 
@@ -126,7 +126,7 @@ async fn rebuild_mode_only_touches_database_under_current_instance_dir() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前还没有实例目录边界**
+- [x] **Step 2: 运行定向测试，确认当前还没有实例目录边界**
 
 Run:
 `cargo test -p poise-server instance_dir::tests::instance_dir_resolves_config_data_and_log_paths -- --exact`
@@ -146,7 +146,7 @@ Run:
 Expected:
 - FAIL，原因是 `prepare_state_repository(...)` 仍然内部按 `config.default_db_path()` 取库路径
 
-- [ ] **Step 3: 实现最小实例目录边界**
+- [x] **Step 3: 实现最小实例目录边界**
 
 要求：
 - 新增 `InstanceDir`
@@ -157,7 +157,7 @@ Expected:
 - `state_bootstrap` 接收显式数据库路径，不再自己推导工作目录相对路径
 - `render_startup_error(...)` 中的建议命令改成 `--instance-dir <path> --rebuild-state`
 
-- [ ] **Step 4: 运行 server 入口与状态重建回归**
+- [x] **Step 4: 运行 server 入口与状态重建回归**
 
 Run:
 `cargo test -p poise-server parse_startup_options_requires_instance_dir -- --exact`
@@ -172,7 +172,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/instance_dir.rs server/src/main.rs server/src/config.rs server/src/state_bootstrap.rs
@@ -180,7 +180,7 @@ git commit -m "refactor: derive server state paths from instance dir"
 ```
 
 Task 1 code commit:
-`TODO`
+`815b3c5`
 
 ---
 
