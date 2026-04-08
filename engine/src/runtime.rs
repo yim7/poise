@@ -7,10 +7,10 @@ use poise_core::risk::CapacityBudget;
 use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
-use crate::ledger::TrackLedgerState;
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
+use crate::ledger::TrackLedgerState;
 use crate::ports::OrderStatus;
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
@@ -472,8 +472,8 @@ mod tests {
             },
             CapacityBudget {
                 max_notional: 6_000.0,
-                daily_loss_limit: -500.0,
-                stop_loss_pct: 10.0,
+                daily_loss_limit: 500.0,
+                total_loss_limit: 1_000.0,
             },
             ExchangeRules {
                 price_tick: 0.1,
@@ -868,7 +868,9 @@ mod tests {
                 "realized_pnl_day": "2026-03-29",
                 "gross_realized_pnl_today": 1.0,
                 "gross_realized_pnl_cumulative": 2.0,
+                "trading_fee_today": 0.3,
                 "trading_fee_cumulative": 0.3,
+                "funding_fee_today": -0.1,
                 "funding_fee_cumulative": -0.1,
                 "unresolved_gaps": [
                     {
@@ -914,12 +916,28 @@ mod tests {
             serde_json::from_value(future_ledger_snapshot_json()).unwrap();
         let roundtrip = serde_json::to_value(restored).unwrap();
 
-        assert_eq!(roundtrip["ledger_state"]["realized_pnl_day"], json!("2026-03-29"));
-        assert_eq!(roundtrip["ledger_state"]["gross_realized_pnl_today"], json!(1.0));
+        assert_eq!(
+            roundtrip["ledger_state"]["realized_pnl_day"],
+            json!("2026-03-29")
+        );
+        assert_eq!(
+            roundtrip["ledger_state"]["gross_realized_pnl_today"],
+            json!(1.0)
+        );
         assert_eq!(
             roundtrip["ledger_state"]["gross_realized_pnl_cumulative"],
             json!(2.0)
         );
+    }
+
+    #[test]
+    fn track_runtime_snapshot_roundtrip_preserves_ledger_state() {
+        let restored: TrackRuntimeSnapshot =
+            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let roundtrip = serde_json::to_value(restored).unwrap();
+
+        assert_eq!(roundtrip["ledger_state"]["trading_fee_today"], json!(0.3));
+        assert_eq!(roundtrip["ledger_state"]["funding_fee_today"], json!(-0.1));
     }
 
     #[test]

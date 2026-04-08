@@ -189,8 +189,7 @@ impl TrackManager {
         }
         track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
         track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
-        track.risk_state.realized_pnl_cumulative =
-            track.ledger_state.gross_realized_pnl_cumulative;
+        track.risk_state.realized_pnl_cumulative = track.ledger_state.gross_realized_pnl_cumulative;
         Ok(())
     }
 
@@ -662,13 +661,13 @@ impl TrackManager {
                 track.risk_state.realized_pnl_cumulative,
             );
         }
-        track
-            .ledger_state
-            .apply_gross_realized_pnl(today, observation.realized_pnl);
+        track.ledger_state.apply_delta(
+            today,
+            &crate::ledger::LedgerDelta::GrossRealizedPnl(observation.realized_pnl),
+        );
         track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
         track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
-        track.risk_state.realized_pnl_cumulative =
-            track.ledger_state.gross_realized_pnl_cumulative;
+        track.risk_state.realized_pnl_cumulative = track.ledger_state.gross_realized_pnl_cumulative;
 
         if track.executor_state.diagnostics.recovery_anomaly.is_some() {
             return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
@@ -1068,8 +1067,8 @@ mod tests {
     fn test_budget() -> CapacityBudget {
         CapacityBudget {
             max_notional: 3000.0,
-            daily_loss_limit: -120.0,
-            stop_loss_pct: 4.0,
+            daily_loss_limit: 120.0,
+            total_loss_limit: 500.0,
         }
     }
 
@@ -1381,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn add_track_rejects_non_negative_daily_loss_limit() {
+    fn add_track_rejects_non_positive_daily_loss_limit() {
         let mut manager = test_manager();
         let error = manager
             .add_track(
@@ -1400,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn add_track_rejects_non_positive_stop_loss_pct() {
+    fn add_track_rejects_non_positive_total_loss_limit() {
         let mut manager = test_manager();
         let error = manager
             .add_track(
@@ -1408,14 +1407,14 @@ mod tests {
                 test_instrument("BTCUSDT"),
                 test_config(),
                 CapacityBudget {
-                    stop_loss_pct: 0.0,
+                    total_loss_limit: 0.0,
                     ..test_budget()
                 },
                 test_exchange_rules(),
             )
             .unwrap_err();
 
-        assert!(error.to_string().contains("stop_loss_pct"));
+        assert!(error.to_string().contains("total_loss_limit"));
     }
 
     #[test]
@@ -3658,7 +3657,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(absorb_result, crate::executor::OrderUpdateAbsorbResult::Applied);
+        assert_eq!(
+            absorb_result,
+            crate::executor::OrderUpdateAbsorbResult::Applied
+        );
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(
             inventory_core_order(track).map(|order| order.status),

@@ -2,6 +2,7 @@ pub mod command;
 pub mod execution_plan;
 pub mod executor;
 pub mod ledger;
+pub mod loss_guard;
 pub mod manager;
 pub mod observation;
 pub mod ports;
