@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use poise_application::{ApplicationNotification, TrackInstrument, TrackMutationError};
 use poise_engine::manager::ExchangeSyncMode;
-use poise_engine::ports::{ExchangeOrder, ExchangePort};
+use poise_engine::ports::{ExchangeOrder, ExecutionPort};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -29,7 +29,7 @@ pub(super) fn spawn_recovery_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
-    let exchange = Arc::clone(&runtime.exchange);
+    let execution = Arc::clone(&runtime.execution);
     let retry_interval = runtime.recovery_retry_interval;
     let audit_interval = runtime.audit_interval;
 
@@ -100,7 +100,7 @@ pub(super) fn spawn_recovery_task(
                         next_audit_at.insert(track_id.clone(), Instant::now() + audit_interval);
                         if let Err(error) = sync_exchange_state_from_exchange(
                             &state.reconcile,
-                            &exchange,
+                            execution.as_ref(),
                             &track_id,
                             &instrument,
                             ExchangeSyncMode::RecoverAndReconcile,
@@ -175,26 +175,26 @@ pub(super) fn spawn_recovery_task(
 
 pub(super) async fn enqueue_reconcile_request(
     state: &impl ReconcileStateAccess,
-    exchange: &Arc<dyn ExchangePort>,
+    execution: &dyn ExecutionPort,
     request: ReconcileRequest,
     instrument: &poise_engine::track::Instrument,
 ) -> std::result::Result<ReconcileExecution, TrackMutationError> {
-    let execution = reconcile_execution(&request.track_id, vec![request.reason]);
+    let reconcile_execution = reconcile_execution(&request.track_id, vec![request.reason]);
     let state = state.reconcile_state_view();
     sync_exchange_state_from_exchange(
         &state,
-        exchange,
+        execution,
         &request.track_id,
         instrument,
         ExchangeSyncMode::RecoverAndReconcile,
     )
     .await?;
-    Ok(execution)
+    Ok(reconcile_execution)
 }
 
 pub(super) async fn sync_exchange_state_from_exchange(
     state: &impl ReconcileStateAccess,
-    exchange: &Arc<dyn ExchangePort>,
+    execution: &dyn ExecutionPort,
     track_id: &str,
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
@@ -207,18 +207,18 @@ pub(super) async fn sync_exchange_state_from_exchange(
         .load_track_state(track_id)
         .await
         .map_err(TrackMutationError::Persistence)?;
-    let mut position = exchange
+    let mut position = execution
         .get_position(instrument)
         .await
         .map_err(TrackMutationError::Persistence)?;
-    let mut open_orders = exchange
+    let mut open_orders = execution
         .get_open_orders(instrument)
         .await
         .map_err(TrackMutationError::Persistence)?;
 
     if should_cancel_unknown_live_orders(snapshot.as_ref(), &open_orders) {
         for order in &open_orders {
-            exchange
+            execution
                 .cancel_order(instrument, &order.order_id)
                 .await
                 .with_context(|| {
@@ -229,11 +229,11 @@ pub(super) async fn sync_exchange_state_from_exchange(
                 })
                 .map_err(TrackMutationError::Persistence)?;
         }
-        position = exchange
+        position = execution
             .get_position(instrument)
             .await
             .map_err(TrackMutationError::Persistence)?;
-        open_orders = exchange
+        open_orders = execution
             .get_open_orders(instrument)
             .await
             .map_err(TrackMutationError::Persistence)?;

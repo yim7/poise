@@ -15,7 +15,9 @@ use poise_application::{
 };
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{ClockPort, ExchangePort, MarketDataPort};
+use poise_engine::ports::{
+    AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
+};
 use poise_engine::track::{Instrument, TrackId};
 #[cfg(test)]
 use tokio::sync::RwLock;
@@ -24,6 +26,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::account_projector::AccountProjector;
 use crate::config::Config;
+use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::runtime::{
@@ -165,36 +168,74 @@ pub async fn assemble(config: &Config, repositories: StateRepositories) -> Resul
         exchange_config.rest_base_url,
         exchange_config.ws_base_url,
     ));
-    let exchange: Arc<dyn ExchangePort> = adapter.clone();
-    let market_data: Arc<dyn MarketDataPort> = adapter;
-
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_state_store(config, exchange, market_data, repositories, clock).await
+    assemble_with_exchange_ports(
+        config,
+        adapter.clone(),
+        adapter.clone(),
+        adapter.clone(),
+        adapter.clone(),
+        adapter,
+        repositories,
+        clock,
+    )
+    .await
 }
 
 #[cfg(test)]
-pub(crate) async fn assemble_with_components<R>(
+pub(crate) async fn assemble_with_components<R, E>(
     config: &Config,
-    exchange: Arc<dyn ExchangePort>,
+    exchange: Arc<E>,
     market_data: Arc<dyn MarketDataPort>,
     repository: Arc<R>,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
+    E: ExecutionPort + AccountSummaryPort + AccountPort + MetadataPort + 'static,
     R: poise_application::TrackMutationStore
         + poise_application::TrackQueryStore
         + poise_application::TrackEffectStore
         + 'static,
 {
     let repositories = StateRepositories::new(repository);
-    assemble_with_state_store(config, exchange, market_data, repositories, clock).await
+    assemble_with_exchange_ports(
+        config,
+        exchange.clone(),
+        market_data,
+        exchange.clone(),
+        exchange.clone(),
+        exchange,
+        repositories,
+        clock,
+    )
+    .await
+}
+
+pub(crate) async fn assemble_with_exchange_ports(
+    config: &Config,
+    execution: Arc<dyn ExecutionPort>,
+    market_data: Arc<dyn MarketDataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
+    account: Arc<dyn AccountPort>,
+    metadata: Arc<dyn MetadataPort>,
+    repositories: StateRepositories,
+    clock: Arc<dyn ClockPort>,
+) -> Result<ServerPlatform> {
+    let exchange = Exchange::new(
+        config.exchange.venue(),
+        execution,
+        market_data,
+        account_summary,
+        account,
+        metadata,
+    );
+    assemble_with_state_store(config, exchange, repositories, clock).await
 }
 
 async fn assemble_with_state_store(
     config: &Config,
-    exchange: Arc<dyn ExchangePort>,
-    market_data: Arc<dyn MarketDataPort>,
+    exchange: Exchange,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
@@ -211,9 +252,9 @@ async fn assemble_with_state_store(
     for track in &config.tracks {
         let track_id = track.track_id();
         let instrument = track.instrument(config.exchange.venue());
-        let info = load_exchange_info_with_retry(exchange.as_ref(), &instrument).await?;
+        let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
         let account_capacity_snapshot =
-            load_account_capacity_snapshot_with_retry(exchange.as_ref(), &instrument)
+            load_account_capacity_snapshot_with_retry(exchange.account(), &instrument)
                 .await?;
         if track.budget().max_notional > account_capacity_snapshot.max_increase_notional {
             return Err(anyhow!(
@@ -259,10 +300,9 @@ async fn assemble_with_state_store(
     let projector = Arc::new(TrackProjector::new());
     let account_projector = Arc::new(AccountProjector::new());
     let account_monitor = if let Some(account_store) = repositories.account_monitor_store() {
-        let account_summary: Arc<dyn poise_engine::ports::AccountSummaryPort> = exchange.clone();
         Arc::new(
             AccountMonitor::restore(
-                account_summary,
+                exchange.account_summary_port(),
                 account_store,
                 notifications.clone(),
                 config.account_monitor.clone(),
@@ -335,8 +375,10 @@ async fn assemble_with_state_store(
         runtime: ServerRuntime::with_account_capacity_snapshots(
             runtime_state,
             effect_worker_state,
-            exchange,
-            market_data,
+            exchange.execution_port(),
+            exchange.market_data_port(),
+            exchange.account_port(),
+            exchange.metadata_port(),
             account_capacity_snapshots,
             Duration::from_secs(1),
         ),
@@ -344,13 +386,13 @@ async fn assemble_with_state_store(
 }
 
 async fn load_exchange_info_with_retry(
-    exchange: &dyn ExchangePort,
+    metadata: &dyn MetadataPort,
     instrument: &Instrument,
 ) -> Result<poise_engine::ports::ExchangeInfo> {
     let mut last_error = None;
 
     for attempt in 0..STARTUP_RETRY_ATTEMPTS {
-        match exchange.get_exchange_info(instrument).await {
+        match metadata.get_exchange_info(instrument).await {
             Ok(info) => return Ok(info),
             Err(error) => {
                 if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
@@ -373,13 +415,13 @@ async fn load_exchange_info_with_retry(
 }
 
 async fn load_account_capacity_snapshot_with_retry(
-    exchange: &dyn ExchangePort,
+    account: &dyn AccountPort,
     instrument: &Instrument,
 ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
     let mut last_error = None;
 
     for attempt in 0..STARTUP_RETRY_ATTEMPTS {
-        match exchange.get_account_capacity_snapshot(instrument).await {
+        match account.get_account_capacity_snapshot(instrument).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(error) => {
                 if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
@@ -549,7 +591,8 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
-        ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest, Position, PriceTick,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
+        MarketDataPort, MetadataPort, OrderReceipt, OrderRequest, Position, PriceTick,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::StreamEvent;
@@ -623,6 +666,46 @@ notional_per_unit = 3000.0
 
         assert_eq!(instrument.venue, Venue::Binance);
         assert_eq!(instrument.symbol, "BTCUSDT");
+    }
+
+    #[tokio::test]
+    async fn assemble_accepts_distinct_execution_account_summary_account_metadata_and_market_ports()
+    {
+        let config = parse_config(
+            r#"
+environment = "testnet"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+"#,
+        )
+        .unwrap();
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        let platform = super::assemble_with_exchange_ports(
+            &config,
+            Arc::new(FakeExecutionPort::default()),
+            Arc::new(FakeMarketDataPort::default()),
+            Arc::new(FakeAccountSummaryPort::default()),
+            Arc::new(FakeAccountPort::default()),
+            Arc::new(FakeMetadataPort::default()),
+            StateRepositories::new(repository),
+            Arc::new(SystemClock),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(platform.manager().read().await.list_tracks().len(), 1);
     }
 
     #[tokio::test]
@@ -1308,6 +1391,16 @@ notional_per_unit = 3000.0
     }
 
     struct FakeExchange;
+    #[derive(Default)]
+    struct FakeExecutionPort;
+    #[derive(Default)]
+    struct FakeAccountSummaryPort;
+    #[derive(Default)]
+    struct FakeAccountPort;
+    #[derive(Default)]
+    struct FakeMetadataPort;
+    #[derive(Default)]
+    struct FakeMarketDataPort;
 
     struct LimitedMarginExchange {
         max_increase_notional: f64,
@@ -1340,7 +1433,7 @@ notional_per_unit = 3000.0
     }
 
     #[async_trait::async_trait]
-    impl ExchangePort for FakeExchange {
+    impl ExecutionPort for FakeExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Err(anyhow!("not used in tests"))
         }
@@ -1366,19 +1459,33 @@ notional_per_unit = 3000.0
             Ok(Vec::new())
         }
 
-        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-            Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: test_exchange_rules(),
-            })
-        }
+    }
 
+    #[async_trait::async_trait]
+    impl AccountPort for FakeExchange {
         async fn get_account_capacity_snapshot(
             &self,
             _instrument: &Instrument,
         ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
+            })
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for FakeExchange {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+            Ok(ExchangeInfo {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                rules: test_exchange_rules(),
             })
         }
 
@@ -1400,7 +1507,7 @@ notional_per_unit = 3000.0
     }
 
     #[async_trait::async_trait]
-    impl ExchangePort for FlakyExchangeInfoExchange {
+    impl ExecutionPort for FlakyExchangeInfoExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Err(anyhow!("not used in tests"))
         }
@@ -1421,6 +1528,29 @@ notional_per_unit = 3000.0
             Err(anyhow!("not used in tests"))
         }
 
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPort for FlakyExchangeInfoExchange {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
+                max_increase_notional: 1_000_000.0,
+            })
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for FlakyExchangeInfoExchange {
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             self.get_exchange_info_calls.fetch_add(1, Ordering::SeqCst);
             let remaining = self.remaining_failures.load(Ordering::SeqCst);
@@ -1432,15 +1562,6 @@ notional_per_unit = 3000.0
             Ok(ExchangeInfo {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: test_exchange_rules(),
-            })
-        }
-
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
             })
         }
 
@@ -1462,7 +1583,7 @@ notional_per_unit = 3000.0
     }
 
     #[async_trait::async_trait]
-    impl ExchangePort for LimitedMarginExchange {
+    impl ExecutionPort for LimitedMarginExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Err(anyhow!("not used in tests"))
         }
@@ -1483,19 +1604,33 @@ notional_per_unit = 3000.0
             Err(anyhow!("not used in tests"))
         }
 
-        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-            Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: test_exchange_rules(),
-            })
-        }
+    }
 
+    #[async_trait::async_trait]
+    impl AccountPort for LimitedMarginExchange {
         async fn get_account_capacity_snapshot(
             &self,
             _instrument: &Instrument,
         ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: self.max_increase_notional,
+            })
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for LimitedMarginExchange {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+            Ok(ExchangeInfo {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                rules: test_exchange_rules(),
             })
         }
 
@@ -1700,10 +1835,87 @@ notional_per_unit = 3000.0
                 .remove(&instrument.symbol)
                 .ok_or_else(|| anyhow!("no test receiver for symbol `{}`", instrument.symbol))
         }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for FakeExecutionPort {
+        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+            Err(anyhow!("not used in tests"))
+        }
+
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+            Ok(Position {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                qty: 0.0,
+                avg_price: 100.0,
+                unrealized_pnl: 0.0,
+            })
+        }
+
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AccountSummaryPort for FakeAccountSummaryPort {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            Ok(poise_engine::ports::AccountSummarySnapshot {
+                equity: 1_000_000.0,
+                available: 1_000_000.0,
+                unrealized_pnl: 0.0,
+                observed_at: chrono::Utc::now(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPort for FakeAccountPort {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
+                max_increase_notional: 1_000_000.0,
+            })
+        }
 
         async fn subscribe_user_data(
             &self,
         ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for FakeMetadataPort {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+            Ok(ExchangeInfo {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                rules: test_exchange_rules(),
+            })
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+            Ok(chrono::Utc::now())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MarketDataPort for FakeMarketDataPort {
+        async fn subscribe_prices(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

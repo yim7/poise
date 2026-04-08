@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_engine::ports::{
-    AccountCapacitySnapshot, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOrder, ExchangePort, MarketDataPort, OrderReceipt, OrderRequest, Position, PriceTick,
-    UserDataEvent,
+    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
+    ExchangeInfo, ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, OrderReceipt,
+    OrderRequest, Position, PriceTick, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
@@ -42,7 +42,7 @@ impl AccountSummaryPort for BinanceAdapter {
 }
 
 #[async_trait]
-impl ExchangePort for BinanceAdapter {
+impl ExecutionPort for BinanceAdapter {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
         self.rest.new_order(&req).await
     }
@@ -65,10 +65,10 @@ impl ExchangePort for BinanceAdapter {
         self.rest.get_open_orders(&instrument.symbol).await
     }
 
-    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-        self.rest.get_exchange_info(&instrument.symbol).await
-    }
+}
 
+#[async_trait]
+impl AccountPort for BinanceAdapter {
     async fn get_account_capacity_snapshot(
         &self,
         instrument: &Instrument,
@@ -76,6 +76,17 @@ impl ExchangePort for BinanceAdapter {
         self.rest
             .get_account_capacity_snapshot(&instrument.symbol)
             .await
+    }
+
+    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+        self.ws.subscribe_user_data().await
+    }
+}
+
+#[async_trait]
+impl MetadataPort for BinanceAdapter {
+    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
+        self.rest.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
@@ -87,10 +98,6 @@ impl ExchangePort for BinanceAdapter {
 impl MarketDataPort for BinanceAdapter {
     async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
         self.ws.subscribe_prices(instrument).await
-    }
-
-    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        self.ws.subscribe_user_data().await
     }
 }
 

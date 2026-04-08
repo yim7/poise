@@ -3,6 +3,7 @@ mod assembly;
 mod config;
 mod effect_worker;
 mod event_presentation;
+mod exchange;
 mod exchange_freshness;
 mod http;
 mod instance_dir;
@@ -221,8 +222,8 @@ mod tests {
     use chrono::Utc;
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
-        ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
-        OrderStatus, Position, PriceTick,
+        AccountPort, ClockPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
+        OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick,
     };
     use poise_engine::track::{Instrument, Venue};
     use poise_storage::sqlite::SqliteStorage;
@@ -722,7 +723,7 @@ notional_per_unit = 375.0
     }
 
     #[async_trait::async_trait]
-    impl ExchangePort for FakeExchange {
+    impl ExecutionPort for FakeExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
@@ -752,6 +753,29 @@ notional_per_unit = 375.0
             Ok(Vec::new())
         }
 
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPort for FakeExchange {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
+                max_increase_notional: 1_000_000.0,
+            })
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for FakeExchange {
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -763,15 +787,6 @@ notional_per_unit = 375.0
                     maker_fee_rate: 0.0,
                     taker_fee_rate: 0.0,
                 },
-            })
-        }
-
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
             })
         }
 
@@ -797,13 +812,6 @@ notional_per_unit = 375.0
                 .remove(&instrument.symbol)
                 .ok_or_else(|| anyhow!("missing price receiver for {}", instrument.symbol))
         }
-
-        async fn subscribe_user_data(
-            &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
-            let (_sender, receiver) = mpsc::channel(1);
-            Ok(receiver)
-        }
     }
 
     struct FailingStartMarketData;
@@ -816,12 +824,6 @@ notional_per_unit = 375.0
         ) -> Result<mpsc::Receiver<PriceTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
-        }
-
-        async fn subscribe_user_data(
-            &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
-            Err(anyhow!("subscribe_user_data should not run"))
         }
     }
 

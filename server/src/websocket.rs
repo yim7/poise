@@ -146,10 +146,7 @@ mod tests {
     use poise_engine::command::TrackCommand;
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{
-        AccountSummarySnapshot, ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
-        OrderRequest, Position,
-    };
+    use poise_engine::ports::{AccountSummarySnapshot, ClockPort};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_protocol::{
@@ -1034,57 +1031,67 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl ExchangePort for NoopExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            Err(anyhow!("submit_order should not be called"))
+    impl poise_engine::ports::ExecutionPort for NoopExchange {
+        async fn submit_order(
+            &self,
+            req: poise_engine::ports::OrderRequest,
+        ) -> Result<poise_engine::ports::OrderReceipt> {
+            Ok(poise_engine::ports::OrderReceipt {
+                order_id: "noop-order".into(),
+                client_order_id: req.client_order_id,
+                status: poise_engine::ports::OrderStatus::New,
+            })
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
-            Err(anyhow!("cancel_order should not be called"))
+        async fn cancel_order(
+            &self,
+            _instrument: &poise_engine::track::Instrument,
+            _order_id: &str,
+        ) -> Result<()> {
+            Ok(())
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
-            Err(anyhow!("cancel_all should not be called"))
+        async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
+            Ok(())
         }
 
-        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
-            Ok(Position {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+        async fn get_position(
+            &self,
+            instrument: &poise_engine::track::Instrument,
+        ) -> Result<poise_engine::ports::Position> {
+            Ok(poise_engine::ports::Position {
+                instrument: instrument.clone(),
                 qty: 0.0,
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
             })
         }
 
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(
+            &self,
+            _instrument: &poise_engine::track::Instrument,
+        ) -> Result<Vec<poise_engine::ports::ExchangeOrder>> {
             Ok(Vec::new())
         }
+    }
 
-        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-            Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: ExchangeRules {
-                    price_tick: 0.0,
-                    quantity_step: 0.0,
-                    min_qty: 0.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
-            })
-        }
-
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountPort for NoopExchange {
         async fn get_account_capacity_snapshot(
             &self,
-            _instrument: &Instrument,
+            _instrument: &poise_engine::track::Instrument,
         ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })
         }
 
-        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-            Ok(Utc::now())
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<tokio::sync::mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+            Ok(receiver)
         }
     }
+
 }

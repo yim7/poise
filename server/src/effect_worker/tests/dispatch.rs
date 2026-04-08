@@ -33,7 +33,7 @@ async fn submit_success_updates_working_order_via_receipt_writeback() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -94,7 +94,7 @@ async fn effect_worker_writeback_keeps_round_target_without_working_order_target
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -141,7 +141,7 @@ async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
 
     let worker = EffectWorker::new(
         state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -170,7 +170,7 @@ async fn stale_submit_effect_syncs_exchange_before_submitting() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -219,7 +219,7 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     let task = tokio::spawn(async move { worker.run_once().await });
@@ -272,7 +272,7 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();

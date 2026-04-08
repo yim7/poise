@@ -1,4 +1,5 @@
 use super::*;
+use poise_engine::ports::UserDataEvent;
 
 pub(crate) async fn test_state(
     repository: Arc<MemoryRepository>,
@@ -338,19 +339,7 @@ impl Default for FakeExchange {
 }
 
 #[async_trait::async_trait]
-impl poise_engine::ports::AccountSummaryPort for FakeExchange {
-    async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
-        Ok(poise_engine::ports::AccountSummarySnapshot {
-            equity: 1_000_000.0,
-            available: 1_000_000.0,
-            unrealized_pnl: 0.0,
-            observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl ExchangePort for FakeExchange {
+impl ExecutionPort for FakeExchange {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
         self.effects.lock().await.push(req.clone());
         if let Some(notify) = &self.submit_started {
@@ -393,20 +382,10 @@ impl ExchangePort for FakeExchange {
         Ok(self.open_orders.lock().await.clone())
     }
 
-    async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-        Ok(ExchangeInfo {
-            instrument: btc_instrument(),
-            rules: ExchangeRules {
-                price_tick: 0.1,
-                quantity_step: 0.1,
-                min_qty: 0.0,
-                min_notional: 0.0,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
-            },
-        })
-    }
+}
 
+#[async_trait::async_trait]
+impl AccountPort for FakeExchange {
     async fn get_account_capacity_snapshot(
         &self,
         _instrument: &Instrument,
@@ -416,8 +395,11 @@ impl ExchangePort for FakeExchange {
         })
     }
 
-    async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-        Ok(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap())
+    async fn subscribe_user_data(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<UserDataEvent>> {
+        let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+        Ok(receiver)
     }
 }
 

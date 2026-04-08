@@ -142,10 +142,10 @@ async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
-    let (user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let (user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -154,7 +154,7 @@ async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs
     let runtime = ServerRuntime::with_reconcile_intervals(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         market_data as Arc<dyn MarketDataPort>,
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -243,7 +243,7 @@ async fn repeated_ticks_before_first_submit_are_absorbed_into_one_replacement_pl
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -251,7 +251,7 @@ async fn repeated_ticks_before_first_submit_are_absorbed_into_one_replacement_pl
     .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -308,7 +308,7 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
     snapshot.desired_exposure = Some(Exposure(2.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -320,7 +320,7 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
         .unwrap();
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -387,7 +387,7 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
     snapshot.desired_exposure = Some(Exposure(2.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -399,7 +399,7 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
         .unwrap();
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -467,7 +467,7 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
     snapshot.desired_exposure = Some(Exposure(2.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -479,7 +479,7 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
         .unwrap();
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -592,7 +592,7 @@ async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active
     .await;
     let worker = EffectWorker::new(
         fixture.worker.clone(),
-        fixture.exchange.clone() as Arc<dyn ExchangePort>,
+        fixture.exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -657,12 +657,12 @@ async fn effect_worker_restores_pending_effect_after_restart() {
     );
 
     let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, user_receiver) = mpsc::channel(8);
+    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
     let restarted_runtime = ServerRuntime::new(
         fixture.state.runtime_state(),
         fixture.worker.effect_worker_state.clone(),
-        fixture.exchange.clone() as Arc<dyn ExchangePort>,
-        Arc::new(FakeMarketData::new(price_receiver, user_receiver)) as Arc<dyn MarketDataPort>,
+        fixture.exchange.clone(),
+        Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -756,10 +756,10 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
-    let (user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let (user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -768,7 +768,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
     let runtime = ServerRuntime::with_reconcile_intervals(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         market_data as Arc<dyn MarketDataPort>,
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -813,10 +813,10 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
-    let (user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let (user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -825,7 +825,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
     let runtime = ServerRuntime::with_reconcile_intervals(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         market_data as Arc<dyn MarketDataPort>,
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -886,7 +886,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
         SlotState::SubmitPending,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -932,12 +932,12 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
         .mark_submit_started("BTCUSDT:recovery:0")
         .await;
     let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, user_receiver) = mpsc::channel(8);
+    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
     let restarted_runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
-        Arc::new(FakeMarketData::new(price_receiver, user_receiver)) as Arc<dyn MarketDataPort>,
+        exchange.clone(),
+        Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -986,7 +986,7 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
         SlotState::SubmitPending,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -1028,12 +1028,12 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
         })
         .await;
     let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, user_receiver) = mpsc::channel(8);
+    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
     let restarted_runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
-        Arc::new(FakeMarketData::new(price_receiver, user_receiver)) as Arc<dyn MarketDataPort>,
+        exchange.clone(),
+        Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -1067,10 +1067,10 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -1079,7 +1079,7 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         market_data as Arc<dyn MarketDataPort>,
     );
 
@@ -1128,10 +1128,10 @@ async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -1140,7 +1140,7 @@ async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         market_data as Arc<dyn MarketDataPort>,
     );
 
@@ -1188,10 +1188,10 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -1200,7 +1200,7 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         market_data as Arc<dyn MarketDataPort>,
     );
 
@@ -1281,7 +1281,7 @@ async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(FailOnReceiptPersistence::default());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -1289,7 +1289,7 @@ async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_
     .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1366,7 +1366,7 @@ async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
     snapshot.desired_exposure = Some(Exposure(4.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     let (_state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -1402,7 +1402,7 @@ async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
         .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1462,7 +1462,7 @@ async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_rev
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     snapshot.observed.reference_price = Some(95.0);
     let (_state, worker_state) = test_launch_contexts_with_config(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -1499,7 +1499,7 @@ async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_rev
         .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1535,7 +1535,7 @@ async fn effect_worker_waits_for_exchange_state_when_receipt_snapshot_has_no_liv
         SlotState::Working,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -1571,7 +1571,7 @@ async fn effect_worker_waits_for_exchange_state_when_receipt_snapshot_has_no_liv
         .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1613,7 +1613,7 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
         SlotState::SubmitPending,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -1663,7 +1663,7 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
         .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1800,7 +1800,7 @@ async fn effect_worker_supersedes_submit_when_target_is_reached_without_receipt_
     snapshot.desired_exposure = Some(Exposure(6.0));
     snapshot.observed.reference_price = Some(92.5);
     let (_state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot.clone()),
         test_budget(),
@@ -1836,7 +1836,7 @@ async fn effect_worker_supersedes_submit_when_target_is_reached_without_receipt_
         .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1876,7 +1876,7 @@ async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_s
         SlotState::Working,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot),
         test_budget(),
@@ -1884,7 +1884,7 @@ async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_s
     .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -1944,7 +1944,7 @@ async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_
         SlotState::Working,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot),
         test_budget(),
@@ -1952,7 +1952,7 @@ async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_
     .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -2028,7 +2028,7 @@ async fn effect_worker_keeps_effect_pending_when_submit_cleanup_persistence_fail
     ));
     let persistence = Arc::new(FailOnSavePersistence::new(2));
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -2036,7 +2036,7 @@ async fn effect_worker_keeps_effect_pending_when_submit_cleanup_persistence_fail
     .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -2095,7 +2095,7 @@ async fn recovered_submit_emits_effect_state_changed_notification() {
         SlotState::Working,
     );
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(restored_snapshot),
         test_budget(),
@@ -2131,7 +2131,7 @@ async fn recovered_submit_emits_effect_state_changed_notification() {
         .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_millis(10),
     );
     state
@@ -2165,7 +2165,7 @@ async fn receipt_persistence_failure_emits_effect_state_changed_notification() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(FailOnReceiptPersistence::default());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -2173,7 +2173,7 @@ async fn receipt_persistence_failure_emits_effect_state_changed_notification() {
     .await;
     let worker = EffectWorker::new(
         worker_state,
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_millis(10),
     );
     let mut receiver = state.notifications.subscribe();
@@ -2214,7 +2214,7 @@ async fn effect_worker_keeps_effect_pending_while_submit_is_inflight() {
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (state, worker_state) = test_launch_contexts(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         None,
         test_budget(),
@@ -2222,7 +2222,7 @@ async fn effect_worker_keeps_effect_pending_while_submit_is_inflight() {
     .await;
     let worker = EffectWorker::new(
         worker_state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_millis(10),
     );
 
@@ -2286,7 +2286,7 @@ async fn effect_worker_keeps_effect_pending_when_loaded_track_is_missing_for_wri
         build_effect_worker_test_context(&services, persistence.clone(), persistence.clone());
     let worker = EffectWorker::new(
         state,
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_millis(10),
     );
 

@@ -44,7 +44,7 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -92,7 +92,7 @@ async fn cancel_success_clears_working_order_slot_without_waiting_for_order_even
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -155,7 +155,7 @@ async fn stale_cancel_effect_syncs_exchange_before_canceling() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -210,7 +210,7 @@ async fn stale_cancel_all_effect_syncs_exchange_before_canceling() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -265,7 +265,7 @@ async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -293,7 +293,7 @@ async fn fresh_effects_do_not_trigger_extra_sync() {
 
     let submit_worker = EffectWorker::new(
         submit_state,
-        submit_exchange.clone() as Arc<dyn ExchangePort>,
+        submit_exchange.clone(),
         Duration::from_secs(60),
     );
     submit_worker.run_once().await.unwrap();
@@ -333,7 +333,7 @@ async fn fresh_effects_do_not_trigger_extra_sync() {
 
     let cancel_worker = EffectWorker::new(
         cancel_state,
-        cancel_exchange.clone() as Arc<dyn ExchangePort>,
+        cancel_exchange.clone(),
         Duration::from_secs(60),
     );
     cancel_worker.run_once().await.unwrap();

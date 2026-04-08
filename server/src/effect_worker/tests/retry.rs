@@ -70,7 +70,7 @@ async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arriv
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     let error = worker
@@ -183,7 +183,7 @@ async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     let error = worker
@@ -297,7 +297,7 @@ async fn submit_recovery_proceed_keeps_active_pending_target_when_rounded_reques
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange as Arc<dyn ExchangePort>,
+        exchange,
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -357,7 +357,8 @@ async fn effect_worker_stops_polling_new_effects_after_shutdown_signal() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker = EffectWorker::with_shutdown_rx(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
+        exchange.clone(),
         Duration::from_millis(1),
         shutdown_rx,
     );
@@ -411,7 +412,7 @@ async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_f
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     let task = tokio::spawn(async move { worker.run_once().await });
@@ -490,7 +491,7 @@ async fn outcome_unknown_marks_track_stale_before_reconcile() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Duration::from_secs(60),
     );
     let task = tokio::spawn(async move { worker.run_once().await });

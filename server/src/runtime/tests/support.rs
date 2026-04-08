@@ -124,11 +124,15 @@ pub(crate) async fn runtime_fixture_with_options(
     budget: CapacityBudget,
     options: RuntimeFixtureOptions,
 ) -> RuntimeFixture {
-    let exchange = Arc::new(FakeExchange::new(position, open_orders));
+    let (user_sender, user_receiver) = mpsc::channel(8);
+    let exchange = Arc::new(FakeExchange::with_user_receiver(
+        position,
+        open_orders,
+        user_receiver,
+    ));
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
-    let (user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
 
     let mut manager = TrackManager::new(options.clock);
     manager
@@ -151,8 +155,7 @@ pub(crate) async fn runtime_fixture_with_options(
 
     let (events, _) = broadcast::channel(16);
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    let account_monitor =
-        build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events.clone()).await;
+    let account_monitor = build_test_account_monitor(exchange.clone(), events.clone()).await;
     let services = build_test_application_services(
         manager,
         persistence.clone(),
@@ -172,7 +175,7 @@ pub(crate) async fn runtime_fixture_with_options(
         runtime: ServerRuntime::with_reconcile_and_account_refresh_intervals(
             state.runtime_state(),
             worker_state.effect_worker_state.clone(),
-            exchange.clone() as Arc<dyn ExchangePort>,
+            exchange.clone(),
             market_data as Arc<dyn MarketDataPort>,
             options.recovery_retry_interval,
             options.audit_interval,
@@ -187,13 +190,14 @@ pub(crate) async fn runtime_fixture_with_options(
     }
 }
 
-pub(crate) async fn test_state<R>(
-    exchange: Arc<dyn ExchangePort>,
+pub(crate) async fn test_state<R, E>(
+    exchange: Arc<E>,
     persistence: Arc<R>,
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     budget: CapacityBudget,
 ) -> RuntimeTestContext
 where
+    E: ExecutionPort + AccountPort + AccountSummaryPort + MetadataPort + 'static,
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
     test_launch_contexts(exchange, persistence, restored_snapshot, budget)
@@ -201,27 +205,29 @@ where
         .0
 }
 
-pub(crate) async fn test_launch_contexts<R>(
-    exchange: Arc<dyn ExchangePort>,
+pub(crate) async fn test_launch_contexts<R, E>(
+    exchange: Arc<E>,
     persistence: Arc<R>,
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     budget: CapacityBudget,
 ) -> (RuntimeTestContext, EffectWorkerTestContext)
 where
+    E: ExecutionPort + AccountPort + AccountSummaryPort + MetadataPort + 'static,
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
     test_launch_contexts_with_config(exchange, persistence, restored_snapshot, budget, test_config())
         .await
 }
 
-pub(crate) async fn test_launch_contexts_with_config<R>(
-    exchange: Arc<dyn ExchangePort>,
+pub(crate) async fn test_launch_contexts_with_config<R, E>(
+    exchange: Arc<E>,
     persistence: Arc<R>,
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     budget: CapacityBudget,
     config: TrackConfig,
 ) -> (RuntimeTestContext, EffectWorkerTestContext)
 where
+    E: ExecutionPort + AccountPort + AccountSummaryPort + MetadataPort + 'static,
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
     let clock = Arc::new(FixedClock(
@@ -285,10 +291,13 @@ pub(crate) async fn shutdown(handles: RuntimeHandles) {
     let _ = handles.account_task.await;
 }
 
-pub(crate) async fn build_test_account_monitor(
-    exchange: Arc<dyn ExchangePort>,
+pub(crate) async fn build_test_account_monitor<E>(
+    exchange: Arc<E>,
     notifications: broadcast::Sender<poise_application::ApplicationNotification>,
-) -> Arc<AccountMonitor> {
+) -> Arc<AccountMonitor>
+where
+    E: AccountSummaryPort + 'static,
+{
     let account_store: Arc<dyn AccountMonitorStore> =
         Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap());
     account_store
@@ -648,10 +657,21 @@ pub(crate) struct FakeExchange {
     release_submit: Option<Arc<Notify>>,
     get_position_started: Option<Arc<Notify>>,
     release_get_position: Mutex<Option<Arc<Notify>>>,
+    user_receiver: AsyncMutex<Option<mpsc::Receiver<UserDataEvent>>>,
+    subscribe_user_data_calls: AtomicUsize,
 }
 
 impl FakeExchange {
     pub(crate) fn new(position: Position, open_orders: Vec<ExchangeOrder>) -> Self {
+        let (_sender, receiver) = mpsc::channel(1);
+        Self::with_user_receiver(position, open_orders, receiver)
+    }
+
+    pub(crate) fn with_user_receiver(
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        user_receiver: mpsc::Receiver<UserDataEvent>,
+    ) -> Self {
         Self {
             exchange_info: ExchangeInfo {
                 instrument: btc_instrument(),
@@ -685,6 +705,8 @@ impl FakeExchange {
             release_submit: None,
             get_position_started: None,
             release_get_position: Mutex::new(None),
+            user_receiver: AsyncMutex::new(Some(user_receiver)),
+            subscribe_user_data_calls: AtomicUsize::new(0),
         }
     }
 
@@ -749,6 +771,7 @@ impl FakeExchange {
     pub(crate) fn set_position(&self, position: Position) {
         *self.position.lock().unwrap() = position;
     }
+
 }
 
 #[async_trait::async_trait]
@@ -766,7 +789,7 @@ impl poise_engine::ports::AccountSummaryPort for FakeExchange {
 }
 
 #[async_trait::async_trait]
-impl ExchangePort for FakeExchange {
+impl ExecutionPort for FakeExchange {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
         self.submitted_orders.lock().unwrap().push(req.clone());
         if let Some(notify) = &self.submit_started {
@@ -840,6 +863,10 @@ impl ExchangePort for FakeExchange {
         Ok(self.open_orders.lock().unwrap().clone())
     }
 
+}
+
+#[async_trait::async_trait]
+impl AccountPort for FakeExchange {
     async fn get_account_capacity_snapshot(
         &self,
         _instrument: &Instrument,
@@ -849,6 +876,19 @@ impl ExchangePort for FakeExchange {
         })
     }
 
+    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+        self.subscribe_user_data_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.user_receiver
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow!("missing test user receiver"))
+    }
+}
+
+#[async_trait::async_trait]
+impl MetadataPort for FakeExchange {
     async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
         Ok(self.exchange_info.clone())
     }
@@ -1540,29 +1580,19 @@ impl TrackQueryStore for FailOnSavePersistence {
 
 pub(crate) struct FakeMarketData {
     price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
-    user_receiver: Mutex<Option<mpsc::Receiver<UserDataEvent>>>,
 }
 
 impl FakeMarketData {
-    pub(crate) fn new(
-        price_receiver: mpsc::Receiver<PriceTick>,
-        user_receiver: mpsc::Receiver<UserDataEvent>,
-    ) -> Self {
+    pub(crate) fn new(price_receiver: mpsc::Receiver<PriceTick>) -> Self {
         let mut price_receivers = HashMap::new();
         price_receivers.insert("BTCUSDT".to_string(), price_receiver);
         Self {
             price_receivers: Mutex::new(price_receivers),
-            user_receiver: Mutex::new(Some(user_receiver)),
         }
     }
 
     pub(crate) fn without_user_receiver(price_receiver: mpsc::Receiver<PriceTick>) -> Self {
-        let mut price_receivers = HashMap::new();
-        price_receivers.insert("BTCUSDT".to_string(), price_receiver);
-        Self {
-            price_receivers: Mutex::new(price_receivers),
-            user_receiver: Mutex::new(None),
-        }
+        Self::new(price_receiver)
     }
 }
 
@@ -1575,15 +1605,219 @@ impl MarketDataPort for FakeMarketData {
             .remove(&instrument.symbol)
             .ok_or_else(|| anyhow!("missing test price receiver for {}", instrument.symbol))
     }
+}
+
+pub(crate) struct RuntimeWithPortsFixture {
+    pub(crate) runtime: ServerRuntime,
+    pub(crate) state: RuntimeTestContext,
+    pub(crate) account: Arc<FakeAccountPort>,
+}
+
+pub(crate) async fn build_test_runtime_with_ports(
+    execution: Arc<FakeExecutionPort>,
+    market_data: Arc<FakeMarketDataPort>,
+    account_summary: Arc<FakeAccountSummaryPort>,
+    account: Arc<FakeAccountPort>,
+    metadata: Arc<FakeMetadataPort>,
+) -> RuntimeWithPortsFixture {
+    let persistence = Arc::new(MemoryPersistence::default());
+    let mut manager = TrackManager::new(Arc::new(FixedClock(test_server_time())));
+    let instrument = btc_instrument();
+    manager
+        .add_track(
+            TrackId::new("BTCUSDT"),
+            instrument.clone(),
+            test_config(),
+            test_budget(),
+            metadata.get_exchange_info(&instrument).await.unwrap().rules,
+        )
+        .unwrap();
+
+    let (events, _) = broadcast::channel(16);
+    let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
+    let services = build_test_application_services(
+        manager,
+        persistence.clone(),
+        persistence.clone(),
+        events.clone(),
+        account_margin_guard,
+    );
+    let account_monitor = Arc::new(
+        AccountMonitor::restore(
+            account_summary,
+            Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap()),
+            events,
+            AccountMonitorConfig::default(),
+        )
+        .await
+        .unwrap(),
+    );
+    let (state, worker_state) = build_runtime_and_effect_worker_test_contexts(
+        &services,
+        persistence.clone(),
+        persistence,
+        account_monitor,
+        Arc::new(TrackProjector::new()),
+    );
+
+    RuntimeWithPortsFixture {
+        runtime: ServerRuntime::with_account_capacity_snapshots(
+            state.runtime_state(),
+            worker_state.effect_worker_state,
+            execution,
+            market_data,
+            account.clone(),
+            metadata,
+            HashMap::new(),
+            Duration::from_secs(1),
+        ),
+        state,
+        account,
+    }
+}
+
+pub(crate) struct FakeExecutionPort {
+    position: Mutex<Position>,
+}
+
+impl FakeExecutionPort {
+    pub(crate) fn default_position() -> Position {
+        btc_position(0.0, 0.0)
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionPort for FakeExecutionPort {
+    async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+        Err(anyhow!("not used in tests"))
+    }
+
+    async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        Err(anyhow!("not used in tests"))
+    }
+
+    async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+        Err(anyhow!("not used in tests"))
+    }
+
+    async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+        Ok(self.position.lock().unwrap().clone())
+    }
+
+    async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        Ok(Vec::new())
+    }
+}
+
+impl Default for FakeExecutionPort {
+    fn default() -> Self {
+        Self {
+            position: Mutex::new(Self::default_position()),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FakeMarketDataPort;
+
+#[async_trait::async_trait]
+impl MarketDataPort for FakeMarketDataPort {
+    async fn subscribe_prices(&self, _instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+        let (_sender, receiver) = mpsc::channel(1);
+        Ok(receiver)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FakeAccountSummaryPort;
+
+#[async_trait::async_trait]
+impl AccountSummaryPort for FakeAccountSummaryPort {
+    async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+        Ok(poise_engine::ports::AccountSummarySnapshot {
+            equity: 1_000_000.0,
+            available: 1_000_000.0,
+            unrealized_pnl: 0.0,
+            observed_at: test_server_time(),
+        })
+    }
+}
+
+pub(crate) struct FakeAccountPort {
+    user_receiver: AsyncMutex<Option<mpsc::Receiver<UserDataEvent>>>,
+    subscribe_user_data_calls: AtomicUsize,
+}
+
+impl FakeAccountPort {
+    pub(crate) fn with_user_events(events: Vec<UserDataEvent>) -> Self {
+        let (sender, receiver) = mpsc::channel(events.len().max(1));
+        for event in events {
+            sender.try_send(event).unwrap();
+        }
+        drop(sender);
+        Self {
+            user_receiver: AsyncMutex::new(Some(receiver)),
+            subscribe_user_data_calls: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn without_user_receiver() -> Self {
+        Self {
+            user_receiver: AsyncMutex::new(None),
+            subscribe_user_data_calls: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn subscribe_user_data_calls(&self) -> usize {
+        self.subscribe_user_data_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for FakeAccountPort {
+    fn default() -> Self {
+        Self::with_user_events(Vec::new())
+    }
+}
+
+#[async_trait::async_trait]
+impl AccountPort for FakeAccountPort {
+    async fn get_account_capacity_snapshot(&self, _instrument: &Instrument) -> Result<AccountCapacitySnapshot> {
+        Ok(AccountCapacitySnapshot {
+            max_increase_notional: 1_000_000.0,
+        })
+    }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        let receiver = self
-            .user_receiver
+        self.subscribe_user_data_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.user_receiver
             .lock()
-            .unwrap()
+            .await
             .take()
-            .ok_or_else(|| anyhow!("missing test user receiver"))?;
+            .ok_or_else(|| anyhow!("missing test user receiver"))
+    }
+}
 
-        Ok(receiver)
+#[derive(Default)]
+pub(crate) struct FakeMetadataPort;
+
+#[async_trait::async_trait]
+impl MetadataPort for FakeMetadataPort {
+    async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+        Ok(ExchangeInfo {
+            instrument: btc_instrument(),
+            rules: ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.1,
+                min_qty: 0.0,
+                min_notional: 0.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+        })
+    }
+
+    async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+        Ok(test_server_time())
     }
 }

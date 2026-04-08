@@ -29,7 +29,7 @@ async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
 
     let error = super::apply_user_data_event(
         &state,
-        &(Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![])) as Arc<dyn ExchangePort>),
+        Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![])).as_ref(),
         "missing-track",
         position_event_at(
             Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 1).unwrap(),
@@ -66,7 +66,7 @@ async fn apply_user_data_event_persists_track_ledger_event_atomically() {
         SlotState::Working,
     );
     let state = test_state(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence.clone(),
         Some(snapshot),
         test_budget(),
@@ -75,7 +75,7 @@ async fn apply_user_data_event_persists_track_ledger_event_atomically() {
 
     super::apply_user_data_event(
         &state,
-        &(exchange.clone() as Arc<dyn ExchangePort>),
+        exchange.as_ref(),
         "BTCUSDT",
         UserDataEvent {
             event_time: test_server_time() + chrono::Duration::milliseconds(1),
@@ -132,7 +132,7 @@ async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
         SlotState::Working,
     );
     let state = test_state(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence,
         Some(snapshot),
         test_budget(),
@@ -141,7 +141,7 @@ async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
 
     super::apply_user_data_event(
         &state,
-        &(exchange.clone() as Arc<dyn ExchangePort>),
+        exchange.as_ref(),
         "BTCUSDT",
         order_event_at(
             test_server_time() + chrono::Duration::milliseconds(1),
@@ -171,7 +171,7 @@ async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
 async fn successful_exchange_sync_clears_stale_state() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let state = test_state(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Arc::new(MemoryPersistence::default()),
         None,
         test_budget(),
@@ -184,7 +184,7 @@ async fn successful_exchange_sync_clears_stale_state() {
 
     super::sync_exchange_state_from_exchange(
         &state,
-        &(exchange.clone() as Arc<dyn ExchangePort>),
+        exchange.as_ref(),
         "BTCUSDT",
         &btc_instrument(),
         ExchangeSyncMode::RecoverAndReconcile,
@@ -206,7 +206,7 @@ async fn successful_exchange_sync_does_not_clear_newer_stale_fact() {
         release_get_position.clone(),
     ));
     let state = test_state(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Arc::new(MemoryPersistence::default()),
         None,
         test_budget(),
@@ -219,11 +219,11 @@ async fn successful_exchange_sync_does_not_clear_newer_stale_fact() {
 
     let task = tokio::spawn({
         let state = state.clone();
-        let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+        let exchange = exchange.clone();
         async move {
             super::sync_exchange_state_from_exchange(
                 &state,
-                &exchange,
+                exchange.as_ref(),
                 "BTCUSDT",
                 &btc_instrument(),
                 ExchangeSyncMode::RecoverAndReconcile,
@@ -328,7 +328,7 @@ async fn unabsorbed_order_update_marks_stale_and_triggers_immediate_reconcile() 
         release_get_position.clone(),
     ));
     let state = test_state(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         Arc::new(MemoryPersistence::default()),
         None,
         test_budget(),
@@ -337,11 +337,11 @@ async fn unabsorbed_order_update_marks_stale_and_triggers_immediate_reconcile() 
 
     let task = tokio::spawn({
         let state = state.clone();
-        let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+        let exchange = exchange.clone();
         async move {
             super::apply_user_data_event(
                 &state,
-                &exchange,
+                exchange.as_ref(),
                 "BTCUSDT",
                 order_event_at(
                     test_server_time() + chrono::Duration::milliseconds(1),
@@ -423,7 +423,7 @@ async fn immediate_reconcile_requests_are_single_flight_per_track() {
     ));
     let persistence = Arc::new(MemoryPersistence::default());
     let state = test_state(
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.clone(),
         persistence,
         None,
         test_budget(),
@@ -433,12 +433,12 @@ async fn immediate_reconcile_requests_are_single_flight_per_track() {
 
     let first = tokio::spawn({
         let state = state.clone();
-        let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+        let exchange = exchange.clone();
         let instrument = instrument.clone();
         async move {
             super::enqueue_reconcile_request(
                 &state,
-                &exchange,
+                exchange.as_ref(),
                 crate::order_outcome::ReconcileRequest {
                     track_id: "BTCUSDT".into(),
                     reason: crate::order_outcome::ReconcileReason::SyncAfterSubmitOutcomeUnknown,
@@ -453,12 +453,12 @@ async fn immediate_reconcile_requests_are_single_flight_per_track() {
 
     let second = tokio::spawn({
         let state = state.clone();
-        let exchange = exchange.clone() as Arc<dyn ExchangePort>;
+        let exchange = exchange.clone();
         let instrument = instrument.clone();
         async move {
             super::enqueue_reconcile_request(
                 &state,
-                &exchange,
+                exchange.as_ref(),
                 crate::order_outcome::ReconcileRequest {
                     track_id: "BTCUSDT".into(),
                     reason: crate::order_outcome::ReconcileReason::SyncAfterCancelOutcomeUnknown,
@@ -516,6 +516,7 @@ async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_wi
 #[tokio::test]
 async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+    let account = Arc::new(FakeAccountPort::without_user_receiver());
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
     drop(price_sender);
@@ -548,15 +549,19 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events).await,
+        build_test_account_monitor(exchange.clone(), events).await,
         Arc::new(TrackProjector::new()),
     );
 
-    let runtime = ServerRuntime::new(
+    let runtime = ServerRuntime::with_account_capacity_snapshots(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange as Arc<dyn ExchangePort>,
+        exchange.clone() as Arc<dyn ExecutionPort>,
         market_data as Arc<dyn MarketDataPort>,
+        account as Arc<dyn AccountPort>,
+        exchange as Arc<dyn MetadataPort>,
+        HashMap::new(),
+        Duration::from_secs(1),
     );
 
     let error = runtime.start().await.err().unwrap();
