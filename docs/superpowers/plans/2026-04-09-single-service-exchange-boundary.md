@@ -450,7 +450,7 @@ Task 2 code commit:
 - Test: `exchanges/binance/src/connected.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 先写失败测试，固定 endpoint 选择不再经过 `server`**
+- [x] **Step 1: 先写失败测试，固定 endpoint 选择不再经过 `server`**
 
 在 `exchanges/binance/src/config.rs` 增加测试：
 
@@ -506,7 +506,7 @@ fn connected_exposes_all_required_ports() {
 
 这个测试的重点不是网络访问，而是固定 `build_exchange(...)` 的输入只来自 `exchange` 配置，Binance 自己的装配入口只来自 `connected.rs`，并且不再消费顶层 `environment`。
 
-- [ ] **Step 2: 运行定向测试，确认当前 Binance endpoint 仍在 `server`**
+- [x] **Step 2: 运行定向测试，确认当前 Binance endpoint 仍在 `server`**
 
 Run:
 `cargo test -p poise-binance deployment_resolves_mainnet_testnet_and_custom_endpoints -- --exact`
@@ -526,7 +526,7 @@ Run:
 Expected:
 - FAIL，原因是当前 Binance crate 还没有 `connected.rs` 作为唯一装配入口
 
-- [ ] **Step 3: 实现最小 owner 下沉**
+- [x] **Step 3: 实现最小 owner 下沉**
 
 要求：
 - `poise_binance::Config` 明确拥有 `deployment`、`api_key`、`api_secret`
@@ -546,7 +546,7 @@ Expected:
 - `build_exchange(...)` 不接收也不读取顶层 `environment`
 - 不把新的 owner 逻辑临时落回 `adapter.rs`
 
-- [ ] **Step 4: 运行 owner 下沉回归**
+- [x] **Step 4: 运行 owner 下沉回归**
 
 Run:
 `cargo test -p poise-binance deployment_resolves_mainnet_testnet_and_custom_endpoints -- --exact`
@@ -567,12 +567,12 @@ Expected:
 - PASS
 
 Run:
-`cargo test -p poise-server --lib`
+`cargo test -p poise-server --quiet`
 
 Expected:
 - PASS，说明 `server` 装配已完全不持有 Binance endpoint 规则
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add exchanges/binance/src/config.rs exchanges/binance/src/connected.rs exchanges/binance/src/lib.rs exchanges/binance/src/rest.rs exchanges/binance/src/websocket.rs server/src/assembly.rs
@@ -581,7 +581,7 @@ git commit -m "refactor: move binance wiring into connected entrypoint"
 ```
 
 Task 3 code commit:
-`<fill-me>`
+`9717fac`
 
 ---
 
