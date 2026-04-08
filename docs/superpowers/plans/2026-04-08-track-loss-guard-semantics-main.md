@@ -21,10 +21,10 @@
   - 验收：`cargo test -p poise-storage`
   - commit: `6973953`
 
-- [ ] Task 3: 迁移 `application` / `server` 的 budget read model、协议与配置边界
+- [x] Task 3: 迁移 `application` / `server` 的 budget read model、协议与配置边界
   - 验收：`cargo test -p poise-application`
   - 验收：`cargo test -p poise-server`
-  - commit:
+  - commit: `e053a28`
 
 - [ ] Task 4: 更新 README、示例配置并执行全量回归
   - 验收：`cargo fmt --all --check`
