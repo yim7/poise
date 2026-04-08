@@ -1,0 +1,58 @@
+use std::sync::Arc;
+
+use poise_application::{
+    AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
+    TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
+    TrackQueryService,
+};
+use tokio::sync::broadcast;
+
+use crate::account_projector::AccountProjector;
+use crate::exchange_freshness::ExchangeFreshness;
+use crate::projector::TrackProjector;
+use crate::runtime::{AccountMarginGuardStore, TrackReconcileGuards};
+use crate::submit_preflight::SubmitPreflight;
+
+#[derive(Clone)]
+pub struct HttpState {
+    pub command_service: Arc<TrackCommandService>,
+    pub query_service: Arc<TrackQueryService>,
+    pub debug_query_service: Arc<TrackDebugQueryService>,
+    pub projector: Arc<TrackProjector>,
+    pub account_monitor: Arc<AccountMonitor>,
+    pub account_projector: Arc<AccountProjector>,
+}
+
+#[derive(Clone)]
+pub struct WebSocketState {
+    pub notifications: broadcast::Sender<ApplicationNotification>,
+    pub query_service: Arc<TrackQueryService>,
+    pub projector: Arc<TrackProjector>,
+    pub account_monitor: Arc<AccountMonitor>,
+    pub account_projector: Arc<AccountProjector>,
+}
+
+#[derive(Clone)]
+pub struct ReconcileState {
+    pub observation_service: Arc<TrackObservationService>,
+    pub mutation_store: Arc<dyn TrackMutationStore>,
+    pub effect_store: Arc<dyn TrackEffectStore>,
+    pub exchange_freshness: Arc<ExchangeFreshness>,
+    pub reconcile_guards: Arc<TrackReconcileGuards>,
+    pub submit_preflight: Arc<SubmitPreflight>,
+}
+
+#[derive(Clone)]
+pub struct RuntimeState {
+    pub reconcile: ReconcileState,
+    pub notifications: broadcast::Sender<ApplicationNotification>,
+    pub account_monitor: Arc<AccountMonitor>,
+    pub account_margin_guard: Arc<AccountMarginGuardStore>,
+}
+
+#[derive(Clone)]
+pub struct EffectWorkerState {
+    pub reconcile: ReconcileState,
+    pub effect_service: Arc<TrackEffectService>,
+    pub account_margin_guard: Arc<AccountMarginGuardStore>,
+}

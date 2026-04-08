@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{SecondsFormat, Utc};
+use poise_application::{AccountMonitorStore, TrackEffectStore, TrackMutationStore, TrackQueryStore};
 use poise_core::strategy::TrackConfig;
-use poise_engine::ports::{StateRepositoryPort, TrackReadRepositoryPort, TrackSnapshot};
 use poise_engine::track::Instrument;
 use poise_storage::sqlite::SqliteStorage;
 
@@ -74,9 +74,10 @@ type BootstrapResult<T> = std::result::Result<T, StateBootstrapError>;
 
 #[derive(Clone)]
 pub struct StateRepositories {
-    sqlite_storage: Option<Arc<SqliteStorage>>,
-    state_repository: Arc<dyn StateRepositoryPort>,
-    read_repository: Arc<dyn TrackReadRepositoryPort>,
+    account_monitor_store: Option<Arc<dyn AccountMonitorStore>>,
+    mutation_store: Arc<dyn TrackMutationStore>,
+    query_store: Arc<dyn TrackQueryStore>,
+    effect_store: Arc<dyn TrackEffectStore>,
 }
 
 pub struct PreparedStateStore {
@@ -133,37 +134,45 @@ impl StateRepositories {
     #[cfg(test)]
     pub(crate) fn new<R>(repository: Arc<R>) -> Self
     where
-        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+        R: TrackMutationStore + TrackQueryStore + TrackEffectStore + 'static,
     {
         Self {
-            sqlite_storage: None,
-            state_repository: repository.clone(),
-            read_repository: repository,
+            account_monitor_store: None,
+            mutation_store: repository.clone(),
+            query_store: repository.clone(),
+            effect_store: repository.clone(),
         }
     }
 
     pub(crate) fn from_sqlite_storage(repository: Arc<SqliteStorage>) -> Self {
         Self {
-            sqlite_storage: Some(repository.clone()),
-            state_repository: repository.clone(),
-            read_repository: repository,
+            account_monitor_store: Some(repository.clone()),
+            mutation_store: repository.clone(),
+            query_store: repository.clone(),
+            effect_store: repository.clone(),
         }
     }
 
-    pub fn sqlite_storage(&self) -> Option<Arc<SqliteStorage>> {
-        self.sqlite_storage.as_ref().map(Arc::clone)
+    pub fn account_monitor_store(&self) -> Option<Arc<dyn AccountMonitorStore>> {
+        self.account_monitor_store.as_ref().map(Arc::clone)
     }
 
-    pub fn state_repository(&self) -> Arc<dyn StateRepositoryPort> {
-        Arc::clone(&self.state_repository)
+    pub fn mutation_store(&self) -> Arc<dyn TrackMutationStore> {
+        Arc::clone(&self.mutation_store)
     }
 
-    pub fn read_repository(&self) -> Arc<dyn TrackReadRepositoryPort> {
-        Arc::clone(&self.read_repository)
+    pub fn query_store(&self) -> Arc<dyn TrackQueryStore> {
+        Arc::clone(&self.query_store)
     }
 
-    pub async fn load_track_state(&self, track_id: &str) -> Result<Option<TrackSnapshot>> {
-        self.state_repository.load_track_state(track_id).await
+    pub fn effect_store(&self) -> Arc<dyn TrackEffectStore> {
+        Arc::clone(&self.effect_store)
+    }
+    pub async fn load_track_state(
+        &self,
+        track_id: &str,
+    ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
+        self.mutation_store.load_track_state(track_id).await
     }
 }
 
@@ -249,7 +258,7 @@ async fn detect_persisted_state_mismatches(
     config: &Config,
     repository: &SqliteStorage,
 ) -> Result<Vec<PersistedStateMismatch>> {
-    let persisted_snapshots = repository.list_track_snapshots().await?;
+    let persisted_snapshots = TrackQueryStore::list_track_snapshots(repository).await?;
     let mut persisted_by_id = std::collections::HashMap::new();
     for stored in persisted_snapshots {
         persisted_by_id.insert(
@@ -394,8 +403,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use poise_application::TrackQueryStore;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::StateRepositoryPort;
+    use poise_application::TrackMutationStore;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_storage::sqlite::SqliteStorage;
 
@@ -412,7 +422,19 @@ mod tests {
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .unwrap();
-        let _ = prepared.repositories.state_repository();
+        let _ = prepared.repositories.mutation_store();
+    }
+
+    #[tokio::test]
+    async fn state_repositories_exposes_query_store_via_application_owner() {
+        let repository = std::sync::Arc::new(SqliteStorage::in_memory().unwrap());
+        let repositories = super::StateRepositories::from_sqlite_storage(repository);
+        let query_store = repositories.query_store();
+
+        let snapshots = TrackQueryStore::list_track_snapshots(query_store.as_ref())
+            .await
+            .unwrap();
+        assert!(snapshots.is_empty());
     }
 
     #[tokio::test]
@@ -450,7 +472,7 @@ mod tests {
 
         let loaded = prepared
             .repositories
-            .state_repository()
+            .mutation_store()
             .load_track_state("btc-core")
             .await
             .unwrap();
@@ -516,7 +538,7 @@ mod tests {
 
         let loaded = prepared
             .repositories
-            .state_repository()
+            .mutation_store()
             .load_track_state("btc-core")
             .await
             .unwrap();
@@ -694,7 +716,7 @@ mod tests {
 
         let loaded = prepared
             .repositories
-            .state_repository()
+            .mutation_store()
             .load_track_state("btc-core")
             .await
             .unwrap();

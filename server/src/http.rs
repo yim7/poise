@@ -2,17 +2,18 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use poise_application::{DiagnosticSeverity, TrackMutationError};
 use poise_engine::command::TrackCommand;
 use poise_engine::track::TrackId;
 use poise_protocol::{
-    AccountSummaryView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-    TrackDetailView, TrackDiagnosticsView, TrackListResponse,
+    AccountSummaryView, ActivityLevelView, TrackCommandAccepted, TrackCommandRequest,
+    TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
+    TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
-use crate::assembly::ServerState;
-use crate::write_service::TrackMutationError;
+use crate::server_context::{HttpState, WebSocketState};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ErrorResponse {
@@ -26,7 +27,7 @@ struct HealthResponse {
     attention_required_count: usize,
 }
 
-pub fn router(state: ServerState) -> Router {
+pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/account", get(get_account))
@@ -34,13 +35,16 @@ pub fn router(state: ServerState) -> Router {
         .route("/tracks/:id", get(get_track_detail))
         .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
         .route("/tracks/:id/commands", post(submit_command))
-        .route("/ws", get(crate::websocket::ws_handler))
+        .route(
+            "/ws",
+            get(move |ws| crate::websocket::ws_handler(ws, websocket_state.clone())),
+        )
         .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(http_state)
 }
 
 async fn list_tracks(
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<TrackListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let sources = state
         .query_service
@@ -55,7 +59,7 @@ async fn list_tracks(
 }
 
 async fn health(
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<(StatusCode, Json<HealthResponse>), (StatusCode, Json<ErrorResponse>)> {
     let sources = state
         .query_service
@@ -91,7 +95,7 @@ async fn health(
 }
 
 async fn get_account(
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<AccountSummaryView>, (StatusCode, Json<ErrorResponse>)> {
     let summary = state
         .account_monitor
@@ -104,7 +108,7 @@ async fn get_account(
 
 async fn get_track_detail(
     Path(id): Path<String>,
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<TrackDetailView>, (StatusCode, Json<ErrorResponse>)> {
     let track_id = TrackId::new(id.clone());
     let source = state
@@ -118,7 +122,7 @@ async fn get_track_detail(
 
 async fn get_track_diagnostics(
     Path(id): Path<String>,
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
 ) -> Result<Json<TrackDiagnosticsView>, (StatusCode, Json<ErrorResponse>)> {
     let track_id = TrackId::new(id.clone());
     let diagnostics = state
@@ -128,21 +132,30 @@ async fn get_track_diagnostics(
         .map_err(map_query_error)?
         .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
 
-    Ok(Json(diagnostics))
+    Ok(Json(TrackDiagnosticsView {
+        items: diagnostics
+            .into_iter()
+            .map(|item| TrackDiagnosticItemView {
+                ts: item.observed_at.to_rfc3339(),
+                message: item.message,
+                level: project_diagnostic_severity(item.severity),
+            })
+            .collect(),
+    }))
 }
 
 async fn submit_command(
     Path(id): Path<String>,
-    State(state): State<ServerState>,
+    State(state): State<HttpState>,
     Json(request): Json<TrackCommandRequest>,
 ) -> Result<Json<TrackCommandAccepted>, (StatusCode, Json<ErrorResponse>)> {
-    if !state.write_service.has_track(&id).await {
+    if !state.command_service.has_track(&id).await {
         return Err(not_found(format!("track `{id}` not found")));
     }
 
     let command = map_command(request.command)?;
     state
-        .write_service
+        .command_service
         .command(&id, command)
         .await
         .map_err(map_command_error)?;
@@ -190,6 +203,13 @@ fn map_query_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     internal_error(error.to_string())
 }
 
+fn project_diagnostic_severity(severity: DiagnosticSeverity) -> ActivityLevelView {
+    match severity {
+        DiagnosticSeverity::Info => ActivityLevelView::Info,
+        DiagnosticSeverity::Warn => ActivityLevelView::Warn,
+    }
+}
+
 fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     match error.downcast::<TrackMutationError>() {
         Ok(TrackMutationError::LoadedTrackInvariant { track_id }) => {
@@ -209,6 +229,11 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
+    use poise_application::{
+        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
+        StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationStore,
+        TrackQueryStore,
+    };
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::{
@@ -218,9 +243,7 @@ mod tests {
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
-    use poise_engine::ports::{
-        ClockPort, OrderStatus, StateRepositoryPort, StoredTrackSnapshot, TrackReadRepositoryPort,
-    };
+    use poise_engine::ports::{ClockPort, OrderStatus};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
@@ -230,20 +253,28 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
-    use crate::account_monitor::AccountMonitor;
-    use crate::account_monitor_store::{
-        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
-    };
-    use crate::assembly::{
-        ServerState, build_server_state, build_server_state_with_account_monitor,
-    };
-    use crate::config::AccountMonitorConfig;
-    use crate::notifications::ServerNotification;
+    use crate::account_projector::AccountProjector;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
-    use crate::write_service::TrackWriteService;
+    use crate::server_context::{HttpState, WebSocketState};
+    use crate::test_support::{
+        build_http_state, build_test_application_services, build_websocket_state,
+        unavailable_account_monitor,
+    };
 
-    use super::router;
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
+        StoredAccountMonitorState, TrackDebugQueryService, TrackQueryService,
+    };
+
+    #[derive(Clone)]
+    struct HttpTestState {
+        http_state: HttpState,
+        websocket_state: WebSocketState,
+    }
+
+    fn router(state: HttpTestState) -> axum::Router {
+        super::router(state.http_state, state.websocket_state)
+    }
 
     fn test_exchange_rules() -> ExchangeRules {
         ExchangeRules {
@@ -327,14 +358,14 @@ mod tests {
         }
     }
 
-    async fn app_state() -> ServerState {
+    async fn app_state() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         build_test_state(repository).await
     }
 
-    async fn build_test_state<R>(repository: Arc<R>) -> ServerState
+    async fn build_test_state<R>(repository: Arc<R>) -> HttpTestState
     where
-        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
         let manager = test_manager();
         let mut snapshot = manager
@@ -353,28 +384,43 @@ mod tests {
             )
             .await
             .unwrap();
-        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let query_store: Arc<dyn TrackQueryStore> = repository.clone();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let services = build_test_application_services(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
-        ));
-
-        let query_service = Arc::new(TrackQueryService::new(read_repository));
-        build_server_state(
-            write_service,
-            state_repository,
-            query_service,
-            Arc::new(TrackProjector::new()),
-            account_margin_guard,
-        )
+        );
+        let query_service = Arc::new(TrackQueryService::new(query_store));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let projector = Arc::new(TrackProjector::new());
+        let account_monitor = unavailable_account_monitor(services.notifications.clone());
+        let account_projector = Arc::new(AccountProjector::new());
+        HttpTestState {
+            http_state: build_http_state(
+                &services,
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                Arc::new(TrackQueryService::new(repository as Arc<dyn TrackQueryStore>)),
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        }
     }
 
-    async fn app_state_with_account_summary() -> ServerState {
+    async fn app_state_with_account_summary() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = test_manager();
         let mut snapshot = manager
@@ -394,19 +440,20 @@ mod tests {
             .await
             .unwrap();
 
-        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let query_store: Arc<dyn TrackQueryStore> = repository.clone();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let services = build_test_application_services(
             manager,
-            state_repository.clone(),
+            mutation_store,
+            effect_store,
             notifications.clone(),
-            account_margin_guard.clone(),
-        ));
-        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
-            SqliteStorage::in_memory().unwrap(),
-        )));
+            account_margin_guard,
+        );
+        let account_store: Arc<dyn AccountMonitorStore> =
+            Arc::new(SqliteStorage::in_memory().unwrap());
         account_store
             .save_state(&StoredAccountMonitorState {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
@@ -431,15 +478,27 @@ mod tests {
             .await
             .unwrap(),
         );
-
-        build_server_state_with_account_monitor(
-            write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
-            Arc::new(TrackProjector::new()),
-            account_monitor,
-            account_margin_guard,
-        )
+        let projector = Arc::new(TrackProjector::new());
+        let account_projector = Arc::new(AccountProjector::new());
+        let query_service = Arc::new(TrackQueryService::new(query_store));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        HttpTestState {
+            http_state: build_http_state(
+                &services,
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                query_service,
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        }
     }
 
     fn test_manager() -> TrackManager {
@@ -493,7 +552,7 @@ mod tests {
         manager
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::ports::TrackSnapshot) {
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.realized_pnl_cumulative = 980.1;
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.realized_pnl_day =
@@ -517,6 +576,21 @@ mod tests {
                 source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
             },
         ];
+    }
+
+    #[tokio::test]
+    async fn router_accepts_http_state_without_runtime_dependencies() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -825,24 +899,41 @@ mod tests {
                 .snapshot("btc-core")
                 .expect("seeded manager should expose runtime snapshot"),
         );
-        let (notifications, _) = tokio::sync::broadcast::channel::<ServerNotification>(16);
-        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackReadRepositoryPort>
+            repository.clone() as Arc<dyn TrackQueryStore>
         ));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let app = router(build_server_state(
-            Arc::new(TrackWriteService::new(
-                manager,
-                state_repository.clone(),
-                notifications,
-                account_margin_guard.clone(),
-            )),
-            state_repository,
-            query_service,
-            Arc::new(TrackProjector::new()),
+        let services = build_test_application_services(
+            manager,
+            mutation_store,
+            effect_store,
+            notifications,
             account_margin_guard,
-        ));
+        );
+        let projector = Arc::new(TrackProjector::new());
+        let account_monitor = unavailable_account_monitor(services.notifications.clone());
+        let account_projector = Arc::new(AccountProjector::new());
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let app = router(HttpTestState {
+            http_state: build_http_state(
+                &services,
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                query_service,
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        });
 
         let pause = app
             .clone()
@@ -1019,7 +1110,7 @@ mod tests {
     }
 
     impl FailingRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::ports::TrackSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
             self.snapshots.lock().unwrap().insert(
                 snapshot.track_id.as_str().to_string(),
                 StoredTrackSnapshot {
@@ -1031,22 +1122,22 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for FailingRepository {
+    impl TrackMutationStore for FailingRepository {
         async fn save_transition_with_effect_status(
             &self,
             _id: &str,
-            _state: &poise_engine::ports::TrackSnapshot,
+            _state: &poise_engine::snapshot::TrackRuntimeSnapshot,
             _events: &[poise_core::events::DomainEvent],
             _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
-        ) -> anyhow::Result<poise_engine::ports::CommittedTrackWrite> {
+            _effect_status_update: Option<&EffectStatusUpdate>,
+        ) -> anyhow::Result<CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
         }
 
         async fn load_track_state(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Option<poise_engine::ports::TrackSnapshot>> {
+        ) -> anyhow::Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
             Ok(None)
         }
 
@@ -1056,23 +1147,24 @@ mod tests {
         ) -> anyhow::Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
+    }
 
-        async fn list_dispatchable_effects(
-            &self,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+    #[async_trait::async_trait]
+    impl TrackEffectStore for FailingRepository {
+        async fn list_dispatchable_effects(&self) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_all_pending_submit_effects(
             &self,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_track(
             &self,
             _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
@@ -1080,14 +1172,14 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _batch_id: &str,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn save_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1095,21 +1187,21 @@ mod tests {
         async fn list_follow_up_retirement_requests(
             &self,
             _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+        ) -> anyhow::Result<Vec<FollowUpRetirementRequest>> {
             Ok(Vec::new())
         }
 
         async fn delete_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> anyhow::Result<()> {
             Ok(())
         }
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for FailingRepository {
+    impl TrackQueryStore for FailingRepository {
         async fn list_track_snapshots(&self) -> anyhow::Result<Vec<StoredTrackSnapshot>> {
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())
         }
@@ -1130,7 +1222,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<poise_engine::ports::StoredTrackEvent>> {
+        ) -> anyhow::Result<Vec<StoredTrackEvent>> {
             Ok(Vec::new())
         }
 
@@ -1138,7 +1230,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> anyhow::Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }

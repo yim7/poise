@@ -12,8 +12,8 @@ use poise_protocol::{
     TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
-use crate::event_presentation::{PresentationAudience, classify_track_events};
-use crate::read_model::TrackReadModel;
+use crate::event_presentation::project_activity_events;
+use poise_application::TrackReadModel;
 
 pub struct TrackProjector;
 
@@ -132,9 +132,8 @@ impl TrackProjector {
     }
 
     pub fn project_activity(&self, source: &TrackReadModel) -> Vec<TrackActivityItemView> {
-        classify_track_events(source)
+        project_activity_events(source)
             .into_iter()
-            .filter(|item| item.audience == PresentationAudience::Activity)
             .map(|item| TrackActivityItemView {
                 ts: item.ts.to_rfc3339(),
                 message: item.message,
@@ -365,7 +364,8 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_engine::ports::{EffectStatus, OrderRequest, PersistedTrackEffect, StoredTrackEvent};
+    use poise_application::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
+    use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::TrackStatus;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -375,7 +375,7 @@ mod tests {
     };
 
     use super::TrackProjector;
-    use crate::read_model::{ReadModelSlot, TrackReadModel};
+    use poise_application::{ReadModelSlot, TrackReadModel};
 
     #[test]
     fn projects_execution_badge_from_working_orders() {

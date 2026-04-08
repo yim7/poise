@@ -1,6 +1,6 @@
 use poise_protocol::{AccountSummaryView, RiskSignalView};
 
-use crate::account_read_model::{AccountReadModel, AccountRiskSignal};
+use poise_application::{AccountReadModel, AccountRiskSignal};
 
 pub struct AccountProjector;
 
@@ -37,7 +37,7 @@ mod tests {
     use poise_protocol::{AccountSummaryView, RiskSignalView};
 
     use super::AccountProjector;
-    use crate::account_read_model::{AccountReadModel, AccountRiskSignal};
+    use poise_application::{AccountReadModel, AccountRiskSignal};
 
     #[test]
     fn projects_account_read_model_to_summary_view() {

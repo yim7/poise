@@ -1,28 +1,21 @@
-mod account_monitor;
-mod account_monitor_store;
 mod account_projector;
-mod account_read_model;
 mod assembly;
 mod config;
-mod debug_query_service;
 mod effect_worker;
 mod event_presentation;
 mod exchange_freshness;
 mod http;
 mod instance_dir;
-mod notifications;
 mod order_outcome;
 #[allow(dead_code)]
 mod projector;
-#[allow(dead_code)]
-mod query_service;
-#[allow(dead_code)]
-mod read_model;
 mod runtime;
+mod server_context;
 mod state_bootstrap;
 mod submit_preflight;
+#[cfg(test)]
+mod test_support;
 mod websocket;
-mod write_service;
 
 use std::env;
 
@@ -65,7 +58,7 @@ async fn main() -> Result<()> {
             start_platform(&config, platform).await
         })
         .await?;
-    let app = http::router(platform.state());
+    let app = http::router(platform.http_state(), platform.websocket_state());
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await;
@@ -618,7 +611,7 @@ notional_per_unit = 375.0
         .await
         .unwrap();
         let runtime_handles = platform.runtime.start().await.unwrap();
-        let app = crate::http::router(platform.state());
+        let app = crate::http::router(platform.http_state(), platform.websocket_state());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });

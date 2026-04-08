@@ -1,0 +1,17 @@
+[package]
+name = "poise-application"
+version.workspace = true
+edition.workspace = true
+
+[features]
+server-test-support = []
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+poise-core = { path = "../core" }
+poise-engine = { path = "../engine" }
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true

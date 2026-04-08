@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust workspace, Cargo, Tokio, Axum, Rusqlite, Serde, anyhow
 
-**Baseline:** `cargo test --workspace --quiet` 在 2026-04-06 当前基线通过，可直接作为每个 task 的最终回归命令。
+**Baseline:** `cargo test --workspace --quiet` 和 `cargo build -p poise-server` 在 2026-04-06 当前基线通过，可直接作为每个 task 的最终回归命令。
 
 ---
 
@@ -114,6 +114,7 @@
 
 ### 迁移后删除的旧文件
 
+- 说明：以下文件名反映计划制定时的迁移目标，其中 `server/src/write_service.rs` 已在本轮实现中删除
 - `server/src/notifications.rs`
 - `server/src/read_model.rs`
 - `server/src/account_read_model.rs`
@@ -130,6 +131,7 @@
 - 每个 task 先写失败测试，再写最小实现
 - 每个 task 验收通过后必须立即提交，并把 commit SHA 回写到本计划
 - 未完成 `git add`、`git commit` 和计划回写，不得开始下一个 task
+- 最终验收至少包含 `cargo test --workspace --quiet` 和 `cargo build -p poise-server`
 - 除修复重构过程中暴露的明确 bug 外，不允许引入新的业务规则、策略口径或对外行为变化
 - 不因为“文件太大”单独拆 `engine/src/manager.rs`；只有在前面任务已经证明它仍混合多类变化原因时，才另起 spec / plan 处理
 
@@ -217,7 +219,7 @@ git commit -m "refactor: introduce poise-application shared domain boundary"
 ```
 
 Task 1 code commit:
-`<fill during execution>`
+`9e64514`
 
 ---
 
@@ -311,7 +313,7 @@ git commit -m "refactor: move persistence and queue stores under poise-applicati
 ```
 
 Task 2 code commit:
-`<fill during execution>`
+`ac46b3b`
 
 ---
 
@@ -426,7 +428,7 @@ git commit -m "refactor: move query and account application services into poise-
 ```
 
 Task 3 code commit:
-`<fill during execution>`
+`ffa4985`
 
 ---
 
@@ -528,7 +530,7 @@ git commit -m "refactor: split track write paths into application services"
 ```
 
 Task 4 code commit:
-`<fill during execution>`
+`ea9581e`
 
 ---
 
@@ -559,7 +561,7 @@ Task 4 code commit:
 - Test: `server/src/runtime/mod.rs`
 - Test: `server/src/effect_worker/mod.rs`
 
-- [ ] **Step 1: 先写失败测试，固定每个角色只拿自己需要的依赖**
+- [x] **Step 1: 先写失败测试，固定每个角色只拿自己需要的依赖**
 
 增加或改写这些测试：
 
@@ -577,7 +579,7 @@ async fn runtime_state_exposes_observation_and_account_paths_only() { /* ... */ 
 async fn effect_worker_state_exposes_effect_execution_paths_only() { /* ... */ }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前仍被 `ServerState` 绑定**
+- [x] **Step 2: 运行定向测试，确认当前仍被 `ServerState` 绑定**
 
 Run:
 `cargo test -p poise-server http::tests::router_accepts_http_state_without_runtime_dependencies -- --exact`
@@ -591,7 +593,7 @@ Run:
 Expected:
 - FAIL 或编译失败，提示 assembly 仍导出统一 `ServerState`
 
-- [ ] **Step 3: 实现角色化 context 和目录模块拆分**
+- [x] **Step 3: 实现角色化 context 和目录模块拆分**
 
 要求：
 - 新增 `HttpState`、`WebSocketState`、`RuntimeState`、`EffectWorkerState`
@@ -609,7 +611,7 @@ Expected:
   - retry / retirement
 - 顶层 `mod.rs` 只保留公开入口和少量编排
 
-- [ ] **Step 4: 运行 server 包的角色与模块边界回归**
+- [x] **Step 4: 运行 server 包的角色与模块边界回归**
 
 Run:
 `cargo test -p poise-server http::tests:: -- --nocapture`
@@ -621,7 +623,7 @@ Run:
 Expected:
 - PASS，`ServerState` 已删除，`runtime` / `effect_worker` 已按稳定职责组织
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/server_context.rs server/src/runtime server/src/effect_worker server/src/assembly.rs server/src/http.rs server/src/websocket.rs server/src/main.rs
@@ -630,7 +632,7 @@ git commit -m "refactor: replace server state bag with role-specific contexts"
 ```
 
 Task 5 code commit:
-`<fill during execution>`
+`083b5e5`
 
 ---
 
@@ -641,7 +643,7 @@ Task 5 code commit:
 - Modify: `docs/superpowers/specs/2026-04-06-server-boundary-convergence-design.md` (only if implementation names drift)
 - Modify: `Cargo.toml` / crate `Cargo.toml` files (only if final cleanup needed)
 
-- [ ] **Step 1: 做一次死代码和边界残留检查**
+- [x] **Step 1: 做一次死代码和边界残留检查**
 
 Run:
 `rg -n "ServerState|TrackWriteService|TrackReadRepositoryPort|ServerNotification|server::read_model|server::query_service" .`
@@ -650,7 +652,7 @@ Expected:
 - 只剩计划文档或 spec 中的历史描述
 - 生产代码中不存在这些旧 owner / 旧入口
 
-- [ ] **Step 2: 运行格式化和 workspace 全量验收**
+- [x] **Step 2: 运行格式化和 workspace 全量验收**
 
 Run:
 `cargo fmt --all`
@@ -661,14 +663,14 @@ Run:
 Expected:
 - PASS，workspace 全绿
 
-- [ ] **Step 3: 回写计划勾选状态和 commit SHA**
+- [x] **Step 3: 回写计划勾选状态和 commit SHA**
 
 要求：
 - 把本文件所有已完成步骤勾选
 - 把每个 task 的 commit SHA 回填到对应位置
 - 如果实现文件名与 spec 有偏差，更新 spec 文档中的最终命名
 
-- [ ] **Step 4: 提交最终清理**
+- [x] **Step 4: 提交最终清理**
 
 ```bash
 git add docs/superpowers/plans/2026-04-06-server-boundary-convergence.md docs/superpowers/specs/2026-04-06-server-boundary-convergence-design.md Cargo.toml application/Cargo.toml server/Cargo.toml storage/Cargo.toml
@@ -676,17 +678,17 @@ git commit -m "docs: finalize server boundary convergence implementation notes"
 ```
 
 Task 6 code commit:
-`<fill during execution>`
+`33c5afd`
 
 ---
 
 ## Acceptance Checklist
 
-- [ ] `poise-application` 已成为 query、effect store、mutation store、account monitor store、notifications、read models、diagnostics 和写侧服务的 owner
-- [ ] `engine::ports` 不再承载 read-side 和 effect queue / follow-up retirement 契约
-- [ ] `poise-storage` 通过 application-owned stores 暴露 SQLite 能力
-- [ ] `server` 不再持有 `ServerState`
-- [ ] `server` 不再持有 `TrackWriteService`
-- [ ] `runtime` 与 `effect_worker` 已拆成按稳定职责组织的目录模块
-- [ ] `TrackDebugQueryService` 返回 application model，protocol DTO 映射留在 `server`
-- [ ] `cargo test --workspace --quiet` 通过
+- [x] `poise-application` 已成为 query、effect store、mutation store、account monitor store、notifications、read models、diagnostics 和写侧服务的 owner
+- [x] `engine::ports` 不再承载 read-side 和 effect queue / follow-up retirement 契约
+- [x] `poise-storage` 通过 application-owned stores 暴露 SQLite 能力
+- [x] `server` 不再持有 `ServerState`
+- [x] `server` 不再持有 `TrackWriteService`
+- [x] `runtime` 与 `effect_worker` 已拆成按稳定职责组织的目录模块
+- [x] `TrackDebugQueryService` 返回 application model，protocol DTO 映射留在 `server`
+- [x] `cargo test --workspace --quiet` 通过

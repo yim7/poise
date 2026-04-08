@@ -8,47 +8,46 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use poise_application::{
+    AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
+    TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
+    TrackQueryService, TrackServiceSet,
+};
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{ClockPort, ExchangePort, MarketDataPort, StateRepositoryPort};
+use poise_engine::ports::{ClockPort, ExchangePort, MarketDataPort};
 use poise_engine::track::{Instrument, TrackId};
+#[cfg(test)]
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
-use crate::account_monitor::AccountMonitor;
-use crate::account_monitor_store::SqliteAccountMonitorStore;
 use crate::account_projector::AccountProjector;
 use crate::config::Config;
-use crate::debug_query_service::TrackDebugQueryService;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
-use crate::query_service::TrackQueryService;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
+#[cfg(test)]
+use crate::test_support::{EffectWorkerTestContext, RuntimeTestContext};
+use crate::server_context::{
+    EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
+};
 use crate::state_bootstrap::StateRepositories;
 use crate::submit_preflight::SubmitPreflight;
-use crate::write_service::TrackWriteService;
-#[derive(Clone)]
-pub struct ServerState {
-    pub write_service: Arc<TrackWriteService>,
-    pub state_repository: Arc<dyn StateRepositoryPort>,
-    pub exchange_freshness: Arc<ExchangeFreshness>,
-    #[allow(dead_code)]
-    pub query_service: Arc<TrackQueryService>,
-    #[allow(dead_code)]
-    pub debug_query_service: Arc<TrackDebugQueryService>,
-    #[allow(dead_code)]
-    pub projector: Arc<TrackProjector>,
-    pub account_monitor: Arc<AccountMonitor>,
-    pub account_projector: Arc<AccountProjector>,
-    pub account_margin_guard: Arc<AccountMarginGuardStore>,
-    pub reconcile_guards: Arc<TrackReconcileGuards>,
-    pub submit_preflight: Arc<SubmitPreflight>,
-}
+#[cfg(test)]
+use crate::test_support::build_test_contexts_from_runtime_states;
 
 pub struct ServerPlatform {
-    state: ServerState,
+    http_state: HttpState,
+    websocket_state: WebSocketState,
+    #[cfg(test)]
+    manager: Arc<RwLock<TrackManager>>,
+    #[cfg(test)]
+    runtime_test_context: RuntimeTestContext,
+    #[cfg(test)]
+    effect_worker_test_context: EffectWorkerTestContext,
     pub runtime: ServerRuntime,
 }
 
@@ -179,8 +178,9 @@ pub(crate) async fn assemble_with_components<R>(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform>
 where
-    R: poise_engine::ports::StateRepositoryPort
-        + poise_engine::ports::TrackReadRepositoryPort
+    R: poise_application::TrackMutationStore
+        + poise_application::TrackQueryStore
+        + poise_application::TrackEffectStore
         + 'static,
 {
     let repositories = StateRepositories::new(repository);
@@ -228,47 +228,103 @@ async fn assemble_with_state_store(
     }
 
     let (notifications, _) = broadcast::channel(256);
-    let state_repository = repositories.state_repository();
-    let read_repository = repositories.read_repository();
+    let mutation_store = repositories.mutation_store();
+    let query_store = repositories.query_store();
+    let effect_store = repositories.effect_store();
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    let write_service = Arc::new(TrackWriteService::new(
+    let write_services = TrackServiceSet::new(
         manager,
-        state_repository.clone(),
+        mutation_store.clone(),
+        effect_store.clone(),
         notifications.clone(),
         account_margin_guard.clone(),
-    ));
-    let query_service = Arc::new(TrackQueryService::new(read_repository));
+    );
+    let command_service = Arc::new(write_services.command);
+    let observation_service = Arc::new(write_services.observation);
+    let effect_service = Arc::new(write_services.effect);
+    #[cfg(test)]
+    let manager = observation_service.manager();
+    let query_service = Arc::new(TrackQueryService::new(query_store));
+    let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     let projector = Arc::new(TrackProjector::new());
-    let account_monitor = if let Some(sqlite_storage) = repositories.sqlite_storage() {
+    let account_projector = Arc::new(AccountProjector::new());
+    let account_monitor = if let Some(account_store) = repositories.account_monitor_store() {
         let account_summary: Arc<dyn poise_engine::ports::AccountSummaryPort> = exchange.clone();
         Arc::new(
             AccountMonitor::restore(
                 account_summary,
-                Arc::new(SqliteAccountMonitorStore::new(sqlite_storage)),
-                write_service.notification_sender(),
+                account_store,
+                notifications.clone(),
                 config.account_monitor.clone(),
             )
             .await?,
         )
     } else {
         Arc::new(AccountMonitor::unavailable(
-            write_service.notification_sender(),
+            notifications.clone(),
             config.account_monitor.clone(),
         ))
     };
-    let server_state = build_server_state_with_account_monitor(
-        write_service,
-        state_repository,
-        query_service,
-        projector,
-        account_monitor,
-        account_margin_guard,
+    let exchange_freshness = Arc::new(ExchangeFreshness::default());
+    let reconcile_guards = Arc::new(TrackReconcileGuards::default());
+    let submit_preflight = Arc::new(SubmitPreflight::new());
+    let reconcile_state = build_reconcile_state(
+        observation_service.clone(),
+        mutation_store.clone(),
+        effect_store.clone(),
+        exchange_freshness.clone(),
+        reconcile_guards.clone(),
+        submit_preflight.clone(),
+    );
+    let http_state = build_http_state(
+        command_service.clone(),
+        query_service.clone(),
+        debug_query_service.clone(),
+        projector.clone(),
+        account_monitor.clone(),
+        account_projector.clone(),
+    );
+    let websocket_state = build_websocket_state(
+        notifications.clone(),
+        query_service.clone(),
+        projector.clone(),
+        account_monitor.clone(),
+        account_projector.clone(),
+    );
+    let runtime_state = build_runtime_state(
+        reconcile_state.clone(),
+        notifications.clone(),
+        account_monitor.clone(),
+        account_margin_guard.clone(),
+    );
+    let effect_worker_state = build_effect_worker_state(
+        reconcile_state.clone(),
+        effect_service.clone(),
+        account_margin_guard.clone(),
+    );
+    #[cfg(test)]
+    let (runtime_test_context, effect_worker_test_context) = build_test_contexts_from_runtime_states(
+        runtime_state.clone(),
+        effect_worker_state.clone(),
+        manager.clone(),
+        notifications.clone(),
+        projector.clone(),
+        command_service.clone(),
+        observation_service.clone(),
     );
 
     Ok(ServerPlatform {
-        state: server_state.clone(),
+        http_state,
+        websocket_state,
+        #[cfg(test)]
+        manager,
+        #[cfg(test)]
+        runtime_test_context: runtime_test_context.clone(),
+        #[cfg(test)]
+        effect_worker_test_context: effect_worker_test_context.clone(),
         runtime: ServerRuntime::with_account_capacity_snapshots(
-            server_state,
+            runtime_state,
+            effect_worker_state,
             exchange,
             market_data,
             account_capacity_snapshots,
@@ -336,8 +392,32 @@ async fn load_account_capacity_snapshot_with_retry(
 }
 
 impl ServerPlatform {
-    pub fn state(&self) -> ServerState {
-        self.state.clone()
+    pub fn http_state(&self) -> HttpState {
+        self.http_state.clone()
+    }
+
+    pub fn websocket_state(&self) -> WebSocketState {
+        self.websocket_state.clone()
+    }
+
+    #[cfg(test)]
+    pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
+        self.manager.clone()
+    }
+
+    #[cfg(test)]
+    pub fn runtime_test_context(&self) -> RuntimeTestContext {
+        self.runtime_test_context.clone()
+    }
+
+    #[cfg(test)]
+    pub fn effect_worker_test_context(&self) -> crate::test_support::EffectWorkerTestContext {
+        self.effect_worker_test_context.clone()
+    }
+
+    #[cfg(test)]
+    pub fn exchange_freshness(&self) -> Arc<ExchangeFreshness> {
+        self.runtime_test_context.exchange_freshness.clone()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -363,53 +443,81 @@ impl ClockPort for SystemClock {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn build_server_state(
-    write_service: Arc<TrackWriteService>,
-    state_repository: Arc<dyn StateRepositoryPort>,
+pub(crate) fn build_http_state(
+    command_service: Arc<TrackCommandService>,
     query_service: Arc<TrackQueryService>,
-    projector: Arc<TrackProjector>,
-    account_margin_guard: Arc<AccountMarginGuardStore>,
-) -> ServerState {
-    let account_monitor = Arc::new(AccountMonitor::unavailable(
-        write_service.notification_sender(),
-        crate::config::AccountMonitorConfig::default(),
-    ));
-    build_server_state_with_account_monitor(
-        write_service,
-        state_repository,
-        query_service,
-        projector,
-        account_monitor,
-        account_margin_guard,
-    )
-}
-
-pub(crate) fn build_server_state_with_account_monitor(
-    write_service: Arc<TrackWriteService>,
-    state_repository: Arc<dyn StateRepositoryPort>,
-    query_service: Arc<TrackQueryService>,
+    debug_query_service: Arc<TrackDebugQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
-    account_margin_guard: Arc<AccountMarginGuardStore>,
-) -> ServerState {
-    assert!(
-        write_service.uses_account_margin_guard(&account_margin_guard),
-        "account margin guard mismatch"
-    );
-    let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
-    ServerState {
-        write_service,
-        state_repository,
-        exchange_freshness: Arc::new(ExchangeFreshness::default()),
+    account_projector: Arc<AccountProjector>,
+) -> HttpState {
+    HttpState {
+        command_service,
         query_service,
         debug_query_service,
         projector,
         account_monitor,
-        account_projector: Arc::new(AccountProjector::new()),
+        account_projector,
+    }
+}
+
+pub(crate) fn build_websocket_state(
+    notifications: broadcast::Sender<ApplicationNotification>,
+    query_service: Arc<TrackQueryService>,
+    projector: Arc<TrackProjector>,
+    account_monitor: Arc<AccountMonitor>,
+    account_projector: Arc<AccountProjector>,
+) -> WebSocketState {
+    WebSocketState {
+        notifications,
+        query_service,
+        projector,
+        account_monitor,
+        account_projector,
+    }
+}
+
+pub(crate) fn build_reconcile_state(
+    observation_service: Arc<TrackObservationService>,
+    mutation_store: Arc<dyn TrackMutationStore>,
+    effect_store: Arc<dyn TrackEffectStore>,
+    exchange_freshness: Arc<ExchangeFreshness>,
+    reconcile_guards: Arc<TrackReconcileGuards>,
+    submit_preflight: Arc<SubmitPreflight>,
+) -> ReconcileState {
+    ReconcileState {
+        observation_service,
+        mutation_store,
+        effect_store,
+        exchange_freshness,
+        reconcile_guards,
+        submit_preflight,
+    }
+}
+
+pub(crate) fn build_runtime_state(
+    reconcile: ReconcileState,
+    notifications: broadcast::Sender<ApplicationNotification>,
+    account_monitor: Arc<AccountMonitor>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
+) -> RuntimeState {
+    RuntimeState {
+        reconcile,
+        notifications,
+        account_monitor,
         account_margin_guard,
-        reconcile_guards: Arc::new(TrackReconcileGuards::default()),
-        submit_preflight: Arc::new(SubmitPreflight::new()),
+    }
+}
+
+pub(crate) fn build_effect_worker_state(
+    reconcile: ReconcileState,
+    effect_service: Arc<TrackEffectService>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
+) -> EffectWorkerState {
+    EffectWorkerState {
+        reconcile,
+        effect_service,
+        account_margin_guard,
     }
 }
 
@@ -422,12 +530,16 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
+    use poise_application::{
+        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
+        StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationStore,
+        TrackQueryStore,
+    };
     use poise_core::events::DomainEvent as EngineDomainEvent;
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
         ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest, Position, PriceTick,
-        StateRepositoryPort, TrackReadRepositoryPort, TrackSnapshot,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::StreamEvent;
@@ -441,12 +553,16 @@ mod tests {
     use crate::config::{Config, ExchangeConfig, TrackDefinition};
     use crate::http::router;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
     use crate::state_bootstrap::StateRepositories;
-    use crate::write_service::TrackWriteService;
+    use crate::test_support::{
+        build_runtime_and_effect_worker_test_contexts, build_test_application_services,
+        build_http_state as build_test_http_state,
+        build_websocket_state as build_test_websocket_state, unavailable_account_monitor,
+    };
+    use poise_application::{TrackDebugQueryService, TrackQueryService};
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_server_state, resolve_binance_endpoints,
+        ServerPlatform, SystemClock, assemble, resolve_binance_endpoints,
         resolve_binance_endpoints_with_lookup, validate_exchange_runtime_config,
         validate_unique_instruments, validate_unique_track_ids,
     };
@@ -544,7 +660,7 @@ mod tests {
         let platform = assemble_with_fake_ports(&config, instance_dir.path())
             .await
             .unwrap();
-        let manager_handle = platform.state().write_service.manager();
+        let manager_handle = platform.manager();
         let manager = manager_handle.read().await;
 
         assert_eq!(manager.list_tracks().len(), 2);
@@ -749,7 +865,7 @@ mod tests {
             3,
             "should retry until exchange info succeeds"
         );
-        let manager = platform.state().write_service.manager();
+        let manager = platform.manager();
         assert_eq!(manager.read().await.list_tracks().len(), 1);
     }
 
@@ -801,105 +917,6 @@ mod tests {
         assert!(error.to_string().contains("insufficient account margin"));
     }
 
-    #[tokio::test]
-    async fn build_server_state_reuses_explicit_account_margin_guard() {
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let mut manager = TrackManager::new(Arc::new(SystemClock));
-        manager
-            .add_track(
-                TrackId::new("BTCUSDT"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
-                },
-                poise_core::risk::CapacityBudget {
-                    max_notional: 3000.0,
-                    daily_loss_limit: -100.0,
-                    stop_loss_pct: 10.0,
-                },
-                test_exchange_rules(),
-            )
-            .unwrap();
-        let (events, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
-        let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
-            manager,
-            state_repository.clone(),
-            events,
-            account_margin_guard.clone(),
-        ));
-
-        let state = build_server_state(
-            write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
-            Arc::new(TrackProjector::new()),
-            account_margin_guard.clone(),
-        );
-
-        assert!(Arc::ptr_eq(
-            &state.account_margin_guard,
-            &account_margin_guard
-        ));
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "account margin guard mismatch")]
-    async fn build_server_state_rejects_mismatched_account_margin_guard() {
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let mut manager = TrackManager::new(Arc::new(SystemClock));
-        manager
-            .add_track(
-                TrackId::new("BTCUSDT"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
-                },
-                poise_core::risk::CapacityBudget {
-                    max_notional: 3000.0,
-                    daily_loss_limit: -100.0,
-                    stop_loss_pct: 10.0,
-                },
-                test_exchange_rules(),
-            )
-            .unwrap();
-        let (events, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
-        let write_service_guard = Arc::new(AccountMarginGuardStore::default());
-        let server_state_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
-            manager,
-            state_repository.clone(),
-            events,
-            write_service_guard,
-        ));
-
-        let _ = build_server_state(
-            write_service,
-            state_repository,
-            Arc::new(TrackQueryService::new(read_repository)),
-            Arc::new(TrackProjector::new()),
-            server_state_guard,
-        );
-    }
-
     #[test]
     fn test_runtime_reads_endpoints_from_env_lookup() {
         let (rest_base_url, ws_base_url) =
@@ -919,7 +936,7 @@ mod tests {
         let (platform, btc_sender) = test_platform();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app = router(platform.state());
+        let app = router(platform.http_state(), platform.websocket_state());
 
         let handles = platform.start_market_data_tasks().await.unwrap();
         let server = tokio::spawn(async move {
@@ -995,7 +1012,7 @@ mod tests {
         let first = assemble_with_fake_ports(&config, instance_dir.path())
             .await
             .unwrap();
-        let app = router(first.state());
+        let app = router(first.http_state(), first.websocket_state());
         let pause = tower::ServiceExt::oneshot(
             app,
             axum::http::Request::builder()
@@ -1014,7 +1031,7 @@ mod tests {
         let second = assemble_with_fake_ports(&config, instance_dir.path())
             .await
             .unwrap();
-        let manager_handle = second.state().write_service.manager();
+        let manager_handle = second.manager();
         let manager = manager_handle.read().await;
         let track = manager.get_track("btc-core").unwrap();
 
@@ -1022,13 +1039,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_state_exposes_observation_and_account_paths_only() {
+        let (platform, _) = test_platform();
+        let state = platform.runtime_test_context();
+
+        assert_eq!(state.track_instruments().await.len(), 1);
+        assert!(state.runtime_state().account_monitor.current_summary().await.is_none());
+        let _receiver = state.notifications.subscribe();
+    }
+
+    #[tokio::test]
+    async fn effect_worker_state_exposes_effect_execution_paths_only() {
+        let (platform, _) = test_platform();
+        let state = platform.effect_worker_test_context().effect_worker_state;
+
+        assert!(
+            state
+                .reconcile
+                .effect_store
+                .list_dispatchable_effects()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = state
+            .account_margin_guard
+            .constraint_for(&Instrument::new(Venue::Binance, "BTCUSDT"));
+    }
+
+    #[tokio::test]
     async fn newer_tick_snapshot_is_not_overwritten_by_older_command_snapshot() {
         let persistence = Arc::new(BlockingPersistence::default());
         let (platform, _btc_sender) = test_platform_with_repository(persistence.clone());
-        let app = router(platform.state());
+        let app = router(platform.http_state(), platform.websocket_state());
 
         {
-            let manager_handle = platform.state.write_service.manager();
+            let manager_handle = platform.manager();
             let mut manager = manager_handle.write().await;
             let tick = PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -1063,7 +1109,7 @@ mod tests {
 
         persistence.wait_for_first_save_start().await;
 
-        let tick_state = platform.state.clone();
+        let tick_state = platform.runtime_test_context();
         let tick_request = tokio::spawn(async move {
             let tick = PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -1071,11 +1117,7 @@ mod tests {
                 mark_price: 85.0,
                 timestamp: chrono::Utc::now(),
             };
-            tick_state
-                .write_service
-                .observe_market("btc-core", tick.reference_price)
-                .await
-                .map(|_| ())
+            tick_state.observe_market("btc-core", tick.reference_price).await.map(|_| ())
         });
 
         let second_save_started = tokio::time::timeout(
@@ -1104,10 +1146,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_server_state_initializes_fresh_exchange_freshness_store() {
+    async fn build_test_context_initializes_fresh_exchange_freshness_store() {
         let (platform, _) = test_platform();
 
-        assert!(!platform.state.exchange_freshness.is_stale("btc-core").await);
+        assert!(!platform.exchange_freshness().is_stale("btc-core").await);
+    }
+
+    #[tokio::test]
+    async fn build_test_context_reuses_runtime_coordination_objects() {
+        let (platform, _) = test_platform();
+        let runtime_context = platform.runtime_test_context();
+        let effect_worker_context = platform.effect_worker_test_context();
+
+        assert!(Arc::ptr_eq(
+            &runtime_context.exchange_freshness,
+            &effect_worker_context.exchange_freshness,
+        ));
+        assert!(Arc::ptr_eq(
+            &runtime_context.submit_preflight,
+            &effect_worker_context.submit_preflight,
+        ));
     }
 
     fn test_platform() -> (ServerPlatform, mpsc::Sender<PriceTick>) {
@@ -1136,7 +1194,7 @@ mod tests {
         repository: Arc<R>,
     ) -> (ServerPlatform, mpsc::Sender<PriceTick>)
     where
-        R: StateRepositoryPort + TrackReadRepositoryPort + 'static,
+        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
         let (btc_sender, btc_receiver) = mpsc::channel(8);
         let mut receivers = HashMap::new();
@@ -1170,28 +1228,58 @@ mod tests {
             )
             .unwrap();
         let (events, _) = broadcast::channel(16);
-        let state_repository: Arc<dyn StateRepositoryPort> = repository.clone();
-        let read_repository: Arc<dyn TrackReadRepositoryPort> = repository;
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteService::new(
+        let services = build_test_application_services(
             manager,
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             events.clone(),
             account_margin_guard.clone(),
-        ));
-        let query_service = Arc::new(TrackQueryService::new(read_repository));
-        let state = build_server_state(
-            write_service,
-            state_repository,
-            query_service,
-            Arc::new(TrackProjector::new()),
-            account_margin_guard,
         );
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>
+        ));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let projector = Arc::new(TrackProjector::new());
+        let account_monitor = unavailable_account_monitor(events.clone());
+        let account_projector = Arc::new(crate::account_projector::AccountProjector::new());
+        let (runtime_test_context, effect_worker_test_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                mutation_store,
+                effect_store,
+                account_monitor.clone(),
+                projector.clone(),
+            );
 
         (
             ServerPlatform {
-                state: state.clone(),
-                runtime: crate::runtime::ServerRuntime::new(state, exchange, market_data),
+                http_state: build_test_http_state(
+                    &services,
+                    query_service.clone(),
+                    debug_query_service,
+                    projector.clone(),
+                    account_monitor.clone(),
+                    account_projector.clone(),
+                ),
+                websocket_state: build_test_websocket_state(
+                    &services,
+                    query_service,
+                    projector,
+                    account_monitor,
+                    account_projector,
+                ),
+                manager: services.observation_service.manager(),
+                runtime_test_context: runtime_test_context.clone(),
+                effect_worker_test_context: effect_worker_test_context.clone(),
+                runtime: crate::runtime::ServerRuntime::new(
+                    runtime_test_context.runtime_state(),
+                    effect_worker_test_context.effect_worker_state.clone(),
+                    exchange,
+                    market_data,
+                ),
             },
             btc_sender,
         )
@@ -1396,7 +1484,7 @@ mod tests {
 
     #[derive(Default)]
     struct BlockingPersistence {
-        snapshots: AsyncMutex<HashMap<String, TrackSnapshot>>,
+        snapshots: AsyncMutex<HashMap<String, poise_engine::snapshot::TrackRuntimeSnapshot>>,
         started_saves: AtomicUsize,
         completed_saves: AtomicUsize,
         first_save_started: Notify,
@@ -1429,15 +1517,15 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for BlockingPersistence {
+    impl TrackMutationStore for BlockingPersistence {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &TrackSnapshot,
+            state: &poise_engine::snapshot::TrackRuntimeSnapshot,
             _events: &[EngineDomainEvent],
             _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
-        ) -> Result<poise_engine::ports::CommittedTrackWrite> {
+            _effect_status_update: Option<&EffectStatusUpdate>,
+        ) -> Result<CommittedTrackWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
             self.first_save_started.notify_waiters();
             if save_index == 0 {
@@ -1450,36 +1538,38 @@ mod tests {
                 .insert(id.to_string(), state.clone());
             self.completed_saves.fetch_add(1, Ordering::SeqCst);
             self.completed_save.notify_waiters();
-            Ok(poise_engine::ports::CommittedTrackWrite {
+            Ok(CommittedTrackWrite {
                 track_id: poise_engine::track::TrackId::new(id),
                 effects: Vec::new(),
             })
         }
 
-        async fn load_track_state(&self, id: &str) -> Result<Option<TrackSnapshot>> {
+        async fn load_track_state(
+            &self,
+            id: &str,
+        ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
             Ok(self.snapshots.lock().await.get(id).cloned())
         }
 
         async fn list_track_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
             Ok(Vec::new())
         }
+    }
 
-        async fn list_dispatchable_effects(
-            &self,
-        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+    #[async_trait::async_trait]
+    impl TrackEffectStore for BlockingPersistence {
+        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
-        async fn list_all_pending_submit_effects(
-            &self,
-        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn list_pending_submit_effects_for_track(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
@@ -1487,14 +1577,14 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _batch_id: &str,
-        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 
         async fn save_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> Result<()> {
             Ok(())
         }
@@ -1502,31 +1592,29 @@ mod tests {
         async fn list_follow_up_retirement_requests(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
             Ok(Vec::new())
         }
 
         async fn delete_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> Result<()> {
             Ok(())
         }
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for BlockingPersistence {
-        async fn list_track_snapshots(
-            &self,
-        ) -> Result<Vec<poise_engine::ports::StoredTrackSnapshot>> {
+    impl TrackQueryStore for BlockingPersistence {
+        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .values()
                 .cloned()
-                .map(|snapshot| poise_engine::ports::StoredTrackSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: chrono::Utc::now(),
                 })
@@ -1536,14 +1624,14 @@ mod tests {
         async fn load_track_snapshot(
             &self,
             track_id: &TrackId,
-        ) -> Result<Option<poise_engine::ports::StoredTrackSnapshot>> {
+        ) -> Result<Option<StoredTrackSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
                 .await
                 .get(track_id.as_str())
                 .cloned()
-                .map(|snapshot| poise_engine::ports::StoredTrackSnapshot {
+                .map(|snapshot| StoredTrackSnapshot {
                     snapshot,
                     updated_at: chrono::Utc::now(),
                 }))
@@ -1553,7 +1641,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<poise_engine::ports::StoredTrackEvent>> {
+        ) -> Result<Vec<StoredTrackEvent>> {
             Ok(Vec::new())
         }
 
@@ -1561,7 +1649,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _limit: usize,
-        ) -> Result<Vec<poise_engine::ports::PersistedTrackEffect>> {
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
     }

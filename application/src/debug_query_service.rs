@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use poise_core::events::DomainEvent;
 use poise_engine::track::TrackId;
-use poise_protocol::{TrackDiagnosticItemView, TrackDiagnosticsView};
 
-use crate::event_presentation::{PresentationAudience, classify_track_events};
-use crate::query_service::TrackQueryService;
+use crate::{DiagnosticSeverity, TrackDiagnosticItem, TrackQueryService};
 
 pub struct TrackDebugQueryService {
     query_service: Arc<TrackQueryService>,
@@ -19,7 +18,7 @@ impl TrackDebugQueryService {
     pub async fn load_track_diagnostics(
         &self,
         track_id: &TrackId,
-    ) -> Result<Option<TrackDiagnosticsView>> {
+    ) -> Result<Option<Vec<TrackDiagnosticItem>>> {
         let Some(source) = self
             .query_service
             .load_track_detail_source(track_id)
@@ -28,18 +27,25 @@ impl TrackDebugQueryService {
             return Ok(None);
         };
 
-        let items = classify_track_events(&source)
-            .into_iter()
-            .filter(|item| item.audience == PresentationAudience::Diagnostics)
-            .map(|item| TrackDiagnosticItemView {
-                ts: item.ts.to_rfc3339(),
-                message: item.message,
-                level: item.level,
-            })
-            .collect();
-
-        Ok(Some(TrackDiagnosticsView { items }))
+        Ok(Some(classify_diagnostic_items(&source)))
     }
+}
+
+fn classify_diagnostic_items(source: &crate::TrackReadModel) -> Vec<TrackDiagnosticItem> {
+    let mut items = source
+        .recent_track_events
+        .iter()
+        .filter_map(|event| match &event.event {
+            DomainEvent::ExposureTargetChanged { from, to } => Some(TrackDiagnosticItem {
+                observed_at: event.created_at,
+                severity: DiagnosticSeverity::Info,
+                message: format!("desired exposure {:.4} -> {:.4}", from.0, to.0),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| item.observed_at);
+    items
 }
 
 #[cfg(test)]
@@ -47,15 +53,13 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Result;
+    use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-    use poise_engine::ports::{
-        EffectStatus, OrderRequest, OrderStatus, PersistedTrackEffect, StoredTrackEvent,
-        StoredTrackSnapshot, TrackReadRepositoryPort,
-    };
+    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
         WorkingOrder,
@@ -64,8 +68,12 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
+    use crate::{
+        DiagnosticSeverity, EffectStatus, PersistedTrackEffect, StoredTrackEvent,
+        StoredTrackSnapshot, TrackQueryService, TrackQueryStore,
+    };
+
     use super::TrackDebugQueryService;
-    use crate::query_service::TrackQueryService;
 
     #[tokio::test]
     async fn load_track_diagnostics_projects_only_diagnostic_events_in_order() {
@@ -78,17 +86,18 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(diagnostics.items.len(), 2);
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Info);
+        assert_eq!(diagnostics[0].message, "desired exposure 3.5000 -> 4.0000");
         assert_eq!(
-            diagnostics.items[0].message,
-            "desired exposure 3.5000 -> 4.0000"
+            diagnostics[0].observed_at,
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap()
         );
-        assert_eq!(diagnostics.items[0].ts, "2026-03-26T10:01:00+00:00");
+        assert_eq!(diagnostics[1].message, "desired exposure 4.0000 -> 4.5000");
         assert_eq!(
-            diagnostics.items[1].message,
-            "desired exposure 4.0000 -> 4.5000"
+            diagnostics[1].observed_at,
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 10).unwrap()
         );
-        assert_eq!(diagnostics.items[1].ts, "2026-03-26T10:01:10+00:00");
     }
 
     struct FakeReadRepository {
@@ -161,8 +170,8 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for FakeReadRepository {
+    #[async_trait]
+    impl TrackQueryStore for FakeReadRepository {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             Ok(vec![self.snapshot.clone()])
         }
@@ -257,7 +266,7 @@ mod tests {
                 realized_pnl_day: None,
                 realized_pnl_today: 0.0,
                 realized_pnl_cumulative: 980.1,
-                unrealized_pnl: 265.2,
+                unrealized_pnl: 0.0,
                 ..RiskState::default()
             },
             observed: ObservedState {

@@ -1194,6 +1194,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "poise-application"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "poise-core",
+ "poise-engine",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "poise-binance"
 version = "0.1.0"
 dependencies = [
@@ -1254,6 +1268,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "poise-application",
  "poise-binance",
  "poise-core",
  "poise-engine",
@@ -1279,6 +1294,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "poise-application",
  "poise-core",
  "poise-engine",
  "rusqlite",

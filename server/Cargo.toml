@@ -8,6 +8,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+poise-application = { path = "../application" }
 poise-binance = { path = "../exchanges/binance" }
 poise-core = { path = "../core" }
 poise-engine = { path = "../engine" }
@@ -24,6 +25,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+poise-application = { path = "../application", features = ["server-test-support"] }
 reqwest.workspace = true
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

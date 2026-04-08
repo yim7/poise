@@ -1,26 +1,33 @@
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
+use poise_application::ApplicationNotification;
 use poise_protocol::StreamEvent;
 
-use crate::assembly::ServerState;
-use crate::notifications::ServerNotification;
+use crate::server_context::WebSocketState;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, state: WebSocketState) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: ServerState) {
-    let mut receiver = state.write_service.subscribe_notifications();
+#[cfg(test)]
+pub async fn ws_handler_with_test_state(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<WebSocketState>,
+) -> Response {
+    ws_handler(ws, state).await
+}
+
+async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
+    let mut receiver = state.notifications.subscribe();
 
     loop {
         match receiver.recv().await {
-            Ok(ServerNotification::TrackChanged { track_id }) => {
+            Ok(ApplicationNotification::TrackChanged { track_id }) => {
                 if !push_projected_updates(&mut socket, &state, track_id).await {
                     break;
                 }
             }
-            Ok(ServerNotification::AccountChanged) => {
+            Ok(ApplicationNotification::AccountChanged) => {
                 if !push_account_summary(&mut socket, &state).await {
                     break;
                 }
@@ -39,7 +46,7 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
 
 async fn push_projected_updates(
     socket: &mut WebSocket,
-    state: &ServerState,
+    state: &WebSocketState,
     track_id: poise_engine::track::TrackId,
 ) -> bool {
     let source = match state
@@ -93,7 +100,7 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
-async fn push_account_summary(socket: &mut WebSocket, state: &ServerState) -> bool {
+async fn push_account_summary(socket: &mut WebSocket, state: &WebSocketState) -> bool {
     let Some(summary) = state.account_monitor.current_summary().await else {
         return true;
     };
@@ -127,7 +134,12 @@ mod tests {
     use anyhow::{Result, anyhow};
     use axum::Router;
     use chrono::{TimeZone, Utc};
-    use futures_util::StreamExt;
+    use futures_util::{SinkExt, StreamExt};
+    use poise_application::{
+        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
+        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
+        TrackMutationStore, TrackQueryStore,
+    };
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
@@ -135,9 +147,8 @@ mod tests {
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountSummarySnapshot, ClockPort, EffectStatus, ExchangeInfo, ExchangeOrder, ExchangePort,
-        OrderReceipt, OrderRequest, PersistedTrackEffect, Position, StateRepositoryPort,
-        StoredTrackEvent, StoredTrackSnapshot, TrackReadRepositoryPort,
+        AccountSummarySnapshot, ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt,
+        OrderRequest, Position,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -147,21 +158,26 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::account_monitor::AccountMonitor;
-    use crate::account_monitor_store::{
-        AccountMonitorStore, SqliteAccountMonitorStore, StoredAccountMonitorState,
-    };
-    use crate::assembly::{
-        ServerState, build_server_state, build_server_state_with_account_monitor,
-    };
-    use crate::config::AccountMonitorConfig;
+    use crate::server_context::WebSocketState;
     use crate::effect_worker::EffectWorker;
-    use crate::notifications::ServerNotification;
     use crate::projector::TrackProjector;
-    use crate::query_service::TrackQueryService;
-    use crate::write_service::TrackWriteService;
+    use crate::test_support::{
+        build_effect_worker_test_context, build_test_application_services, build_websocket_state,
+        unavailable_account_monitor,
+    };
+    use poise_application::{
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
+        StoredAccountMonitorState, TrackCommandService, TrackQueryService,
+    };
 
-    use super::ws_handler;
+    use super::ws_handler_with_test_state;
+
+    #[derive(Clone)]
+    struct WebSocketTestContext {
+        websocket_state: WebSocketState,
+        command_service: Arc<TrackCommandService>,
+        notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
+    }
 
     type ClientStream = futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
@@ -171,79 +187,137 @@ mod tests {
 
     async fn spawn_server(
         repository: Arc<TestRepository>,
-    ) -> (String, Arc<TrackWriteService>, ServerState) {
+    ) -> (String, WebSocketTestContext) {
         spawn_server_with_capacity(repository, 16).await
+    }
+
+    #[tokio::test]
+    async fn websocket_accepts_websocket_state_without_effect_worker_dependencies() {
+        let repository = Arc::new(TestRepository::default());
+        let (_url, state) = spawn_server(repository).await;
+        let websocket_state = state.websocket_state.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws| super::ws_handler(ws, websocket_state.clone())),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
+        let (mut sink, _) = client.split();
+        sink.close().await.unwrap();
     }
 
     async fn spawn_server_with_capacity(
         repository: Arc<TestRepository>,
         notification_capacity: usize,
-    ) -> (String, Arc<TrackWriteService>, ServerState) {
+    ) -> (String, WebSocketTestContext) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
-        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let service = Arc::new(TrackWriteService::new(
+        let services = build_test_application_services(
             test_manager(),
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
+        );
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>
         ));
-        let state = build_server_state(
-            Arc::clone(&service),
-            state_repository,
-            Arc::new(TrackQueryService::new(
-                repository.clone() as Arc<dyn TrackReadRepositoryPort>
-            )),
+        let websocket_state = build_websocket_state(
+            &services,
+            query_service,
             Arc::new(TrackProjector::new()),
-            account_margin_guard,
+            unavailable_account_monitor(services.notifications.clone()),
+            Arc::new(crate::account_projector::AccountProjector::new()),
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler))
-            .with_state(state.clone());
+            .route("/ws", axum::routing::get(ws_handler_with_test_state))
+            .with_state(websocket_state.clone());
 
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
-        (format!("ws://{address}/ws"), service, state)
+        (
+            format!("ws://{address}/ws"),
+            WebSocketTestContext {
+                websocket_state,
+                command_service: services.command_service.clone(),
+                notifications: services.notifications.clone(),
+            },
+        )
     }
 
     async fn spawn_server_with_account_monitor(
         repository: Arc<TestRepository>,
         account_monitor: Arc<AccountMonitor>,
-    ) -> (String, Arc<TrackWriteService>, ServerState) {
+    ) -> (String, WebSocketTestContext) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
-        let state_repository = repository.clone() as Arc<dyn StateRepositoryPort>;
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let service = Arc::new(TrackWriteService::new(
+        let services = build_test_application_services(
             test_manager(),
-            state_repository.clone(),
+            mutation_store.clone(),
+            effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
+        );
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>
         ));
-        let state = build_server_state_with_account_monitor(
-            Arc::clone(&service),
-            state_repository,
-            Arc::new(TrackQueryService::new(
-                repository.clone() as Arc<dyn TrackReadRepositoryPort>
-            )),
+        let websocket_state = build_websocket_state(
+            &services,
+            query_service,
             Arc::new(TrackProjector::new()),
             account_monitor,
-            account_margin_guard,
+            Arc::new(crate::account_projector::AccountProjector::new()),
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler))
-            .with_state(state.clone());
+            .route("/ws", axum::routing::get(ws_handler_with_test_state))
+            .with_state(websocket_state.clone());
 
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
-        (format!("ws://{address}/ws"), service, state)
+        (
+            format!("ws://{address}/ws"),
+            WebSocketTestContext {
+                websocket_state,
+                command_service: services.command_service.clone(),
+                notifications: services.notifications.clone(),
+            },
+        )
+    }
+
+    fn build_effect_worker_state_for_notification_test(
+        repository: Arc<TestRepository>,
+        notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
+    ) -> crate::server_context::EffectWorkerState {
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository as Arc<dyn TrackEffectStore>;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager(),
+            mutation_store.clone(),
+            effect_store.clone(),
+            notifications,
+            account_margin_guard,
+        );
+
+        build_effect_worker_test_context(&services, mutation_store, effect_store).effect_worker_state
     }
 
     async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
@@ -264,11 +338,10 @@ mod tests {
     }
 
     async fn seeded_account_monitor(
-        notifications: tokio::sync::broadcast::Sender<ServerNotification>,
+        notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
     ) -> Arc<AccountMonitor> {
-        let account_store = Arc::new(SqliteAccountMonitorStore::new(Arc::new(
-            poise_storage::sqlite::SqliteStorage::in_memory().unwrap(),
-        )));
+        let account_store: Arc<dyn AccountMonitorStore> =
+            Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap());
         account_store
             .save_state(&StoredAccountMonitorState {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
@@ -299,13 +372,13 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_events_to_multiple_clients() {
         let repository = seeded_repository();
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client_a, _) = connect_async(&url).await.unwrap();
         let (client_b, _) = connect_async(&url).await.unwrap();
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(ServerNotification::TrackChanged {
+        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -322,12 +395,12 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_track_events_with_stream_event_envelope() {
         let repository = seeded_repository();
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(
-            crate::notifications::ServerNotification::TrackChanged {
+        let _ = state.notifications.send(
+            poise_application::ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             },
         );
@@ -351,12 +424,12 @@ mod tests {
         let repository = seeded_repository();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_monitor = seeded_account_monitor(notifications.clone()).await;
-        let (url, service, _) =
+        let (url, state) =
             spawn_server_with_account_monitor(repository, account_monitor).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ServerNotification::AccountChanged);
+        let _ = state.notifications.send(ApplicationNotification::AccountChanged);
 
         let event = recv_event(&mut stream).await;
 
@@ -375,11 +448,12 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_track_detail_changed_after_write_commit() {
         let repository = seeded_repository();
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service
+        state
+            .command_service
             .command("btc-core", TrackCommand::Pause)
             .await
             .unwrap();
@@ -421,8 +495,16 @@ mod tests {
     async fn broadcasts_track_list_item_changed_after_effect_state_change() {
         let repository = seeded_repository();
         repository.seed_pending_noop_effect();
-        let (url, service, state) = spawn_server(repository).await;
-        let worker = EffectWorker::new(state, Arc::new(NoopExchange), Duration::from_millis(10));
+        let (url, state) = spawn_server(repository.clone()).await;
+        let effect_worker_state = build_effect_worker_state_for_notification_test(
+            repository,
+            state.notifications.clone(),
+        );
+        let worker = EffectWorker::new(
+            effect_worker_state,
+            Arc::new(NoopExchange),
+            Duration::from_millis(10),
+        );
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
@@ -452,20 +534,18 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, StreamEvent::TrackDetailChanged { .. }))
         );
-
-        drop(service);
     }
 
     #[tokio::test]
     async fn closes_socket_when_notification_stream_lags() {
         let repository = seeded_repository();
         repository.set_read_delay(Duration::from_millis(50));
-        let (url, service, _) = spawn_server_with_capacity(repository, 1).await;
+        let (url, state) = spawn_server_with_capacity(repository, 1).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(ServerNotification::TrackChanged {
+            let _ = state.notifications.send(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             });
         }
@@ -494,11 +574,11 @@ mod tests {
     async fn closes_socket_when_track_read_model_is_missing_for_notification() {
         let repository = seeded_repository();
         repository.remove_snapshot("btc-core");
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ServerNotification::TrackChanged {
+        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -526,11 +606,11 @@ mod tests {
     async fn closes_socket_when_track_read_model_load_fails() {
         let repository = seeded_repository();
         repository.set_load_snapshot_error("injected read failure");
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ServerNotification::TrackChanged {
+        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -598,7 +678,7 @@ mod tests {
         manager
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::ports::TrackSnapshot) {
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.realized_pnl_cumulative = 980.1;
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.realized_pnl_day =
@@ -643,7 +723,7 @@ mod tests {
     }
 
     impl TestRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::ports::TrackSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
             self.snapshots.lock().unwrap().insert(
                 snapshot.track_id.as_str().to_string(),
                 StoredTrackSnapshot {
@@ -689,15 +769,15 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StateRepositoryPort for TestRepository {
+    impl TrackMutationStore for TestRepository {
         async fn save_transition_with_effect_status(
             &self,
             id: &str,
-            state: &poise_engine::ports::TrackSnapshot,
+            state: &poise_engine::snapshot::TrackRuntimeSnapshot,
             events: &[poise_core::events::DomainEvent],
             effects: &[TrackEffect],
-            effect_status_update: Option<&poise_engine::ports::EffectStatusUpdate>,
-        ) -> Result<poise_engine::ports::CommittedTrackWrite> {
+            effect_status_update: Option<&EffectStatusUpdate>,
+        ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
             self.snapshots.lock().unwrap().insert(
                 id.to_string(),
@@ -756,7 +836,7 @@ mod tests {
                 effect.updated_at = now;
             }
 
-            Ok(poise_engine::ports::CommittedTrackWrite {
+            Ok(CommittedTrackWrite {
                 track_id: TrackId::new(id),
                 effects: persisted_effects,
             })
@@ -765,7 +845,7 @@ mod tests {
         async fn load_track_state(
             &self,
             id: &str,
-        ) -> Result<Option<poise_engine::ports::TrackSnapshot>> {
+        ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
             Ok(self
                 .snapshots
                 .lock()
@@ -790,7 +870,10 @@ mod tests {
                 .map(|stored| stored.event)
                 .collect())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl TrackEffectStore for TestRepository {
         async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
             Ok(self
                 .effects
@@ -851,7 +934,7 @@ mod tests {
         async fn save_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> Result<()> {
             Ok(())
         }
@@ -859,21 +942,21 @@ mod tests {
         async fn list_follow_up_retirement_requests(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Vec<poise_engine::ports::FollowUpRetirementRequest>> {
+        ) -> Result<Vec<FollowUpRetirementRequest>> {
             Ok(Vec::new())
         }
 
         async fn delete_follow_up_retirement_request(
             &self,
             _track_id: &TrackId,
-            _request: &poise_engine::ports::FollowUpRetirementRequest,
+            _request: &FollowUpRetirementRequest,
         ) -> Result<()> {
             Ok(())
         }
     }
 
     #[async_trait::async_trait]
-    impl TrackReadRepositoryPort for TestRepository {
+    impl TrackQueryStore for TestRepository {
         async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
             self.maybe_delay_read().await;
             Ok(self.snapshots.lock().unwrap().values().cloned().collect())

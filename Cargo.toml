@@ -1,5 +1,14 @@
 [workspace]
-members = ["core", "engine", "storage", "protocol", "exchanges/binance", "server", "tui"]
+members = [
+    "application",
+    "core",
+    "engine",
+    "storage",
+    "protocol",
+    "exchanges/binance",
+    "server",
+    "tui",
+]
 resolver = "3"
 
 [workspace.package]
