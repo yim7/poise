@@ -15,7 +15,7 @@ use crate::schema;
 use poise_core::events::{DomainEvent, ReplacementGateReason};
 use poise_core::strategy::{TrackConfig, validate_config};
 use poise_core::types::Exposure;
-use poise_engine::ledger::TrackLedgerState;
+use poise_engine::ledger::{LegacyRealizedState, TrackLedgerState};
 use poise_engine::runtime::{ExecutorState, RiskState, TrackStatus};
 use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use poise_engine::track::{Instrument, TrackId, Venue};
@@ -346,25 +346,9 @@ impl SqliteStorage {
             .map(serde_json::to_string)
             .transpose()
             .context("failed to serialize replacement gate reason")?;
-        let ledger_state = if state.ledger_state.is_empty()
-            && (state.risk.realized_pnl_day.is_some()
-                || state.risk.realized_pnl_today.abs() > f64::EPSILON
-                || state.risk.realized_pnl_cumulative.abs() > f64::EPSILON)
-        {
-            TrackLedgerState::from_legacy_realized(
-                state.risk.realized_pnl_day,
-                state.risk.realized_pnl_today,
-                state.risk.realized_pnl_cumulative,
-            )
-        } else {
-            state.ledger_state.clone()
-        };
+        let ledger_state = state.ledger_state.clone();
         let ledger_state_json =
             serde_json::to_string(&ledger_state).context("failed to serialize ledger state")?;
-        let realized_pnl_day = state
-            .risk
-            .realized_pnl_day
-            .map(|day| day.format("%F").to_string());
         let out_of_band_since = state
             .observed
             .out_of_band_since
@@ -398,16 +382,13 @@ impl SqliteStorage {
                 executor_state_json,
                 replacement_gate_reason_json,
                 ledger_state_json,
-                realized_pnl_day,
-                realized_pnl_today,
-                realized_pnl_cumulative,
                 unrealized_pnl,
                 reference_price,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id,
                 state.instrument.venue.as_str(),
@@ -420,9 +401,6 @@ impl SqliteStorage {
                 executor_state_json,
                 replacement_gate_reason_json,
                 ledger_state_json,
-                realized_pnl_day,
-                state.risk.realized_pnl_today,
-                state.risk.realized_pnl_cumulative,
                 state.risk.unrealized_pnl,
                 state.observed.reference_price,
                 out_of_band_since,
@@ -686,17 +664,15 @@ impl SqliteStorage {
             manual_target_override,
             executor_state,
             replacement_gate_reason,
-            ledger_state: ledger_state.unwrap_or_else(|| {
-                TrackLedgerState::from_legacy_realized(
+            ledger_state: TrackLedgerState::from_persisted(
+                ledger_state,
+                LegacyRealizedState {
                     realized_pnl_day,
-                    realized_pnl_today,
-                    realized_pnl_cumulative,
-                )
-            }),
+                    gross_realized_pnl_today: realized_pnl_today,
+                    gross_realized_pnl_cumulative: realized_pnl_cumulative,
+                },
+            ),
             risk: RiskState {
-                realized_pnl_day,
-                realized_pnl_today,
-                realized_pnl_cumulative,
                 unrealized_pnl,
                 ..RiskState::default()
             },
@@ -1346,7 +1322,9 @@ mod tests {
                 realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
                 gross_realized_pnl_today: 12.5,
                 gross_realized_pnl_cumulative: 17.5,
+                trading_fee_today: 1.2,
                 trading_fee_cumulative: 3.2,
+                funding_fee_today: -0.5,
                 funding_fee_cumulative: -1.5,
                 unresolved_gaps: vec![
                     LedgerGapRecord {
@@ -1370,9 +1348,6 @@ mod tests {
                 ],
             },
             risk: RiskState {
-                realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
-                realized_pnl_today: 12.5,
-                realized_pnl_cumulative: 17.5,
                 unrealized_pnl: -3.0,
                 ..RiskState::default()
             },
@@ -1751,10 +1726,10 @@ mod tests {
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(
-            loaded.risk.realized_pnl_day,
+            loaded.ledger_state.realized_pnl_day,
             Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap())
         );
-        assert!((loaded.risk.realized_pnl_today - 12.5).abs() < f64::EPSILON);
+        assert!((loaded.ledger_state.gross_realized_pnl_today - 12.5).abs() < f64::EPSILON);
         assert!((loaded.risk.unrealized_pnl + 3.0).abs() < f64::EPSILON);
         assert_eq!(loaded.observed.reference_price, Some(95.0));
         assert_eq!(
@@ -1788,6 +1763,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_transition_leaves_legacy_realized_columns_at_defaults() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let (realized_pnl_day, realized_pnl_today, realized_pnl_cumulative): (
+            Option<String>,
+            f64,
+            f64,
+        ) = conn
+            .query_row(
+                "SELECT realized_pnl_day, realized_pnl_today, realized_pnl_cumulative
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
+                params!["test-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(realized_pnl_day, None);
+        assert_eq!(realized_pnl_today, 0.0);
+        assert_eq!(realized_pnl_cumulative, 0.0);
+    }
+
+    #[tokio::test]
     async fn save_and_load_track_runtime_snapshot_roundtrip() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
@@ -1802,7 +1807,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!((loaded.risk.realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
+        assert!((loaded.ledger_state.gross_realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
         assert_eq!(loaded, snapshot);
     }
 

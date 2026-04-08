@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use poise_core::events::ReplacementGateReason;
@@ -36,9 +36,6 @@ pub struct AccountCapacityConstraint {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RiskState {
-    pub realized_pnl_day: Option<NaiveDate>,
-    pub realized_pnl_today: f64,
-    pub realized_pnl_cumulative: f64,
     pub unrealized_pnl: f64,
     #[serde(default)]
     pub account_capacity_constraint: AccountCapacityConstraint,
@@ -344,19 +341,6 @@ impl TrackRuntime {
     }
 
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
-        let ledger_state = if self.ledger_state.is_empty()
-            && (self.risk_state.realized_pnl_day.is_some()
-                || self.risk_state.realized_pnl_today.abs() > f64::EPSILON
-                || self.risk_state.realized_pnl_cumulative.abs() > f64::EPSILON)
-        {
-            TrackLedgerState::from_legacy_realized(
-                self.risk_state.realized_pnl_day,
-                self.risk_state.realized_pnl_today,
-                self.risk_state.realized_pnl_cumulative,
-            )
-        } else {
-            self.ledger_state.clone()
-        };
         TrackRuntimeSnapshot {
             track_id: self.id.clone(),
             instrument: self.instrument.clone(),
@@ -367,7 +351,7 @@ impl TrackRuntime {
             manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
-            ledger_state,
+            ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
                 reference_price: self.reference_price,
@@ -406,19 +390,7 @@ impl TrackRuntime {
         self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
-        self.ledger_state = if snapshot.ledger_state.is_empty()
-            && (snapshot.risk.realized_pnl_day.is_some()
-                || snapshot.risk.realized_pnl_today.abs() > f64::EPSILON
-                || snapshot.risk.realized_pnl_cumulative.abs() > f64::EPSILON)
-        {
-            TrackLedgerState::from_legacy_realized(
-                snapshot.risk.realized_pnl_day,
-                snapshot.risk.realized_pnl_today,
-                snapshot.risk.realized_pnl_cumulative,
-            )
-        } else {
-            snapshot.ledger_state.clone()
-        };
+        self.ledger_state = snapshot.ledger_state.clone();
         self.risk_state = snapshot.risk.clone();
         self.reference_price = snapshot.observed.reference_price;
         self.out_of_band_since = snapshot.observed.out_of_band_since;
@@ -446,6 +418,7 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use crate::ledger::TrackLedgerState;
     use crate::ports::OrderStatus;
     use crate::snapshot::TrackRuntimeSnapshot;
     use crate::track::{Instrument, TrackId, Venue};
@@ -557,9 +530,6 @@ mod tests {
         runtime.tick_timeout_secs = 45;
         runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
         runtime.risk_state = RiskState {
-            realized_pnl_day: None,
-            realized_pnl_today: 1.0,
-            realized_pnl_cumulative: 2.0,
             unrealized_pnl: -0.5,
             account_capacity_constraint: AccountCapacityConstraint {
                 increase_blocked: true,
@@ -567,6 +537,7 @@ mod tests {
                 max_increase_notional: Some(1_500.0),
             },
         };
+        runtime.ledger_state = TrackLedgerState::from_legacy_realized(None, 1.0, 2.0);
         runtime.reference_price = Some(96.0);
         runtime.out_of_band_since = Some(
             DateTime::parse_from_rfc3339("2026-03-29T08:02:00Z")
@@ -612,6 +583,15 @@ mod tests {
             restored.risk_state.account_capacity_constraint,
             runtime.risk_state.account_capacity_constraint
         );
+    }
+
+    #[test]
+    fn risk_state_snapshot_no_longer_persists_realized_pnl_fields() {
+        let snapshot = test_runtime().snapshot();
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert!(json["risk"].get("realized_pnl_today").is_none());
+        assert!(json["risk"].get("realized_pnl_cumulative").is_none());
     }
 
     #[test]
@@ -746,9 +726,6 @@ mod tests {
             },
             "replacement_gate_reason": null,
             "risk": {
-                "realized_pnl_day": null,
-                "realized_pnl_today": 0.0,
-                "realized_pnl_cumulative": 0.0,
                 "unrealized_pnl": 0.0
             },
             "observed": {
@@ -765,6 +742,71 @@ mod tests {
             restored.risk.account_capacity_constraint,
             AccountCapacityConstraint::default()
         );
+    }
+
+    #[test]
+    fn restore_from_legacy_snapshot_backfills_daily_fee_fields_and_preserves_loss_window() {
+        let legacy_snapshot = json!({
+            "track_id": "track-1",
+            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+            "config": {
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_exposure_units": 8.0,
+                "short_exposure_units": 8.0,
+                "notional_per_unit": 375.0,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+            },
+            "status": "active",
+            "current_exposure": 4.0,
+            "desired_exposure": 6.0,
+            "executor_state": {
+                "mode": "passive",
+                "inventory_gap": 0.0,
+                "gap_started_at": null,
+                "last_reprice_at": null,
+                "slots": [{
+                    "slot": "inventory_core",
+                    "state": "empty",
+                    "working_order": null
+                }],
+                "last_execution_reason": null,
+                "recovery_anomaly": null,
+                "stats": {
+                    "started_at": "2026-03-29T09:00:00Z",
+                    "max_inventory_gap_abs": 0.0,
+                    "max_gap_age_ms": 0
+                }
+            },
+            "replacement_gate_reason": null,
+            "ledger_state": {
+                "realized_pnl_day": "2026-04-08",
+                "gross_realized_pnl_today": 120.0,
+                "gross_realized_pnl_cumulative": 300.0,
+                "trading_fee_cumulative": 5.0,
+                "funding_fee_cumulative": -2.0,
+                "unresolved_gaps": []
+            },
+            "risk": {
+                "realized_pnl_day": "2026-04-08",
+                "realized_pnl_today": 120.0,
+                "realized_pnl_cumulative": 300.0,
+                "unrealized_pnl": -30.0,
+                "account_capacity_constraint": {
+                    "increase_blocked": false,
+                    "blocked_reason": null,
+                    "max_increase_notional": null
+                }
+            },
+            "observed": {}
+        });
+
+        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+
+        assert_eq!(restored.ledger_state.trading_fee_today, 0.0);
+        assert_eq!(restored.ledger_state.funding_fee_today, 0.0);
+        assert!((restored.risk.unrealized_pnl + 30.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -804,9 +846,6 @@ mod tests {
             },
             "replacement_gate_reason": null,
             "risk": {
-                "realized_pnl_day": null,
-                "realized_pnl_today": 0.0,
-                "realized_pnl_cumulative": 0.0,
                 "unrealized_pnl": 0.0
             },
             "observed": {
@@ -859,9 +898,6 @@ mod tests {
             },
             "replacement_gate_reason": null,
             "risk": {
-                "realized_pnl_day": null,
-                "realized_pnl_today": 0.0,
-                "realized_pnl_cumulative": 0.0,
                 "unrealized_pnl": -0.5
             },
             "ledger_state": {

@@ -3,6 +3,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::observation::OrderObservation;
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LegacyRealizedState {
+    pub realized_pnl_day: Option<NaiveDate>,
+    pub gross_realized_pnl_today: f64,
+    pub gross_realized_pnl_cumulative: f64,
+}
+
+impl LegacyRealizedState {
+    pub fn is_empty(&self) -> bool {
+        self.realized_pnl_day.is_none()
+            && self.gross_realized_pnl_today.abs() <= f64::EPSILON
+            && self.gross_realized_pnl_cumulative.abs() <= f64::EPSILON
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TrackLedgerState {
     pub realized_pnl_day: Option<NaiveDate>,
@@ -29,6 +44,22 @@ impl TrackLedgerState {
             gross_realized_pnl_today,
             gross_realized_pnl_cumulative,
             ..Self::default()
+        }
+    }
+
+    pub fn from_persisted(
+        ledger_state: Option<Self>,
+        legacy_realized: LegacyRealizedState,
+    ) -> Self {
+        match ledger_state {
+            Some(ledger_state) if !ledger_state.is_empty() => ledger_state,
+            Some(ledger_state) if legacy_realized.is_empty() => ledger_state,
+            _ if legacy_realized.is_empty() => Self::default(),
+            _ => Self::from_legacy_realized(
+                legacy_realized.realized_pnl_day,
+                legacy_realized.gross_realized_pnl_today,
+                legacy_realized.gross_realized_pnl_cumulative,
+            ),
         }
     }
 
