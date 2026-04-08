@@ -15,10 +15,11 @@
   - 验收：`cargo test -p poise-engine manager::tests`
   - commit: `e7530e4`
 
-- [ ] Task 2: 迁移 `snapshot` / `storage` 兼容与 `RiskState` 瘦身
+- [x] Task 2: 迁移 `snapshot` / `storage` 兼容与 `RiskState` 瘦身
   - 验收：`cargo test -p poise-engine runtime::tests`
+  - 验收：`cargo test -p poise-engine`
   - 验收：`cargo test -p poise-storage`
-  - commit:
+  - commit: `6973953`
 
 - [ ] Task 3: 迁移 `application` / `server` 的 budget read model、协议与配置边界
   - 验收：`cargo test -p poise-application`
