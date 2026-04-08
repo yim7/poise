@@ -26,7 +26,7 @@
   - 验收：`cargo test -p poise-server`
   - commit: `e053a28`
 
-- [ ] Task 4: 更新 README、示例配置并执行全量回归
+- [x] Task 4: 更新 README、示例配置并执行全量回归
   - 验收：`cargo fmt --all --check`
   - 验收：`cargo test --workspace`
-  - commit:
+  - commit: `94ba7d8`
