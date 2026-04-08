@@ -348,11 +348,7 @@ async fn startup_sync_rebuilds_submit_pending_slot_to_current_plan_before_follow
     );
     assert_eq!(order.status, OrderStatus::Submitting);
 
-    let transition = fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
 }
 
@@ -453,11 +449,7 @@ async fn startup_sync_clears_orphaned_submit_pending_slot_without_effect() {
         Some(true)
     );
 
-    let transition = fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
 }
 

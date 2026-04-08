@@ -9,8 +9,8 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
-    TrackBudgetCatalog, TrackEffectService, TrackEffectStore, TrackMutationStore,
+    AccountMonitor, ApplicationNotification, TrackBudgetCatalog, TrackCommandService,
+    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackMutationStore,
     TrackObservationService, TrackQueryService, TrackServiceSet,
 };
 use poise_binance::BinanceAdapter;
@@ -29,8 +29,6 @@ use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
-#[cfg(test)]
-use crate::test_support::{EffectWorkerTestContext, RuntimeTestContext};
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
 };
@@ -38,6 +36,8 @@ use crate::state_bootstrap::StateRepositories;
 use crate::submit_preflight::SubmitPreflight;
 #[cfg(test)]
 use crate::test_support::build_test_contexts_from_runtime_states;
+#[cfg(test)]
+use crate::test_support::{EffectWorkerTestContext, RuntimeTestContext};
 
 pub struct ServerPlatform {
     http_state: HttpState,
@@ -309,15 +309,16 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
     );
     #[cfg(test)]
-    let (runtime_test_context, effect_worker_test_context) = build_test_contexts_from_runtime_states(
-        runtime_state.clone(),
-        effect_worker_state.clone(),
-        manager.clone(),
-        notifications.clone(),
-        projector.clone(),
-        command_service.clone(),
-        observation_service.clone(),
-    );
+    let (runtime_test_context, effect_worker_test_context) =
+        build_test_contexts_from_runtime_states(
+            runtime_state.clone(),
+            effect_worker_state.clone(),
+            manager.clone(),
+            notifications.clone(),
+            projector.clone(),
+            command_service.clone(),
+            observation_service.clone(),
+        );
 
     Ok(ServerPlatform {
         http_state,
@@ -561,10 +562,9 @@ mod tests {
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
     use crate::test_support::{
-        build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        build_http_state as build_test_http_state,
-        build_websocket_state as build_test_websocket_state, test_budget_catalog,
-        unavailable_account_monitor,
+        build_http_state as build_test_http_state, build_runtime_and_effect_worker_test_contexts,
+        build_test_application_services, build_websocket_state as build_test_websocket_state,
+        test_budget_catalog, unavailable_account_monitor,
     };
     use poise_application::{TrackDebugQueryService, TrackQueryService};
 
@@ -673,9 +673,11 @@ mod tests {
         assert_eq!(manager.list_tracks().len(), 2);
         let track = manager.get_track("btc-core").unwrap();
         assert_eq!(track.budget().max_notional, 3000.0);
-        assert!(crate::instance_dir::InstanceDir::new(instance_dir.path())
-            .db_path(&suffix)
-            .exists());
+        assert!(
+            crate::instance_dir::InstanceDir::new(instance_dir.path())
+                .db_path(&suffix)
+                .exists()
+        );
     }
 
     #[test]
@@ -1051,7 +1053,14 @@ mod tests {
         let state = platform.runtime_test_context();
 
         assert_eq!(state.track_instruments().await.len(), 1);
-        assert!(state.runtime_state().account_monitor.current_summary().await.is_none());
+        assert!(
+            state
+                .runtime_state()
+                .account_monitor
+                .current_summary()
+                .await
+                .is_none()
+        );
         let _receiver = state.notifications.subscribe();
     }
 
@@ -1124,7 +1133,10 @@ mod tests {
                 mark_price: 85.0,
                 timestamp: chrono::Utc::now(),
             };
-            tick_state.observe_market("btc-core", tick.reference_price).await.map(|_| ())
+            tick_state
+                .observe_market("btc-core", tick.reference_price)
+                .await
+                .map(|_| ())
         });
 
         let second_save_started = tokio::time::timeout(
@@ -1184,7 +1196,8 @@ mod tests {
         config: &Config,
         instance_dir: &std::path::Path,
     ) -> Result<ServerPlatform> {
-        let db_path = crate::instance_dir::InstanceDir::new(instance_dir).db_path(&config.environment);
+        let db_path =
+            crate::instance_dir::InstanceDir::new(instance_dir).db_path(&config.environment);
         super::ensure_parent_dir(&db_path)?;
         let repository = Arc::new(SqliteStorage::new(&db_path)?);
         super::assemble_with_components(

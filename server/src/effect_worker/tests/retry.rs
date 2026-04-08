@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[tokio::test]
 async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arrives() {
     let repository = Arc::new(MemoryRepository::default());
@@ -326,10 +325,7 @@ async fn effect_worker_stops_polling_new_effects_after_shutdown_signal() {
     ));
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     let submit_effect = match transition.effects.as_slice() {
         [TrackEffect::SubmitOrder { .. }] => repository
             .list_all_effects()
@@ -400,10 +396,7 @@ async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_f
     exchange.set_position_qty(15.0).await;
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -479,10 +472,7 @@ async fn outcome_unknown_marks_track_stale_before_reconcile() {
     exchange.set_position_qty(15.0).await;
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]

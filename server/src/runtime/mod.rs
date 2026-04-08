@@ -326,7 +326,6 @@ impl ReconcileStateAccess for RuntimeTestContext {
     }
 }
 
-
 async fn retry_startup_step<T, F, Fut>(step_name: &'static str, operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,

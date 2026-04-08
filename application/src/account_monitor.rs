@@ -457,7 +457,10 @@ mod tests {
             .refresh_once()
             .await
             .expect("summary-only source should refresh");
-        let summary = monitor.current_summary().await.expect("summary should exist");
+        let summary = monitor
+            .current_summary()
+            .await
+            .expect("summary should exist");
         assert_eq!(summary.equity, 12_500.0);
         assert_eq!(summary.available, 9_000.0);
         assert_eq!(summary.unrealized_pnl, -350.0);

@@ -25,7 +25,9 @@ impl InstanceDir {
     }
 
     pub fn db_path(&self, environment: &str) -> PathBuf {
-        self.data_root().join(environment).join("poise-server.sqlite")
+        self.data_root()
+            .join(environment)
+            .join("poise-server.sqlite")
     }
 }
 

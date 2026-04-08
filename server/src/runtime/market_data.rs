@@ -13,7 +13,11 @@ pub(super) fn spawn_market_task(
     let market_data = Arc::clone(&runtime.market_data);
 
     tokio::spawn(async move {
-        let tracks = state.reconcile.observation_service.track_instruments().await;
+        let tracks = state
+            .reconcile
+            .observation_service
+            .track_instruments()
+            .await;
         let mut workers = JoinSet::new();
 
         for track in tracks {

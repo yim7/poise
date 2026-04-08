@@ -52,11 +52,7 @@ pub(crate) async fn test_state_with_track(
         notifications.clone(),
         account_margin_guard.clone(),
     );
-    build_effect_worker_test_context(
-        &services,
-        mutation_store,
-        effect_store,
-    )
+    build_effect_worker_test_context(&services, mutation_store, effect_store)
 }
 
 pub(crate) fn btc_instrument() -> Instrument {

@@ -576,11 +576,9 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 else {
                     return Ok(UserStreamMessage::Events(Vec::new()));
                 };
-                let Some(balance) = account
-                    .balances
-                    .iter()
-                    .find(|balance| balance.balance_change != "0" && balance.balance_change != "0.0")
-                else {
+                let Some(balance) = account.balances.iter().find(|balance| {
+                    balance.balance_change != "0" && balance.balance_change != "0.0"
+                }) else {
                     return Ok(UserStreamMessage::Events(Vec::new()));
                 };
                 let balance_change = parse_decimal("a.B.bc", &balance.balance_change)?;
@@ -964,7 +962,8 @@ mod tests {
                         },
                         ledger_deltas: vec![LedgerDelta::GrossRealizedPnl(12.34)],
                         ledger_gaps: vec![LedgerGapRecord {
-                            gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
+                            gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset"
+                                .into(),
                             reason: LedgerGapReason::UnsupportedCommissionAsset,
                             observed_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                             source: "binance:order_trade_update".into(),

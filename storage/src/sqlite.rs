@@ -5,9 +5,9 @@ use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
-    self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
-    FollowUpRetirementRequest, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
-    TrackEffectStore, TrackMutationStore, TrackQueryStore,
+    self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
+    PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
+    TrackMutationStore, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -397,7 +397,10 @@ impl SqliteStorage {
                 status_json,
                 state.current_exposure.0,
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
-                state.manual_target_override.as_ref().map(|exposure| exposure.0),
+                state
+                    .manual_target_override
+                    .as_ref()
+                    .map(|exposure| exposure.0),
                 executor_state_json,
                 replacement_gate_reason_json,
                 ledger_state_json,
@@ -1277,16 +1280,16 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use poise_application::{
+        EffectStatus, FollowUpRetirementRequest, TrackEffectStore, TrackMutationStore,
+        TrackQueryStore,
+    };
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
     use poise_core::strategy::{
         DEFAULT_MIN_REBALANCE_UNITS, OutOfBandPolicy, ShapeFamily, TrackConfig,
     };
     use poise_core::types::{Exposure, Side};
-    use poise_application::{
-        EffectStatus, FollowUpRetirementRequest, TrackEffectStore, TrackMutationStore,
-        TrackQueryStore,
-    };
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::ports::{OrderRequest, OrderStatus};
@@ -1328,8 +1331,7 @@ mod tests {
                 funding_fee_cumulative: -1.5,
                 unresolved_gaps: vec![
                     LedgerGapRecord {
-                        gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset"
-                            .into(),
+                        gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
                         reason: LedgerGapReason::UnsupportedCommissionAsset,
                         observed_at: DateTime::parse_from_rfc3339("2026-03-24T07:35:00+00:00")
                             .unwrap()
@@ -1337,8 +1339,9 @@ mod tests {
                         source: "binance:order_trade_update".into(),
                     },
                     LedgerGapRecord {
-                        gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
-                            .into(),
+                        gap_key:
+                            "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
+                                .into(),
                         reason: LedgerGapReason::MissingSymbol,
                         observed_at: DateTime::parse_from_rfc3339("2026-03-24T08:00:00+00:00")
                             .unwrap()

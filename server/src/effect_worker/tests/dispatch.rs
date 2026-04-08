@@ -6,10 +6,7 @@ async fn submit_success_updates_working_order_via_receipt_writeback() {
     let exchange = Arc::new(FakeExchange::default());
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -75,10 +72,7 @@ async fn effect_worker_writeback_keeps_round_target_without_working_order_target
     let exchange = Arc::new(FakeExchange::default());
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -130,10 +124,7 @@ async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
     let exchange = Arc::new(FakeExchange::default());
     let state = test_state(repository, exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -155,10 +146,7 @@ async fn stale_submit_effect_syncs_exchange_before_submitting() {
     let exchange = Arc::new(FakeExchange::default());
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -201,10 +189,7 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
     ));
     let state = test_state(repository.clone(), exchange.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -301,4 +286,3 @@ async fn submit_preflight_assumes_single_effect_worker_execution_order() {
     );
     assert_eq!(fresh_decision, SubmitPreflightDecision::Direct);
 }
-

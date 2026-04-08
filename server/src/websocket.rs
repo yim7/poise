@@ -158,9 +158,9 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::server_context::WebSocketState;
     use crate::effect_worker::EffectWorker;
     use crate::projector::TrackProjector;
+    use crate::server_context::WebSocketState;
     use crate::test_support::{
         build_effect_worker_test_context, build_test_application_services, build_websocket_state,
         test_budget_catalog, unavailable_account_monitor,
@@ -185,9 +185,7 @@ mod tests {
         >,
     >;
 
-    async fn spawn_server(
-        repository: Arc<TestRepository>,
-    ) -> (String, WebSocketTestContext) {
+    async fn spawn_server(repository: Arc<TestRepository>) -> (String, WebSocketTestContext) {
         spawn_server_with_capacity(repository, 16).await
     }
 
@@ -319,7 +317,8 @@ mod tests {
             account_margin_guard,
         );
 
-        build_effect_worker_test_context(&services, mutation_store, effect_store).effect_worker_state
+        build_effect_worker_test_context(&services, mutation_store, effect_store)
+            .effect_worker_state
     }
 
     async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
@@ -380,9 +379,11 @@ mod tests {
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
-            track_id: TrackId::new("btc-core"),
-        });
+        let _ = state
+            .notifications
+            .send(ApplicationNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            });
 
         let payload_a = recv_event(&mut stream_a).await;
         let payload_b = recv_event(&mut stream_b).await;
@@ -401,11 +402,12 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        let _ = state.notifications.send(
-            poise_application::ApplicationNotification::TrackChanged {
-                track_id: TrackId::new("btc-core"),
-            },
-        );
+        let _ =
+            state
+                .notifications
+                .send(poise_application::ApplicationNotification::TrackChanged {
+                    track_id: TrackId::new("btc-core"),
+                });
 
         let first = recv_event(&mut stream).await;
         let second = recv_event(&mut stream).await;
@@ -426,12 +428,13 @@ mod tests {
         let repository = seeded_repository();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_monitor = seeded_account_monitor(notifications.clone()).await;
-        let (url, state) =
-            spawn_server_with_account_monitor(repository, account_monitor).await;
+        let (url, state) = spawn_server_with_account_monitor(repository, account_monitor).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        let _ = state.notifications.send(ApplicationNotification::AccountChanged);
+        let _ = state
+            .notifications
+            .send(ApplicationNotification::AccountChanged);
 
         let event = recv_event(&mut stream).await;
 
@@ -547,9 +550,11 @@ mod tests {
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            let _ = state.notifications.send(ApplicationNotification::TrackChanged {
-                track_id: TrackId::new("btc-core"),
-            });
+            let _ = state
+                .notifications
+                .send(ApplicationNotification::TrackChanged {
+                    track_id: TrackId::new("btc-core"),
+                });
         }
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
@@ -580,9 +585,11 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
-            track_id: TrackId::new("btc-core"),
-        });
+        let _ = state
+            .notifications
+            .send(ApplicationNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -612,9 +619,11 @@ mod tests {
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
-            track_id: TrackId::new("btc-core"),
-        });
+        let _ = state
+            .notifications
+            .send(ApplicationNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            });
 
         let next = tokio::time::timeout(Duration::from_secs(1), async {
             loop {

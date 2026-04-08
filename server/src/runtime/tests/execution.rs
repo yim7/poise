@@ -160,10 +160,7 @@ async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs
         Duration::from_secs(5),
     );
 
-    let transition = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let effect_id = persistence
         .list_dispatchable_effects()
         .await
@@ -192,11 +189,7 @@ async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs
 async fn effect_worker_executes_persisted_submit_order_and_marks_success() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
-    let transition = fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
             .effects
@@ -255,19 +248,13 @@ async fn repeated_ticks_before_first_submit_are_absorbed_into_one_replacement_pl
         Duration::from_millis(10),
     );
 
-    let first = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let first = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(matches!(
         first.effects.as_slice(),
         [ExecutionAction::SubmitOrder { .. }]
     ));
 
-    let second = state
-        .observe_market("BTCUSDT", 92.5)
-        .await
-        .unwrap();
+    let second = state.observe_market("BTCUSDT", 92.5).await.unwrap();
     assert_eq!(
         second.effects,
         vec![ExecutionAction::NoOp],
@@ -324,10 +311,7 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
         Duration::from_millis(10),
     );
 
-    let first = state
-        .observe_market("BTCUSDT", 96.5)
-        .await
-        .unwrap();
+    let first = state.observe_market("BTCUSDT", 96.5).await.unwrap();
     let (first_request, first_desired_exposure) = match first.effects.as_slice() {
         [
             ExecutionAction::SubmitOrder {
@@ -338,10 +322,7 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
         other => panic!("expected one submit effect, got {other:?}"),
     };
 
-    let second = state
-        .observe_market("BTCUSDT", 96.125)
-        .await
-        .unwrap();
+    let second = state.observe_market("BTCUSDT", 96.125).await.unwrap();
     assert_eq!(
         second.effects,
         vec![ExecutionAction::NoOp],
@@ -403,10 +384,7 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
         Duration::from_millis(10),
     );
 
-    let first = state
-        .observe_market("BTCUSDT", 96.5)
-        .await
-        .unwrap();
+    let first = state.observe_market("BTCUSDT", 96.5).await.unwrap();
     let first_desired_exposure = match first.effects.as_slice() {
         [
             ExecutionAction::SubmitOrder {
@@ -418,10 +396,7 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
 
     worker.run_once().await.unwrap();
 
-    let second = state
-        .observe_market("BTCUSDT", 96.125)
-        .await
-        .unwrap();
+    let second = state.observe_market("BTCUSDT", 96.125).await.unwrap();
     assert_eq!(
         second.effects,
         vec![ExecutionAction::NoOp],
@@ -483,10 +458,7 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
         Duration::from_millis(10),
     );
 
-    let first = state
-        .observe_market("BTCUSDT", 96.5)
-        .await
-        .unwrap();
+    let first = state.observe_market("BTCUSDT", 96.5).await.unwrap();
     let first_desired_exposure = match first.effects.as_slice() {
         [
             ExecutionAction::SubmitOrder {
@@ -525,10 +497,7 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
         )
         .await
         .unwrap();
-    let second = state
-        .observe_market("BTCUSDT", 96.125)
-        .await
-        .unwrap();
+    let second = state.observe_market("BTCUSDT", 96.125).await.unwrap();
     assert_eq!(
         second.effects,
         vec![ExecutionAction::NoOp],
@@ -596,11 +565,7 @@ async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active
         Duration::from_millis(10),
     );
 
-    let first = fixture
-        .state
-        .observe_market("BTCUSDT", 96.5)
-        .await
-        .unwrap();
+    let first = fixture.state.observe_market("BTCUSDT", 96.5).await.unwrap();
     assert!(matches!(
         first.effects.as_slice(),
         [ExecutionAction::SubmitOrder { .. }]
@@ -608,11 +573,7 @@ async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active
     worker.run_once().await.unwrap();
 
     clock.set(test_server_time() + chrono::Duration::seconds(70));
-    let second = fixture
-        .state
-        .observe_market("BTCUSDT", 96.4)
-        .await
-        .unwrap();
+    let second = fixture.state.observe_market("BTCUSDT", 96.4).await.unwrap();
     assert!(matches!(
         second.effects.as_slice(),
         [
@@ -641,11 +602,7 @@ async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active
 async fn effect_worker_restores_pending_effect_after_restart() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
-    fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert_eq!(
         fixture
             .persistence
@@ -687,11 +644,7 @@ async fn effect_worker_restores_pending_effect_after_restart() {
 async fn restarted_pending_submit_with_matching_live_order_is_recovered_without_duplicate_submit() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
-    fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let persisted = fixture
         .persistence
         .list_dispatchable_effects()
@@ -774,10 +727,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
         Duration::from_secs(5),
     );
 
-    state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let effect_id = persistence
         .list_dispatchable_effects()
         .await
@@ -831,10 +781,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
         Duration::from_secs(5),
     );
 
-    state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let failed_effect_id = persistence
         .list_dispatchable_effects()
         .await
@@ -1083,10 +1030,7 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
         market_data as Arc<dyn MarketDataPort>,
     );
 
-    let transition = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
             .effects
@@ -1144,10 +1088,7 @@ async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
         market_data as Arc<dyn MarketDataPort>,
     );
 
-    let transition = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
             .effects
@@ -1204,10 +1145,7 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
         market_data as Arc<dyn MarketDataPort>,
     );
 
-    state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
 
     let handles = runtime.start().await.unwrap();
 
@@ -1219,10 +1157,7 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
     })
     .await;
 
-    let transition = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
 
     assert!(
         transition
@@ -1239,10 +1174,10 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
         persistence.clone() as Arc<dyn TrackQueryStore>,
         test_budget_catalog("BTCUSDT", test_budget()),
     )
-        .load_track_detail_source(&TrackId::new("BTCUSDT"))
-        .await
-        .unwrap()
-        .unwrap();
+    .load_track_detail_source(&TrackId::new("BTCUSDT"))
+    .await
+    .unwrap()
+    .unwrap();
     let detail = state.projector.project_detail(&source);
     assert_eq!(
         detail.execution.execution_status,
@@ -1296,10 +1231,7 @@ async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_
         Duration::from_millis(10),
     );
 
-    let transition = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
             .effects
@@ -1322,11 +1254,7 @@ async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_
 async fn effect_worker_skips_stale_submit_when_track_is_paused_before_execution() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
-    let transition = fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [ExecutionAction::SubmitOrder { .. }]
@@ -1891,10 +1819,7 @@ async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_s
         Duration::from_millis(10),
     );
 
-    let transition = state
-        .observe_market("BTCUSDT", 90.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 90.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [
@@ -2043,10 +1968,7 @@ async fn effect_worker_keeps_effect_pending_when_submit_cleanup_persistence_fail
         Duration::from_millis(10),
     );
 
-    let transition = state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
             .effects
@@ -2181,10 +2103,7 @@ async fn receipt_persistence_failure_emits_effect_state_changed_notification() {
     );
     let mut receiver = state.notifications.subscribe();
 
-    state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let committed = timeout(Duration::from_secs(1), receiver.recv())
         .await
         .unwrap()
@@ -2229,10 +2148,7 @@ async fn effect_worker_keeps_effect_pending_while_submit_is_inflight() {
         Duration::from_millis(10),
     );
 
-    state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
 
     let task = tokio::spawn({
         let worker = worker.clone();

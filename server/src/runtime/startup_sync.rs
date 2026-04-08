@@ -70,9 +70,14 @@ pub(super) async fn replay_startup_user_data(
                 );
                 continue;
             };
-            apply_user_data_event(&runtime.state.reconcile, &runtime.exchange, &track_id, event)
-                .await
-                .map_err(super::mutate_error)?;
+            apply_user_data_event(
+                &runtime.state.reconcile,
+                &runtime.exchange,
+                &track_id,
+                event,
+            )
+            .await
+            .map_err(super::mutate_error)?;
         }
     }
 

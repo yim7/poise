@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[tokio::test]
 async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
     let repository = Arc::new(MemoryRepository::default());
@@ -286,10 +285,7 @@ async fn fresh_effects_do_not_trigger_extra_sync() {
     let submit_repository = Arc::new(MemoryRepository::default());
     let submit_exchange = Arc::new(FakeExchange::default());
     let submit_state = test_state(submit_repository.clone(), submit_exchange.clone()).await;
-    submit_state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    submit_state.observe_market("btc-core", 95.0).await.unwrap();
 
     let submit_worker = EffectWorker::new(
         submit_state,

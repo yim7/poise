@@ -40,10 +40,7 @@ async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
     .await
     .unwrap_err();
 
-    assert!(matches!(
-        error,
-        TrackMutationError::Mutation(_)
-    ));
+    assert!(matches!(error, TrackMutationError::Mutation(_)));
 }
 
 #[tokio::test]

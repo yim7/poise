@@ -105,11 +105,14 @@ pub(super) async fn execute_submit(
         Err(error) => {
             let failure_message = error.to_string();
             if is_insufficient_margin_failure(&failure_message) {
-                worker.state.account_margin_guard.activate_insufficient_margin(
-                    &request.instrument,
-                    "insufficient_margin",
-                    Utc::now(),
-                );
+                worker
+                    .state
+                    .account_margin_guard
+                    .activate_insufficient_margin(
+                        &request.instrument,
+                        "insufficient_margin",
+                        Utc::now(),
+                    );
                 if let Ok(snapshot) = worker
                     .exchange
                     .get_account_capacity_snapshot(&request.instrument)

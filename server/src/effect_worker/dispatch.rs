@@ -35,14 +35,19 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn process_effect(worker: &EffectWorker, persisted: PersistedTrackEffect) -> Result<()> {
+pub(super) async fn process_effect(
+    worker: &EffectWorker,
+    persisted: PersistedTrackEffect,
+) -> Result<()> {
     match persisted.effect {
         TrackEffect::SubmitOrder {
             ref request,
             ref desired_exposure,
-        } => worker
-            .execute_submit(&persisted, request.clone(), desired_exposure.clone())
-            .await,
+        } => {
+            worker
+                .execute_submit(&persisted, request.clone(), desired_exposure.clone())
+                .await
+        }
         TrackEffect::CancelOrder {
             ref instrument,
             ref order_id,

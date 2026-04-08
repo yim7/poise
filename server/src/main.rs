@@ -41,17 +41,14 @@ async fn main() -> Result<()> {
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
     let db_path = instance_dir.db_path(&config.environment);
-    let prepared_state = match state_bootstrap::prepare_state_repository(
-        &config,
-        &db_path,
-        options.bootstrap_mode,
-    )
-    .await
-    {
-        Ok(repository) => repository,
-        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
-        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
-    };
+    let prepared_state =
+        match state_bootstrap::prepare_state_repository(&config, &db_path, options.bootstrap_mode)
+            .await
+        {
+            Ok(repository) => repository,
+            Err(StateBootstrapError::Unexpected(error)) => return Err(error),
+            Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
+        };
     let (platform, runtime_handles, listener) = prepared_state
         .run_startup(|repositories| async {
             let platform = assembly::assemble(&config, repositories).await?;
@@ -343,15 +340,22 @@ mod tests {
     }
 
     fn run_instance_server_script_path() -> PathBuf {
-        workspace_root().join("scripts").join("run-instance-server.sh")
+        workspace_root()
+            .join("scripts")
+            .join("run-instance-server.sh")
     }
 
     fn start_instance_zellij_script_path() -> PathBuf {
-        workspace_root().join("scripts").join("start-instance-zellij.sh")
+        workspace_root()
+            .join("scripts")
+            .join("start-instance-zellij.sh")
     }
 
     fn instance_zellij_layout_path() -> PathBuf {
-        workspace_root().join("ops").join("zellij").join("poise-instance.kdl")
+        workspace_root()
+            .join("ops")
+            .join("zellij")
+            .join("poise-instance.kdl")
     }
 
     #[test]
@@ -600,7 +604,8 @@ total_loss_limit = 600.0
         .unwrap();
 
         let config = crate::config::load_config(&config_path).unwrap();
-        let db_path = crate::instance_dir::InstanceDir::new(&instance_dir).db_path(&config.environment);
+        let db_path =
+            crate::instance_dir::InstanceDir::new(&instance_dir).db_path(&config.environment);
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
         let platform = crate::assembly::assemble_with_components(
@@ -684,7 +689,8 @@ total_loss_limit = 600.0
             account_monitor: Default::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
+        let db_path =
+            crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
         let platform = crate::assembly::assemble_with_components(

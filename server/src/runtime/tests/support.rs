@@ -210,8 +210,14 @@ pub(crate) async fn test_launch_contexts<R>(
 where
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
-    test_launch_contexts_with_config(exchange, persistence, restored_snapshot, budget, test_config())
-        .await
+    test_launch_contexts_with_config(
+        exchange,
+        persistence,
+        restored_snapshot,
+        budget,
+        test_config(),
+    )
+    .await
 }
 
 pub(crate) async fn test_launch_contexts_with_config<R>(
@@ -496,7 +502,10 @@ pub(crate) fn position_event_at(
     }
 }
 
-pub(crate) fn order_event_at(event_time: chrono::DateTime<Utc>, order: ExchangeOrder) -> UserDataEvent {
+pub(crate) fn order_event_at(
+    event_time: chrono::DateTime<Utc>,
+    order: ExchangeOrder,
+) -> UserDataEvent {
     UserDataEvent {
         event_time,
         payload: UserDataPayload::OrderUpdate(order),
@@ -530,7 +539,11 @@ pub(crate) fn working_order(
     }
 }
 
-pub(crate) fn set_executor_state(snapshot: &mut TrackRuntimeSnapshot, order: WorkingOrder, state: SlotState) {
+pub(crate) fn set_executor_state(
+    snapshot: &mut TrackRuntimeSnapshot,
+    order: WorkingOrder,
+    state: SlotState,
+) {
     let desired_exposure = snapshot
         .desired_exposure
         .clone()
