@@ -237,8 +237,8 @@ pub(crate) fn test_config() -> TrackConfig {
 pub(crate) fn test_budget() -> CapacityBudget {
     CapacityBudget {
         max_notional: 3000.0,
-        daily_loss_limit: -120.0,
-        stop_loss_pct: 10.0,
+        daily_loss_limit: 120.0,
+        total_loss_limit: 300.0,
     }
 }
 

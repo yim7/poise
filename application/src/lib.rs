@@ -25,7 +25,7 @@ pub use mutation_executor::{
     TrackMutationError, TrackServiceSet, is_loaded_track_invariant_violation,
 };
 pub use notifications::ApplicationNotification;
-pub use query_service::TrackQueryService;
+pub use query_service::{TrackBudgetCatalog, TrackQueryService};
 pub use read_model::{ReadModelSlot, TrackReadModel};
 pub use track_command_service::TrackCommandService;
 pub use track_effect_service::TrackEffectService;

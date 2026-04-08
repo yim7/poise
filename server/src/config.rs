@@ -36,8 +36,8 @@ pub struct TrackDefinition {
     #[serde(default = "default_out_of_band_policy")]
     pub out_of_band_policy: OutOfBandPolicy,
     pub max_notional: Option<f64>,
-    pub daily_loss_limit: Option<f64>,
-    pub stop_loss_pct: Option<f64>,
+    pub daily_loss_limit: f64,
+    pub total_loss_limit: f64,
     pub tick_timeout_secs: Option<u64>,
 }
 
@@ -95,8 +95,8 @@ impl TrackDefinition {
             self.long_exposure_units.max(self.short_exposure_units) * self.notional_per_unit;
         CapacityBudget {
             max_notional: self.max_notional.unwrap_or(implied_max_notional),
-            daily_loss_limit: self.daily_loss_limit.unwrap_or(-implied_max_notional * 0.1),
-            stop_loss_pct: self.stop_loss_pct.unwrap_or(10.0),
+            daily_loss_limit: self.daily_loss_limit,
+            total_loss_limit: self.total_loss_limit,
         }
     }
 }
@@ -150,6 +150,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 6.0
 notional_per_unit = 3000.0
+daily_loss_limit = 1200.0
+total_loss_limit = 2400.0
 
 [[tracks]]
 track_id = "eth-core"
@@ -160,6 +162,8 @@ upper_price = 2600.0
 long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
+daily_loss_limit = 800.0
+total_loss_limit = 1600.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
@@ -198,6 +202,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -231,6 +237,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -253,6 +261,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 min_rebalance_units = -0.1
 "#,
         )
@@ -276,6 +286,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 min_rebalance_units = nan
 "#,
         )
@@ -299,6 +311,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 tick_timeout_secs = 45
 "#,
         )
@@ -322,6 +336,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 4.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 shape_family = "concave"
 out_of_band_policy = "reduce_only"
 "#,
@@ -350,21 +366,21 @@ long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
 max_notional = 5000.0
-daily_loss_limit = -200.0
-stop_loss_pct = 5.0
+daily_loss_limit = 200.0
+total_loss_limit = 500.0
 "#,
         )
         .unwrap();
 
         let budget = config.tracks[0].budget();
         assert!((budget.max_notional - 5000.0).abs() < f64::EPSILON);
-        assert!((budget.daily_loss_limit - (-200.0)).abs() < f64::EPSILON);
-        assert!((budget.stop_loss_pct - 5.0).abs() < f64::EPSILON);
+        assert!((budget.daily_loss_limit - 200.0).abs() < f64::EPSILON);
+        assert!((budget.total_loss_limit - 500.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn budget_uses_safe_defaults_when_risk_limits_omitted() {
-        let config = parse_config(
+    fn rejects_missing_risk_limits() {
+        let error = parse_config(
             r#"
 environment = "test"
 
@@ -379,13 +395,9 @@ short_exposure_units = 8.0
 notional_per_unit = 375.0
 "#,
         )
-        .unwrap();
+        .unwrap_err();
 
-        let budget = config.tracks[0].budget();
-        let implied_max = 8.0 * 375.0;
-        assert!((budget.max_notional - implied_max).abs() < f64::EPSILON);
-        assert!((budget.daily_loss_limit - (-implied_max * 0.1)).abs() < f64::EPSILON);
-        assert!((budget.stop_loss_pct - 10.0).abs() < f64::EPSILON);
+        assert!(format!("{error:#}").contains("daily_loss_limit"));
     }
 
     #[test]
@@ -403,6 +415,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -435,7 +449,7 @@ notional_per_unit = 375.0
         assert!(raw.contains("tick_timeout_secs ="));
         assert!(raw.contains("max_notional ="));
         assert!(raw.contains("daily_loss_limit ="));
-        assert!(raw.contains("stop_loss_pct ="));
+        assert!(raw.contains("total_loss_limit ="));
     }
 
     #[test]
@@ -448,7 +462,7 @@ notional_per_unit = 375.0
         assert!(raw.contains("tick_timeout_secs ="));
         assert!(raw.contains("max_notional ="));
         assert!(raw.contains("daily_loss_limit ="));
-        assert!(raw.contains("stop_loss_pct ="));
+        assert!(raw.contains("total_loss_limit ="));
     }
 
     #[test]
@@ -466,6 +480,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -492,6 +508,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap_err();

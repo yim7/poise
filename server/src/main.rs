@@ -592,6 +592,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#
             ),
         )
@@ -671,8 +673,8 @@ notional_per_unit = 375.0
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: crate::config::ExchangeConfig {

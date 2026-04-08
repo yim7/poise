@@ -56,6 +56,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
@@ -70,7 +71,7 @@ mod tests {
 
     use crate::{
         DiagnosticSeverity, EffectStatus, PersistedTrackEffect, StoredTrackEvent,
-        StoredTrackSnapshot, TrackQueryService, TrackQueryStore,
+        StoredTrackSnapshot, TrackBudgetCatalog, TrackQueryService, TrackQueryStore,
     };
 
     use super::TrackDebugQueryService;
@@ -78,7 +79,10 @@ mod tests {
     #[tokio::test]
     async fn load_track_diagnostics_projects_only_diagnostic_events_in_order() {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = TrackDebugQueryService::new(Arc::new(TrackQueryService::new(repository)));
+        let service = TrackDebugQueryService::new(Arc::new(TrackQueryService::new(
+            repository,
+            TrackBudgetCatalog::from_iter([(TrackId::new("btc-core"), test_budget())]),
+        )));
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -98,6 +102,14 @@ mod tests {
             diagnostics[1].observed_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 10).unwrap()
         );
+    }
+
+    fn test_budget() -> CapacityBudget {
+        CapacityBudget {
+            max_notional: 3000.0,
+            daily_loss_limit: 100.0,
+            total_loss_limit: 300.0,
+        }
     }
 
     struct FakeReadRepository {
@@ -263,9 +275,6 @@ mod tests {
             replacement_gate_reason: None,
             ledger_state: Default::default(),
             risk: RiskState {
-                realized_pnl_day: None,
-                realized_pnl_today: 0.0,
-                realized_pnl_cumulative: 980.1,
                 unrealized_pnl: 0.0,
                 ..RiskState::default()
             },

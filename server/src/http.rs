@@ -258,7 +258,7 @@ mod tests {
     use crate::server_context::{HttpState, WebSocketState};
     use crate::test_support::{
         build_http_state, build_test_application_services, build_websocket_state,
-        unavailable_account_monitor,
+        test_budget_catalog, unavailable_account_monitor,
     };
 
     use poise_application::{
@@ -396,7 +396,10 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(query_store));
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store,
+            test_budget_catalog("btc-core"),
+        ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
@@ -412,7 +415,10 @@ mod tests {
             ),
             websocket_state: build_websocket_state(
                 &services,
-                Arc::new(TrackQueryService::new(repository as Arc<dyn TrackQueryStore>)),
+                Arc::new(TrackQueryService::new(
+                    repository as Arc<dyn TrackQueryStore>,
+                    test_budget_catalog("btc-core"),
+                )),
                 projector,
                 account_monitor,
                 account_projector,
@@ -480,7 +486,10 @@ mod tests {
         );
         let projector = Arc::new(TrackProjector::new());
         let account_projector = Arc::new(AccountProjector::new());
-        let query_service = Arc::new(TrackQueryService::new(query_store));
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store,
+            test_budget_catalog("btc-core"),
+        ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
         HttpTestState {
             http_state: build_http_state(
@@ -519,8 +528,8 @@ mod tests {
                 },
                 CapacityBudget {
                     max_notional: 3000.0,
-                    daily_loss_limit: -100.0,
-                    stop_loss_pct: 10.0,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
                 },
                 test_exchange_rules(),
             )
@@ -553,7 +562,6 @@ mod tests {
     }
 
     fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
-        snapshot.risk.realized_pnl_cumulative = 980.1;
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.realized_pnl_day =
             Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap());
@@ -903,7 +911,8 @@ mod tests {
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackQueryStore>
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            test_budget_catalog("btc-core"),
         ));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(

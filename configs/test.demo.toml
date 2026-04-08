@@ -14,8 +14,8 @@ min_rebalance_units = 0.5
 shape_family = "linear"
 out_of_band_policy = "freeze"
 max_notional = 3000.0
-daily_loss_limit = -300.0
-stop_loss_pct = 10.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 tick_timeout_secs = 30
 
 [[tracks]]
@@ -31,6 +31,6 @@ min_rebalance_units = 0.5
 shape_family = "linear"
 out_of_band_policy = "freeze"
 max_notional = 6000.0
-daily_loss_limit = -600.0
-stop_loss_pct = 10.0
+daily_loss_limit = 600.0
+total_loss_limit = 1200.0
 tick_timeout_secs = 30

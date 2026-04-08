@@ -3,14 +3,16 @@
 use std::sync::Arc;
 
 use poise_application::{
-    AccountCapacityGuard, AccountMonitor, ApplicationNotification, TrackCommandService,
-    TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
-    TrackServiceSet,
+    AccountCapacityGuard, AccountMonitor, ApplicationNotification, TrackBudgetCatalog,
+    TrackCommandService, TrackEffectService, TrackEffectStore, TrackMutationStore,
+    TrackObservationService, TrackServiceSet,
 };
+use poise_core::risk::CapacityBudget;
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::OrderUpdateAbsorbResult;
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::{OrderObservation, PositionObservation};
+use poise_engine::track::TrackId;
 use poise_engine::transition::TrackTransition;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -153,6 +155,22 @@ pub(crate) fn unavailable_account_monitor(
         notifications,
         poise_application::AccountMonitorConfig::default(),
     ))
+}
+
+pub(crate) fn test_budget() -> CapacityBudget {
+    CapacityBudget {
+        max_notional: 3000.0,
+        daily_loss_limit: 100.0,
+        total_loss_limit: 300.0,
+    }
+}
+
+pub(crate) fn test_budget_catalog(track_id: &str) -> TrackBudgetCatalog {
+    budget_catalog_for(track_id, test_budget())
+}
+
+pub(crate) fn budget_catalog_for(track_id: &str, budget: CapacityBudget) -> TrackBudgetCatalog {
+    TrackBudgetCatalog::from_iter([(TrackId::new(track_id), budget)])
 }
 
 pub(crate) fn build_http_state(

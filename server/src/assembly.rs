@@ -10,8 +10,8 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
     AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
-    TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
-    TrackQueryService, TrackServiceSet,
+    TrackBudgetCatalog, TrackEffectService, TrackEffectStore, TrackMutationStore,
+    TrackObservationService, TrackQueryService, TrackServiceSet,
 };
 use poise_binance::BinanceAdapter;
 use poise_engine::manager::TrackManager;
@@ -231,6 +231,12 @@ async fn assemble_with_state_store(
     let mutation_store = repositories.mutation_store();
     let query_store = repositories.query_store();
     let effect_store = repositories.effect_store();
+    let budget_catalog = TrackBudgetCatalog::from_iter(
+        config
+            .tracks
+            .iter()
+            .map(|track| (track.track_id(), track.budget())),
+    );
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let write_services = TrackServiceSet::new(
         manager,
@@ -244,7 +250,7 @@ async fn assemble_with_state_store(
     let effect_service = Arc::new(write_services.effect);
     #[cfg(test)]
     let manager = observation_service.manager();
-    let query_service = Arc::new(TrackQueryService::new(query_store));
+    let query_service = Arc::new(TrackQueryService::new(query_store, budget_catalog));
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     let projector = Arc::new(TrackProjector::new());
     let account_projector = Arc::new(AccountProjector::new());
@@ -557,7 +563,8 @@ mod tests {
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
         build_http_state as build_test_http_state,
-        build_websocket_state as build_test_websocket_state, unavailable_account_monitor,
+        build_websocket_state as build_test_websocket_state, test_budget_catalog,
+        unavailable_account_monitor,
     };
     use poise_application::{TrackDebugQueryService, TrackQueryService};
 
@@ -628,8 +635,8 @@ mod tests {
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
-                    daily_loss_limit: None,
-                    stop_loss_pct: None,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                     tick_timeout_secs: None,
                 },
                 TrackDefinition {
@@ -645,8 +652,8 @@ mod tests {
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
-                    daily_loss_limit: None,
-                    stop_loss_pct: None,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                     tick_timeout_secs: None,
                 },
             ],
@@ -709,8 +716,8 @@ mod tests {
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
-                    daily_loss_limit: None,
-                    stop_loss_pct: None,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                     tick_timeout_secs: None,
                 },
                 TrackDefinition {
@@ -726,8 +733,8 @@ mod tests {
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                     max_notional: None,
-                    daily_loss_limit: None,
-                    stop_loss_pct: None,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                     tick_timeout_secs: None,
                 },
             ],
@@ -762,8 +769,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
@@ -800,8 +807,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
@@ -842,8 +849,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
@@ -892,8 +899,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: Some(20_000.0),
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
@@ -998,8 +1005,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig {
@@ -1221,8 +1228,8 @@ mod tests {
                 },
                 poise_core::risk::CapacityBudget {
                     max_notional: 3000.0,
-                    daily_loss_limit: -100.0,
-                    stop_loss_pct: 10.0,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
                 },
                 test_exchange_rules(),
             )
@@ -1239,7 +1246,8 @@ mod tests {
             account_margin_guard.clone(),
         );
         let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackQueryStore>
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            test_budget_catalog("btc-core"),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
         let projector = Arc::new(TrackProjector::new());

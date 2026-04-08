@@ -750,8 +750,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: ExchangeConfig::default(),
@@ -791,8 +791,8 @@ mod tests {
                 },
                 poise_core::risk::CapacityBudget {
                     max_notional: 3000.0,
-                    daily_loss_limit: -300.0,
-                    stop_loss_pct: 10.0,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                 },
                 poise_core::types::ExchangeRules {
                     price_tick: 0.1,

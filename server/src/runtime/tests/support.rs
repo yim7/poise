@@ -234,7 +234,7 @@ where
             TrackId::new("BTCUSDT"),
             instrument.clone(),
             config,
-            budget,
+            budget.clone(),
             exchange.get_exchange_info(&instrument).await.unwrap().rules,
         )
         .unwrap();
@@ -254,7 +254,10 @@ where
         account_margin_guard.clone(),
     );
     let account_monitor = build_test_account_monitor(exchange, events).await;
-    let _ = Arc::new(TrackQueryService::new(persistence as Arc<dyn TrackQueryStore>));
+    let _ = Arc::new(TrackQueryService::new(
+        persistence as Arc<dyn TrackQueryStore>,
+        test_budget_catalog("BTCUSDT", budget.clone()),
+    ));
     build_runtime_and_effect_worker_test_contexts(
         &services,
         mutation_store,
@@ -426,9 +429,13 @@ pub(crate) fn rounded_submit_test_config() -> TrackConfig {
 pub(crate) fn test_budget() -> CapacityBudget {
     CapacityBudget {
         max_notional: 3000.0,
-        daily_loss_limit: -120.0,
-        stop_loss_pct: 10.0,
+        daily_loss_limit: 120.0,
+        total_loss_limit: 300.0,
     }
+}
+
+pub(crate) fn test_budget_catalog(track_id: &str, budget: CapacityBudget) -> TrackBudgetCatalog {
+    TrackBudgetCatalog::from_iter([(TrackId::new(track_id), budget)])
 }
 
 pub(crate) fn test_server_time() -> chrono::DateTime<Utc> {

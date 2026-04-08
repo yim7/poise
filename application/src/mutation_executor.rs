@@ -1364,8 +1364,8 @@ pub(crate) mod test_support {
                 },
                 CapacityBudget {
                     max_notional: 3_000.0,
-                    daily_loss_limit: -300.0,
-                    stop_loss_pct: 10.0,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                 },
                 ExchangeRules {
                     price_tick: 0.1,

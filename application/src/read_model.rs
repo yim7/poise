@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
+use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
@@ -24,6 +25,7 @@ pub struct TrackReadModel {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: OutOfBandPolicy,
+    pub budget: CapacityBudget,
     pub reference_price: Option<f64>,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
@@ -59,6 +61,7 @@ pub struct ReadModelSlot {
 impl TrackReadModel {
     pub fn from_snapshot(
         snapshot: TrackRuntimeSnapshot,
+        budget: CapacityBudget,
         updated_at: DateTime<Utc>,
         recent_track_events: Vec<StoredTrackEvent>,
         recent_effects: Vec<PersistedTrackEffect>,
@@ -109,6 +112,7 @@ impl TrackReadModel {
             min_rebalance_units: config.min_rebalance_units,
             shape_family: config.shape_family,
             out_of_band_policy: config.out_of_band_policy,
+            budget,
             reference_price: observed.reference_price,
             current_exposure: current_exposure.0,
             desired_exposure: desired_exposure.map(|value| value.0),
@@ -144,6 +148,7 @@ fn project_slot_label(index: usize, slot_name: &str) -> String {
 mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
@@ -215,9 +220,6 @@ mod tests {
                 ledger_state: Default::default(),
                 replacement_gate_reason: None,
                 risk: RiskState {
-                    realized_pnl_day: None,
-                    realized_pnl_today: 0.0,
-                    realized_pnl_cumulative: 0.0,
                     unrealized_pnl: 0.0,
                     ..RiskState::default()
                 },
@@ -227,6 +229,11 @@ mod tests {
                     last_tick_at: None,
                     market_data_stale_since: None,
                 },
+            },
+            CapacityBudget {
+                max_notional: 3000.0,
+                daily_loss_limit: 100.0,
+                total_loss_limit: 300.0,
             },
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             vec![StoredTrackEvent {
