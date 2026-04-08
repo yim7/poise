@@ -610,7 +610,7 @@ Task 3 code commit:
 - Test: `exchanges/binance/src/rest/client.rs`
 - Test: `exchanges/binance/src/ws/account.rs`
 
-- [ ] **Step 1: 先写失败测试，固定最终模块边界和残留清理**
+- [x] **Step 1: 先写失败测试，固定最终模块边界和残留清理**
 
 在 `server/src/runtime/guards.rs` 增加测试：
 
@@ -641,7 +641,7 @@ fn project_instrument_preserves_exchange_name() {
 
 同时把 `exchanges/binance/src/rest.rs`、`websocket.rs`、`types.rs` 里的现有测试迁移目标写到新文件中，先移动测试壳子再移动实现，确保文件结构重组不是无测试搬家。
 
-- [ ] **Step 2: 运行定向测试，确认当前仍有遗留假设**
+- [x] **Step 2: 运行定向测试，确认当前仍有遗留假设**
 
 Run:
 `cargo test -p poise-server account_margin_guard_tracks_single_exchange_block_without_venue_bucket -- --exact`
@@ -655,7 +655,7 @@ Run:
 Expected:
 - FAIL，原因是当前仍把 `"binance"` 映射成 `"binance_futures"`
 
-- [ ] **Step 3: 实现最终结构整理**
+- [x] **Step 3: 实现最终结构整理**
 
 要求：
 - `poise-binance` 按 spec 收敛为：
@@ -670,7 +670,7 @@ Expected:
 - `server/src/projector.rs` 删除 `binance -> binance_futures` 特判
 - 除了上面两点清理，不改对外 HTTP / WebSocket 协议语义
 
-- [ ] **Step 4: 运行最终回归**
+- [x] **Step 4: 运行最终回归**
 
 Run:
 `cargo test -p poise-server account_margin_guard_tracks_single_exchange_block_without_venue_bucket -- --exact`
@@ -702,7 +702,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add exchanges/binance/src exchanges/binance/Cargo.toml server/src/runtime/guards.rs server/src/projector.rs server/src/runtime/tests/support.rs server/src/runtime/tests/execution.rs server/src/runtime/tests/user_data.rs
@@ -710,4 +710,4 @@ git commit -m "refactor: align binance integration with exchange boundary"
 ```
 
 Task 4 code commit:
-`<fill-me>`
+`68c2f80`
