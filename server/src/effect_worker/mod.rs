@@ -11,8 +11,6 @@ use tokio::time::sleep;
 
 use crate::order_outcome::OutcomeUnknownRecovery;
 use crate::server_context::EffectWorkerState;
-#[cfg(test)]
-use crate::server_context::TestServerContext;
 use crate::submit_preflight::SubmitPreflightDecision;
 
 mod dispatch;
@@ -29,17 +27,12 @@ pub struct EffectWorker {
 impl EffectWorker {
     #[cfg(test)]
     pub fn new(
-        state: TestServerContext,
+        state: impl Into<EffectWorkerState>,
         exchange: Arc<dyn ExchangePort>,
         poll_interval: Duration,
     ) -> Self {
         let (_, shutdown_rx) = watch::channel(false);
-        Self::with_shutdown_rx(
-            state.effect_worker_state(),
-            exchange,
-            poll_interval,
-            shutdown_rx,
-        )
+        Self::with_shutdown_rx(state, exchange, poll_interval, shutdown_rx)
     }
 
     pub fn with_shutdown_rx(

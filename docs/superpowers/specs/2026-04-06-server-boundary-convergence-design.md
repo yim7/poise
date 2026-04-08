@@ -4,8 +4,8 @@
 
 - `engine::ports` 同时承载执行、持久化、effect 调度和 read-side 查询契约
 - `server` 通过一个过宽的 `ServerState` 把多类运行时知识暴露给所有调用方
-- `TrackWriteService` 对外镜像 `TrackManager` 的 mutation 面，应用层没有形成自己的抽象
-- `runtime.rs`、`write_service.rs`、`effect_worker.rs`、`manager.rs` 已经出现明显的大文件信号，模块边界和文件边界没有对齐
+- 旧的总写侧服务曾对外镜像 `TrackManager` 的 mutation 面，应用层没有形成自己的抽象
+- `runtime.rs`、`effect_worker.rs`、`manager.rs`，以及当时仍存在的 `write_service.rs` 都出现过明显的大文件信号，模块边界和文件边界没有对齐
 
 这不是单个文件或单个 trait 的问题，而是当前 `server`、`engine`、`storage` 三层之间的 owner 放置不稳定，导致 change amplification、cognitive load 和 unknown unknowns 一起上升。
 
@@ -491,7 +491,7 @@
 - `mod.rs` 只保留 runtime 组装和主入口
 - 细节按稳定职责拆开，例如：启动恢复、market data 消费、user data 消费、reconcile、exchange 同步、账户刷新、guard / preflight
 
-### `server/src/write_service.rs`
+### 已删除的 `server/src/write_service.rs`
 
 目标形态：
 

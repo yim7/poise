@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{SecondsFormat, Utc};
-use poise_application::{TrackEffectStore, TrackMutationStore, TrackQueryStore};
+use poise_application::{AccountMonitorStore, TrackEffectStore, TrackMutationStore, TrackQueryStore};
 use poise_core::strategy::TrackConfig;
 use poise_engine::track::Instrument;
 use poise_storage::sqlite::SqliteStorage;
@@ -74,7 +74,7 @@ type BootstrapResult<T> = std::result::Result<T, StateBootstrapError>;
 
 #[derive(Clone)]
 pub struct StateRepositories {
-    sqlite_storage: Option<Arc<SqliteStorage>>,
+    account_monitor_store: Option<Arc<dyn AccountMonitorStore>>,
     mutation_store: Arc<dyn TrackMutationStore>,
     query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
@@ -137,7 +137,7 @@ impl StateRepositories {
         R: TrackMutationStore + TrackQueryStore + TrackEffectStore + 'static,
     {
         Self {
-            sqlite_storage: None,
+            account_monitor_store: None,
             mutation_store: repository.clone(),
             query_store: repository.clone(),
             effect_store: repository.clone(),
@@ -146,15 +146,15 @@ impl StateRepositories {
 
     pub(crate) fn from_sqlite_storage(repository: Arc<SqliteStorage>) -> Self {
         Self {
-            sqlite_storage: Some(repository.clone()),
+            account_monitor_store: Some(repository.clone()),
             mutation_store: repository.clone(),
             query_store: repository.clone(),
             effect_store: repository.clone(),
         }
     }
 
-    pub fn sqlite_storage(&self) -> Option<Arc<SqliteStorage>> {
-        self.sqlite_storage.as_ref().map(Arc::clone)
+    pub fn account_monitor_store(&self) -> Option<Arc<dyn AccountMonitorStore>> {
+        self.account_monitor_store.as_ref().map(Arc::clone)
     }
 
     pub fn mutation_store(&self) -> Arc<dyn TrackMutationStore> {

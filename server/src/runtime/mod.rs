@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use crate::effect_worker::EffectWorker;
 use crate::order_outcome::{ReconcileExecution, ReconcileRequest};
-#[cfg(test)]
-use crate::server_context::TestServerContext;
 use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
+#[cfg(test)]
+use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_engine::manager::ExchangeSyncMode;
@@ -63,13 +63,14 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 impl ServerRuntime {
     #[cfg(test)]
     pub fn new(
-        state: TestServerContext,
+        state: RuntimeState,
+        effect_worker_state: EffectWorkerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
-            state.runtime_state(),
-            state.effect_worker_state(),
+            state,
+            effect_worker_state,
             exchange,
             market_data,
             HashMap::new(),
@@ -101,15 +102,16 @@ impl ServerRuntime {
 
     #[cfg(test)]
     fn with_reconcile_intervals(
-        state: TestServerContext,
+        state: RuntimeState,
+        effect_worker_state: EffectWorkerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
-            state.runtime_state(),
-            state.effect_worker_state(),
+            state,
+            effect_worker_state,
             exchange,
             market_data,
             HashMap::new(),
@@ -121,7 +123,8 @@ impl ServerRuntime {
 
     #[cfg(test)]
     fn with_reconcile_and_account_refresh_intervals(
-        state: TestServerContext,
+        state: RuntimeState,
+        effect_worker_state: EffectWorkerState,
         exchange: Arc<dyn ExchangePort>,
         market_data: Arc<dyn MarketDataPort>,
         recovery_retry_interval: Duration,
@@ -129,8 +132,8 @@ impl ServerRuntime {
         account_refresh_interval: Duration,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
-            state.runtime_state(),
-            state.effect_worker_state(),
+            state,
+            effect_worker_state,
             exchange,
             market_data,
             HashMap::new(),
@@ -317,11 +320,12 @@ impl ReconcileStateAccess for ReconcileState {
 }
 
 #[cfg(test)]
-impl ReconcileStateAccess for TestServerContext {
+impl ReconcileStateAccess for RuntimeTestContext {
     fn reconcile_state_view(&self) -> ReconcileState {
-        self.reconcile_state()
+        self.runtime_state().reconcile.clone()
     }
 }
+
 
 async fn retry_startup_step<T, F, Fut>(step_name: &'static str, operation: F) -> Result<T>
 where

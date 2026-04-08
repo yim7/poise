@@ -12,9 +12,9 @@ mod runtime;
 mod server_context;
 mod state_bootstrap;
 mod submit_preflight;
-mod websocket;
 #[cfg(test)]
-mod write_service;
+mod test_support;
+mod websocket;
 
 use std::env;
 

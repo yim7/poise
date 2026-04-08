@@ -253,19 +253,28 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
 
-    use crate::assembly::{
-        TestServerContext, build_test_context, build_test_context_with_account_monitor,
-    };
+    use crate::account_projector::AccountProjector;
     use crate::projector::TrackProjector;
-    use crate::write_service::TrackWriteHarness;
+    use crate::server_context::{HttpState, WebSocketState};
+    use crate::test_support::{
+        build_http_state, build_test_application_services, build_websocket_state,
+        unavailable_account_monitor,
+    };
 
-    fn router(state: TestServerContext) -> axum::Router {
-        super::router(state.http_state(), state.websocket_state())
-    }
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackQueryService,
+        StoredAccountMonitorState, TrackDebugQueryService, TrackQueryService,
     };
+
+    #[derive(Clone)]
+    struct HttpTestState {
+        http_state: HttpState,
+        websocket_state: WebSocketState,
+    }
+
+    fn router(state: HttpTestState) -> axum::Router {
+        super::router(state.http_state, state.websocket_state)
+    }
 
     fn test_exchange_rules() -> ExchangeRules {
         ExchangeRules {
@@ -349,12 +358,12 @@ mod tests {
         }
     }
 
-    async fn app_state() -> TestServerContext {
+    async fn app_state() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         build_test_state(repository).await
     }
 
-    async fn build_test_state<R>(repository: Arc<R>) -> TestServerContext
+    async fn build_test_state<R>(repository: Arc<R>) -> HttpTestState
     where
         R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
@@ -378,28 +387,40 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
-        let query_store: Arc<dyn TrackQueryStore> = repository;
+        let query_store: Arc<dyn TrackQueryStore> = repository.clone();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteHarness::new(
+        let services = build_test_application_services(
             manager,
             mutation_store.clone(),
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
-        ));
-
+        );
         let query_service = Arc::new(TrackQueryService::new(query_store));
-        build_test_context(
-            write_service,
-            mutation_store,
-            effect_store,
-            query_service,
-            Arc::new(TrackProjector::new()),
-            account_margin_guard,
-        )
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let projector = Arc::new(TrackProjector::new());
+        let account_monitor = unavailable_account_monitor(services.notifications.clone());
+        let account_projector = Arc::new(AccountProjector::new());
+        HttpTestState {
+            http_state: build_http_state(
+                &services,
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                Arc::new(TrackQueryService::new(repository as Arc<dyn TrackQueryStore>)),
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        }
     }
 
-    async fn app_state_with_account_summary() -> TestServerContext {
+    async fn app_state_with_account_summary() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = test_manager();
         let mut snapshot = manager
@@ -422,15 +443,15 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
         let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
-        let query_store: Arc<dyn TrackQueryStore> = repository;
+        let query_store: Arc<dyn TrackQueryStore> = repository.clone();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let write_service = Arc::new(TrackWriteHarness::new(
+        let services = build_test_application_services(
             manager,
-            mutation_store.clone(),
-            effect_store.clone(),
+            mutation_store,
+            effect_store,
             notifications.clone(),
-            account_margin_guard.clone(),
-        ));
+            account_margin_guard,
+        );
         let account_store: Arc<dyn AccountMonitorStore> =
             Arc::new(SqliteStorage::in_memory().unwrap());
         account_store
@@ -457,16 +478,27 @@ mod tests {
             .await
             .unwrap(),
         );
-
-        build_test_context_with_account_monitor(
-            write_service,
-            mutation_store,
-            effect_store,
-            Arc::new(TrackQueryService::new(query_store)),
-            Arc::new(TrackProjector::new()),
-            account_monitor,
-            account_margin_guard,
-        )
+        let projector = Arc::new(TrackProjector::new());
+        let account_projector = Arc::new(AccountProjector::new());
+        let query_service = Arc::new(TrackQueryService::new(query_store));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        HttpTestState {
+            http_state: build_http_state(
+                &services,
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                query_service,
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        }
     }
 
     fn test_manager() -> TrackManager {
@@ -874,20 +906,34 @@ mod tests {
             repository.clone() as Arc<dyn TrackQueryStore>
         ));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let app = router(build_test_context(
-            Arc::new(TrackWriteHarness::new(
-                manager,
-                mutation_store.clone(),
-                effect_store.clone(),
-                notifications,
-                account_margin_guard.clone(),
-            )),
+        let services = build_test_application_services(
+            manager,
             mutation_store,
             effect_store,
-            query_service,
-            Arc::new(TrackProjector::new()),
+            notifications,
             account_margin_guard,
-        ));
+        );
+        let projector = Arc::new(TrackProjector::new());
+        let account_monitor = unavailable_account_monitor(services.notifications.clone());
+        let account_projector = Arc::new(AccountProjector::new());
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let app = router(HttpTestState {
+            http_state: build_http_state(
+                &services,
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                query_service,
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        });
 
         let pause = app
             .clone()

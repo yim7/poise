@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust workspace, Cargo, Tokio, Axum, Rusqlite, Serde, anyhow
 
-**Baseline:** `cargo test --workspace --quiet` 在 2026-04-06 当前基线通过，可直接作为每个 task 的最终回归命令。
+**Baseline:** `cargo test --workspace --quiet` 和 `cargo build -p poise-server` 在 2026-04-06 当前基线通过，可直接作为每个 task 的最终回归命令。
 
 ---
 
@@ -114,6 +114,7 @@
 
 ### 迁移后删除的旧文件
 
+- 说明：以下文件名反映计划制定时的迁移目标，其中 `server/src/write_service.rs` 已在本轮实现中删除
 - `server/src/notifications.rs`
 - `server/src/read_model.rs`
 - `server/src/account_read_model.rs`
@@ -130,6 +131,7 @@
 - 每个 task 先写失败测试，再写最小实现
 - 每个 task 验收通过后必须立即提交，并把 commit SHA 回写到本计划
 - 未完成 `git add`、`git commit` 和计划回写，不得开始下一个 task
+- 最终验收至少包含 `cargo test --workspace --quiet` 和 `cargo build -p poise-server`
 - 除修复重构过程中暴露的明确 bug 外，不允许引入新的业务规则、策略口径或对外行为变化
 - 不因为“文件太大”单独拆 `engine/src/manager.rs`；只有在前面任务已经证明它仍混合多类变化原因时，才另起 spec / plan 处理
 

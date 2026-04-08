@@ -10,11 +10,11 @@ pub async fn ws_handler(ws: WebSocketUpgrade, state: WebSocketState) -> Response
 }
 
 #[cfg(test)]
-pub async fn ws_handler_with_test_context(
+pub async fn ws_handler_with_test_state(
     ws: WebSocketUpgrade,
-    axum::extract::State(state): axum::extract::State<crate::server_context::TestServerContext>,
+    axum::extract::State(state): axum::extract::State<WebSocketState>,
 ) -> Response {
-    ws_handler(ws, state.websocket_state()).await
+    ws_handler(ws, state).await
 }
 
 async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
@@ -158,18 +158,26 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::assembly::{
-        TestServerContext, build_test_context, build_test_context_with_account_monitor,
-    };
+    use crate::server_context::WebSocketState;
     use crate::effect_worker::EffectWorker;
     use crate::projector::TrackProjector;
-    use crate::write_service::TrackWriteHarness;
+    use crate::test_support::{
+        build_effect_worker_test_context, build_test_application_services, build_websocket_state,
+        unavailable_account_monitor,
+    };
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackQueryService,
+        StoredAccountMonitorState, TrackCommandService, TrackQueryService,
     };
 
-    use super::ws_handler_with_test_context;
+    use super::ws_handler_with_test_state;
+
+    #[derive(Clone)]
+    struct WebSocketTestContext {
+        websocket_state: WebSocketState,
+        command_service: Arc<TrackCommandService>,
+        notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
+    }
 
     type ClientStream = futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
@@ -179,15 +187,15 @@ mod tests {
 
     async fn spawn_server(
         repository: Arc<TestRepository>,
-    ) -> (String, Arc<TrackWriteHarness>, TestServerContext) {
+    ) -> (String, WebSocketTestContext) {
         spawn_server_with_capacity(repository, 16).await
     }
 
     #[tokio::test]
     async fn websocket_accepts_websocket_state_without_effect_worker_dependencies() {
         let repository = Arc::new(TestRepository::default());
-        let (_url, _service, state) = spawn_server(repository).await;
-        let websocket_state = state.websocket_state();
+        let (_url, state) = spawn_server(repository).await;
+        let websocket_state = state.websocket_state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new().route(
@@ -207,78 +215,109 @@ mod tests {
     async fn spawn_server_with_capacity(
         repository: Arc<TestRepository>,
         notification_capacity: usize,
-    ) -> (String, Arc<TrackWriteHarness>, TestServerContext) {
+    ) -> (String, WebSocketTestContext) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let service = Arc::new(TrackWriteHarness::new(
+        let services = build_test_application_services(
             test_manager(),
             mutation_store.clone(),
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
+        );
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>
         ));
-        let state = build_test_context(
-            Arc::clone(&service),
-            mutation_store,
-            effect_store,
-            Arc::new(TrackQueryService::new(
-                repository.clone() as Arc<dyn TrackQueryStore>
-            )),
+        let websocket_state = build_websocket_state(
+            &services,
+            query_service,
             Arc::new(TrackProjector::new()),
-            account_margin_guard,
+            unavailable_account_monitor(services.notifications.clone()),
+            Arc::new(crate::account_projector::AccountProjector::new()),
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler_with_test_context))
-            .with_state(state.clone());
+            .route("/ws", axum::routing::get(ws_handler_with_test_state))
+            .with_state(websocket_state.clone());
 
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
-        (format!("ws://{address}/ws"), service, state)
+        (
+            format!("ws://{address}/ws"),
+            WebSocketTestContext {
+                websocket_state,
+                command_service: services.command_service.clone(),
+                notifications: services.notifications.clone(),
+            },
+        )
     }
 
     async fn spawn_server_with_account_monitor(
         repository: Arc<TestRepository>,
         account_monitor: Arc<AccountMonitor>,
-    ) -> (String, Arc<TrackWriteHarness>, TestServerContext) {
+    ) -> (String, WebSocketTestContext) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let service = Arc::new(TrackWriteHarness::new(
+        let services = build_test_application_services(
             test_manager(),
             mutation_store.clone(),
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
+        );
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>
         ));
-        let state = build_test_context_with_account_monitor(
-            Arc::clone(&service),
-            mutation_store,
-            effect_store,
-            Arc::new(TrackQueryService::new(
-                repository.clone() as Arc<dyn TrackQueryStore>
-            )),
+        let websocket_state = build_websocket_state(
+            &services,
+            query_service,
             Arc::new(TrackProjector::new()),
             account_monitor,
-            account_margin_guard,
+            Arc::new(crate::account_projector::AccountProjector::new()),
         );
         let app = Router::new()
-            .route("/ws", axum::routing::get(ws_handler_with_test_context))
-            .with_state(state.clone());
+            .route("/ws", axum::routing::get(ws_handler_with_test_state))
+            .with_state(websocket_state.clone());
 
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
-        (format!("ws://{address}/ws"), service, state)
+        (
+            format!("ws://{address}/ws"),
+            WebSocketTestContext {
+                websocket_state,
+                command_service: services.command_service.clone(),
+                notifications: services.notifications.clone(),
+            },
+        )
+    }
+
+    fn build_effect_worker_state_for_notification_test(
+        repository: Arc<TestRepository>,
+        notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
+    ) -> crate::server_context::EffectWorkerState {
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository as Arc<dyn TrackEffectStore>;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager(),
+            mutation_store.clone(),
+            effect_store.clone(),
+            notifications,
+            account_margin_guard,
+        );
+
+        build_effect_worker_test_context(&services, mutation_store, effect_store).effect_worker_state
     }
 
     async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
@@ -333,13 +372,13 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_events_to_multiple_clients() {
         let repository = seeded_repository();
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client_a, _) = connect_async(&url).await.unwrap();
         let (client_b, _) = connect_async(&url).await.unwrap();
         let (_, mut stream_a) = client_a.split();
         let (_, mut stream_b) = client_b.split();
 
-        service.emit_internal_notification(ApplicationNotification::TrackChanged {
+        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -356,11 +395,11 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_track_events_with_stream_event_envelope() {
         let repository = seeded_repository();
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(
+        let _ = state.notifications.send(
             poise_application::ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             },
@@ -385,12 +424,12 @@ mod tests {
         let repository = seeded_repository();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_monitor = seeded_account_monitor(notifications.clone()).await;
-        let (url, service, _) =
+        let (url, state) =
             spawn_server_with_account_monitor(repository, account_monitor).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ApplicationNotification::AccountChanged);
+        let _ = state.notifications.send(ApplicationNotification::AccountChanged);
 
         let event = recv_event(&mut stream).await;
 
@@ -409,11 +448,12 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_track_detail_changed_after_write_commit() {
         let repository = seeded_repository();
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service
+        state
+            .command_service
             .command("btc-core", TrackCommand::Pause)
             .await
             .unwrap();
@@ -455,8 +495,16 @@ mod tests {
     async fn broadcasts_track_list_item_changed_after_effect_state_change() {
         let repository = seeded_repository();
         repository.seed_pending_noop_effect();
-        let (url, service, state) = spawn_server(repository).await;
-        let worker = EffectWorker::new(state, Arc::new(NoopExchange), Duration::from_millis(10));
+        let (url, state) = spawn_server(repository.clone()).await;
+        let effect_worker_state = build_effect_worker_state_for_notification_test(
+            repository,
+            state.notifications.clone(),
+        );
+        let worker = EffectWorker::new(
+            effect_worker_state,
+            Arc::new(NoopExchange),
+            Duration::from_millis(10),
+        );
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
@@ -486,20 +534,18 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, StreamEvent::TrackDetailChanged { .. }))
         );
-
-        drop(service);
     }
 
     #[tokio::test]
     async fn closes_socket_when_notification_stream_lags() {
         let repository = seeded_repository();
         repository.set_read_delay(Duration::from_millis(50));
-        let (url, service, _) = spawn_server_with_capacity(repository, 1).await;
+        let (url, state) = spawn_server_with_capacity(repository, 1).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
         for _ in 0..8 {
-            service.emit_internal_notification(ApplicationNotification::TrackChanged {
+            let _ = state.notifications.send(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             });
         }
@@ -528,11 +574,11 @@ mod tests {
     async fn closes_socket_when_track_read_model_is_missing_for_notification() {
         let repository = seeded_repository();
         repository.remove_snapshot("btc-core");
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ApplicationNotification::TrackChanged {
+        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 
@@ -560,11 +606,11 @@ mod tests {
     async fn closes_socket_when_track_read_model_load_fails() {
         let repository = seeded_repository();
         repository.set_load_snapshot_error("injected read failure");
-        let (url, service, _) = spawn_server(repository).await;
+        let (url, state) = spawn_server(repository).await;
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        service.emit_internal_notification(ApplicationNotification::TrackChanged {
+        let _ = state.notifications.send(ApplicationNotification::TrackChanged {
             track_id: TrackId::new("btc-core"),
         });
 

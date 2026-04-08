@@ -190,14 +190,14 @@ pub(super) async fn apply_user_data_event(
     Ok(())
 }
 
-fn position_observation(position: &Position) -> PositionObservation {
+pub(super) fn position_observation(position: &Position) -> PositionObservation {
     PositionObservation {
         qty: position.qty,
         unrealized_pnl: position.unrealized_pnl,
     }
 }
 
-fn order_observation(order: &ExchangeOrder) -> OrderObservation {
+pub(super) fn order_observation(order: &ExchangeOrder) -> OrderObservation {
     OrderObservation {
         order_id: order.order_id.clone(),
         client_order_id: order.client_order_id.clone(),
