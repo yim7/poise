@@ -264,7 +264,7 @@ Task 1 code commit:
 - Test: `server/src/exchange.rs`
 - Verify: `application/src/account_monitor.rs`
 
-- [ ] **Step 1: 先写失败测试，固定一次性装配边界**
+- [x] **Step 1: 先写失败测试，固定一次性装配边界**
 
 在 `server/src/assembly.rs` 增加装配测试，明确运行时可以接收独立的执行 / 账户摘要 / 账户私有流 / 元数据 / 行情实现：
 
@@ -343,7 +343,7 @@ fn exchange_retains_venue_and_exposes_stable_ports() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前边界还没有一次迁移到位**
+- [x] **Step 2: 运行定向测试，确认当前边界还没有一次迁移到位**
 
 Run:
 `cargo test -p poise-server assemble_accepts_distinct_execution_account_summary_account_metadata_and_market_ports -- --exact`
@@ -363,7 +363,7 @@ Run:
 Expected:
 - FAIL，原因是 `server/src/exchange.rs` 尚不存在
 
-- [ ] **Step 3: 实现一次性装配边界迁移**
+- [x] **Step 3: 实现一次性装配边界迁移**
 
 要求：
 - 保留 `AccountSummaryPort` 作为窄读侧接口
@@ -392,7 +392,7 @@ Expected:
 - `AccountMonitor` 和只读摘要路径继续依赖 `AccountSummaryPort`
 - `BinanceAdapter` 在旧文件结构下先实现新接口，但不承担新的装配 owner
 
-- [ ] **Step 4: 运行装配边界回归**
+- [x] **Step 4: 运行装配边界回归**
 
 Run:
 `cargo test -p poise-server exchange_retains_venue_and_exposes_stable_ports -- --exact`
@@ -424,7 +424,7 @@ Run:
 Expected:
 - PASS，说明 Binance 现有 REST / WebSocket 行为在新接口下仍成立
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server/src/exchange.rs engine/src/ports.rs server/src/assembly.rs server/src/runtime/mod.rs server/src/runtime/startup_sync.rs server/src/runtime/reconcile.rs server/src/effect_worker/mod.rs server/src/http.rs server/src/websocket.rs server/src/main.rs server/src/server_context.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs server/src/effect_worker/tests/support.rs exchanges/binance/src/adapter.rs
@@ -432,7 +432,7 @@ git commit -m "refactor: introduce exchange assembly and split stable ports"
 ```
 
 Task 2 code commit:
-`<fill-me>`
+`65ee751`
 
 ---
 
