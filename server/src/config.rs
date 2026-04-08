@@ -61,12 +61,14 @@ impl ExchangeConfig {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn api_key(&self) -> Option<&str> {
         match self {
             Self::Binance(config) => config.api_key.as_deref(),
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn api_secret(&self) -> Option<&str> {
         match self {
             Self::Binance(config) => config.api_secret.as_deref(),

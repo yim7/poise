@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
@@ -13,19 +12,19 @@ use poise_application::{
     TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
     TrackQueryService, TrackServiceSet,
 };
-use poise_binance::BinanceAdapter;
+use poise_binance::connect as connect_binance;
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{
-    AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
-};
-use poise_engine::track::{Instrument, TrackId};
+use poise_engine::ports::{AccountPort, ClockPort, MetadataPort};
+#[cfg(test)]
+use poise_engine::ports::{AccountSummaryPort, ExecutionPort, MarketDataPort};
+use poise_engine::track::{Instrument, TrackId, Venue};
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 
 use crate::account_projector::AccountProjector;
-use crate::config::Config;
+use crate::config::{Config, ExchangeConfig};
 use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
@@ -52,14 +51,6 @@ pub struct ServerPlatform {
     #[cfg(test)]
     effect_worker_test_context: EffectWorkerTestContext,
     pub runtime: ServerRuntime,
-}
-
-#[derive(Debug)]
-struct ValidatedExchangeRuntimeConfig {
-    api_key: String,
-    api_secret: String,
-    rest_base_url: String,
-    ws_base_url: String,
 }
 
 const STARTUP_RETRY_ATTEMPTS: usize = 5;
@@ -96,60 +87,20 @@ fn validate_unique_track_ids(
     Ok(())
 }
 
-fn required_exchange_field(value: Option<&str>, field_name: &str) -> Result<String> {
-    let value = value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("missing required {field_name}"))?;
-    Ok(value.to_string())
-}
-
-fn validate_exchange_runtime_config(config: &Config) -> Result<ValidatedExchangeRuntimeConfig> {
-    let api_key = required_exchange_field(config.exchange.api_key(), "exchange.api_key")?;
-    let api_secret = required_exchange_field(config.exchange.api_secret(), "exchange.api_secret")?;
-    let (rest_base_url, ws_base_url) = resolve_binance_endpoints(&config.environment)?;
-    Ok(ValidatedExchangeRuntimeConfig {
-        rest_base_url,
-        ws_base_url,
-        api_key,
-        api_secret,
-    })
-}
-
-fn resolve_binance_endpoints(environment: &str) -> Result<(String, String)> {
-    resolve_binance_endpoints_with_lookup(environment, |name| env::var(name).ok())
-}
-
-fn resolve_binance_endpoints_with_lookup(
-    environment: &str,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Result<(String, String)> {
-    if environment.eq_ignore_ascii_case("testnet") {
-        return Ok((
-            "https://demo-fapi.binance.com".to_string(),
-            "wss://fstream.binancefuture.com".to_string(),
-        ));
-    }
-    if environment.eq_ignore_ascii_case("mainnet") {
-        return Ok((
-            "https://fapi.binance.com".to_string(),
-            "wss://fstream.binance.com".to_string(),
-        ));
-    }
-    if environment.eq_ignore_ascii_case("test") {
-        let rest_base_url = lookup("POISE_TEST_BINANCE_REST_BASE_URL");
-        let ws_base_url = lookup("POISE_TEST_BINANCE_WS_BASE_URL");
-        if let (Some(rest_base_url), Some(ws_base_url)) = (rest_base_url, ws_base_url) {
-            return Ok((rest_base_url, ws_base_url));
+pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> {
+    match config {
+        ExchangeConfig::Binance(binance_config) => {
+            let connected = connect_binance(binance_config).await?;
+            Ok(Exchange::new(
+                Venue::Binance,
+                connected.execution(),
+                connected.market_data(),
+                connected.account_summary(),
+                connected.account(),
+                connected.metadata(),
+            ))
         }
-        return Err(anyhow!(
-            "environment `test` is reserved for automated tests; set `POISE_TEST_BINANCE_REST_BASE_URL` and `POISE_TEST_BINANCE_WS_BASE_URL` to start the real Binance runtime in test mode"
-        ));
     }
-
-    Err(anyhow!(
-        "unsupported runtime environment `{environment}`; expected `testnet` or `mainnet`"
-    ))
 }
 
 pub async fn assemble(config: &Config, repositories: StateRepositories) -> Result<ServerPlatform> {
@@ -160,27 +111,10 @@ pub async fn assemble(config: &Config, repositories: StateRepositories) -> Resul
             .map(|track| track.instrument(config.exchange.venue())),
     )?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
-    let exchange_config = validate_exchange_runtime_config(config)?;
-
-    let adapter = Arc::new(BinanceAdapter::new(
-        exchange_config.api_key,
-        exchange_config.api_secret,
-        exchange_config.rest_base_url,
-        exchange_config.ws_base_url,
-    ));
+    let exchange = build_exchange(&config.exchange).await?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_exchange_ports(
-        config,
-        adapter.clone(),
-        adapter.clone(),
-        adapter.clone(),
-        adapter.clone(),
-        adapter,
-        repositories,
-        clock,
-    )
-    .await
+    assemble_with_state_store(config, exchange, repositories, clock).await
 }
 
 #[cfg(test)]
@@ -212,6 +146,7 @@ where
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn assemble_with_exchange_ports(
     config: &Config,
     execution: Arc<dyn ExecutionPort>,
@@ -615,9 +550,8 @@ mod tests {
     use poise_application::{TrackDebugQueryService, TrackQueryService};
 
     use super::{
-        ServerPlatform, SystemClock, assemble, resolve_binance_endpoints,
-        resolve_binance_endpoints_with_lookup, validate_exchange_runtime_config,
-        validate_unique_instruments, validate_unique_track_ids,
+        ServerPlatform, SystemClock, assemble, build_exchange, validate_unique_instruments,
+        validate_unique_track_ids,
     };
 
     fn test_exchange_rules() -> poise_core::types::ExchangeRules {
@@ -706,6 +640,35 @@ notional_per_unit = 3000.0
         .unwrap();
 
         assert_eq!(platform.manager().read().await.list_tracks().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn build_exchange_ignores_top_level_environment_for_binance_endpoint_selection() {
+        let config = parse_config(
+            r#"
+environment = "test"
+
+[exchange]
+venue = "binance"
+deployment = "mainnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+"#,
+        )
+        .unwrap();
+
+        let exchange = build_exchange(&config.exchange).await.unwrap();
+
+        assert_eq!(exchange.venue(), Venue::Binance);
     }
 
     #[tokio::test]
@@ -892,46 +855,6 @@ notional_per_unit = 3000.0
         );
     }
 
-    #[test]
-    fn real_runtime_rejects_test_environment() {
-        let config = Config {
-            environment: "test".into(),
-            bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
-                track_id: "btc-core".into(),
-                symbol: "BTCUSDT".into(),
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
-                max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
-                tick_timeout_secs: None,
-            }],
-            exchange: ExchangeConfig::Binance(poise_binance::Config {
-                api_key: Some("demo-key".into()),
-                api_secret: Some("demo-secret".into()),
-                ..Default::default()
-            }),
-            account_monitor: Default::default(),
-        };
-
-        let error = validate_exchange_runtime_config(&config).unwrap_err();
-        assert!(error.to_string().contains("reserved for automated tests"));
-    }
-
-    #[test]
-    fn testnet_runtime_uses_fixed_demo_endpoints() {
-        let (rest_base_url, ws_base_url) = resolve_binance_endpoints("testnet").unwrap();
-        assert_eq!(rest_base_url, "https://demo-fapi.binance.com");
-        assert_eq!(ws_base_url, "wss://fstream.binancefuture.com");
-    }
-
     #[tokio::test]
     async fn assemble_retries_transient_exchange_info_failures() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -1023,20 +946,6 @@ notional_per_unit = 3000.0
         };
 
         assert!(error.to_string().contains("insufficient account margin"));
-    }
-
-    #[test]
-    fn test_runtime_reads_endpoints_from_env_lookup() {
-        let (rest_base_url, ws_base_url) =
-            resolve_binance_endpoints_with_lookup("test", |name| match name {
-                "POISE_TEST_BINANCE_REST_BASE_URL" => Some("http://127.0.0.1:19080".into()),
-                "POISE_TEST_BINANCE_WS_BASE_URL" => Some("ws://127.0.0.1:19081".into()),
-                _ => None,
-            })
-            .unwrap();
-
-        assert_eq!(rest_base_url, "http://127.0.0.1:19080");
-        assert_eq!(ws_base_url, "ws://127.0.0.1:19081");
     }
 
     #[tokio::test]

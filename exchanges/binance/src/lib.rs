@@ -1,8 +1,8 @@
 mod config;
-mod adapter;
+mod connected;
 mod rest;
 mod types;
 mod websocket;
 
-pub use adapter::BinanceAdapter;
-pub use config::{Config, Deployment};
+pub use config::{Config, Deployment, Endpoints};
+pub use connected::{Connected, connect};

@@ -11,9 +11,54 @@ use poise_engine::ports::{
 };
 use poise_engine::track::Instrument;
 
-use crate::{rest::BinanceRestClient, websocket::BinanceWsClient};
+use crate::{Config, rest::BinanceRestClient, websocket::BinanceWsClient};
 
-pub struct BinanceAdapter {
+pub async fn connect(config: &Config) -> Result<Connected> {
+    let endpoints = config.endpoints();
+    let (api_key, api_secret) = config.credentials()?;
+
+    Ok(Connected::new(BinanceAdapter::new(
+        api_key,
+        api_secret,
+        endpoints.rest_base_url(),
+        endpoints.ws_base_url(),
+    )))
+}
+
+#[derive(Clone)]
+pub struct Connected {
+    adapter: Arc<BinanceAdapter>,
+}
+
+impl Connected {
+    fn new(adapter: BinanceAdapter) -> Self {
+        Self {
+            adapter: Arc::new(adapter),
+        }
+    }
+
+    pub fn execution(&self) -> Arc<dyn ExecutionPort> {
+        self.adapter.clone()
+    }
+
+    pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
+        self.adapter.clone()
+    }
+
+    pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
+        self.adapter.clone()
+    }
+
+    pub fn account(&self) -> Arc<dyn AccountPort> {
+        self.adapter.clone()
+    }
+
+    pub fn metadata(&self) -> Arc<dyn MetadataPort> {
+        self.adapter.clone()
+    }
+}
+
+struct BinanceAdapter {
     #[allow(dead_code)]
     rest: Arc<BinanceRestClient>,
     #[allow(dead_code)]
@@ -118,6 +163,26 @@ mod tests {
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
+
+    fn build_test_connected() -> Connected {
+        Connected::new(BinanceAdapter::new(
+            "api-key",
+            "secret-key",
+            "http://127.0.0.1:18080",
+            "ws://127.0.0.1:19080",
+        ))
+    }
+
+    #[test]
+    fn connected_exposes_all_required_ports() {
+        let connected = build_test_connected();
+
+        let _execution: Arc<dyn ExecutionPort> = connected.execution();
+        let _market_data: Arc<dyn MarketDataPort> = connected.market_data();
+        let _account_summary: Arc<dyn AccountSummaryPort> = connected.account_summary();
+        let _account: Arc<dyn AccountPort> = connected.account();
+        let _metadata: Arc<dyn MetadataPort> = connected.metadata();
+    }
 
     #[tokio::test]
     async fn submit_order_calls_rest_and_returns_receipt() {
