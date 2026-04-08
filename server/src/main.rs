@@ -580,12 +580,12 @@ environment = "{suffix}"
 bind_address = "{bind_address}"
 
 [exchange]
+venue = "binance"
 api_key = "demo-key"
 api_secret = "demo-secret"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -660,7 +660,6 @@ notional_per_unit = 375.0
             bind_address: bind_address.to_string(),
             tracks: vec![crate::config::TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -675,10 +674,11 @@ notional_per_unit = 375.0
                 stop_loss_pct: None,
                 tick_timeout_secs: None,
             }],
-            exchange: crate::config::ExchangeConfig {
+            exchange: crate::config::ExchangeConfig::Binance(poise_binance::Config {
                 api_key: Some("demo-key".into()),
                 api_secret: Some("demo-secret".into()),
-            },
+                ..Default::default()
+            }),
             account_monitor: Default::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();

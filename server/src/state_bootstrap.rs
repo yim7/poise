@@ -273,7 +273,7 @@ async fn detect_persisted_state_mismatches(
             continue;
         };
 
-        let expected_instrument = track.instrument();
+        let expected_instrument = track.instrument(config.exchange.venue());
         let actual_instrument = snapshot.instrument.clone();
         let expected_config = track.track_config();
         let actual_config = snapshot.config.clone();
@@ -739,7 +739,6 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price,
                 upper_price: 110.0,

@@ -102,9 +102,8 @@ fn required_exchange_field(value: Option<&str>, field_name: &str) -> Result<Stri
 }
 
 fn validate_exchange_runtime_config(config: &Config) -> Result<ValidatedExchangeRuntimeConfig> {
-    let api_key = required_exchange_field(config.exchange.api_key.as_deref(), "exchange.api_key")?;
-    let api_secret =
-        required_exchange_field(config.exchange.api_secret.as_deref(), "exchange.api_secret")?;
+    let api_key = required_exchange_field(config.exchange.api_key(), "exchange.api_key")?;
+    let api_secret = required_exchange_field(config.exchange.api_secret(), "exchange.api_secret")?;
     let (rest_base_url, ws_base_url) = resolve_binance_endpoints(&config.environment)?;
     Ok(ValidatedExchangeRuntimeConfig {
         rest_base_url,
@@ -151,7 +150,12 @@ fn resolve_binance_endpoints_with_lookup(
 }
 
 pub async fn assemble(config: &Config, repositories: StateRepositories) -> Result<ServerPlatform> {
-    validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
+    validate_unique_instruments(
+        config
+            .tracks
+            .iter()
+            .map(|track| track.instrument(config.exchange.venue())),
+    )?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
     let exchange_config = validate_exchange_runtime_config(config)?;
 
@@ -194,16 +198,22 @@ async fn assemble_with_state_store(
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
-    validate_unique_instruments(config.tracks.iter().map(|track| track.instrument()))?;
+    validate_unique_instruments(
+        config
+            .tracks
+            .iter()
+            .map(|track| track.instrument(config.exchange.venue())),
+    )?;
     validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
 
     let mut manager = TrackManager::new(clock);
     let mut account_capacity_snapshots = HashMap::new();
     for track in &config.tracks {
         let track_id = track.track_id();
-        let info = load_exchange_info_with_retry(exchange.as_ref(), &track.instrument()).await?;
+        let instrument = track.instrument(config.exchange.venue());
+        let info = load_exchange_info_with_retry(exchange.as_ref(), &instrument).await?;
         let account_capacity_snapshot =
-            load_account_capacity_snapshot_with_retry(exchange.as_ref(), &track.instrument())
+            load_account_capacity_snapshot_with_retry(exchange.as_ref(), &instrument)
                 .await?;
         if track.budget().max_notional > account_capacity_snapshot.max_increase_notional {
             return Err(anyhow!(
@@ -213,10 +223,10 @@ async fn assemble_with_state_store(
                 account_capacity_snapshot.max_increase_notional
             ));
         }
-        account_capacity_snapshots.insert(track.instrument(), account_capacity_snapshot);
+        account_capacity_snapshots.insert(instrument.clone(), account_capacity_snapshot);
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
-            track.instrument(),
+            instrument,
             track.track_config(),
             track.budget(),
             info.rules,
@@ -550,7 +560,7 @@ mod tests {
     use crate::runtime::AccountMarginGuardStore;
     use tokio_tungstenite::connect_async;
 
-    use crate::config::{Config, ExchangeConfig, TrackDefinition};
+    use crate::config::{Config, ExchangeConfig, TrackDefinition, parse_config};
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
@@ -587,6 +597,34 @@ mod tests {
         )
     }
 
+    #[test]
+    fn track_instrument_uses_service_exchange_venue() {
+        let config = parse_config(
+            r#"
+environment = "testnet"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+"#,
+        )
+        .unwrap();
+
+        let instrument = config.tracks[0].instrument(config.exchange.venue());
+
+        assert_eq!(instrument.venue, Venue::Binance);
+        assert_eq!(instrument.symbol, "BTCUSDT");
+    }
+
     #[tokio::test]
     async fn assemble_accepts_prepared_state_store_instead_of_bootstrap_flag() {
         let config = Config {
@@ -617,7 +655,6 @@ mod tests {
             tracks: vec![
                 TrackDefinition {
                     track_id: "btc-core".into(),
-                    venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -634,7 +671,6 @@ mod tests {
                 },
                 TrackDefinition {
                     track_id: "eth-core".into(),
-                    venue: Venue::Binance,
                     symbol: "ETHUSDT".into(),
                     lower_price: 2000.0,
                     upper_price: 2500.0,
@@ -650,9 +686,7 @@ mod tests {
                     tick_timeout_secs: None,
                 },
             ],
-            exchange: ExchangeConfig {
-                ..Default::default()
-            },
+            exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
 
@@ -698,7 +732,6 @@ mod tests {
             tracks: vec![
                 TrackDefinition {
                     track_id: "btc-core".into(),
-                    venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
                     upper_price: 110.0,
@@ -715,7 +748,6 @@ mod tests {
                 },
                 TrackDefinition {
                     track_id: "btc-alt".into(),
-                    venue: Venue::Binance,
                     symbol: "BTCUSDT".into(),
                     lower_price: 80.0,
                     upper_price: 100.0,
@@ -731,9 +763,7 @@ mod tests {
                     tick_timeout_secs: None,
                 },
             ],
-            exchange: ExchangeConfig {
-                ..Default::default()
-            },
+            exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
 
@@ -751,7 +781,6 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -766,9 +795,7 @@ mod tests {
                 stop_loss_pct: None,
                 tick_timeout_secs: None,
             }],
-            exchange: ExchangeConfig {
-                ..Default::default()
-            },
+            exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
 
@@ -789,7 +816,6 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -804,10 +830,11 @@ mod tests {
                 stop_loss_pct: None,
                 tick_timeout_secs: None,
             }],
-            exchange: ExchangeConfig {
+            exchange: ExchangeConfig::Binance(poise_binance::Config {
                 api_key: Some("demo-key".into()),
                 api_secret: Some("demo-secret".into()),
-            },
+                ..Default::default()
+            }),
             account_monitor: Default::default(),
         };
 
@@ -831,7 +858,6 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -881,7 +907,6 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -987,7 +1012,6 @@ mod tests {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -1002,9 +1026,7 @@ mod tests {
                 stop_loss_pct: None,
                 tick_timeout_secs: None,
             }],
-            exchange: ExchangeConfig {
-                ..Default::default()
-            },
+            exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
 
