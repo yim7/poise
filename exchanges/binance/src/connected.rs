@@ -5,13 +5,13 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_engine::ports::{
-    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
-    ExchangeInfo, ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, OrderReceipt,
-    OrderRequest, Position, PriceTick, UserDataEvent,
+    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, OrderReceipt, OrderRequest,
+    Position, PriceTick, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
-use crate::{Config, rest::BinanceRestClient, websocket::BinanceWsClient};
+use crate::{Config, rest::BinanceRestClient, ws::BinanceWsClient};
 
 pub async fn connect(config: &Config) -> Result<Connected> {
     let endpoints = config.endpoints();
@@ -109,7 +109,6 @@ impl ExecutionPort for BinanceAdapter {
     async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
         self.rest.get_open_orders(&instrument.symbol).await
     }
-
 }
 
 #[async_trait]

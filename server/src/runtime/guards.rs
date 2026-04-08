@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -8,7 +7,7 @@ use poise_engine::track::Instrument;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct VenueMarginBlock {
+pub(crate) struct AccountMarginBlock {
     pub increase_blocked: bool,
     pub blocked_reason: Option<String>,
     pub blocked_at: Option<DateTime<Utc>>,
@@ -16,14 +15,15 @@ pub(crate) struct VenueMarginBlock {
 
 #[derive(Default)]
 pub struct AccountMarginGuardStore {
-    snapshots_by_instrument: std::sync::Mutex<HashMap<Instrument, AccountCapacitySnapshot>>,
-    blocks_by_venue: std::sync::Mutex<HashMap<poise_engine::track::Venue, VenueMarginBlock>>,
+    snapshots_by_instrument:
+        std::sync::Mutex<std::collections::HashMap<Instrument, AccountCapacitySnapshot>>,
+    block: std::sync::Mutex<AccountMarginBlock>,
 }
 
 impl AccountMarginGuardStore {
     pub(crate) fn replace_snapshots(
         &self,
-        snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
+        snapshots: std::collections::HashMap<Instrument, AccountCapacitySnapshot>,
     ) {
         let mut stored_snapshots = self.snapshots_by_instrument.lock().unwrap();
         stored_snapshots.extend(snapshots);
@@ -42,19 +42,16 @@ impl AccountMarginGuardStore {
 
     pub(crate) fn activate_insufficient_margin(
         &self,
-        instrument: &Instrument,
+        _instrument: &Instrument,
         reason: impl Into<String>,
         blocked_at: DateTime<Utc>,
     ) {
         let reason = reason.into();
-        self.blocks_by_venue.lock().unwrap().insert(
-            instrument.venue,
-            VenueMarginBlock {
-                increase_blocked: true,
-                blocked_reason: Some(reason),
-                blocked_at: Some(blocked_at),
-            },
-        );
+        *self.block.lock().unwrap() = AccountMarginBlock {
+            increase_blocked: true,
+            blocked_reason: Some(reason),
+            blocked_at: Some(blocked_at),
+        };
     }
 
     pub(crate) fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
@@ -64,13 +61,7 @@ impl AccountMarginGuardStore {
             .unwrap()
             .get(instrument)
             .cloned();
-        let block = self
-            .blocks_by_venue
-            .lock()
-            .unwrap()
-            .get(&instrument.venue)
-            .cloned()
-            .unwrap_or_default();
+        let block = self.block.lock().unwrap().clone();
 
         AccountCapacityConstraint {
             increase_blocked: block.increase_blocked,
@@ -103,5 +94,25 @@ impl TrackReconcileGuards {
         };
 
         lock.lock_owned().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use poise_engine::track::{Instrument, Venue};
+
+    use super::*;
+
+    #[test]
+    fn account_margin_guard_tracks_single_exchange_block_without_venue_bucket() {
+        let store = AccountMarginGuardStore::default();
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+
+        store.activate_insufficient_margin(&instrument, "insufficient margin", Utc::now());
+        let constraint = store.constraint_for(&instrument);
+
+        assert!(constraint.increase_blocked);
+        assert!(store.block.lock().unwrap().increase_blocked);
     }
 }

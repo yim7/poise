@@ -1,87 +1,16 @@
 use chrono::Utc;
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
 
+use crate::rest::models::{
+    BinanceAccountSummaryInformation, BinanceExchangeInfo, BinanceOpenOrder, BinanceOrderResponse,
+    BinancePositionRisk, BinanceSymbolConfiguration,
+};
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderStatus, Position,
 };
 use poise_engine::track::{Instrument, Venue};
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceOrderResponse {
-    #[serde(rename = "orderId")]
-    pub order_id: u64,
-    #[serde(rename = "clientOrderId")]
-    pub client_order_id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinancePositionRisk {
-    pub symbol: String,
-    #[serde(rename = "positionAmt")]
-    pub position_amt: String,
-    #[serde(rename = "entryPrice")]
-    pub entry_price: String,
-    #[serde(rename = "unRealizedProfit")]
-    pub unrealized_profit: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceAccountSummaryInformation {
-    #[serde(rename = "availableBalance")]
-    pub available_balance: String,
-    #[serde(rename = "totalMarginBalance")]
-    pub total_margin_balance: String,
-    #[serde(rename = "totalUnrealizedProfit")]
-    pub total_unrealized_profit: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceSymbolConfiguration {
-    pub symbol: String,
-    pub leverage: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceOpenOrder {
-    pub symbol: String,
-    #[serde(rename = "orderId")]
-    pub order_id: u64,
-    #[serde(rename = "clientOrderId")]
-    pub client_order_id: String,
-    pub side: String,
-    pub price: String,
-    #[serde(rename = "origQty")]
-    pub orig_qty: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceExchangeInfoResponse {
-    pub symbols: Vec<BinanceExchangeInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceExchangeInfo {
-    pub symbol: String,
-    pub filters: Vec<BinanceSymbolFilter>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BinanceSymbolFilter {
-    #[serde(rename = "filterType")]
-    pub filter_type: String,
-    #[serde(rename = "tickSize")]
-    pub tick_size: Option<String>,
-    #[serde(rename = "minQty")]
-    pub min_qty: Option<String>,
-    #[serde(rename = "stepSize")]
-    pub step_size: Option<String>,
-    pub notional: Option<String>,
-}
 
 impl TryFrom<BinanceOrderResponse> for OrderReceipt {
     type Error = anyhow::Error;
@@ -227,6 +156,7 @@ mod tests {
     use poise_engine::ports::AccountSummarySnapshot;
 
     use super::*;
+    use crate::rest::models::BinanceExchangeInfoResponse;
 
     #[test]
     fn converts_order_response_into_order_receipt() {

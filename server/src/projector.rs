@@ -178,10 +178,7 @@ fn project_ledger_gap_reason(reason: LedgerGapReason) -> TrackLedgerGapReasonVie
 
 fn project_instrument(venue: &str, symbol: &str) -> InstrumentView {
     InstrumentView {
-        venue: match venue {
-            "binance" => "binance_futures".to_string(),
-            other => other.to_string(),
-        },
+        venue: venue.to_string(),
         symbol: symbol.to_string(),
     }
 }
@@ -376,6 +373,14 @@ mod tests {
 
     use super::TrackProjector;
     use poise_application::{ReadModelSlot, TrackReadModel};
+
+    #[test]
+    fn project_instrument_preserves_exchange_name() {
+        let view = super::project_instrument("binance", "BTCUSDT");
+
+        assert_eq!(view.venue, "binance");
+        assert_eq!(view.symbol, "BTCUSDT");
+    }
 
     #[test]
     fn projects_execution_badge_from_working_orders() {

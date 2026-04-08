@@ -6,23 +6,23 @@ use std::sync::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
-use hmac::{Hmac, Mac};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
-use sha2::Sha256;
 use tokio::time::{Duration, sleep};
-use url::{Host, Url, form_urlencoded::Serializer};
+use url::{Host, Url};
 
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest, Position,
 };
 
-use crate::types::{
-    BinanceAccountSummaryInformation, BinanceExchangeInfoResponse, BinanceOpenOrder,
-    BinanceOrderResponse, BinancePositionRisk, BinanceSymbolConfiguration,
-    build_account_capacity_snapshot,
+use super::auth::{encode_query, sign_query};
+use super::models::{
+    BinanceAccountSummaryInformation, BinanceErrorResponse, BinanceExchangeInfoResponse,
+    BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk, BinanceSymbolConfiguration,
+    ListenKeyResponse, ServerTimeResponse,
 };
+use crate::mapper::build_account_capacity_snapshot;
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
 const MAX_RETRIES: usize = 3;
@@ -104,10 +104,7 @@ impl BinanceRestClient {
     }
 
     pub fn sign_query(&self, query: &str) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(self.api_secret.as_bytes())
-            .expect("HMAC-SHA256 accepts any key length");
-        mac.update(query.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        sign_query(&self.api_secret, query)
     }
 
     pub async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
@@ -262,12 +259,6 @@ impl BinanceRestClient {
     }
 
     pub async fn start_user_stream(&self) -> Result<String> {
-        #[derive(serde::Deserialize)]
-        struct ListenKeyResponse {
-            #[serde(rename = "listenKey")]
-            listen_key: String,
-        }
-
         let response: ListenKeyResponse = self
             .send_request(
                 Method::POST,
@@ -459,25 +450,6 @@ impl BinanceRestClient {
 
         Err(last_error.unwrap_or_else(|| anyhow!("request GET /fapi/v1/time failed")))
     }
-}
-
-#[derive(serde::Deserialize)]
-struct ServerTimeResponse {
-    #[serde(rename = "serverTime")]
-    server_time: i64,
-}
-
-#[derive(serde::Deserialize)]
-struct BinanceErrorResponse {
-    code: i64,
-}
-
-fn encode_query(params: &[(&str, String)]) -> String {
-    let mut serializer = Serializer::new(String::new());
-    for (key, value) in params {
-        serializer.append_pair(key, value);
-    }
-    serializer.finish()
 }
 
 fn build_http_client(base_url: &str) -> reqwest::Client {
