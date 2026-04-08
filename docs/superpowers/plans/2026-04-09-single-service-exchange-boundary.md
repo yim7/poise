@@ -101,7 +101,7 @@
 - Test: `server/src/config.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 先写失败测试，固定新的配置形状**
+- [x] **Step 1: 先写失败测试，固定新的配置形状**
 
 在 `server/src/config.rs` 增加配置测试：
 
@@ -178,7 +178,7 @@ fn track_instrument_uses_service_exchange_venue() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前配置边界还没有切到服务级**
+- [x] **Step 2: 运行定向测试，确认当前配置边界还没有切到服务级**
 
 Run:
 `cargo test -p poise-server parses_service_level_exchange_config_and_track_symbols -- --exact`
@@ -198,7 +198,7 @@ Run:
 Expected:
 - FAIL，原因是当前 `TrackDefinition::instrument()` 仍直接读取 `track.venue`
 
-- [ ] **Step 3: 实现最小配置边界**
+- [x] **Step 3: 实现最小配置边界**
 
 要求：
 - `server/src/config.rs` 改成服务级 `exchange`
@@ -209,7 +209,7 @@ Expected:
 - `TrackDefinition`、`ExchangeConfig` 加 `deny_unknown_fields`，明确拒绝旧字段和脏配置
 - `server/src/assembly.rs` 中的唯一性校验和 `TrackManager::add_track...` 改用服务级 `exchange.venue()`
 
-- [ ] **Step 4: 运行配置与装配回归**
+- [x] **Step 4: 运行配置与装配回归**
 
 Run:
 `cargo test -p poise-server parses_service_level_exchange_config_and_track_symbols -- --exact`
@@ -229,7 +229,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add exchanges/binance/src/config.rs exchanges/binance/src/lib.rs server/src/config.rs server/src/assembly.rs
@@ -237,7 +237,7 @@ git commit -m "refactor: move exchange identity to service config"
 ```
 
 Task 1 code commit:
-`<fill-me>`
+`510a3a9`
 
 ---
 
