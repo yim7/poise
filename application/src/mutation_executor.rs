@@ -923,9 +923,10 @@ impl MutationExecutor {
         let Some(mut snapshot) = manager.snapshot(id) else {
             return Ok(());
         };
-        let constraint = self
-            .account_margin_guard
-            .constraint_for(&snapshot.instrument);
+        let Some(track) = manager.get_track(id) else {
+            return Ok(());
+        };
+        let constraint = self.account_margin_guard.constraint_for(track.instrument());
         if snapshot.risk.account_capacity_constraint == constraint {
             return Ok(());
         }

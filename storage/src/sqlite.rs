@@ -12,13 +12,10 @@ use poise_application::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
-use poise_core::events::{DomainEvent, ReplacementGateReason};
-use poise_core::strategy::{TrackConfig, validate_config};
-use poise_core::types::Exposure;
-use poise_engine::ledger::{LegacyRealizedState, TrackLedgerState};
-use poise_engine::runtime::{ExecutorState, RiskState, TrackStatus};
-use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
-use poise_engine::track::{Instrument, TrackId, Venue};
+use poise_core::events::DomainEvent;
+use poise_engine::persisted_runtime::{PersistedRuntimeCodec, PersistedRuntimeRow};
+use poise_engine::snapshot::TrackRuntimeSnapshot;
+use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 
 pub struct SqliteStorage {
@@ -63,40 +60,6 @@ impl SqliteStorage {
     fn lock_connection(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
         conn.lock()
             .map_err(|err| anyhow!("failed to lock sqlite connection: {err}"))
-    }
-
-    fn deserialize_track_config(config_json: &str) -> rusqlite::Result<TrackConfig> {
-        let config: TrackConfig = serde_json::from_str(config_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
-        })?;
-        validate_config(&config).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
-            )
-        })?;
-        Ok(config)
-    }
-
-    fn deserialize_track_status(status_json: &str) -> rusqlite::Result<TrackStatus> {
-        serde_json::from_str(status_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
-        })
-    }
-
-    fn deserialize_venue(venue: &str) -> rusqlite::Result<Venue> {
-        match venue {
-            "binance" => Ok(Venue::Binance),
-            other => Err(rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unknown venue `{other}`"),
-                )),
-            )),
-        }
     }
 
     fn deserialize_domain_event(event_json: &str) -> rusqlite::Result<DomainEvent> {
@@ -334,8 +297,6 @@ impl SqliteStorage {
         effects: Vec<TrackEffect>,
         effect_status_update: Option<EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite> {
-        let config_json =
-            serde_json::to_string(&state.config).context("failed to serialize track config")?;
         let status_json =
             serde_json::to_string(&state.status).context("failed to serialize track status")?;
         let executor_state_json = serde_json::to_string(&state.executor_state)
@@ -372,6 +333,7 @@ impl SqliteStorage {
         tx.execute(
             "INSERT OR REPLACE INTO track_snapshots (
                 track_id,
+                restore_revision,
                 venue,
                 symbol,
                 config_json,
@@ -388,12 +350,13 @@ impl SqliteStorage {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 id,
-                state.instrument.venue.as_str(),
-                state.instrument.symbol,
-                config_json,
+                state.restore_revision.as_str(),
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
                 status_json,
                 state.current_exposure.0,
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
@@ -413,6 +376,15 @@ impl SqliteStorage {
             ],
         )
         .context("failed to save track snapshot")?;
+
+        tx.execute(
+            "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(track_id) DO UPDATE SET
+                 updated_at = excluded.updated_at",
+            params![id, updated_at_text, updated_at_text],
+        )
+        .context("failed to upsert persisted track presence")?;
 
         for event in events {
             let event_json =
@@ -519,6 +491,7 @@ impl SqliteStorage {
         let snapshot = conn
             .query_row(
                 "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
+                        restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
                         realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -542,6 +515,7 @@ impl SqliteStorage {
         let snapshot = conn
             .query_row(
                 "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
+                        restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
                         realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -558,144 +532,50 @@ impl SqliteStorage {
     }
 
     fn track_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRuntimeSnapshot> {
-        let venue: String = row.get(1)?;
-        let config_json: String = row.get(3)?;
-        let status_json: String = row.get(4)?;
-        let executor_state_json: String = row.get(8)?;
-        let replacement_gate_reason_json: Option<String> = row.get(9)?;
-        let ledger_state_json: Option<String> = row.get(10)?;
-        let realized_pnl_day: Option<String> = row.get(11)?;
-        let out_of_band_since: Option<String> = row.get(16)?;
-        let last_tick_at: Option<String> = row.get(17)?;
-        let market_data_stale_since: Option<String> = row.get(18)?;
-        let config = Self::deserialize_track_config(&config_json)?;
-        let status = Self::deserialize_track_status(&status_json)?;
-        let venue = Self::deserialize_venue(&venue)?;
-        let executor_state =
-            serde_json::from_str::<ExecutorState>(&executor_state_json).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    8,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-        let replacement_gate_reason = replacement_gate_reason_json
-            .map(|json| {
-                serde_json::from_str::<ReplacementGateReason>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        9,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
-        let ledger_state = ledger_state_json
-            .map(|json| {
-                serde_json::from_str::<TrackLedgerState>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        10,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
-        let realized_pnl_day = realized_pnl_day
-            .map(|value| {
-                NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        11,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
-        let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
-        let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
-        let realized_pnl_today: f64 = row.get(12)?;
-        let realized_pnl_cumulative: f64 = row.get(13)?;
-        let unrealized_pnl: f64 = row.get(14)?;
-        let out_of_band_since = out_of_band_since
-            .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            16,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-            })
-            .transpose()?;
-        let last_tick_at = last_tick_at
-            .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            17,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-            })
-            .transpose()?;
-        let market_data_stale_since = market_data_stale_since
-            .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            18,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-            })
-            .transpose()?;
-
-        Ok(TrackRuntimeSnapshot {
+        let runtime = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
             track_id: TrackId::new(row.get::<_, String>(0)?),
-            instrument: Instrument::new(venue, row.get::<_, String>(2)?),
-            config,
-            status,
-            current_exposure: Exposure(row.get(5)?),
-            desired_exposure,
-            manual_target_override,
-            executor_state,
-            replacement_gate_reason,
-            ledger_state: TrackLedgerState::from_persisted(
-                ledger_state,
-                LegacyRealizedState {
-                    realized_pnl_day,
-                    gross_realized_pnl_today: realized_pnl_today,
-                    gross_realized_pnl_cumulative: realized_pnl_cumulative,
-                },
-            ),
-            risk: RiskState {
-                unrealized_pnl,
-                ..RiskState::default()
-            },
-            observed: ObservedState {
-                reference_price: row.get(15)?,
-                out_of_band_since,
-                last_tick_at,
-                market_data_stale_since,
-            },
+            venue: row.get(1)?,
+            symbol: row.get(2)?,
+            config_json: row.get(3)?,
+            status_json: row.get(4)?,
+            current_exposure: row.get(5)?,
+            desired_exposure: row.get(6)?,
+            restore_revision: row.get(7)?,
+            manual_target_override: row.get(8)?,
+            executor_state_json: row.get(9)?,
+            replacement_gate_reason_json: row.get(10)?,
+            ledger_state_json: row.get(11)?,
+            realized_pnl_day: row.get(12)?,
+            realized_pnl_today: row.get(13)?,
+            realized_pnl_cumulative: row.get(14)?,
+            unrealized_pnl: row.get(15)?,
+            reference_price: row.get(16)?,
+            out_of_band_since: row.get(17)?,
+            last_tick_at: row.get(18)?,
+            market_data_stale_since: row.get(19)?,
         })
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    err.to_string(),
+                )),
+            )
+        })?;
+
+        Ok(runtime)
     }
 
     fn stored_track_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredTrackSnapshot> {
-        let updated_at: String = row.get(19)?;
+        let updated_at: String = row.get(20)?;
 
         Ok(StoredTrackSnapshot {
             snapshot: Self::track_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 19)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 20)?,
         })
     }
 
@@ -706,6 +586,7 @@ impl SqliteStorage {
         let mut stmt = conn
             .prepare(
                 "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
+                        restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
                         realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -1292,6 +1173,7 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionRound, ExecutionSlot, ExecutionStats, ExecutorDiagnostics, ExecutorState,
@@ -1302,20 +1184,30 @@ mod tests {
     use poise_engine::transition::TrackEffect;
     use rusqlite::Connection;
 
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
+
+    fn test_instrument(symbol: &str) -> Instrument {
+        Instrument::new(Venue::Binance, symbol)
+    }
+
     fn test_snapshot() -> TrackRuntimeSnapshot {
+        let instrument = test_instrument("BTCUSDT");
+        let config = test_track_config();
+
         TrackRuntimeSnapshot {
             track_id: TrackId::new("test-1"),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
+            restore_revision: TrackRestoreRevision::for_track(&instrument, &config),
             status: TrackStatus::Active,
             current_exposure: Exposure(4.0),
             desired_exposure: Some(Exposure(6.0)),
@@ -1438,7 +1330,8 @@ mod tests {
     fn test_snapshot_for(track_id: &str, symbol: &str) -> TrackRuntimeSnapshot {
         let mut snapshot = test_snapshot();
         snapshot.track_id = TrackId::new(track_id);
-        snapshot.instrument = Instrument::new(Venue::Binance, symbol);
+        snapshot.restore_revision =
+            TrackRestoreRevision::for_track(&test_instrument(symbol), &test_track_config());
         snapshot
     }
 
@@ -1519,7 +1412,7 @@ mod tests {
                 &btc_snapshot,
                 &[],
                 &[TrackEffect::CancelAll {
-                    instrument: btc_snapshot.instrument.clone(),
+                    instrument: test_instrument("BTCUSDT"),
                 }],
             )
             .await
@@ -1549,7 +1442,7 @@ mod tests {
                 &snapshot,
                 &[],
                 &[TrackEffect::CancelAll {
-                    instrument: snapshot.instrument.clone(),
+                    instrument: test_instrument(symbol),
                 }],
             )
             .await
@@ -1580,7 +1473,7 @@ mod tests {
                 &snapshot,
                 &[],
                 &[TrackEffect::CancelAll {
-                    instrument: snapshot.instrument.clone(),
+                    instrument: test_instrument(symbol),
                 }],
             )
             .await
@@ -1723,9 +1616,11 @@ mod tests {
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.track_id.as_str(), "test-1");
-        assert_eq!(loaded.instrument.symbol, "BTCUSDT");
+        assert_eq!(
+            loaded.restore_revision,
+            TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
+        );
         assert_eq!(loaded.status, TrackStatus::Active);
-        assert_eq!(loaded.config, snapshot.config);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(
@@ -1739,6 +1634,48 @@ mod tests {
             loaded.observed.out_of_band_since,
             snapshot.observed.out_of_band_since
         );
+    }
+
+    #[test]
+    fn initialize_creates_persisted_track_presence_table() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let conn = storage.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'persisted_track_presence'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn save_transition_records_persisted_track_presence() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT track_id
+                 FROM persisted_track_presence
+                 WHERE track_id = ?1",
+                params!["test-1"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+
+        assert_eq!(found.as_deref(), Some("test-1"));
     }
 
     #[tokio::test]
@@ -1979,7 +1916,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
@@ -2014,7 +1951,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
@@ -2045,7 +1982,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
@@ -2082,7 +2019,7 @@ mod tests {
 
         let btc_effects = vec![
             TrackEffect::CancelAll {
-                instrument: btc_snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
@@ -2136,7 +2073,7 @@ mod tests {
         let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
@@ -2163,7 +2100,7 @@ mod tests {
         let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let replacement_effects = vec![
             TrackEffect::CancelOrder {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
                 order_id: "old-order-1".into(),
             },
             TrackEffect::SubmitOrder {
@@ -2590,7 +2527,12 @@ mod tests {
             .lock()
             .unwrap()
             .execute(
-                "UPDATE track_snapshots SET config_json = ?1 WHERE track_id = ?2",
+                "UPDATE track_snapshots
+                 SET config_json = ?1,
+                     venue = 'binance',
+                     symbol = 'BTCUSDT',
+                     restore_revision = NULL
+                 WHERE track_id = ?2",
                 params![
                     serde_json::json!({
                         "lower_price": 90.0,
@@ -2609,8 +2551,8 @@ mod tests {
 
         let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
         assert_eq!(
-            loaded.config.min_rebalance_units,
-            DEFAULT_MIN_REBALANCE_UNITS
+            loaded.restore_revision,
+            TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
         );
     }
 
@@ -2629,7 +2571,12 @@ mod tests {
             .lock()
             .unwrap()
             .execute(
-                "UPDATE track_snapshots SET config_json = ?1 WHERE track_id = ?2",
+                "UPDATE track_snapshots
+                 SET config_json = ?1,
+                     venue = 'binance',
+                     symbol = 'BTCUSDT',
+                     restore_revision = NULL
+                 WHERE track_id = ?2",
                 params![
                     serde_json::json!({
                         "lower_price": 90.0,

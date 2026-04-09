@@ -391,16 +391,6 @@ impl TrackManager {
             .tracks
             .get_mut(&snapshot.track_id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", snapshot.track_id.as_str()))?;
-        if track.instrument != snapshot.instrument {
-            bail!(
-                "snapshot instrument mismatch for `{}`: expected `{}:{}`, got `{}:{}`",
-                snapshot.track_id.as_str(),
-                track.instrument.venue.as_str(),
-                track.instrument.symbol,
-                snapshot.instrument.venue.as_str(),
-                snapshot.instrument.symbol
-            );
-        }
         track.restore_from_snapshot(snapshot)?;
         Ok(())
     }
@@ -1313,7 +1303,7 @@ mod tests {
     }
 
     fn legacy_snapshot_with_realized_pnl_fields_only() -> TrackRuntimeSnapshot {
-        serde_json::from_value(json!({
+        crate::persisted_runtime::PersistedRuntimeCodec::decode(json!({
             "track_id": "btc-core",
             "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
             "config": {
@@ -1574,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_track_state_rejects_config_mismatch() {
+    fn restore_track_state_rejects_restore_revision_mismatch() {
         let mut manager = test_manager_with_active_track();
         let snapshot = {
             let mut runtime = TrackRuntime::new(
@@ -1595,7 +1585,11 @@ mod tests {
         };
 
         let error = manager.restore_track_state(&snapshot).unwrap_err();
-        assert!(error.to_string().contains("snapshot config mismatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot restore revision mismatch")
+        );
     }
 
     #[test]

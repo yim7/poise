@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use poise_core::events::ReplacementGateReason;
-use poise_core::risk::CapacityBudget;
+use poise_core::risk::{
+    CapacityBudget, ExposureIntent, LossGuardSnapshot, RiskDecision, evaluate_risk,
+};
 use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
@@ -11,6 +13,7 @@ use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
 use crate::ledger::TrackLedgerState;
+use crate::persisted_runtime::{PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed};
 use crate::ports::OrderStatus;
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
@@ -340,11 +343,26 @@ impl TrackRuntime {
         &self.budget
     }
 
+    pub fn initial_from_seed(
+        seed: TrackRuntimeSeed,
+        exchange_rules: ExchangeRules,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        Self::with_tick_timeout_secs(
+            seed.track_id,
+            seed.instrument,
+            seed.track_config,
+            seed.budget,
+            exchange_rules,
+            started_at,
+            seed.tick_timeout_secs,
+        )
+    }
+
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
         TrackRuntimeSnapshot {
             track_id: self.id.clone(),
-            instrument: self.instrument.clone(),
-            config: self.config.clone(),
+            restore_revision: TrackRestoreRevision::for_track(&self.instrument, &self.config),
             status: self.status.clone(),
             current_exposure: self.current_exposure.clone(),
             desired_exposure: self.desired_exposure.clone(),
@@ -370,18 +388,12 @@ impl TrackRuntime {
                 snapshot.track_id.as_str()
             );
         }
-        if self.instrument != snapshot.instrument {
+        let expected_revision = TrackRestoreRevision::for_track(&self.instrument, &self.config);
+        if expected_revision != snapshot.restore_revision {
             anyhow::bail!(
-                "snapshot instrument mismatch for `{}`: expected `{}:{}`, got `{}:{}`",
-                self.id.as_str(),
-                self.instrument.venue.as_str(),
-                self.instrument.symbol,
-                snapshot.instrument.venue.as_str(),
-                snapshot.instrument.symbol
+                "snapshot restore revision mismatch for `{}`",
+                self.id.as_str()
             );
-        }
-        if self.config != snapshot.config {
-            anyhow::bail!("snapshot config mismatch for `{}`", self.id.as_str());
         }
 
         self.status = snapshot.status.clone();
@@ -405,6 +417,41 @@ impl TrackRuntime {
 
         Ok(())
     }
+
+    pub fn apply_post_restore_constraints(&mut self, constraints: PostRestoreConstraints) {
+        self.budget = constraints.budget;
+        self.tick_timeout_secs = constraints.tick_timeout_secs;
+
+        if let Some(target) = self.desired_exposure.clone() {
+            let decision = evaluate_risk(
+                &ExposureIntent {
+                    current: self.current_exposure.clone(),
+                    target,
+                    unit_notional: self.config.notional_per_unit,
+                    loss_guard: LossGuardSnapshot {
+                        net_realized_pnl_today: self.ledger_state.net_realized_pnl_today(),
+                        net_realized_pnl_cumulative: self
+                            .ledger_state
+                            .net_realized_pnl_cumulative(),
+                        unrealized_pnl: self.risk_state.unrealized_pnl,
+                    },
+                },
+                &self.budget,
+            );
+            self.desired_exposure = Some(match decision {
+                RiskDecision::Allow(exposure) | RiskDecision::Cap(exposure) => exposure,
+                RiskDecision::Deny { .. } => Exposure(0.0),
+            });
+            return;
+        }
+
+        let total_loss_amount = (-(self.ledger_state.net_realized_pnl_cumulative()
+            + self.risk_state.unrealized_pnl))
+            .max(0.0);
+        if total_loss_amount >= self.budget.total_loss_limit {
+            self.desired_exposure = Some(Exposure(0.0));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +466,9 @@ mod tests {
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ledger::TrackLedgerState;
+    use crate::persisted_runtime::{
+        PersistedRuntimeCodec, PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed,
+    };
     use crate::ports::OrderStatus;
     use crate::snapshot::TrackRuntimeSnapshot;
     use crate::track::{Instrument, TrackId, Venue};
@@ -429,7 +479,7 @@ mod tests {
         WorkingOrder,
     };
 
-    fn test_runtime() -> TrackRuntime {
+    pub(crate) fn test_runtime() -> TrackRuntime {
         TrackRuntime::new(
             TrackId::new("track-1"),
             Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -458,6 +508,29 @@ mod tests {
             },
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         )
+    }
+
+    fn test_runtime_seed() -> TrackRuntimeSeed {
+        TrackRuntimeSeed {
+            track_id: TrackId::new("track-1"),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            track_config: TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+            budget: CapacityBudget {
+                max_notional: 6_000.0,
+                daily_loss_limit: 500.0,
+                total_loss_limit: 1_000.0,
+            },
+            tick_timeout_secs: 45,
+        }
     }
 
     fn test_executor_state() -> ExecutorState {
@@ -508,6 +581,52 @@ mod tests {
                 max_gap_age_ms: 42_000,
             },
         }
+    }
+
+    #[test]
+    fn initial_from_seed_uses_engine_defaults_for_fresh_runtime() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap();
+        let runtime = TrackRuntime::initial_from_seed(
+            test_runtime_seed(),
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.01,
+                min_qty: 0.01,
+                min_notional: 5.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+            started_at,
+        );
+
+        assert_eq!(runtime.id().as_str(), "track-1");
+        assert_eq!(runtime.instrument().symbol, "BTCUSDT");
+        assert_eq!(runtime.status(), &TrackStatus::WaitingMarketData);
+        assert_eq!(runtime.budget().max_notional, 6_000.0);
+        assert_eq!(runtime.tick_timeout_secs, 45);
+        assert_eq!(runtime.snapshot().current_exposure, Exposure(0.0));
+    }
+
+    #[test]
+    fn apply_post_restore_constraints_clears_desired_exposure_when_total_loss_limit_is_breached() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::Active;
+        runtime.current_exposure = Exposure(4.0);
+        runtime.desired_exposure = Some(Exposure(6.0));
+        runtime.ledger_state.gross_realized_pnl_cumulative = -1_050.0;
+        runtime.risk_state.unrealized_pnl = 0.0;
+
+        runtime.apply_post_restore_constraints(PostRestoreConstraints {
+            budget: CapacityBudget {
+                max_notional: 6_000.0,
+                daily_loss_limit: 500.0,
+                total_loss_limit: 1_000.0,
+            },
+            tick_timeout_secs: 60,
+        });
+
+        assert_eq!(runtime.desired_exposure, Some(Exposure(0.0)));
+        assert_eq!(runtime.tick_timeout_secs, 60);
     }
 
     #[test]
@@ -736,7 +855,7 @@ mod tests {
             }
         });
 
-        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+        let restored = PersistedRuntimeCodec::decode(legacy_snapshot).unwrap();
 
         assert_eq!(
             restored.risk.account_capacity_constraint,
@@ -802,7 +921,7 @@ mod tests {
             "observed": {}
         });
 
-        let restored: TrackRuntimeSnapshot = serde_json::from_value(legacy_snapshot).unwrap();
+        let restored = PersistedRuntimeCodec::decode(legacy_snapshot).unwrap();
 
         assert_eq!(restored.ledger_state.trading_fee_today, 0.0);
         assert_eq!(restored.ledger_state.funding_fee_today, 0.0);
@@ -813,16 +932,10 @@ mod tests {
     fn snapshot_deserializes_desired_exposure() {
         let snapshot = json!({
             "track_id": "track-1",
-            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
-            "config": {
-                "lower_price": 90.0,
-                "upper_price": 110.0,
-                "long_exposure_units": 8.0,
-                "short_exposure_units": 8.0,
-                "notional_per_unit": 375.0,
-                "shape_family": "linear",
-                "out_of_band_policy": "freeze"
-            },
+            "restore_revision": TrackRestoreRevision::for_track(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &test_runtime_seed().track_config
+            ).as_str(),
             "status": "active",
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
@@ -934,8 +1047,7 @@ mod tests {
 
     #[test]
     fn unresolved_gaps_accumulate_without_overwriting_previous_records() {
-        let restored: TrackRuntimeSnapshot =
-            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let restored = PersistedRuntimeCodec::decode(future_ledger_snapshot_json()).unwrap();
         let roundtrip = serde_json::to_value(restored).unwrap();
         let gaps = roundtrip["ledger_state"]["unresolved_gaps"]
             .as_array()
@@ -948,8 +1060,7 @@ mod tests {
 
     #[test]
     fn ledger_state_owns_daily_realized_window() {
-        let restored: TrackRuntimeSnapshot =
-            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let restored = PersistedRuntimeCodec::decode(future_ledger_snapshot_json()).unwrap();
         let roundtrip = serde_json::to_value(restored).unwrap();
 
         assert_eq!(
@@ -968,8 +1079,7 @@ mod tests {
 
     #[test]
     fn track_runtime_snapshot_roundtrip_preserves_ledger_state() {
-        let restored: TrackRuntimeSnapshot =
-            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let restored = PersistedRuntimeCodec::decode(future_ledger_snapshot_json()).unwrap();
         let roundtrip = serde_json::to_value(restored).unwrap();
 
         assert_eq!(roundtrip["ledger_state"]["trading_fee_today"], json!(0.3));
@@ -978,8 +1088,7 @@ mod tests {
 
     #[test]
     fn ledger_gap_record_has_stable_gap_key() {
-        let restored: TrackRuntimeSnapshot =
-            serde_json::from_value(future_ledger_snapshot_json()).unwrap();
+        let restored = PersistedRuntimeCodec::decode(future_ledger_snapshot_json()).unwrap();
         let roundtrip = serde_json::to_value(restored).unwrap();
         let first_gap = &roundtrip["ledger_state"]["unresolved_gaps"][0];
 
