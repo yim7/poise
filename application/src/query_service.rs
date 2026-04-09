@@ -124,6 +124,7 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -139,6 +140,19 @@ mod tests {
     };
 
     use super::TrackQueryService;
+
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
 
     #[tokio::test]
     async fn list_track_sources_reads_all_registered_snapshots() {
@@ -317,19 +331,13 @@ mod tests {
     }
 
     fn test_snapshot() -> TrackRuntimeSnapshot {
+        let config = test_track_config();
         TrackRuntimeSnapshot {
             track_id: TrackId::new("btc-core"),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
+            restore_revision: TrackRestoreRevision::for_track(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &config,
+            ),
             status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
             desired_exposure: Some(Exposure(4.0)),

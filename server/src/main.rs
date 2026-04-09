@@ -604,6 +604,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#
             ),
         )
@@ -690,6 +692,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -715,6 +719,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();

@@ -145,6 +145,7 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -158,22 +159,27 @@ mod tests {
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::{TrackReadDefinition, TrackReadSource, TrackRuntimeReadState};
 
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
+
     #[test]
     fn read_model_from_snapshot_flattens_runtime_state() {
+        let track_config = test_track_config();
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: TrackReadDefinition {
                 track_id: TrackId::new("btc-core"),
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                track_config: TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: OutOfBandPolicy::Freeze,
-                },
+                track_config: track_config.clone(),
                 budget: CapacityBudget {
                     max_notional: 3000.0,
                     daily_loss_limit: 100.0,
@@ -182,17 +188,10 @@ mod tests {
             },
             runtime: TrackRuntimeReadState::from_snapshot(TrackRuntimeSnapshot {
                 track_id: TrackId::new("btc-core"),
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                config: TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: OutOfBandPolicy::Freeze,
-                },
+                restore_revision: TrackRestoreRevision::for_track(
+                    &Instrument::new(Venue::Binance, "BTCUSDT"),
+                    &track_config,
+                ),
                 status: TrackStatus::Active,
                 current_exposure: Exposure(3.5),
                 desired_exposure: Some(Exposure(4.0)),

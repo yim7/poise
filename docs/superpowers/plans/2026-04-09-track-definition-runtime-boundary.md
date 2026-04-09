@@ -355,7 +355,7 @@
 - Modify: `configs/binance-testnet.demo.toml`
 - Modify: `configs/test.demo.toml`
 
-- [ ] **Step 1: 写最后一组守卫测试 / 搜索检查**
+- [x] **Step 1: 写最后一组守卫测试 / 搜索检查**
 
   增加或补齐测试，固定：
   - 不再导出或引用 `TrackBudgetCatalog`
@@ -367,7 +367,7 @@
   额外执行搜索检查：
   - `rg "TrackBudgetCatalog|StoredTrackSnapshot|track_definitions" application server storage`
 
-- [ ] **Step 2: 清理旧接口和文档示例**
+- [x] **Step 2: 清理旧接口和文档示例**
 
   删除：
   - `TrackBudgetCatalog`
@@ -379,7 +379,11 @@
   - `configs/binance-testnet.demo.toml`
   - `configs/test.demo.toml`
 
-- [ ] **Step 3: 跑格式化和 workspace 全量验收**
+  实际补充：
+  - `application` 测试夹具统一切到 `restore_revision`
+  - `server` 内联测试配置补齐 `daily_loss_limit` / `total_loss_limit`
+
+- [x] **Step 3: 跑格式化和 workspace 全量验收**
 
   Run:
   - `cargo fmt --all --check`
@@ -388,14 +392,18 @@
   Expected:
   - 全绿；如果失败，先修回归，再重复这一组验收。
 
-- [ ] **Step 4: 回写计划结果**
+- [x] **Step 4: 回写计划结果**
 
   把 Task 1-5 的 commit SHA 回写到本计划对应位置，补充最终验收命令结果。
+
+  最终验收：
+  - `cargo fmt --all --check`
+  - `cargo test --workspace`
 
 - [ ] **Step 5: 提交并回写 SHA**
 
   Run:
-  - `git add application/src/lib.rs application/src/query_service.rs application/src/read_model.rs engine/src/lib.rs server/src/assembly.rs server/src/http.rs server/src/websocket.rs README.md configs/binance-testnet.demo.toml configs/test.demo.toml docs/superpowers/specs/2026-04-09-track-definition-runtime-boundary-design.md docs/superpowers/plans/2026-04-09-track-definition-runtime-boundary.md`
+  - `git add application/src/debug_query_service.rs application/src/query_service.rs application/src/read_model.rs server/src/assembly.rs server/src/main.rs docs/superpowers/plans/2026-04-09-track-definition-runtime-boundary.md`
   - `git commit -m "refactor: finish track definition runtime boundary"`
 
   Commit SHA: `<pending>`
