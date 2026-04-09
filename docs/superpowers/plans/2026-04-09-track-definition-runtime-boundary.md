@@ -226,7 +226,7 @@
 - Test: `engine/src/runtime.rs`
 - Test: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 写失败测试，锁住 runtime-only snapshot、legacy codec 和 post-restore constraints**
+- [x] **Step 1: 写失败测试，锁住 runtime-only snapshot、legacy codec 和 post-restore constraints**
 
   增加测试，至少覆盖：
   - persisted runtime 新快照不再包含 `instrument` / `config`
@@ -237,7 +237,7 @@
   - `SqliteStorage` 会维护最小 persisted track presence 记录
   - 初始 runtime seed 写入时，不会出现“presence 已写入但 runtime 没写入”的持久化裂缝
 
-- [ ] **Step 2: 运行定向测试，确认旧 snapshot 结构会把这些测试打红**
+- [x] **Step 2: 运行定向测试，确认旧 snapshot 结构会把这些测试打红**
 
   Run:
   - `cargo test -p poise-engine snapshot::tests:: -- --nocapture`
@@ -247,7 +247,7 @@
   Expected:
   - 失败，原因是当前 snapshot 仍包含 definition 字段，storage 仍直接读写 `venue/symbol/config_json`，也还没有 persisted track presence。
 
-- [ ] **Step 3: 实现 runtime-only persisted artifact 与 codec**
+- [x] **Step 3: 实现 runtime-only persisted artifact 与 codec**
 
   最小实现：
   - `TrackRuntimeSnapshot` 改为 runtime-only
@@ -257,7 +257,7 @@
   - `SqliteStorage` 在保存初始 runtime 和后续 runtime snapshot 时，同事务维护最小 persisted track presence
   - `application/src/track_persistence.rs` 改成 runtime-only persisted 记录类型
 
-- [ ] **Step 4: 运行定向测试，确认 persisted runtime 边界成立**
+- [x] **Step 4: 运行定向测试，确认 persisted runtime 边界成立**
 
   Run:
   - `cargo test -p poise-engine snapshot::tests:: -- --nocapture`
@@ -267,13 +267,13 @@
   Expected:
   - 通过，说明 runtime snapshot、legacy decode 和 storage 写读语义已经切到 runtime-only。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
   Run:
   - `git add application/src/track_persistence.rs application/src/track_query_store.rs engine/src/persisted_runtime.rs engine/src/snapshot.rs engine/src/runtime.rs engine/src/manager.rs storage/src/schema.rs storage/src/sqlite.rs server/src/runtime/tests/support.rs`
   - `git commit -m "refactor: persist runtime-only track state"`
 
-  Commit SHA: `<pending>`
+  Commit SHA: `73f2be9`
 
 ### Task 4: 完成 bootstrap 的 restore revision、presence 校验与 post-restore constraints
 
