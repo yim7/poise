@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use poise_core::events::ReplacementGateReason;
 use poise_core::risk::{
@@ -40,7 +40,6 @@ pub struct AccountCapacityConstraint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RiskState {
     pub unrealized_pnl: f64,
-    #[serde(default)]
     pub account_capacity_constraint: AccountCapacityConstraint,
 }
 
@@ -125,7 +124,7 @@ pub struct RecentTerminalOrder {
     pub order_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutorState {
     pub active_round: Option<ExecutionRound>,
     pub diagnostics: ExecutorDiagnostics,
@@ -158,94 +157,6 @@ impl ExecutorState {
         reset.diagnostics.recovery_anomaly = None;
         reset.stats = ExecutionStats::new(started_at);
         reset
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ExecutorStateCompat {
-    #[serde(default)]
-    active_round: Option<ExecutionRound>,
-    #[serde(default)]
-    diagnostics: Option<ExecutorDiagnostics>,
-    #[serde(default)]
-    mode: Option<ExecutionMode>,
-    #[serde(default)]
-    inventory_gap: Option<Exposure>,
-    #[serde(default)]
-    gap_started_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    last_reprice_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    slots: Vec<ExecutionSlot>,
-    #[serde(default)]
-    recent_terminal_orders: Vec<RecentTerminalOrder>,
-    #[serde(default)]
-    last_execution_reason: Option<ExecutionReason>,
-    #[serde(default)]
-    recovery_anomaly: Option<RecoveryAnomaly>,
-    stats: ExecutionStats,
-}
-
-#[derive(Serialize)]
-struct ExecutorStateSerialized<'a> {
-    active_round: &'a Option<ExecutionRound>,
-    diagnostics: &'a ExecutorDiagnostics,
-    slots: &'a [ExecutionSlot],
-    recent_terminal_orders: &'a [RecentTerminalOrder],
-    stats: &'a ExecutionStats,
-}
-
-impl From<ExecutorStateCompat> for ExecutorState {
-    fn from(value: ExecutorStateCompat) -> Self {
-        let diagnostics = value.diagnostics.unwrap_or(ExecutorDiagnostics {
-            mode: value.mode.unwrap_or(ExecutionMode::Passive),
-            inventory_gap: value.inventory_gap.unwrap_or(Exposure(0.0)),
-            gap_started_at: value.gap_started_at,
-            last_reprice_at: value.last_reprice_at,
-            last_execution_reason: value.last_execution_reason,
-            recovery_anomaly: value.recovery_anomaly,
-        });
-
-        Self {
-            active_round: value.active_round,
-            diagnostics,
-            slots: if value.slots.is_empty() {
-                vec![ExecutionSlot {
-                    slot: OrderSlot::new(INVENTORY_CORE_SLOT),
-                    state: SlotState::Empty,
-                    working_order: None,
-                }]
-            } else {
-                value.slots
-            },
-            recent_terminal_orders: value.recent_terminal_orders,
-            stats: value.stats,
-        }
-    }
-}
-
-impl Serialize for ExecutorState {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        ExecutorStateSerialized {
-            active_round: &self.active_round,
-            diagnostics: &self.diagnostics,
-            slots: &self.slots,
-            recent_terminal_orders: &self.recent_terminal_orders,
-            stats: &self.stats,
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ExecutorState {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        ExecutorStateCompat::deserialize(deserializer).map(Into::into)
     }
 }
 
@@ -711,7 +622,11 @@ mod tests {
                 max_increase_notional: Some(1_500.0),
             },
         };
-        runtime.ledger_state = TrackLedgerState::from_legacy_realized(None, 1.0, 2.0);
+        runtime.ledger_state = TrackLedgerState {
+            gross_realized_pnl_today: 1.0,
+            gross_realized_pnl_cumulative: 2.0,
+            ..TrackLedgerState::default()
+        };
         runtime.reference_price = Some(96.0);
         runtime.out_of_band_since = Some(
             DateTime::parse_from_rfc3339("2026-03-29T08:02:00Z")
@@ -864,43 +779,21 @@ mod tests {
     }
 
     #[test]
-    fn margin_guard_snapshot_deserializes_missing_account_capacity_constraint_with_default() {
+    fn margin_guard_snapshot_rejects_legacy_snapshot_without_restore_revision() {
         let legacy_snapshot = json!({
             "track_id": "track-1",
-            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
-            "config": {
-                "lower_price": 90.0,
-                "upper_price": 110.0,
-                "long_exposure_units": 8.0,
-                "short_exposure_units": 8.0,
-                "notional_per_unit": 375.0,
-                "shape_family": "linear",
-                "out_of_band_policy": "freeze"
-            },
             "status": "active",
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
-            "executor_state": {
-                "mode": "passive",
-                "inventory_gap": 2.0,
-                "gap_started_at": null,
-                "last_reprice_at": null,
-                "slots": [{
-                    "slot": "inventory_core",
-                    "state": "empty",
-                    "working_order": null
-                }],
-                "last_execution_reason": null,
-                "recovery_anomaly": null,
-                "stats": {
-                    "started_at": "2026-03-29T09:00:00Z",
-                    "max_inventory_gap_abs": 0.0,
-                    "max_gap_age_ms": 0
-                }
-            },
+            "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
             "risk": {
-                "unrealized_pnl": 0.0
+                "unrealized_pnl": 0.0,
+                "account_capacity_constraint": {
+                    "increase_blocked": false,
+                    "blocked_reason": null,
+                    "max_increase_notional": null
+                }
             },
             "observed": {
                 "reference_price": 96.0,
@@ -910,49 +803,24 @@ mod tests {
             }
         });
 
-        let restored = PersistedRuntimeCodec::decode(legacy_snapshot).unwrap();
+        let error = PersistedRuntimeCodec::decode(legacy_snapshot)
+            .expect_err("legacy snapshot without restore_revision should fail");
+        let rendered = format!("{error:#}");
 
-        assert_eq!(
-            restored.risk.account_capacity_constraint,
-            AccountCapacityConstraint::default()
+        assert!(
+            rendered.contains("restore_revision"),
+            "unexpected error: {rendered}"
         );
     }
 
     #[test]
-    fn restore_from_legacy_snapshot_backfills_daily_fee_fields_and_preserves_loss_window() {
+    fn restore_from_legacy_snapshot_with_realized_fields_is_rejected() {
         let legacy_snapshot = json!({
             "track_id": "track-1",
-            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
-            "config": {
-                "lower_price": 90.0,
-                "upper_price": 110.0,
-                "long_exposure_units": 8.0,
-                "short_exposure_units": 8.0,
-                "notional_per_unit": 375.0,
-                "shape_family": "linear",
-                "out_of_band_policy": "freeze"
-            },
             "status": "active",
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
-            "executor_state": {
-                "mode": "passive",
-                "inventory_gap": 0.0,
-                "gap_started_at": null,
-                "last_reprice_at": null,
-                "slots": [{
-                    "slot": "inventory_core",
-                    "state": "empty",
-                    "working_order": null
-                }],
-                "last_execution_reason": null,
-                "recovery_anomaly": null,
-                "stats": {
-                    "started_at": "2026-03-29T09:00:00Z",
-                    "max_inventory_gap_abs": 0.0,
-                    "max_gap_age_ms": 0
-                }
-            },
+            "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
             "ledger_state": {
                 "realized_pnl_day": "2026-04-08",
@@ -976,11 +844,14 @@ mod tests {
             "observed": {}
         });
 
-        let restored = PersistedRuntimeCodec::decode(legacy_snapshot).unwrap();
+        let error = PersistedRuntimeCodec::decode(legacy_snapshot)
+            .expect_err("legacy snapshot should fail");
+        let rendered = format!("{error:#}");
 
-        assert_eq!(restored.ledger_state.trading_fee_today, 0.0);
-        assert_eq!(restored.ledger_state.funding_fee_today, 0.0);
-        assert!((restored.risk.unrealized_pnl + 30.0).abs() < f64::EPSILON);
+        assert!(
+            rendered.contains("restore_revision"),
+            "unexpected error: {rendered}"
+        );
     }
 
     #[test]
@@ -994,27 +865,16 @@ mod tests {
             "status": "active",
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
-            "executor_state": {
-                "mode": "passive",
-                "inventory_gap": 0.0,
-                "gap_started_at": null,
-                "last_reprice_at": null,
-                "slots": [{
-                    "slot": "inventory_core",
-                    "state": "empty",
-                    "working_order": null
-                }],
-                "last_execution_reason": null,
-                "recovery_anomaly": null,
-                "stats": {
-                    "started_at": "2026-03-29T09:00:00Z",
-                    "max_inventory_gap_abs": 0.0,
-                    "max_gap_age_ms": 0
-                }
-            },
+            "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
+            "ledger_state": TrackLedgerState::default(),
             "risk": {
-                "unrealized_pnl": 0.0
+                "unrealized_pnl": 0.0,
+                "account_capacity_constraint": {
+                    "increase_blocked": false,
+                    "blocked_reason": null,
+                    "max_increase_notional": null
+                }
             },
             "observed": {
                 "reference_price": 96.0,
@@ -1032,41 +892,22 @@ mod tests {
     fn future_ledger_snapshot_json() -> serde_json::Value {
         json!({
             "track_id": "track-1",
-            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
-            "config": {
-                "lower_price": 90.0,
-                "upper_price": 110.0,
-                "long_exposure_units": 8.0,
-                "short_exposure_units": 8.0,
-                "notional_per_unit": 375.0,
-                "min_rebalance_units": 0.5,
-                "shape_family": "linear",
-                "out_of_band_policy": "freeze"
-            },
+            "restore_revision": TrackRestoreRevision::for_track(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &test_runtime_seed().track_config
+            ).as_str(),
             "status": "active",
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
-            "executor_state": {
-                "mode": "passive",
-                "inventory_gap": 0.0,
-                "gap_started_at": null,
-                "last_reprice_at": null,
-                "slots": [{
-                    "slot": "inventory_core",
-                    "state": "empty",
-                    "working_order": null
-                }],
-                "last_execution_reason": null,
-                "recovery_anomaly": null,
-                "stats": {
-                    "started_at": "2026-03-29T09:00:00Z",
-                    "max_inventory_gap_abs": 0.0,
-                    "max_gap_age_ms": 0
-                }
-            },
+            "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
             "risk": {
-                "unrealized_pnl": -0.5
+                "unrealized_pnl": -0.5,
+                "account_capacity_constraint": {
+                    "increase_blocked": false,
+                    "blocked_reason": null,
+                    "max_increase_notional": null
+                }
             },
             "ledger_state": {
                 "realized_pnl_day": "2026-03-29",

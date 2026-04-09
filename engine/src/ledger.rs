@@ -3,21 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::observation::OrderObservation;
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct LegacyRealizedState {
-    pub realized_pnl_day: Option<NaiveDate>,
-    pub gross_realized_pnl_today: f64,
-    pub gross_realized_pnl_cumulative: f64,
-}
-
-impl LegacyRealizedState {
-    pub fn is_empty(&self) -> bool {
-        self.realized_pnl_day.is_none()
-            && self.gross_realized_pnl_today.abs() <= f64::EPSILON
-            && self.gross_realized_pnl_cumulative.abs() <= f64::EPSILON
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TrackLedgerState {
     pub realized_pnl_day: Option<NaiveDate>,
@@ -34,35 +19,6 @@ pub struct TrackLedgerState {
 }
 
 impl TrackLedgerState {
-    pub fn from_legacy_realized(
-        realized_pnl_day: Option<NaiveDate>,
-        gross_realized_pnl_today: f64,
-        gross_realized_pnl_cumulative: f64,
-    ) -> Self {
-        Self {
-            realized_pnl_day,
-            gross_realized_pnl_today,
-            gross_realized_pnl_cumulative,
-            ..Self::default()
-        }
-    }
-
-    pub fn from_persisted(
-        ledger_state: Option<Self>,
-        legacy_realized: LegacyRealizedState,
-    ) -> Self {
-        match ledger_state {
-            Some(ledger_state) if !ledger_state.is_empty() => ledger_state,
-            Some(ledger_state) if legacy_realized.is_empty() => ledger_state,
-            _ if legacy_realized.is_empty() => Self::default(),
-            _ => Self::from_legacy_realized(
-                legacy_realized.realized_pnl_day,
-                legacy_realized.gross_realized_pnl_today,
-                legacy_realized.gross_realized_pnl_cumulative,
-            ),
-        }
-    }
-
     pub fn is_empty(&self) -> bool {
         self.realized_pnl_day.is_none()
             && self.gross_realized_pnl_today.abs() <= f64::EPSILON
@@ -183,11 +139,12 @@ mod tests {
 
     #[test]
     fn apply_gross_realized_pnl_rolls_daily_window() {
-        let mut ledger = TrackLedgerState::from_legacy_realized(
-            Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
-            12.5,
-            17.5,
-        );
+        let mut ledger = TrackLedgerState {
+            realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
+            gross_realized_pnl_today: 12.5,
+            gross_realized_pnl_cumulative: 17.5,
+            ..TrackLedgerState::default()
+        };
 
         ledger.ensure_trading_day(NaiveDate::from_ymd_opt(2026, 3, 25).unwrap());
         ledger.apply_gross_realized_pnl(-5.0);

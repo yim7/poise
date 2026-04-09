@@ -19,7 +19,7 @@ pub struct ObservedState {
     pub market_data_stale_since: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackRuntimeSnapshot {
     pub track_id: TrackId,
     pub restore_revision: TrackRestoreRevision,
@@ -31,7 +31,6 @@ pub struct TrackRuntimeSnapshot {
     pub executor_state: ExecutorState,
     #[serde(default)]
     pub replacement_gate_reason: Option<ReplacementGateReason>,
-    #[serde(default)]
     pub ledger_state: TrackLedgerState,
     pub risk: RiskState,
     pub observed: ObservedState,
@@ -41,48 +40,6 @@ pub struct TrackRuntimeSnapshot {
 pub struct PersistedTrackState {
     pub snapshot: TrackRuntimeSnapshot,
     pub events: Vec<poise_core::events::DomainEvent>,
-}
-
-impl<'de> Deserialize<'de> for TrackRuntimeSnapshot {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Snapshot {
-            track_id: TrackId,
-            restore_revision: TrackRestoreRevision,
-            status: TrackStatus,
-            current_exposure: Exposure,
-            #[serde(default)]
-            desired_exposure: Option<Exposure>,
-            #[serde(default)]
-            manual_target_override: Option<Exposure>,
-            executor_state: ExecutorState,
-            #[serde(default)]
-            replacement_gate_reason: Option<ReplacementGateReason>,
-            #[serde(default)]
-            ledger_state: TrackLedgerState,
-            risk: RiskState,
-            #[serde(default)]
-            observed: ObservedState,
-        }
-
-        let snapshot = Snapshot::deserialize(deserializer)?;
-        Ok(Self {
-            track_id: snapshot.track_id,
-            restore_revision: snapshot.restore_revision,
-            status: snapshot.status,
-            current_exposure: snapshot.current_exposure,
-            desired_exposure: snapshot.desired_exposure,
-            manual_target_override: snapshot.manual_target_override,
-            executor_state: snapshot.executor_state,
-            replacement_gate_reason: snapshot.replacement_gate_reason,
-            ledger_state: snapshot.ledger_state,
-            risk: snapshot.risk,
-            observed: snapshot.observed,
-        })
-    }
 }
 
 #[cfg(test)]

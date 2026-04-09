@@ -1234,15 +1234,16 @@ mod tests {
             ),
             SlotState::Working,
         );
-        track.ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
-            Some(
+        track.ledger_state = crate::ledger::TrackLedgerState {
+            realized_pnl_day: Some(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
                     .unwrap()
                     .date_naive(),
             ),
-            12.5,
-            17.5,
-        );
+            gross_realized_pnl_today: 12.5,
+            gross_realized_pnl_cumulative: 17.5,
+            ..crate::ledger::TrackLedgerState::default()
+        };
         track.risk_state = RiskState {
             unrealized_pnl: -3.0,
             ..RiskState::default()
@@ -1300,72 +1301,6 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.reference_price = Some(reference_price);
         manager
-    }
-
-    fn legacy_snapshot_with_realized_pnl_fields_only() -> TrackRuntimeSnapshot {
-        crate::persisted_runtime::PersistedRuntimeCodec::decode(json!({
-            "track_id": "btc-core",
-            "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
-            "config": {
-                "lower_price": 90.0,
-                "upper_price": 110.0,
-                "long_exposure_units": 8.0,
-                "short_exposure_units": 8.0,
-                "notional_per_unit": 375.0,
-                "min_rebalance_units": 0.5,
-                "shape_family": "linear",
-                "out_of_band_policy": "freeze"
-            },
-            "status": "active",
-            "current_exposure": 4.0,
-            "desired_exposure": null,
-            "manual_target_override": null,
-            "executor_state": {
-                "mode": "passive",
-                "inventory_gap": 0.0,
-                "gap_started_at": null,
-                "last_reprice_at": null,
-                "slots": [{
-                    "slot": "inventory_core",
-                    "state": "empty",
-                    "working_order": null
-                }],
-                "last_execution_reason": null,
-                "recovery_anomaly": null,
-                "stats": {
-                    "started_at": "2026-03-29T09:00:00Z",
-                    "max_inventory_gap_abs": 0.0,
-                    "max_gap_age_ms": 0
-                }
-            },
-            "replacement_gate_reason": null,
-            "ledger_state": {
-                "realized_pnl_day": "2026-04-08",
-                "gross_realized_pnl_today": 120.0,
-                "gross_realized_pnl_cumulative": 300.0,
-                "trading_fee_cumulative": 5.0,
-                "funding_fee_cumulative": -2.0,
-                "unresolved_gaps": []
-            },
-            "risk": {
-                "realized_pnl_day": "2026-04-08",
-                "realized_pnl_today": 120.0,
-                "realized_pnl_cumulative": 300.0,
-                "unrealized_pnl": -30.0,
-                "account_capacity_constraint": {
-                    "increase_blocked": false,
-                    "blocked_reason": null,
-                    "max_increase_notional": null
-                }
-            },
-            "observed": {
-                "reference_price": 96.0,
-                "out_of_band_since": null,
-                "last_tick_at": null,
-                "market_data_stale_since": null
-            }
-        }))
-        .unwrap()
     }
 
     #[test]
@@ -1626,22 +1561,6 @@ mod tests {
         let result = crate::reconciler::reconcile_target(&runtime, 90.0);
         assert_eq!(runtime.budget.max_notional, 1500.0);
         assert_eq!(result.desired_exposure, poise_core::types::Exposure(4.0));
-    }
-
-    #[test]
-    fn restore_from_legacy_snapshot_keeps_existing_budget_and_does_not_force_rebuild() {
-        let snapshot = legacy_snapshot_with_realized_pnl_fields_only();
-        let mut manager = test_manager();
-        register_test_track(&mut manager, "btc-core", "BTCUSDT");
-
-        manager.restore_track_state(&snapshot).unwrap();
-
-        let restored = manager.get_track("btc-core").unwrap();
-        assert_eq!(restored.budget, test_budget());
-        assert_eq!(restored.ledger_state.trading_fee_today, 0.0);
-        assert_eq!(restored.ledger_state.funding_fee_today, 0.0);
-        assert_eq!(restored.ledger_state.trading_fee_cumulative, 5.0);
-        assert_eq!(restored.ledger_state.funding_fee_cumulative, -2.0);
     }
 
     #[test]
@@ -3479,15 +3398,16 @@ mod tests {
             .tracks
             .get_mut(&TrackId::new("btc1"))
             .unwrap()
-            .ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
-            Some(
+            .ledger_state = crate::ledger::TrackLedgerState {
+            realized_pnl_day: Some(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
                     .unwrap()
                     .date_naive(),
             ),
-            20.0,
-            20.0,
-        );
+            gross_realized_pnl_today: 20.0,
+            gross_realized_pnl_cumulative: 20.0,
+            ..crate::ledger::TrackLedgerState::default()
+        };
 
         manager
             .sync_exchange_state(
@@ -4103,15 +4023,16 @@ mod tests {
             .tracks
             .get_mut(&TrackId::new("btc1"))
             .unwrap()
-            .ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
-            Some(
+            .ledger_state = crate::ledger::TrackLedgerState {
+            realized_pnl_day: Some(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
                     .unwrap()
                     .date_naive(),
             ),
-            20.0,
-            20.0,
-        );
+            gross_realized_pnl_today: 20.0,
+            gross_realized_pnl_cumulative: 20.0,
+            ..crate::ledger::TrackLedgerState::default()
+        };
 
         manager
             .observe(
@@ -4151,15 +4072,16 @@ mod tests {
             .tracks
             .get_mut(&TrackId::new("btc1"))
             .unwrap()
-            .ledger_state = crate::ledger::TrackLedgerState::from_legacy_realized(
-            Some(
+            .ledger_state = crate::ledger::TrackLedgerState {
+            realized_pnl_day: Some(
                 Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0)
                     .unwrap()
                     .date_naive(),
             ),
-            20.0,
-            20.0,
-        );
+            gross_realized_pnl_today: 20.0,
+            gross_realized_pnl_cumulative: 20.0,
+            ..crate::ledger::TrackLedgerState::default()
+        };
 
         manager
             .observe(
