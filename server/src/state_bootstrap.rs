@@ -9,7 +9,6 @@ use poise_application::{
     AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectStore,
     TrackMutationStore, TrackQueryStore,
 };
-use poise_core::types::ExchangeRules;
 use poise_engine::runtime::TrackRuntime;
 use poise_engine::track::TrackId;
 use poise_storage::sqlite::SqliteStorage;
@@ -370,28 +369,19 @@ async fn hydrate_query_ready_state(
         .collect::<std::collections::HashMap<_, _>>();
 
     for track in prepared_registry.iter() {
-        let next_snapshot =
-            if let Some(snapshot) = persisted_by_id.remove(track.track_id().as_str()) {
-                let mut runtime = TrackRuntime::initial_from_seed(
-                    track.runtime_seed(),
-                    bootstrap_exchange_rules(),
-                    Utc::now(),
-                );
-                runtime.restore_from_snapshot(&snapshot)?;
-                runtime.apply_post_restore_constraints(track.post_restore_constraints());
-                let next_snapshot = runtime.snapshot();
-                if next_snapshot == snapshot {
-                    continue;
-                }
-                next_snapshot
-            } else {
-                TrackRuntime::initial_from_seed(
-                    track.runtime_seed(),
-                    bootstrap_exchange_rules(),
-                    Utc::now(),
-                )
-                .snapshot()
-            };
+        let persisted_snapshot = persisted_by_id.remove(track.track_id().as_str());
+        let next_snapshot = TrackRuntime::prepare_bootstrap_snapshot(
+            track.runtime_seed(),
+            persisted_snapshot.as_ref(),
+            track.post_restore_constraints(),
+            Utc::now(),
+        )?;
+        if persisted_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| *snapshot == next_snapshot)
+        {
+            continue;
+        }
 
         TrackMutationStore::save_transition(
             repository,
@@ -404,17 +394,6 @@ async fn hydrate_query_ready_state(
     }
 
     Ok(())
-}
-
-fn bootstrap_exchange_rules() -> ExchangeRules {
-    ExchangeRules {
-        price_tick: 0.0,
-        quantity_step: 0.0,
-        min_qty: 0.0,
-        min_notional: 0.0,
-        maker_fee_rate: 0.0,
-        taker_fee_rate: 0.0,
-    }
 }
 
 fn prepared_restore_revision(

@@ -55,9 +55,6 @@ pub struct PostRestoreConstraints {
 pub struct PersistedRuntimeRow {
     pub track_id: TrackId,
     pub restore_revision: Option<String>,
-    pub venue: Option<String>,
-    pub symbol: Option<String>,
-    pub config_json: Option<String>,
     pub status_json: String,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
@@ -129,23 +126,6 @@ impl PersistedRuntimeCodec {
     }
 
     pub fn decode_row(row: PersistedRuntimeRow) -> Result<TrackRuntimeSnapshot> {
-        let instrument = match (row.venue, row.symbol) {
-            (Some(venue), Some(symbol)) => {
-                Some(Instrument::new(Self::parse_venue(&venue)?, symbol))
-            }
-            (None, None) => None,
-            _ => {
-                return Err(anyhow!(
-                    "persisted runtime row `{}` has partial legacy instrument columns",
-                    row.track_id.as_str()
-                ));
-            }
-        };
-        let track_config = row
-            .config_json
-            .as_deref()
-            .map(Self::parse_track_config)
-            .transpose()?;
         let status = serde_json::from_str::<TrackStatus>(&row.status_json)
             .context("failed to deserialize persisted track status")?;
         let executor_state = row
@@ -191,8 +171,8 @@ impl PersistedRuntimeCodec {
         Self::from_compat(PersistedRuntimeSnapshotCompat {
             track_id: row.track_id,
             restore_revision: row.restore_revision.map(TrackRestoreRevision::from_stored),
-            instrument,
-            config: track_config,
+            instrument: None,
+            config: None,
             status,
             current_exposure: Exposure(row.current_exposure),
             desired_exposure: row.desired_exposure.map(Exposure),
@@ -214,6 +194,16 @@ impl PersistedRuntimeCodec {
                 market_data_stale_since,
             },
         })
+    }
+
+    pub fn restore_revision_from_legacy_definition(
+        venue: &str,
+        symbol: &str,
+        config_json: &str,
+    ) -> Result<TrackRestoreRevision> {
+        let instrument = Instrument::new(Self::parse_venue(venue)?, symbol.to_string());
+        let track_config = Self::parse_track_config(config_json)?;
+        Ok(TrackRestoreRevision::for_track(&instrument, &track_config))
     }
 
     fn from_compat(snapshot: PersistedRuntimeSnapshotCompat) -> Result<TrackRuntimeSnapshot> {
@@ -436,23 +426,24 @@ mod tests {
     }
 
     #[test]
-    fn persisted_runtime_codec_reads_legacy_sqlite_row() {
+    fn persisted_runtime_codec_reads_runtime_only_sqlite_row() {
         let snapshot = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
             track_id: TrackId::new("btc-core"),
-            restore_revision: None,
-            venue: Some("binance".into()),
-            symbol: Some("BTCUSDT".into()),
-            config_json: Some(
-                json!({
-                    "lower_price": 90.0,
-                    "upper_price": 110.0,
-                    "long_exposure_units": 8.0,
-                    "short_exposure_units": 8.0,
-                    "notional_per_unit": 375.0,
-                    "min_rebalance_units": 0.5,
-                    "shape_family": "linear",
-                    "out_of_band_policy": "freeze"
-                })
+            restore_revision: Some(
+                TrackRestoreRevision::for_track(
+                    &Instrument::new(Venue::Binance, "BTCUSDT"),
+                    &TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: OutOfBandPolicy::Freeze,
+                    },
+                )
+                .as_str()
                 .to_string(),
             ),
             status_json: "\"active\"".into(),
@@ -501,6 +492,28 @@ mod tests {
         assert_eq!(snapshot.restore_revision.as_str().len(), 64);
         assert_eq!(snapshot.ledger_state.net_realized_pnl_cumulative(), -18.0);
         assert_eq!(snapshot.current_exposure, Exposure(4.0));
+    }
+
+    #[test]
+    fn restore_revision_from_legacy_definition_uses_legacy_columns_only_in_compat_path() {
+        let revision = PersistedRuntimeCodec::restore_revision_from_legacy_definition(
+            "binance",
+            "BTCUSDT",
+            &json!({
+                "lower_price": 90.0,
+                "upper_price": 110.0,
+                "long_exposure_units": 8.0,
+                "short_exposure_units": 8.0,
+                "notional_per_unit": 375.0,
+                "min_rebalance_units": 0.5,
+                "shape_family": "linear",
+                "out_of_band_policy": "freeze"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(revision.as_str().len(), 64);
     }
 
     #[test]

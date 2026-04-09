@@ -273,6 +273,17 @@ pub struct TrackRuntime {
 }
 
 impl TrackRuntime {
+    fn bootstrap_exchange_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.0,
+            quantity_step: 0.0,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
     pub fn new(
         id: TrackId,
         instrument: Instrument,
@@ -357,6 +368,21 @@ impl TrackRuntime {
             started_at,
             seed.tick_timeout_secs,
         )
+    }
+
+    pub fn prepare_bootstrap_snapshot(
+        seed: TrackRuntimeSeed,
+        persisted_snapshot: Option<&TrackRuntimeSnapshot>,
+        constraints: PostRestoreConstraints,
+        started_at: DateTime<Utc>,
+    ) -> Result<TrackRuntimeSnapshot> {
+        let mut runtime =
+            Self::initial_from_seed(seed, Self::bootstrap_exchange_rules(), started_at);
+        if let Some(snapshot) = persisted_snapshot {
+            runtime.restore_from_snapshot(snapshot)?;
+        }
+        runtime.apply_post_restore_constraints(constraints);
+        Ok(runtime.snapshot())
     }
 
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
@@ -627,6 +653,35 @@ mod tests {
 
         assert_eq!(runtime.desired_exposure, Some(Exposure(0.0)));
         assert_eq!(runtime.tick_timeout_secs, 60);
+    }
+
+    #[test]
+    fn prepare_bootstrap_snapshot_restores_and_applies_constraints_without_exchange_rules_input() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::Active;
+        runtime.current_exposure = Exposure(4.0);
+        runtime.desired_exposure = Some(Exposure(6.0));
+        runtime.ledger_state.gross_realized_pnl_cumulative = -1_050.0;
+        let snapshot = runtime.snapshot();
+
+        let prepared = TrackRuntime::prepare_bootstrap_snapshot(
+            test_runtime_seed(),
+            Some(&snapshot),
+            PostRestoreConstraints {
+                budget: CapacityBudget {
+                    max_notional: 6_000.0,
+                    daily_loss_limit: 500.0,
+                    total_loss_limit: 1_000.0,
+                },
+                tick_timeout_secs: 60,
+            },
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 30, 0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.restore_revision, snapshot.restore_revision);
+        assert_eq!(prepared.current_exposure, Exposure(4.0));
+        assert_eq!(prepared.desired_exposure, Some(Exposure(0.0)));
     }
 
     #[test]

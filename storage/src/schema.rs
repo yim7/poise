@@ -13,9 +13,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS track_snapshots (
             track_id TEXT PRIMARY KEY,
             restore_revision TEXT,
-            venue TEXT,
-            symbol TEXT,
-            config_json TEXT,
             status TEXT NOT NULL,
             current_exposure REAL NOT NULL,
             desired_exposure REAL,
@@ -113,9 +110,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         &[
             "track_id",
             "restore_revision",
-            "venue",
-            "symbol",
-            "config_json",
             "status",
             "current_exposure",
             "desired_exposure",
@@ -401,7 +395,11 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(columns.contains(&"track_id".to_string()));
+        assert!(columns.contains(&"restore_revision".to_string()));
         assert!(columns.contains(&"desired_exposure".to_string()));
+        assert!(!columns.contains(&"venue".to_string()));
+        assert!(!columns.contains(&"symbol".to_string()));
+        assert!(!columns.contains(&"config_json".to_string()));
         assert!(!columns.contains(&"pending_order_json".to_string()));
     }
 
@@ -418,9 +416,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE track_snapshots (
                 track_id TEXT PRIMARY KEY,
-                venue TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                config_json TEXT NOT NULL,
+                restore_revision TEXT,
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 desired_exposure REAL,
@@ -447,6 +443,9 @@ mod tests {
 
         assert!(columns.contains(&"replacement_gate_reason_json".to_string()));
         assert!(columns.contains(&"desired_exposure".to_string()));
+        assert!(!columns.contains(&"venue".to_string()));
+        assert!(!columns.contains(&"symbol".to_string()));
+        assert!(!columns.contains(&"config_json".to_string()));
     }
 
     #[test]
