@@ -286,7 +286,7 @@
 - Test: `server/src/state_bootstrap.rs`
 - Test: `server/src/main.rs`
 
-- [ ] **Step 1: 写失败测试，固定 strict mismatch、缺失 runtime seed 和 post-restore constraints 的启动语义**
+- [x] **Step 1: 写失败测试，固定 strict mismatch、缺失 runtime seed 和 post-restore constraints 的启动语义**
 
   在 `server/src/state_bootstrap.rs` 增加测试，至少覆盖：
   - strict 模式下，persisted runtime 的 `restore_revision` 不匹配时返回 mismatch
@@ -300,7 +300,7 @@
   - CLI 只渲染 `RestoreRevisionMismatch` / `PersistedTrackMissingRuntime` / `PersistedTrackMissingFromConfig`
   - 启动错误输出不再依赖 persisted `instrument/config` JSON
 
-- [ ] **Step 2: 运行定向测试，确认当前 bootstrap 仍在直接比较 `instrument/config`**
+- [x] **Step 2: 运行定向测试，确认当前 bootstrap 仍在直接比较 `instrument/config`**
 
   Run:
   - `cargo test -p poise-server state_bootstrap::tests:: -- --nocapture`
@@ -309,7 +309,7 @@
   Expected:
   - 失败，原因是当前 bootstrap 还在直接读取 snapshot 中的 `instrument/config`，还没有 `restore_revision`、persisted track presence 和 `post_restore_constraints` 路径。
 
-- [ ] **Step 3: 实现 registry-aware bootstrap**
+- [x] **Step 3: 实现 registry-aware bootstrap**
 
   最小实现：
   - `state_bootstrap` 读取 persisted track presence 和 persisted runtime
@@ -322,23 +322,23 @@
   - `main` 改成只渲染新的 mismatch payload
   - 返回已经 query-ready 的 repositories + registry
 
-- [ ] **Step 4: 运行定向测试，确认启动边界符合设计**
+- [x] **Step 4: 运行定向测试，确认启动边界符合设计**
 
   Run:
   - `cargo test -p poise-server state_bootstrap::tests:: -- --nocapture`
-  - `cargo test -p poise-server main::tests:: -- --nocapture`
+  - `cargo test -p poise-server render_startup_error_formats_structured_mismatch_for_cli -- --nocapture`
   - `cargo test -p poise-server runtime::tests::startup_sync:: -- --nocapture`
 
   Expected:
   - 通过，说明 strict mismatch、seed 缺失 runtime、budget 变化后的约束同步都已稳定。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
   Run:
-  - `git add server/src/state_bootstrap.rs server/src/main.rs server/src/test_support.rs server/src/runtime/tests/support.rs`
+  - `git add Cargo.lock application/src/lib.rs application/src/query_service.rs application/src/read_model.rs application/src/track_definition.rs engine/src/lib.rs server/Cargo.toml server/src/assembly.rs server/src/config.rs server/src/effect_worker/tests/support.rs server/src/main.rs server/src/runtime/tests/reconcile.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs server/src/state_bootstrap.rs storage/src/sqlite.rs`
   - `git commit -m "refactor: finish bootstrap restore semantics"`
 
-  Commit SHA: `<pending>`
+  Commit SHA: `bc8c757`
 
 ### Task 5: 删除旧接口痕迹并跑全量验收
 
