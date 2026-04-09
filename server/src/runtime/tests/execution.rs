@@ -155,10 +155,12 @@ async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs
     let runtime = ServerRuntime::with_reconcile_intervals(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
         Duration::from_secs(1),
         Duration::from_secs(5),
     );
@@ -630,10 +632,12 @@ async fn effect_worker_restores_pending_effect_after_restart() {
     let restarted_runtime = ServerRuntime::new(
         fixture.state.runtime_state(),
         fixture.worker.effect_worker_state.clone(),
-        fixture.exchange.execution_port(),
-        Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
-        fixture.exchange.account_port(),
-        fixture.exchange.metadata_port(),
+        RuntimePorts::new(
+            fixture.exchange.execution_port(),
+            Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
+            fixture.exchange.account_port(),
+            fixture.exchange.metadata_port(),
+        ),
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -736,10 +740,12 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
     let runtime = ServerRuntime::with_reconcile_intervals(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
         Duration::from_secs(1),
         Duration::from_secs(5),
     );
@@ -793,10 +799,12 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
     let runtime = ServerRuntime::with_reconcile_intervals(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
         Duration::from_secs(1),
         Duration::from_secs(5),
     );
@@ -904,10 +912,12 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
     let restarted_runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -1003,10 +1013,12 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
     let restarted_runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -1053,10 +1065,12 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
@@ -1114,10 +1128,12 @@ async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
@@ -1174,10 +1190,12 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     state.observe_market("BTCUSDT", 95.0).await.unwrap();

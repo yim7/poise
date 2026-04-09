@@ -29,7 +29,7 @@ use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::runtime::{
-    AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
+    AccountMarginGuardStore, RuntimeHandles, RuntimePorts, ServerRuntime, TrackReconcileGuards,
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
@@ -125,24 +125,48 @@ pub async fn assemble(
 }
 
 #[cfg(test)]
-pub(crate) async fn assemble_with_exchange_ports(
-    config: &Config,
-    prepared_registry: Arc<PreparedTrackRegistry>,
+pub(crate) struct ExchangePorts {
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
     account_summary: Arc<dyn AccountSummaryPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
+}
+
+#[cfg(test)]
+impl ExchangePorts {
+    pub(crate) fn new(
+        execution: Arc<dyn ExecutionPort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account_summary: Arc<dyn AccountSummaryPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
+    ) -> Self {
+        Self {
+            execution,
+            market_data,
+            account_summary,
+            account,
+            metadata,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn assemble_with_exchange_ports(
+    config: &Config,
+    prepared_registry: Arc<PreparedTrackRegistry>,
+    exchange_ports: ExchangePorts,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
     let exchange = Exchange::new(
         config.exchange.venue(),
-        execution,
-        market_data,
-        account_summary,
-        account,
-        metadata,
+        exchange_ports.execution,
+        exchange_ports.market_data,
+        exchange_ports.account_summary,
+        exchange_ports.account,
+        exchange_ports.metadata,
     );
     assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
 }
@@ -296,10 +320,12 @@ async fn assemble_with_state_store(
         runtime: ServerRuntime::with_account_capacity_snapshots(
             runtime_state,
             effect_worker_state,
-            exchange.execution_port(),
-            exchange.market_data_port(),
-            exchange.account_port(),
-            exchange.metadata_port(),
+            RuntimePorts::new(
+                exchange.execution_port(),
+                exchange.market_data_port(),
+                exchange.account_port(),
+                exchange.metadata_port(),
+            ),
             account_capacity_snapshots,
             Duration::from_secs(1),
         ),
@@ -626,11 +652,13 @@ total_loss_limit = 600.0
         let platform = super::assemble_with_exchange_ports(
             &config,
             test_prepared_registry(&config),
-            Arc::new(FakeExecutionPort::default()),
-            Arc::new(FakeMarketDataPort::default()),
-            Arc::new(FakeAccountSummaryPort::default()),
-            Arc::new(FakeAccountPort::default()),
-            Arc::new(FakeMetadataPort::default()),
+            super::ExchangePorts::new(
+                Arc::new(FakeExecutionPort),
+                Arc::new(FakeMarketDataPort),
+                Arc::new(FakeAccountSummaryPort),
+                Arc::new(FakeAccountPort),
+                Arc::new(FakeMetadataPort),
+            ),
             StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
@@ -884,11 +912,13 @@ total_loss_limit = 600.0
         let platform = super::assemble_with_exchange_ports(
             &config,
             test_prepared_registry(&config),
-            exchange.clone(),
-            Arc::new(FakeMarketData::empty()),
-            exchange.clone(),
-            exchange.clone(),
-            exchange.clone(),
+            super::ExchangePorts::new(
+                exchange.clone(),
+                Arc::new(FakeMarketData::empty()),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+            ),
             StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
@@ -936,11 +966,13 @@ total_loss_limit = 600.0
         let result = super::assemble_with_exchange_ports(
             &config,
             test_prepared_registry(&config),
-            exchange.clone(),
-            Arc::new(FakeMarketData::empty()),
-            exchange.clone(),
-            exchange.clone(),
-            exchange,
+            super::ExchangePorts::new(
+                exchange.clone(),
+                Arc::new(FakeMarketData::empty()),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
             StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
@@ -1214,11 +1246,13 @@ total_loss_limit = 600.0
         super::assemble_with_exchange_ports(
             config,
             test_prepared_registry(config),
-            exchange.clone(),
-            Arc::new(FakeMarketData::empty()),
-            exchange.clone(),
-            exchange.clone(),
-            exchange,
+            super::ExchangePorts::new(
+                exchange.clone(),
+                Arc::new(FakeMarketData::empty()),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
             StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
@@ -1313,10 +1347,12 @@ total_loss_limit = 600.0
                 runtime: crate::runtime::ServerRuntime::new(
                     runtime_test_context.runtime_state(),
                     effect_worker_test_context.effect_worker_state.clone(),
-                    exchange.clone(),
-                    market_data,
-                    exchange.clone(),
-                    exchange,
+                    crate::runtime::RuntimePorts::new(
+                        exchange.clone(),
+                        market_data,
+                        exchange.clone(),
+                        exchange,
+                    ),
                 ),
             },
             btc_sender,

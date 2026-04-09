@@ -86,19 +86,19 @@ impl PersistedRuntimeCodec {
         let executor_state = row
             .executor_state_json
             .as_deref()
-            .map(|json| serde_json::from_str::<ExecutorState>(json))
+            .map(serde_json::from_str::<ExecutorState>)
             .transpose()
             .context("failed to deserialize executor state")?;
         let replacement_gate_reason = row
             .replacement_gate_reason_json
             .as_deref()
-            .map(|json| serde_json::from_str::<ReplacementGateReason>(json))
+            .map(serde_json::from_str::<ReplacementGateReason>)
             .transpose()
             .context("failed to deserialize replacement gate reason")?;
         let ledger_state = row
             .ledger_state_json
             .as_deref()
-            .map(|json| serde_json::from_str::<TrackLedgerState>(json))
+            .map(serde_json::from_str::<TrackLedgerState>)
             .transpose()
             .context("failed to deserialize ledger state")?;
         let out_of_band_since = row

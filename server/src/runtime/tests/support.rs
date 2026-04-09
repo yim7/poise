@@ -179,10 +179,12 @@ pub(crate) async fn runtime_fixture_with_options(
         runtime: ServerRuntime::with_reconcile_and_account_refresh_intervals(
             state.runtime_state(),
             worker_state.effect_worker_state.clone(),
-            execution,
-            market_data as Arc<dyn MarketDataPort>,
-            account,
-            metadata,
+            RuntimePorts::new(
+                execution,
+                market_data as Arc<dyn MarketDataPort>,
+                account,
+                metadata,
+            ),
             options.recovery_retry_interval,
             options.audit_interval,
             options.account_refresh_interval,
@@ -1767,10 +1769,7 @@ pub(crate) async fn build_test_runtime_with_ports(
         runtime: ServerRuntime::with_account_capacity_snapshots(
             state.runtime_state(),
             worker_state.effect_worker_state,
-            execution,
-            market_data,
-            account.clone(),
-            metadata,
+            RuntimePorts::new(execution, market_data, account.clone(), metadata),
             HashMap::new(),
             Duration::from_secs(1),
         ),

@@ -4,14 +4,14 @@ use super::*;
 async fn runtime_subscribes_user_data_from_account_port() {
     let runtime = build_test_runtime_with_ports(
         Arc::new(FakeExecutionPort::default()),
-        Arc::new(FakeMarketDataPort::default()),
-        Arc::new(FakeAccountSummaryPort::default()),
+        Arc::new(FakeMarketDataPort),
+        Arc::new(FakeAccountSummaryPort),
         Arc::new(FakeAccountPort::with_user_events(vec![position_event_at(
             test_server_time() + chrono::Duration::milliseconds(1),
             7.5,
             11.0,
         )])),
-        Arc::new(FakeMetadataPort::default()),
+        Arc::new(FakeMetadataPort),
     )
     .await;
 
@@ -123,10 +123,12 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     let user_task = runtime.spawn_user_task(
@@ -217,10 +219,12 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        exchange.account_port(),
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            exchange.account_port(),
+            exchange.metadata_port(),
+        ),
     );
 
     let user_task = runtime.spawn_user_task(

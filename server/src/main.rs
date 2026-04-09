@@ -619,11 +619,13 @@ total_loss_limit = 600.0
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
             test_prepared_registry(&config),
-            exchange.clone(),
-            Arc::new(FakeMarketData::default()),
-            exchange.clone(),
-            exchange.clone(),
-            exchange,
+            crate::assembly::ExchangePorts::new(
+                exchange.clone(),
+                Arc::new(FakeMarketData::default()),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
             StateRepositories::new(storage),
             Arc::new(FakeClock),
         )
@@ -776,11 +778,13 @@ total_loss_limit = 600.0
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
             test_prepared_registry(&config),
-            exchange.clone(),
-            Arc::new(FailingStartMarketData),
-            exchange.clone(),
-            exchange.clone(),
-            exchange,
+            crate::assembly::ExchangePorts::new(
+                exchange.clone(),
+                Arc::new(FailingStartMarketData),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
             StateRepositories::new(storage),
             Arc::new(FakeClock),
         )

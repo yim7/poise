@@ -43,6 +43,51 @@ pub struct ServerRuntime {
     shutdown_tx: watch::Sender<bool>,
 }
 
+#[derive(Clone)]
+pub(crate) struct RuntimePorts {
+    execution: Arc<dyn ExecutionPort>,
+    market_data: Arc<dyn MarketDataPort>,
+    account: Arc<dyn AccountPort>,
+    metadata: Arc<dyn MetadataPort>,
+}
+
+impl RuntimePorts {
+    pub(crate) fn new(
+        execution: Arc<dyn ExecutionPort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
+    ) -> Self {
+        Self {
+            execution,
+            market_data,
+            account,
+            metadata,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeIntervals {
+    recovery_retry_interval: Duration,
+    audit_interval: Duration,
+    account_refresh_interval: Duration,
+}
+
+impl RuntimeIntervals {
+    fn new(
+        recovery_retry_interval: Duration,
+        audit_interval: Duration,
+        account_refresh_interval: Duration,
+    ) -> Self {
+        Self {
+            recovery_retry_interval,
+            audit_interval,
+            account_refresh_interval,
+        }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub struct RuntimeHandles {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -68,46 +113,38 @@ impl ServerRuntime {
     pub fn new(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
+        ports: RuntimePorts,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_capacity_snapshots(
+        Self::with_runtime_options(
             state,
             effect_worker_state,
-            execution,
-            market_data,
-            account,
-            metadata,
+            ports,
             HashMap::new(),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
+            RuntimeIntervals::new(
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            ),
         )
     }
 
     pub(crate) fn with_account_capacity_snapshots(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
+        ports: RuntimePorts,
         account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
         recovery_retry_interval: Duration,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_capacity_snapshots(
+        Self::with_runtime_options(
             state,
             effect_worker_state,
-            execution,
-            market_data,
-            account,
-            metadata,
+            ports,
             account_capacity_snapshots,
-            recovery_retry_interval,
-            Duration::from_secs(5),
-            Duration::from_secs(5),
+            RuntimeIntervals::new(
+                recovery_retry_interval,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            ),
         )
     }
 
@@ -115,24 +152,20 @@ impl ServerRuntime {
     fn with_reconcile_intervals(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
+        ports: RuntimePorts,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_capacity_snapshots(
+        Self::with_runtime_options(
             state,
             effect_worker_state,
-            execution,
-            market_data,
-            account,
-            metadata,
+            ports,
             HashMap::new(),
-            recovery_retry_interval,
-            audit_interval,
-            Duration::from_secs(5),
+            RuntimeIntervals::new(
+                recovery_retry_interval,
+                audit_interval,
+                Duration::from_secs(5),
+            ),
         )
     }
 
@@ -140,39 +173,30 @@ impl ServerRuntime {
     fn with_reconcile_and_account_refresh_intervals(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
+        ports: RuntimePorts,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
     ) -> Self {
-        Self::with_reconcile_intervals_and_account_capacity_snapshots(
+        Self::with_runtime_options(
             state,
             effect_worker_state,
-            execution,
-            market_data,
-            account,
-            metadata,
+            ports,
             HashMap::new(),
-            recovery_retry_interval,
-            audit_interval,
-            account_refresh_interval,
+            RuntimeIntervals::new(
+                recovery_retry_interval,
+                audit_interval,
+                account_refresh_interval,
+            ),
         )
     }
 
-    fn with_reconcile_intervals_and_account_capacity_snapshots(
+    fn with_runtime_options(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
+        ports: RuntimePorts,
         account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
-        recovery_retry_interval: Duration,
-        audit_interval: Duration,
-        account_refresh_interval: Duration,
+        intervals: RuntimeIntervals,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         state
@@ -181,13 +205,13 @@ impl ServerRuntime {
         Self {
             state,
             effect_worker_state,
-            execution,
-            market_data,
-            account,
-            metadata,
-            recovery_retry_interval,
-            audit_interval,
-            account_refresh_interval,
+            execution: ports.execution,
+            market_data: ports.market_data,
+            account: ports.account,
+            metadata: ports.metadata,
+            recovery_retry_interval: intervals.recovery_retry_interval,
+            audit_interval: intervals.audit_interval,
+            account_refresh_interval: intervals.account_refresh_interval,
             shutdown_tx,
         }
     }

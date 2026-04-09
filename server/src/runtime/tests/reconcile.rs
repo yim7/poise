@@ -581,10 +581,12 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
     let runtime = ServerRuntime::with_account_capacity_snapshots(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.execution_port(),
-        market_data as Arc<dyn MarketDataPort>,
-        account as Arc<dyn AccountPort>,
-        exchange.metadata_port(),
+        RuntimePorts::new(
+            exchange.execution_port(),
+            market_data as Arc<dyn MarketDataPort>,
+            account as Arc<dyn AccountPort>,
+            exchange.metadata_port(),
+        ),
         HashMap::new(),
         Duration::from_secs(1),
     );

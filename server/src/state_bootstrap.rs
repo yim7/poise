@@ -10,6 +10,7 @@ use poise_application::{
     TrackMutationStore, TrackQueryStore,
 };
 use poise_engine::runtime::TrackRuntime;
+#[cfg(test)]
 use poise_engine::track::TrackId;
 use poise_storage::sqlite::SqliteStorage;
 
@@ -134,6 +135,7 @@ impl PreparedStateStore {
         }
     }
 
+    #[cfg(test)]
     pub fn registry(&self) -> &PreparedTrackRegistry {
         &self.prepared_registry
     }
@@ -209,7 +211,7 @@ pub async fn prepare_state_repository(
     db_path: &Path,
     mode: StateBootstrapMode,
 ) -> BootstrapResult<PreparedStateStore> {
-    ensure_parent_dir(&db_path).map_err(unexpected)?;
+    ensure_parent_dir(db_path).map_err(unexpected)?;
     let db_path = db_path.to_path_buf();
     let prepared_registry = Arc::new(build_prepared_registry(config).map_err(unexpected)?);
 
@@ -396,6 +398,7 @@ async fn hydrate_query_ready_state(
     Ok(())
 }
 
+#[cfg(test)]
 fn prepared_restore_revision(
     prepared_registry: &PreparedTrackRegistry,
     track_id: &str,
@@ -993,7 +996,7 @@ mod tests {
     }
 
     async fn persist_snapshot_with_lower_price(_config: &Config, db_path: &Path, lower_price: f64) {
-        super::ensure_parent_dir(&db_path).unwrap();
+        super::ensure_parent_dir(db_path).unwrap();
         let storage = SqliteStorage::new(db_path).unwrap();
         let mut manager = TrackManager::new(std::sync::Arc::new(SystemClock));
         manager

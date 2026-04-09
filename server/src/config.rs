@@ -37,6 +37,7 @@ pub struct TrackFileDefinition {
     pub tick_timeout_secs: Option<u64>,
 }
 
+#[cfg(test)]
 pub type TrackDefinition = TrackFileDefinition;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

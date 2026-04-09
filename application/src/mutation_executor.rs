@@ -1190,16 +1190,15 @@ pub(crate) mod test_support {
                 committed_effects.push(persisted);
             }
 
-            if let Some(update) = effect_status_update {
-                if let Some(effect) = stored_effects
+            if let Some(update) = effect_status_update
+                && let Some(effect) = stored_effects
                     .iter_mut()
                     .find(|effect| effect.effect_id == update.effect_id)
-                {
-                    effect.status = update.status;
-                    effect.attempt_count += update.attempt_delta;
-                    effect.last_error = update.last_error.clone();
-                    effect.updated_at = now;
-                }
+            {
+                effect.status = update.status;
+                effect.attempt_count += update.attempt_delta;
+                effect.last_error = update.last_error.clone();
+                effect.updated_at = now;
             }
 
             Ok(CommittedTrackWrite {
