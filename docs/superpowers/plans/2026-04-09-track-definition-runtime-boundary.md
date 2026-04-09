@@ -400,10 +400,10 @@
   - `cargo fmt --all --check`
   - `cargo test --workspace`
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
   Run:
   - `git add application/src/debug_query_service.rs application/src/query_service.rs application/src/read_model.rs server/src/assembly.rs server/src/main.rs docs/superpowers/plans/2026-04-09-track-definition-runtime-boundary.md`
   - `git commit -m "refactor: finish track definition runtime boundary"`
 
-  Commit SHA: `<pending>`
+  Commit SHA: `1f364ad`
