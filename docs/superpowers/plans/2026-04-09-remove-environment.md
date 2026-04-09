@@ -284,7 +284,7 @@ git commit -m "refactor: remove environment from runtime surfaces"
 - Test: `server/src/main.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 先写失败测试，固定“实例测试隔离靠 instance-dir，不靠 environment 字符串”**
+- [x] **Step 1: 先写失败测试，固定“实例测试隔离靠 instance-dir，不靠 environment 字符串”**
 
 在 `server/src/state_bootstrap.rs` 保留现有行为测试，但把测试 helper 改成基于 `tempfile::tempdir()` 的实例目录，并增加一条真正调用 `prepare_state_repository(...)` 的约束测试：
 
@@ -304,7 +304,7 @@ fn rebuild_mode_only_touches_database_under_current_instance_dir() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前测试 helper 仍绑在 environment 分桶上**
+- [x] **Step 2: 运行定向测试，确认当前测试 helper 仍绑在 environment 分桶上**
 
 Run:
 `cargo test -p poise-server rebuild_mode_only_touches_database_under_current_instance_dir`
@@ -312,7 +312,7 @@ Run:
 Expected:
 - FAIL，原因是 `state_bootstrap` 测试 helper 仍按 `environment` 生成数据库路径或构造 `Config`
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 要求：
 - `state_bootstrap` 测试 helper 删除 `unique_test_environment()`、`cleanup_environment(...)`、`test_db_path(environment)` 这类按字符串分桶的工具
@@ -321,7 +321,7 @@ Expected:
 - `README` 的 `--rebuild-state` 说明去掉 `<environment>` 目录层级
 - 保留 `rebuild_mode_only_touches_database_under_current_instance_dir` 对真实 `prepare_state_repository(...)` 行为的约束，不降级成纯路径字符串断言
 
-- [ ] **Step 4: 运行最终验证**
+- [x] **Step 4: 运行最终验证**
 
 Run:
 `cargo test -p poise-server`
@@ -335,7 +335,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add server/src/state_bootstrap.rs server/src/main.rs server/src/assembly.rs README.md docs/superpowers/plans/2026-04-09-remove-environment.md
@@ -343,4 +343,4 @@ git commit -m "refactor: remove environment from state bootstrap"
 ```
 
 提交后回写：
-- [ ] Task 2 commit: `<SHA>`
+- [x] Task 2 commit: `4e328f55e751039fa83dca33ba7466a3a8294edf`
