@@ -14,7 +14,7 @@ pub(super) fn spawn_user_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
-    let exchange = Arc::clone(&runtime.exchange);
+    let execution = Arc::clone(&runtime.execution);
 
     tokio::spawn(async move {
         loop {
@@ -56,7 +56,7 @@ pub(super) fn spawn_user_task(
                 continue;
             };
             if let Err(error) =
-                apply_user_data_event(&state.reconcile, &exchange, &track_id, event).await
+                apply_user_data_event(&state.reconcile, execution.as_ref(), &track_id, event).await
             {
                 tracing::warn!(
                     "failed to apply user data update for {}: {}",

@@ -1,9 +1,11 @@
-environment = "test"
 bind_address = "127.0.0.1:18080"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -20,7 +22,6 @@ tick_timeout_secs = 30
 
 [[tracks]]
 track_id = "eth-core"
-venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0

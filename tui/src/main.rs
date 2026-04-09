@@ -2061,40 +2061,34 @@ mod tests {
         panic!("detail `{id}` never received market price");
     }
 
-    #[tokio::test]
-    #[ignore = "slow e2e"]
-    async fn real_server_protocol_integration_covers_list_switch_and_ws_updates() {
-        let exchange = spawn_fake_exchange_server().await;
-        let server_binary = ensure_track_server_binary();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let bind_address = bind_listener.local_addr().unwrap();
-        drop(bind_listener);
-        let config_path = temp_dir.path().join("poise-server.toml");
-        fs::write(
-            &config_path,
-            format!(
-                r#"
-environment = "test"
+    fn e2e_server_config(bind_address: std::net::SocketAddr, include_eth_track: bool) -> String {
+        let mut config = format!(
+            r#"
 bind_address = "{bind_address}"
 
 [exchange]
+venue = "binance"
+deployment = "testnet"
 api_key = "demo-key"
 api_secret = "demo-secret"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+"#
+        );
+
+        if include_eth_track {
+            config.push_str(
+                r#"
 
 [[tracks]]
 track_id = "eth-core"
-venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
@@ -2104,13 +2098,27 @@ notional_per_unit = 2000.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
-            ),
-        )
-        .unwrap();
+            );
+        }
+
+        config
+    }
+
+    #[tokio::test]
+    #[ignore = "slow e2e"]
+    async fn real_server_protocol_integration_covers_list_switch_and_ws_updates() {
+        let exchange = spawn_fake_exchange_server().await;
+        let server_binary = ensure_track_server_binary();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_address = bind_listener.local_addr().unwrap();
+        drop(bind_listener);
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(&config_path, e2e_server_config(bind_address, true)).unwrap();
 
         let mut server = Command::new(server_binary)
-            .arg("--config")
-            .arg(&config_path)
+            .arg("--instance-dir")
+            .arg(temp_dir.path())
             .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
             .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
@@ -2189,35 +2197,12 @@ out_of_band_policy = "hold"
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
-        let config_path = temp_dir.path().join("poise-server.toml");
-        fs::write(
-            &config_path,
-            format!(
-                r#"
-environment = "test"
-bind_address = "{bind_address}"
-
-[exchange]
-api_key = "demo-key"
-api_secret = "demo-secret"
-
-[[tracks]]
-track_id = "btc-core"
-venue = "binance"
-symbol = "BTCUSDT"
-lower_price = 90.0
-upper_price = 110.0
-long_exposure_units = 8.0
-short_exposure_units = 8.0
-notional_per_unit = 375.0
-"#,
-            ),
-        )
-        .unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(&config_path, e2e_server_config(bind_address, false)).unwrap();
 
         let mut server = Command::new(server_binary)
-            .arg("--config")
-            .arg(&config_path)
+            .arg("--instance-dir")
+            .arg(temp_dir.path())
             .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
             .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -2248,47 +2233,12 @@ notional_per_unit = 375.0
         let bind_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
-        let config_path = temp_dir.path().join("poise-server.toml");
-        fs::write(
-            &config_path,
-            format!(
-                r#"
-environment = "test"
-bind_address = "{bind_address}"
-
-[exchange]
-api_key = "demo-key"
-api_secret = "demo-secret"
-
-[[tracks]]
-track_id = "btc-core"
-venue = "binance"
-symbol = "BTCUSDT"
-lower_price = 90.0
-upper_price = 110.0
-long_exposure_units = 8.0
-short_exposure_units = 8.0
-notional_per_unit = 375.0
-
-[[tracks]]
-track_id = "eth-core"
-venue = "binance"
-symbol = "ETHUSDT"
-lower_price = 2000.0
-upper_price = 2600.0
-long_exposure_units = 5.0
-short_exposure_units = 4.0
-notional_per_unit = 2000.0
-shape_family = "concave"
-out_of_band_policy = "hold"
-"#,
-            ),
-        )
-        .unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        fs::write(&config_path, e2e_server_config(bind_address, true)).unwrap();
 
         let mut server = Command::new(server_binary)
-            .arg("--config")
-            .arg(&config_path)
+            .arg("--instance-dir")
+            .arg(temp_dir.path())
             .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
             .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
@@ -2382,5 +2332,15 @@ out_of_band_policy = "hold"
             Some(value) => unsafe { std::env::set_var(name, value) },
             None => unsafe { std::env::remove_var(name) },
         }
+    }
+
+    #[test]
+    fn slow_e2e_server_config_examples_use_service_level_exchange_boundary() {
+        let source = include_str!("main.rs");
+
+        assert!(source.contains("[exchange]\nvenue = \"binance\"\ndeployment = \"testnet\""));
+        assert!(!source.contains("track_id = \"btc-core\"\nvenue = \"binance\""));
+        assert!(!source.contains("track_id = \"eth-core\"\nvenue = \"binance\""));
+        assert!(!source.contains("environment = \"test\""));
     }
 }

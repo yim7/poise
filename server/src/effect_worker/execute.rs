@@ -63,7 +63,7 @@ pub(super) async fn execute_submit(
         .mark_submit_started(&persisted.effect_id)
         .await;
 
-    match worker.exchange.submit_order(request.clone()).await {
+    match worker.execution.submit_order(request.clone()).await {
         Ok(receipt) => {
             if let Err(error) = worker
                 .state
@@ -114,7 +114,7 @@ pub(super) async fn execute_submit(
                         Utc::now(),
                     );
                 if let Ok(snapshot) = worker
-                    .exchange
+                    .account
                     .get_account_capacity_snapshot(&request.instrument)
                     .await
                 {
@@ -158,7 +158,7 @@ pub(super) async fn prepare_submit_execution(
         SubmitPreflightDecision::Direct => None,
         SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => Some(
             worker
-                .exchange
+                .execution
                 .get_open_orders(&request.instrument)
                 .await?
                 .into_iter()
@@ -208,8 +208,8 @@ pub(super) async fn execute_cancellation(
         Cancellation::One {
             ref instrument,
             ref order_id,
-        } => worker.exchange.cancel_order(instrument, order_id).await,
-        Cancellation::All { ref instrument } => worker.exchange.cancel_all(instrument).await,
+        } => worker.execution.cancel_order(instrument, order_id).await,
+        Cancellation::All { ref instrument } => worker.execution.cancel_all(instrument).await,
     };
 
     match result {

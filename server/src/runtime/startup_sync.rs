@@ -1,10 +1,9 @@
 use std::future::Future;
-use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::ports::{ExchangeOrder, ExchangePort, Position, UserDataEvent, UserDataPayload};
+use poise_engine::ports::{ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -25,8 +24,8 @@ pub(super) async fn startup_sync(runtime: &ServerRuntime) -> Result<()> {
         .track_instruments()
         .await
     {
-        let position = runtime.exchange.get_position(&track.instrument).await?;
-        let open_orders = runtime.exchange.get_open_orders(&track.instrument).await?;
+        let position = runtime.execution.get_position(&track.instrument).await?;
+        let open_orders = runtime.execution.get_open_orders(&track.instrument).await?;
         runtime
             .state
             .reconcile
@@ -72,7 +71,7 @@ pub(super) async fn replay_startup_user_data(
             };
             apply_user_data_event(
                 &runtime.state.reconcile,
-                &runtime.exchange,
+                runtime.execution.as_ref(),
                 &track_id,
                 event,
             )
@@ -119,7 +118,7 @@ where
 
 pub(super) async fn apply_user_data_event(
     state: &ReconcileState,
-    exchange: &Arc<dyn ExchangePort>,
+    execution: &dyn ExecutionPort,
     track_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), TrackMutationError> {
@@ -145,7 +144,7 @@ pub(super) async fn apply_user_data_event(
                     .await;
                 enqueue_reconcile_request(
                     state,
-                    exchange,
+                    execution,
                     ReconcileRequest {
                         track_id: track_id.to_string(),
                         reason: ReconcileReason::UnabsorbedOrderUpdate,
@@ -175,7 +174,7 @@ pub(super) async fn apply_user_data_event(
                     .await;
                 enqueue_reconcile_request(
                     state,
-                    exchange,
+                    execution,
                     ReconcileRequest {
                         track_id: track_id.to_string(),
                         reason: ReconcileReason::UnabsorbedOrderUpdate,

@@ -304,60 +304,6 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl poise_engine::ports::ExchangePort for AccountSummaryOnlyExchange {
-        async fn submit_order(
-            &self,
-            _req: poise_engine::ports::OrderRequest,
-        ) -> anyhow::Result<poise_engine::ports::OrderReceipt> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn cancel_order(
-            &self,
-            _instrument: &Instrument,
-            _order_id: &str,
-        ) -> anyhow::Result<()> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn cancel_all(&self, _instrument: &Instrument) -> anyhow::Result<()> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_position(
-            &self,
-            _instrument: &Instrument,
-        ) -> anyhow::Result<poise_engine::ports::Position> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_open_orders(
-            &self,
-            _instrument: &Instrument,
-        ) -> anyhow::Result<Vec<poise_engine::ports::ExchangeOrder>> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_exchange_info(
-            &self,
-            _instrument: &Instrument,
-        ) -> anyhow::Result<poise_engine::ports::ExchangeInfo> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> anyhow::Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_server_time(&self) -> anyhow::Result<chrono::DateTime<Utc>> {
-            Err(anyhow!("not used in tests"))
-        }
-    }
-
     async fn app_state() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         build_test_state(repository).await

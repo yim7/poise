@@ -1,6 +1,34 @@
 use super::*;
 
 #[tokio::test]
+async fn runtime_subscribes_user_data_from_account_port() {
+    let runtime = build_test_runtime_with_ports(
+        Arc::new(FakeExecutionPort::default()),
+        Arc::new(FakeMarketDataPort::default()),
+        Arc::new(FakeAccountSummaryPort::default()),
+        Arc::new(FakeAccountPort::with_user_events(vec![position_event_at(
+            test_server_time() + chrono::Duration::milliseconds(1),
+            7.5,
+            11.0,
+        )])),
+        Arc::new(FakeMetadataPort::default()),
+    )
+    .await;
+
+    let handles = runtime.runtime.start().await.unwrap();
+
+    wait_until_instance(&runtime.state, |instance| {
+        (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
+            && (instance.risk.unrealized_pnl - 11.0).abs() < f64::EPSILON
+    })
+    .await;
+
+    assert_eq!(runtime.account.subscribe_user_data_calls(), 1);
+
+    shutdown(handles).await;
+}
+
+#[tokio::test]
 async fn position_update_reconciles_actual_exposure_without_overwriting_target() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
@@ -89,14 +117,16 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events).await,
+        build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.execution_port(),
         market_data as Arc<dyn MarketDataPort>,
+        exchange.account_port(),
+        exchange.metadata_port(),
     );
 
     let user_task = runtime.spawn_user_task(
@@ -181,14 +211,16 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events).await,
+        build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExchangePort>,
+        exchange.execution_port(),
         market_data as Arc<dyn MarketDataPort>,
+        exchange.account_port(),
+        exchange.metadata_port(),
     );
 
     let user_task = runtime.spawn_user_task(

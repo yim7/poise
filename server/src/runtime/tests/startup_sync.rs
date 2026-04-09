@@ -1005,9 +1005,13 @@ async fn startup_sync_ignores_buffered_user_event_older_than_cutoff() {
 async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted() {
     let (price_sender, price_receiver) = mpsc::channel(8);
     drop(price_sender);
-    let (user_sender, user_receiver) = mpsc::channel(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver, user_receiver));
+    let market_data = Arc::new(FakeMarketData::new(price_receiver));
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+    let account = Arc::new(FakeAccountPort::with_user_events(vec![position_event_at(
+        test_server_time() + chrono::Duration::milliseconds(1),
+        7.5,
+        5.0,
+    )]));
     let persistence = Arc::new(FailOnSavePersistence::new(2));
     let clock = Arc::new(FixedClock(
         Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
@@ -1037,23 +1041,19 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone() as Arc<dyn ExchangePort>, events).await,
+        build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
-    let runtime = ServerRuntime::new(
+    let runtime = ServerRuntime::with_account_capacity_snapshots(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange as Arc<dyn ExchangePort>,
+        exchange.execution_port(),
         market_data as Arc<dyn MarketDataPort>,
+        account as Arc<dyn AccountPort>,
+        exchange.metadata_port(),
+        HashMap::new(),
+        Duration::from_secs(1),
     );
-    user_sender
-        .send(position_event_at(
-            test_server_time() + chrono::Duration::milliseconds(1),
-            7.5,
-            5.0,
-        ))
-        .await
-        .unwrap();
 
     let error = runtime.start().await.err().unwrap();
     assert!(error.to_string().contains("injected save failure"));

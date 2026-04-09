@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use poise_application::{PersistedTrackEffect, PreparedSubmitExecution};
-use poise_engine::ports::{ExchangePort, OrderRequest};
+use poise_engine::ports::{AccountPort, ExecutionPort, OrderRequest};
 use poise_engine::track::Instrument;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -19,7 +19,8 @@ mod retry;
 #[derive(Clone)]
 pub struct EffectWorker {
     state: EffectWorkerState,
-    exchange: Arc<dyn ExchangePort>,
+    execution: Arc<dyn ExecutionPort>,
+    account: Arc<dyn AccountPort>,
     poll_interval: Duration,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -28,22 +29,25 @@ impl EffectWorker {
     #[cfg(test)]
     pub fn new(
         state: impl Into<EffectWorkerState>,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
+        account: Arc<dyn AccountPort>,
         poll_interval: Duration,
     ) -> Self {
         let (_, shutdown_rx) = watch::channel(false);
-        Self::with_shutdown_rx(state, exchange, poll_interval, shutdown_rx)
+        Self::with_shutdown_rx(state, execution, account, poll_interval, shutdown_rx)
     }
 
     pub fn with_shutdown_rx(
         state: impl Into<EffectWorkerState>,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
+        account: Arc<dyn AccountPort>,
         poll_interval: Duration,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             state: state.into(),
-            exchange,
+            execution,
+            account,
             poll_interval,
             shutdown_rx,
         }

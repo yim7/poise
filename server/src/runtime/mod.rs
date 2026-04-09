@@ -13,7 +13,8 @@ use poise_application::TrackMutationError;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    AccountCapacitySnapshot, ExchangeOrder, ExchangePort, MarketDataPort, Position, UserDataEvent,
+    AccountCapacitySnapshot, AccountPort, ExchangeOrder, ExecutionPort, MarketDataPort,
+    MetadataPort, Position, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 use tokio::sync::{mpsc, watch};
@@ -32,8 +33,10 @@ pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
 pub struct ServerRuntime {
     state: RuntimeState,
     effect_worker_state: EffectWorkerState,
-    exchange: Arc<dyn ExchangePort>,
+    execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
+    account: Arc<dyn AccountPort>,
+    metadata: Arc<dyn MetadataPort>,
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     account_refresh_interval: Duration,
@@ -65,14 +68,18 @@ impl ServerRuntime {
     pub fn new(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange,
+            execution,
             market_data,
+            account,
+            metadata,
             HashMap::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
@@ -83,16 +90,20 @@ impl ServerRuntime {
     pub(crate) fn with_account_capacity_snapshots(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
         account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
         recovery_retry_interval: Duration,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange,
+            execution,
             market_data,
+            account,
+            metadata,
             account_capacity_snapshots,
             recovery_retry_interval,
             Duration::from_secs(5),
@@ -104,16 +115,20 @@ impl ServerRuntime {
     fn with_reconcile_intervals(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange,
+            execution,
             market_data,
+            account,
+            metadata,
             HashMap::new(),
             recovery_retry_interval,
             audit_interval,
@@ -125,8 +140,10 @@ impl ServerRuntime {
     fn with_reconcile_and_account_refresh_intervals(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
@@ -134,8 +151,10 @@ impl ServerRuntime {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange,
+            execution,
             market_data,
+            account,
+            metadata,
             HashMap::new(),
             recovery_retry_interval,
             audit_interval,
@@ -146,8 +165,10 @@ impl ServerRuntime {
     fn with_reconcile_intervals_and_account_capacity_snapshots(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<dyn ExchangePort>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
         account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
@@ -160,8 +181,10 @@ impl ServerRuntime {
         Self {
             state,
             effect_worker_state,
-            exchange,
+            execution,
             market_data,
+            account,
+            metadata,
             recovery_retry_interval,
             audit_interval,
             account_refresh_interval,
@@ -170,9 +193,9 @@ impl ServerRuntime {
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
-        let mut user_receiver = self.market_data.subscribe_user_data().await?;
+        let mut user_receiver = self.account.subscribe_user_data().await?;
         let startup_cutoff =
-            retry_startup_step("get_server_time", || self.exchange.get_server_time()).await?;
+            retry_startup_step("get_server_time", || self.metadata.get_server_time()).await?;
         retry_startup_step("startup_sync", || self.startup_sync()).await?;
         self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
             .await?;
@@ -228,7 +251,7 @@ impl ServerRuntime {
             .track_instruments()
             .await;
         for track in &tracks {
-            if let Err(error) = self.exchange.cancel_all(&track.instrument).await {
+            if let Err(error) = self.execution.cancel_all(&track.instrument).await {
                 tracing::warn!(
                     "failed to cancel all orders for {} during shutdown: {error}",
                     track.instrument.symbol
@@ -238,7 +261,7 @@ impl ServerRuntime {
 
             if let Err(error) = sync_exchange_state_from_exchange(
                 &self.state.reconcile,
-                &self.exchange,
+                self.execution.as_ref(),
                 &track.id,
                 &track.instrument,
                 ExchangeSyncMode::RecoverOnly,
@@ -284,7 +307,8 @@ impl ServerRuntime {
     fn spawn_effect_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         EffectWorker::with_shutdown_rx(
             self.effect_worker_state.clone(),
-            Arc::clone(&self.exchange),
+            Arc::clone(&self.execution),
+            Arc::clone(&self.account),
             Duration::from_millis(10),
             shutdown_rx,
         )
@@ -336,31 +360,31 @@ where
 
 async fn apply_user_data_event(
     state: &impl ReconcileStateAccess,
-    exchange: &Arc<dyn ExchangePort>,
+    execution: &dyn ExecutionPort,
     track_id: &str,
     event: UserDataEvent,
 ) -> std::result::Result<(), TrackMutationError> {
     let state = state.reconcile_state_view();
-    startup_sync::apply_user_data_event(&state, exchange, track_id, event).await
+    startup_sync::apply_user_data_event(&state, execution, track_id, event).await
 }
 
 pub(crate) async fn enqueue_reconcile_request(
     state: &impl ReconcileStateAccess,
-    exchange: &Arc<dyn ExchangePort>,
+    execution: &dyn ExecutionPort,
     request: ReconcileRequest,
     instrument: &poise_engine::track::Instrument,
 ) -> std::result::Result<ReconcileExecution, TrackMutationError> {
-    reconcile::enqueue_reconcile_request(state, exchange, request, instrument).await
+    reconcile::enqueue_reconcile_request(state, execution, request, instrument).await
 }
 
 async fn sync_exchange_state_from_exchange(
     state: &impl ReconcileStateAccess,
-    exchange: &Arc<dyn ExchangePort>,
+    execution: &dyn ExecutionPort,
     track_id: &str,
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
-    reconcile::sync_exchange_state_from_exchange(state, exchange, track_id, instrument, mode).await
+    reconcile::sync_exchange_state_from_exchange(state, execution, track_id, instrument, mode).await
 }
 
 fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {

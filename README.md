@@ -25,7 +25,7 @@
 - 同一交易所内，同一 `symbol` 只允许一个轨道
 - `track_id` 是显式配置的稳定标识，不由 `symbol` 派生
 - HTTP / WebSocket 以 `track_id` 作为一等标识
-- SQLite 默认路径是 `<instance-dir>/.data/<environment>/poise-server.sqlite`
+- SQLite 默认路径是 `<instance-dir>/.data/poise-server.sqlite`
 - Binance 适配层当前用 `mark price` 作为策略 `reference_price`
 
 ## 快速开始
@@ -43,23 +43,23 @@ cp configs/binance-testnet.demo.toml "$HOME/poise-instances/testnet-demo/config.
 
 补充说明：
 
-- [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 和 [`configs/binance-mainnet.demo.toml`](configs/binance-mainnet.demo.toml) 只作为模板
-- [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，里面是本地假地址，不能直接拿来连 Binance
+- [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 只作为测试网实例模板
+- [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，不用于真实运行
 - 真实运行时推荐把本地凭证和实例配置都放在实例目录，不再把 `*.local.toml` 留在仓库配置目录里
 
 下面给的是一份字段完整的 `track` 示例，当前支持的参数都显式写出来：
 
 ```toml
-environment = "testnet"
 bind_address = "127.0.0.1:8000"
 
 [exchange]
+venue = "binance"
+deployment = "testnet"
 api_key = ""
 api_secret = ""
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 65500.0
 upper_price = 67500.0
@@ -79,9 +79,9 @@ tick_timeout_secs = 30
 
 - 可以继续追加 `[[tracks]]`，每个轨道都要配置唯一的 `track_id`
 - 当前同一交易所内每个 `symbol` 只能出现一次
-- `environment = "testnet"` 时，服务端固定接 Binance USDⓈ-M Futures 测试网地址
-- `environment = "mainnet"` 时，服务端固定接 Binance USDⓈ-M Futures 主网地址
-- `environment = "test"` 只保留给仓库内自动化测试，不用于真实运行
+- `exchange.venue` 当前必须显式配置，现阶段仓库内只支持 `binance`
+- `exchange.deployment = "testnet"` 时，服务端接 Binance USDⓈ-M Futures 测试网地址
+- `exchange.deployment = "mainnet"` 时，服务端接 Binance USDⓈ-M Futures 主网地址
 - 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
@@ -113,7 +113,7 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet-demo"
 
 `--rebuild-state` 的语义是：
 
-- 先备份当前 `<instance-dir>/.data/<environment>/poise-server.sqlite`
+- 先备份当前 `<instance-dir>/.data/poise-server.sqlite`
 - 删除旧本地快照对应的 SQLite sidecar 文件
 - 用当前配置重新初始化本地状态
 - 启动后再按交易所真实仓位和挂单继续接管
@@ -175,7 +175,7 @@ curl http://127.0.0.1:8000/tracks/btc-core
 
 ## 数据
 
-- 服务端按实例目录和 `environment` 使用单个 SQLite 文件保存全部轨道状态
+- 服务端按实例目录使用单个 SQLite 文件保存全部轨道状态
 
 多账号主网运行时，目录应该显式分开，例如：
 
@@ -191,7 +191,7 @@ curl http://127.0.0.1:8000/tracks/btc-core
   .logs/
 ```
 
-只要实例目录不同，即使两个配置都写 `environment = "mainnet"`，数据库和日志也不会共享。
+只要实例目录不同，数据库和日志就不会共享。
 
 ## 开发与验证
 

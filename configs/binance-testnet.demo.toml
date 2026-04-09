@@ -1,13 +1,13 @@
-environment = "testnet"
 bind_address = "127.0.0.1:8000"
 
 [exchange]
+venue = "binance"
+deployment = "testnet"
 api_key = ""
 api_secret = ""
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 63000
 upper_price = 68500

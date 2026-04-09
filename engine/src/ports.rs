@@ -146,24 +146,32 @@ pub trait AccountSummaryPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait ExchangePort: AccountSummaryPort + Send + Sync {
+pub trait ExecutionPort: Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
     async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()>;
     async fn cancel_all(&self, instrument: &Instrument) -> Result<()>;
     async fn get_position(&self, instrument: &Instrument) -> Result<Position>;
     async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>>;
-    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo>;
+}
+
+#[async_trait]
+pub trait AccountPort: Send + Sync {
     async fn get_account_capacity_snapshot(
         &self,
         instrument: &Instrument,
     ) -> Result<AccountCapacitySnapshot>;
+    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
+}
+
+#[async_trait]
+pub trait MetadataPort: Send + Sync {
+    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo>;
     async fn get_server_time(&self) -> Result<DateTime<Utc>>;
 }
 
 #[async_trait]
 pub trait MarketDataPort: Send + Sync {
     async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>>;
-    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
 }
 
 pub trait ClockPort: Send + Sync {

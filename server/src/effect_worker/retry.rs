@@ -14,7 +14,7 @@ pub(super) async fn trigger_immediate_reconcile(
 ) -> Result<()> {
     runtime::enqueue_reconcile_request(
         &worker.state.reconcile,
-        &worker.exchange,
+        worker.execution.as_ref(),
         ReconcileRequest {
             track_id: track_id.to_string(),
             reason,

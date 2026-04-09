@@ -3,6 +3,7 @@ mod assembly;
 mod config;
 mod effect_worker;
 mod event_presentation;
+mod exchange;
 mod exchange_freshness;
 mod http;
 mod instance_dir;
@@ -40,7 +41,7 @@ async fn main() -> Result<()> {
     let options = parse_startup_options(env::args().skip(1))?;
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
-    let db_path = instance_dir.db_path(&config.environment);
+    let db_path = instance_dir.db_path();
     let prepared_state =
         match state_bootstrap::prepare_state_repository(&config, &db_path, options.bootstrap_mode)
             .await
@@ -208,7 +209,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
@@ -218,27 +218,19 @@ mod tests {
     use chrono::Utc;
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
-        ClockPort, ExchangeInfo, ExchangeOrder, ExchangePort, OrderReceipt, OrderRequest,
-        OrderStatus, Position, PriceTick,
+        AccountPort, ClockPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
+        OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick,
     };
     use poise_engine::track::{Instrument, Venue};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
     use crate::state_bootstrap::{
-        PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, SuggestedAction,
+        PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, StateRepositories,
+        SuggestedAction,
     };
 
     use super::{StartupOptions, parse_startup_options};
-
-    fn unique_test_environment() -> String {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        format!(
-            "main-test-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        )
-    }
 
     #[test]
     fn parse_startup_options_requires_instance_dir() {
@@ -569,7 +561,6 @@ mod tests {
 
     #[tokio::test]
     async fn startup_flow_serves_track_list_and_detail() {
-        let suffix = unique_test_environment();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = listener.local_addr().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -580,39 +571,39 @@ mod tests {
             &config_path,
             format!(
                 r#"
-environment = "{suffix}"
 bind_address = "{bind_address}"
 
 [exchange]
+venue = "binance"
 api_key = "demo-key"
 api_secret = "demo-secret"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
-daily_loss_limit = 300.0
-total_loss_limit = 600.0
 "#
             ),
         )
         .unwrap();
 
         let config = crate::config::load_config(&config_path).unwrap();
-        let db_path =
-            crate::instance_dir::InstanceDir::new(&instance_dir).db_path(&config.environment);
+        let db_path = crate::instance_dir::InstanceDir::new(&instance_dir).db_path();
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
-        let platform = crate::assembly::assemble_with_components(
+        let exchange = Arc::new(FakeExchange);
+        let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
-            Arc::new(FakeExchange),
+            exchange.clone(),
             Arc::new(FakeMarketData::default()),
-            storage,
+            exchange.clone(),
+            exchange.clone(),
+            exchange,
+            StateRepositories::new(storage),
             Arc::new(FakeClock),
         )
         .await
@@ -656,18 +647,81 @@ total_loss_limit = 600.0
         let _ = runtime_handles.recovery_task.await;
     }
 
+    #[test]
+    fn startup_db_path_does_not_depend_on_exchange_deployment() {
+        let instance_dir = tempfile::tempdir().unwrap();
+        let config_path = instance_dir.path().join("config.toml");
+
+        fs::write(
+            &config_path,
+            r#"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+        let testnet_config = crate::config::load_config(&config_path).unwrap();
+        let testnet_path = crate::instance_dir::InstanceDir::new(instance_dir.path()).db_path();
+
+        fs::write(
+            &config_path,
+            r#"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "mainnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+        let mainnet_config = crate::config::load_config(&config_path).unwrap();
+        let mainnet_path = crate::instance_dir::InstanceDir::new(instance_dir.path()).db_path();
+
+        assert_eq!(testnet_config.bind_address, mainnet_config.bind_address);
+        assert_eq!(testnet_path, mainnet_path);
+        assert_eq!(
+            mainnet_path,
+            instance_dir
+                .path()
+                .join(".data")
+                .join("poise-server.sqlite")
+        );
+    }
+
     #[tokio::test]
     async fn start_platform_binds_listener_before_starting_runtime() {
-        let suffix = unique_test_environment();
         let occupied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = occupied_listener.local_addr().unwrap();
 
         let config = crate::config::Config {
-            environment: suffix.clone(),
             bind_address: bind_address.to_string(),
             tracks: vec![crate::config::TrackDefinition {
                 track_id: "btc-core".into(),
-                venue: Venue::Binance,
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -682,22 +736,26 @@ total_loss_limit = 600.0
                 total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
-            exchange: crate::config::ExchangeConfig {
+            exchange: crate::config::ExchangeConfig::Binance(poise_binance::Config {
                 api_key: Some("demo-key".into()),
                 api_secret: Some("demo-secret".into()),
-            },
+                ..Default::default()
+            }),
             account_monitor: Default::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
-        let db_path =
-            crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
+        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path();
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
-        let platform = crate::assembly::assemble_with_components(
+        let exchange = Arc::new(FakeExchange);
+        let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
-            Arc::new(FakeExchange),
+            exchange.clone(),
             Arc::new(FailingStartMarketData),
-            storage,
+            exchange.clone(),
+            exchange.clone(),
+            exchange,
+            StateRepositories::new(storage),
             Arc::new(FakeClock),
         )
         .await
@@ -730,7 +788,7 @@ total_loss_limit = 600.0
     }
 
     #[async_trait::async_trait]
-    impl ExchangePort for FakeExchange {
+    impl ExecutionPort for FakeExchange {
         async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
@@ -759,7 +817,29 @@ total_loss_limit = 600.0
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl AccountPort for FakeExchange {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
+                max_increase_notional: 1_000_000.0,
+            })
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for FakeExchange {
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -771,15 +851,6 @@ total_loss_limit = 600.0
                     maker_fee_rate: 0.0,
                     taker_fee_rate: 0.0,
                 },
-            })
-        }
-
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
             })
         }
 
@@ -805,13 +876,6 @@ total_loss_limit = 600.0
                 .remove(&instrument.symbol)
                 .ok_or_else(|| anyhow!("missing price receiver for {}", instrument.symbol))
         }
-
-        async fn subscribe_user_data(
-            &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
-            let (_sender, receiver) = mpsc::channel(1);
-            Ok(receiver)
-        }
     }
 
     struct FailingStartMarketData;
@@ -824,12 +888,6 @@ total_loss_limit = 600.0
         ) -> Result<mpsc::Receiver<PriceTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
-        }
-
-        async fn subscribe_user_data(
-            &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
-            Err(anyhow!("subscribe_user_data should not run"))
         }
     }
 

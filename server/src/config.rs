@@ -2,27 +2,27 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use poise_application::AccountMonitorConfig;
+use poise_binance as binance;
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
 use poise_engine::track::{Instrument, TrackId, Venue};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
-    pub environment: String,
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
     pub tracks: Vec<TrackDefinition>,
-    #[serde(default)]
     pub exchange: ExchangeConfig,
     #[serde(default)]
     pub account_monitor: AccountMonitorConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackDefinition {
     pub track_id: String,
-    pub venue: Venue,
     pub symbol: String,
     pub lower_price: f64,
     pub upper_price: f64,
@@ -41,10 +41,24 @@ pub struct TrackDefinition {
     pub tick_timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-pub struct ExchangeConfig {
-    pub api_key: Option<String>,
-    pub api_secret: Option<String>,
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "venue", rename_all = "snake_case")]
+pub enum ExchangeConfig {
+    Binance(binance::Config),
+}
+
+impl Default for ExchangeConfig {
+    fn default() -> Self {
+        Self::Binance(binance::Config::default())
+    }
+}
+
+impl ExchangeConfig {
+    pub fn venue(&self) -> Venue {
+        match self {
+            Self::Binance(_) => Venue::Binance,
+        }
+    }
 }
 
 pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
@@ -73,8 +87,8 @@ impl TrackDefinition {
         TrackId::new(self.track_id.clone())
     }
 
-    pub fn instrument(&self) -> Instrument {
-        Instrument::new(self.venue, self.symbol.clone())
+    pub fn instrument(&self, venue: Venue) -> Instrument {
+        Instrument::new(venue, self.symbol.clone())
     }
 
     pub fn track_config(&self) -> TrackConfig {
@@ -120,30 +134,42 @@ fn default_min_rebalance_units() -> f64 {
 #[cfg(test)]
 mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+    use poise_engine::track::Venue;
 
-    use super::{AccountMonitorConfig, default_bind_address, parse_config};
+    use super::{AccountMonitorConfig, ExchangeConfig, default_bind_address, parse_config};
 
     #[test]
-    fn config_module_examples_do_not_use_paper_environment() {
+    fn config_module_examples_do_not_define_environment() {
         let source = include_str!("config.rs");
+        let environment_field_signature = ["pub", " environment", ":"].concat();
 
         assert!(!source.contains("environment = \"paper\""));
+        assert!(!source.contains(&environment_field_signature));
+    }
+
+    #[test]
+    fn exchange_config_does_not_expose_direct_credential_accessors() {
+        let source = include_str!("config.rs");
+        let api_key_signature = ["pub", " fn", " api_key", "("].concat();
+        let api_secret_signature = ["pub", " fn", " api_secret", "("].concat();
+
+        assert!(!source.contains(&api_key_signature));
+        assert!(!source.contains(&api_secret_signature));
     }
 
     #[test]
     fn parses_config_file_with_tracks_and_exchange() {
         let config = parse_config(
             r#"
-environment = "test"
 bind_address = "127.0.0.1:9000"
 
 [exchange]
+venue = "binance"
 api_key = "demo-key"
 api_secret = "demo-secret"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -155,7 +181,6 @@ total_loss_limit = 2400.0
 
 [[tracks]]
 track_id = "eth-core"
-venue = "binance"
 symbol = "ETHUSDT"
 lower_price = 2000.0
 upper_price = 2600.0
@@ -170,7 +195,6 @@ out_of_band_policy = "hold"
         )
         .unwrap();
 
-        assert_eq!(config.environment, "test");
         assert_eq!(config.bind_address, "127.0.0.1:9000");
         assert_eq!(config.tracks.len(), 2);
         assert_eq!(config.tracks[0].symbol, "BTCUSDT");
@@ -183,19 +207,77 @@ out_of_band_policy = "hold"
             config.tracks[1].out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Hold
         );
-        assert_eq!(config.exchange.api_key.as_deref(), Some("demo-key"));
-        assert_eq!(config.exchange.api_secret.as_deref(), Some("demo-secret"));
+        match &config.exchange {
+            ExchangeConfig::Binance(exchange) => {
+                assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
+                assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn parses_service_level_exchange_config_and_track_symbols() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+deployment = "testnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.exchange.venue(), Venue::Binance);
+        assert_eq!(config.tracks[0].symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn rejects_legacy_track_level_venue_field() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+deployment = "testnet"
+
+[[tracks]]
+track_id = "btc-core"
+venue = "binance"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("unknown field `venue`"))
+        );
     }
 
     #[test]
     fn defaults_bind_address_and_exchange_credentials_for_testnet() {
         let config = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -209,8 +291,12 @@ total_loss_limit = 600.0
         .unwrap();
 
         assert_eq!(config.bind_address, default_bind_address());
-        assert_eq!(config.exchange.api_key, None);
-        assert_eq!(config.exchange.api_secret, None);
+        match &config.exchange {
+            ExchangeConfig::Binance(exchange) => {
+                assert_eq!(exchange.api_key, None);
+                assert_eq!(exchange.api_secret, None);
+            }
+        }
         assert_eq!(
             config.tracks[0].track_config().shape_family,
             poise_core::strategy::ShapeFamily::Linear
@@ -226,11 +312,11 @@ total_loss_limit = 600.0
     fn defaults_min_rebalance_units_to_point_five() {
         let config = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -250,11 +336,11 @@ total_loss_limit = 600.0
     fn rejects_negative_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -275,11 +361,11 @@ min_rebalance_units = -0.1
     fn rejects_non_finite_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -300,11 +386,11 @@ min_rebalance_units = nan
     fn parses_optional_tick_timeout_secs() {
         let config = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -325,11 +411,11 @@ tick_timeout_secs = 45
     fn parses_snake_case_strategy_enums() {
         let config = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -354,11 +440,11 @@ out_of_band_policy = "reduce_only"
     fn budget_uses_explicit_risk_limits_when_configured() {
         let config = parse_config(
             r#"
-environment = "test"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -382,11 +468,11 @@ total_loss_limit = 500.0
     fn rejects_missing_risk_limits() {
         let error = parse_config(
             r#"
-environment = "test"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -404,11 +490,11 @@ notional_per_unit = 375.0
     fn parses_explicit_track_id_from_config_instead_of_deriving_from_symbol() {
         let config = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -432,7 +518,6 @@ total_loss_limit = 600.0
         let equivalent_track_step = (track.upper_price - track.lower_price)
             / (track.long_exposure_units + track.short_exposure_units);
 
-        assert_eq!(config.environment, "testnet");
         assert_eq!(config.tracks.len(), 1);
         assert_eq!(track.track_id().as_str(), "btc-core");
         assert_eq!(track.upper_price - track.lower_price, 5500.0);
@@ -466,14 +551,74 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn defaults_account_monitor_thresholds() {
+    fn demo_configs_define_exchange_only_at_service_level() {
+        for raw in [
+            include_str!("../../configs/binance-testnet.demo.toml"),
+            include_str!("../../configs/test.demo.toml"),
+        ] {
+            assert_eq!(raw.matches("venue = ").count(), 1);
+            assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
+        }
+    }
+
+    #[test]
+    fn readme_example_matches_service_level_exchange_boundary() {
+        let raw = include_str!("../../README.md");
+
+        assert!(raw.contains("[exchange]\nvenue = \"binance\"\ndeployment = \"testnet\""));
+        assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
+        assert!(!raw.contains("environment = \"testnet\" 时，服务端固定接 Binance"));
+        assert!(!raw.contains("environment = \"mainnet\" 时，服务端固定接 Binance"));
+        assert!(!raw.contains("configs/binance-mainnet.demo.toml"));
+        assert!(!raw.contains("environment = \"testnet\""));
+        assert!(!raw.contains("environment = \"mainnet\""));
+        assert!(!raw.contains("environment = \"test\""));
+    }
+
+    #[test]
+    fn parses_config_without_environment_field() {
         let config = parse_config(
             r#"
-environment = "testnet"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
 
 [[tracks]]
 track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.bind_address, "127.0.0.1:8000");
+    }
+
+    #[test]
+    fn demo_configs_do_not_define_environment() {
+        for raw in [
+            include_str!("../../configs/binance-testnet.demo.toml"),
+            include_str!("../../configs/test.demo.toml"),
+        ] {
+            assert!(!raw.contains("environment = "));
+        }
+    }
+
+    #[test]
+    fn defaults_account_monitor_thresholds() {
+        let config = parse_config(
+            r#"
+[exchange]
 venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0
@@ -493,7 +638,8 @@ total_loss_limit = 600.0
     fn rejects_inverted_account_monitor_thresholds() {
         let error = parse_config(
             r#"
-environment = "testnet"
+[exchange]
+venue = "binance"
 
 [account_monitor]
 day_change_attention_pct = -6.0
@@ -501,7 +647,6 @@ day_change_critical_pct = -5.0
 
 [[tracks]]
 track_id = "btc-core"
-venue = "binance"
 symbol = "BTCUSDT"
 lower_price = 90.0
 upper_price = 110.0

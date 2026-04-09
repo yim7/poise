@@ -1,155 +1,36 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
-use serde::Deserialize;
 use tokio::{
-    net::TcpStream,
     sync::mpsc,
     time::{Duration, Instant, interval_at, sleep},
 };
-use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async, connect_async_tls_with_config,
-    tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
-};
+use tokio_tungstenite::tungstenite::Message;
 
 use poise_engine::ledger::{
     ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord,
     TrackLedgerEvent,
 };
 use poise_engine::observation::OrderObservation;
-use poise_engine::ports::{PriceTick, TrackLedgerUpdate, UserDataEvent, UserDataPayload};
+use poise_engine::ports::{Position, TrackLedgerUpdate, UserDataEvent, UserDataPayload};
 use poise_engine::track::{Instrument, Venue};
 
-use crate::rest::BinanceRestClient;
-use crate::types::parse_order_status;
+use super::{
+    KeepaliveStatus, UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
+    log_user_stream_disconnect, log_user_stream_error, models::UserEventEnvelope, parse_decimal,
+    parse_side, quote_asset_for_symbol,
+};
+use crate::{mapper::parse_order_status, rest::BinanceRestClient};
 
-type UserWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
-pub struct BinanceWsClient {
-    #[allow(dead_code)]
-    rest: Arc<BinanceRestClient>,
-    #[allow(dead_code)]
-    ws_base_url: String,
-    #[allow(dead_code)]
-    reconnect_delay: Duration,
+#[derive(Debug, PartialEq)]
+pub(super) enum UserStreamMessage {
+    Events(Vec<UserDataEvent>),
+    ListenKeyExpired,
 }
 
-impl BinanceWsClient {
-    pub fn new(rest: Arc<BinanceRestClient>, ws_base_url: impl Into<String>) -> Self {
-        Self {
-            rest,
-            ws_base_url: ws_base_url.into().trim_end_matches('/').to_string(),
-            reconnect_delay: Duration::from_millis(250),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_reconnect_delay(
-        rest: Arc<BinanceRestClient>,
-        ws_base_url: impl Into<String>,
-        reconnect_delay: Duration,
-    ) -> Self {
-        Self {
-            rest,
-            ws_base_url: ws_base_url.into().trim_end_matches('/').to_string(),
-            reconnect_delay,
-        }
-    }
-
-    pub async fn subscribe_prices(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<mpsc::Receiver<PriceTick>> {
-        let (sender, receiver) = mpsc::channel(128);
-        let url = format!(
-            "{}/ws/{}@markPrice",
-            self.ws_base_url,
-            instrument.symbol.to_lowercase()
-        );
-        let reconnect_delay = self.reconnect_delay;
-
-        tokio::spawn(async move {
-            run_market_stream(url, sender, reconnect_delay).await;
-        });
-
-        Ok(receiver)
-    }
-
-    pub async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        let (sender, receiver) = mpsc::channel(128);
-        let ws_base_url = self.ws_base_url.clone();
-        let rest = Arc::clone(&self.rest);
-        let reconnect_delay = self.reconnect_delay;
-        let initial_listen_key = rest.start_user_stream().await?;
-        let initial_websocket = connect_user_stream(&ws_base_url, &initial_listen_key).await?;
-
-        tokio::spawn(async move {
-            run_user_stream(
-                ws_base_url,
-                rest,
-                initial_listen_key,
-                Some(initial_websocket),
-                sender,
-                reconnect_delay,
-            )
-            .await;
-        });
-
-        Ok(receiver)
-    }
-}
-
-async fn run_market_stream(
-    url: String,
-    sender: mpsc::Sender<PriceTick>,
-    reconnect_delay: Duration,
-) {
-    let mut attempt = 0_u32;
-
-    loop {
-        match connect_websocket(&url).await {
-            Ok((mut websocket, _)) => {
-                attempt = 0;
-
-                while let Some(message) = websocket.next().await {
-                    match message {
-                        Ok(Message::Text(text)) => match parse_mark_price_message(&text) {
-                            Ok(Some(tick)) => {
-                                if sender.send(tick).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                tracing::warn!("failed to parse market data message: {error}");
-                            }
-                        },
-                        Ok(Message::Close(_)) => break,
-                        Ok(_) => {}
-                        Err(error) => {
-                            log_websocket_error("market data", &error);
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!("failed to connect market data websocket: {error}");
-            }
-        }
-
-        if sender.is_closed() {
-            return;
-        }
-
-        sleep(backoff_delay(reconnect_delay, attempt)).await;
-        attempt = attempt.saturating_add(1);
-    }
-}
-
-async fn run_user_stream(
+pub(super) async fn run_user_stream(
     ws_base_url: String,
     rest: Arc<BinanceRestClient>,
     initial_listen_key: String,
@@ -285,209 +166,7 @@ async fn run_user_stream(
     }
 }
 
-async fn connect_user_stream(ws_base_url: &str, listen_key: &str) -> Result<UserWebSocket> {
-    let url = format!("{ws_base_url}/ws/{listen_key}");
-    let (websocket, _) = connect_websocket(&url)
-        .await
-        .with_context(|| format!("failed to connect user data websocket `{url}`"))?;
-    Ok(websocket)
-}
-
-async fn connect_websocket(
-    url: &str,
-) -> Result<(
-    WebSocketStream<MaybeTlsStream<TcpStream>>,
-    tokio_tungstenite::tungstenite::handshake::client::Response,
-)> {
-    let connector = websocket_connector(url)?;
-    let result = match connector {
-        Some(connector) => connect_async_tls_with_config(url, None, false, Some(connector)).await,
-        None => connect_async(url).await,
-    };
-
-    result.with_context(|| format!("failed to connect websocket `{url}`"))
-}
-
-fn websocket_connector(url: &str) -> Result<Option<Connector>> {
-    if !url.starts_with("wss://") {
-        return Ok(None);
-    }
-
-    let connector = native_tls::TlsConnector::builder()
-        .build()
-        .context("failed to build native TLS websocket connector")?;
-
-    Ok(Some(Connector::NativeTls(connector)))
-}
-
-fn log_websocket_error(stream_name: &str, error: &WebSocketError) {
-    if is_expected_disconnect(error) {
-        tracing::info!("{stream_name} websocket disconnected: {error}; reconnecting");
-    } else {
-        tracing::warn!("{stream_name} websocket error: {error}");
-    }
-}
-
-fn is_expected_disconnect(error: &WebSocketError) -> bool {
-    matches!(
-        error,
-        WebSocketError::ConnectionClosed
-            | WebSocketError::AlreadyClosed
-            | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeepaliveStatus {
-    Ok,
-    Failed,
-}
-
-impl KeepaliveStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct KeepaliveObservation {
-    finished_at: Instant,
-    latency: Duration,
-    status: KeepaliveStatus,
-}
-
-#[derive(Debug, Clone)]
-struct UserStreamDiagnostics {
-    connected_at: Instant,
-    last_message_at: Instant,
-    last_keepalive: Option<KeepaliveObservation>,
-    last_send_wait: Option<Duration>,
-    max_send_wait: Duration,
-}
-
-impl UserStreamDiagnostics {
-    fn new(now: Instant) -> Self {
-        Self {
-            connected_at: now,
-            last_message_at: now,
-            last_keepalive: None,
-            last_send_wait: None,
-            max_send_wait: Duration::ZERO,
-        }
-    }
-
-    fn record_message(&mut self, now: Instant) {
-        self.last_message_at = now;
-    }
-
-    fn record_send_wait(&mut self, wait: Duration) {
-        self.last_send_wait = Some(wait);
-        if wait > self.max_send_wait {
-            self.max_send_wait = wait;
-        }
-    }
-
-    fn record_keepalive_result(
-        &mut self,
-        started_at: Instant,
-        finished_at: Instant,
-        status: KeepaliveStatus,
-    ) {
-        self.last_keepalive = Some(KeepaliveObservation {
-            finished_at,
-            latency: finished_at.saturating_duration_since(started_at),
-            status,
-        });
-    }
-
-    fn disconnect_snapshot(&self, now: Instant) -> UserStreamDisconnectSnapshot {
-        UserStreamDisconnectSnapshot {
-            connection_age: now.saturating_duration_since(self.connected_at),
-            idle_for: now.saturating_duration_since(self.last_message_at),
-            last_keepalive_age: self
-                .last_keepalive
-                .map(|observation| now.saturating_duration_since(observation.finished_at)),
-            last_keepalive_latency: self.last_keepalive.map(|observation| observation.latency),
-            last_keepalive_status: self.last_keepalive.map(|observation| observation.status),
-            last_send_wait: self.last_send_wait,
-            max_send_wait: self.max_send_wait,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UserStreamDisconnectSnapshot {
-    connection_age: Duration,
-    idle_for: Duration,
-    last_keepalive_age: Option<Duration>,
-    last_keepalive_latency: Option<Duration>,
-    last_keepalive_status: Option<KeepaliveStatus>,
-    last_send_wait: Option<Duration>,
-    max_send_wait: Duration,
-}
-
-fn log_user_stream_disconnect(reason: &str, snapshot: UserStreamDisconnectSnapshot) {
-    tracing::info!(
-        reason,
-        connection_age = ?snapshot.connection_age,
-        idle_for = ?snapshot.idle_for,
-        last_keepalive_age = ?snapshot.last_keepalive_age,
-        last_keepalive_latency = ?snapshot.last_keepalive_latency,
-        last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
-        last_send_wait = ?snapshot.last_send_wait,
-        max_send_wait = ?snapshot.max_send_wait,
-        "user data websocket disconnected; reconnecting"
-    );
-}
-
-fn log_user_stream_error(error: &WebSocketError, snapshot: UserStreamDisconnectSnapshot) {
-    if is_expected_disconnect(error) {
-        tracing::info!(
-            error = %error,
-            connection_age = ?snapshot.connection_age,
-            idle_for = ?snapshot.idle_for,
-            last_keepalive_age = ?snapshot.last_keepalive_age,
-            last_keepalive_latency = ?snapshot.last_keepalive_latency,
-            last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
-            last_send_wait = ?snapshot.last_send_wait,
-            max_send_wait = ?snapshot.max_send_wait,
-            "user data websocket disconnected; reconnecting"
-        );
-    } else {
-        tracing::warn!(
-            error = %error,
-            connection_age = ?snapshot.connection_age,
-            idle_for = ?snapshot.idle_for,
-            last_keepalive_age = ?snapshot.last_keepalive_age,
-            last_keepalive_latency = ?snapshot.last_keepalive_latency,
-            last_keepalive_status = snapshot.last_keepalive_status.map(KeepaliveStatus::as_str).unwrap_or("none"),
-            last_send_wait = ?snapshot.last_send_wait,
-            max_send_wait = ?snapshot.max_send_wait,
-            "user data websocket error"
-        );
-    }
-}
-
-fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
-    let message: MarkPriceMessage = serde_json::from_str(payload)?;
-    let mark_price = parse_decimal("p", &message.mark_price)?;
-    let timestamp = Utc
-        .timestamp_millis_opt(message.event_time)
-        .single()
-        .context("invalid event timestamp")?;
-
-    Ok(Some(PriceTick {
-        instrument: Instrument::new(Venue::Binance, message.symbol),
-        reference_price: mark_price,
-        mark_price,
-        timestamp,
-    }))
-}
-
-fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
+pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
     let envelope: UserEventEnvelope = serde_json::from_str(payload)?;
     let event_time = Utc
         .timestamp_millis_opt(envelope.event_time)
@@ -619,7 +298,7 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
                 .map(|position| {
                     Ok(UserDataEvent {
                         event_time,
-                        payload: UserDataPayload::PositionUpdate(poise_engine::ports::Position {
+                        payload: UserDataPayload::PositionUpdate(Position {
                             instrument: Instrument::new(Venue::Binance, position.symbol),
                             qty: parse_decimal("a.P.pa", &position.position_amt)?,
                             avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
@@ -636,113 +315,6 @@ fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
     }
 }
 
-fn backoff_delay(base: Duration, attempt: u32) -> Duration {
-    let multiplier = 1_u32.checked_shl(attempt.min(4)).unwrap_or(16);
-    base.saturating_mul(multiplier)
-}
-
-fn parse_decimal(field: &str, value: &str) -> Result<f64> {
-    value
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal for {field}: {value}"))
-}
-
-fn parse_side(value: &str) -> Result<poise_core::types::Side> {
-    match value {
-        "BUY" => Ok(poise_core::types::Side::Buy),
-        "SELL" => Ok(poise_core::types::Side::Sell),
-        other => Err(anyhow!("unsupported side: {other}")),
-    }
-}
-
-fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
-    ["USDT", "USDC", "FDUSD", "BUSD"]
-        .into_iter()
-        .find(|quote| symbol.ends_with(quote))
-}
-
-#[derive(Debug, Deserialize)]
-struct MarkPriceMessage {
-    #[serde(rename = "E")]
-    event_time: i64,
-    #[serde(rename = "s")]
-    symbol: String,
-    #[serde(rename = "p")]
-    mark_price: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UserEventEnvelope {
-    #[serde(rename = "e")]
-    event_type: String,
-    #[serde(rename = "E")]
-    event_time: i64,
-    #[serde(rename = "o")]
-    order: Option<OrderTradeUpdate>,
-    #[serde(rename = "a")]
-    account: Option<AccountUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OrderTradeUpdate {
-    #[serde(rename = "s")]
-    symbol: String,
-    #[serde(rename = "i")]
-    order_id: u64,
-    #[serde(rename = "c")]
-    client_order_id: String,
-    #[serde(rename = "S")]
-    side: String,
-    #[serde(rename = "p")]
-    price: String,
-    #[serde(rename = "q")]
-    quantity: String,
-    #[serde(rename = "rp")]
-    realized_pnl: String,
-    #[serde(rename = "n")]
-    commission_amount: Option<String>,
-    #[serde(rename = "N")]
-    commission_asset: Option<String>,
-    #[serde(rename = "X")]
-    status: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountUpdate {
-    #[serde(rename = "m")]
-    reason: Option<String>,
-    #[serde(rename = "B", default)]
-    balances: Vec<AccountBalanceUpdate>,
-    #[serde(rename = "P")]
-    positions: Vec<AccountPositionUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountBalanceUpdate {
-    #[serde(rename = "a")]
-    asset: String,
-    #[serde(rename = "bc")]
-    balance_change: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountPositionUpdate {
-    #[serde(rename = "s")]
-    symbol: String,
-    #[serde(rename = "pa")]
-    position_amt: String,
-    #[serde(rename = "ep")]
-    entry_price: String,
-    #[serde(rename = "up")]
-    unrealized_profit: String,
-}
-
-#[derive(Debug, PartialEq)]
-enum UserStreamMessage {
-    Events(Vec<UserDataEvent>),
-    ListenKeyExpired,
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, collections::VecDeque, sync::Arc};
@@ -755,10 +327,7 @@ mod tests {
         sync::{Mutex, Notify},
         time::timeout,
     };
-    use tokio_tungstenite::{
-        accept_async,
-        tungstenite::{Error as WebSocketError, Message, error::ProtocolError},
-    };
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_core::types::Side;
     use poise_engine::ledger::{
@@ -770,29 +339,7 @@ mod tests {
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
-
-    #[test]
-    fn parses_mark_price_stream_message() {
-        let payload = r#"{
-            "e": "markPriceUpdate",
-            "E": 1700000000000,
-            "s": "BTCUSDT",
-            "p": "64000.10",
-            "i": "63999.90"
-        }"#;
-
-        let tick = parse_mark_price_message(payload).unwrap().unwrap();
-
-        assert_eq!(
-            tick,
-            PriceTick {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                reference_price: 64000.10,
-                mark_price: 64000.10,
-                timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-            }
-        );
-    }
+    use crate::ws::BinanceWsClient;
 
     #[test]
     fn parses_order_trade_update_message() {
@@ -1019,54 +566,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnects_market_price_stream_after_disconnect() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            for payload in [
-                r#"{"e":"markPriceUpdate","E":1700000000000,"s":"BTCUSDT","p":"64000.10","i":"63999.90"}"#,
-                r#"{"e":"markPriceUpdate","E":1700000005000,"s":"BTCUSDT","p":"64010.20","i":"64010.00"}"#,
-            ] {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut websocket = accept_async(stream).await.unwrap();
-                websocket
-                    .send(Message::Text(payload.to_string()))
-                    .await
-                    .unwrap();
-                websocket.close(None).await.unwrap();
-            }
-        });
-
-        let rest = Arc::new(BinanceRestClient::new(
-            "http://127.0.0.1:1",
-            "api-key",
-            "secret-key",
-        ));
-        let client = BinanceWsClient::with_reconnect_delay(
-            rest,
-            format!("ws://{}", address),
-            Duration::from_millis(10),
-        );
-
-        let mut receiver = client
-            .subscribe_prices(&Instrument::new(Venue::Binance, "BTCUSDT"))
-            .await
-            .unwrap();
-        let first = timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let second = timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(first.mark_price, 64000.10);
-        assert_eq!(second.mark_price, 64010.20);
-    }
-
-    #[tokio::test]
     async fn reconnects_user_data_stream_after_listen_key_expired() {
         let rest_server = MockHttpServer::spawn(vec![
             MockResponse::json(200, r#"{"listenKey":"listen-key-1"}"#),
@@ -1281,60 +780,6 @@ mod tests {
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
                 }),
-            }
-        );
-    }
-
-    #[test]
-    fn websocket_connector_uses_native_tls_for_secure_urls() {
-        let connector = super::websocket_connector("wss://example.com/ws").unwrap();
-
-        assert!(matches!(
-            connector,
-            Some(tokio_tungstenite::Connector::NativeTls(_))
-        ));
-    }
-
-    #[test]
-    fn websocket_connector_skips_tls_for_plain_urls() {
-        let connector = super::websocket_connector("ws://127.0.0.1:18081/ws").unwrap();
-
-        assert!(connector.is_none());
-    }
-
-    #[test]
-    fn treats_reset_without_close_handshake_as_expected_disconnect() {
-        let error = WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake);
-
-        assert!(super::is_expected_disconnect(&error));
-    }
-
-    #[test]
-    fn user_stream_diagnostics_snapshot_tracks_keepalive_and_send_wait() {
-        let base = Instant::now();
-        let mut diagnostics = super::UserStreamDiagnostics::new(base);
-
-        diagnostics.record_message(base + Duration::from_secs(5));
-        diagnostics.record_send_wait(Duration::from_millis(250));
-        diagnostics.record_send_wait(Duration::from_millis(100));
-        diagnostics.record_keepalive_result(
-            base + Duration::from_secs(6),
-            base + Duration::from_secs(8),
-            super::KeepaliveStatus::Ok,
-        );
-
-        let snapshot = diagnostics.disconnect_snapshot(base + Duration::from_secs(20));
-
-        assert_eq!(
-            snapshot,
-            super::UserStreamDisconnectSnapshot {
-                connection_age: Duration::from_secs(20),
-                idle_for: Duration::from_secs(15),
-                last_keepalive_age: Some(Duration::from_secs(12)),
-                last_keepalive_latency: Some(Duration::from_secs(2)),
-                last_keepalive_status: Some(super::KeepaliveStatus::Ok),
-                last_send_wait: Some(Duration::from_millis(100)),
-                max_send_wait: Duration::from_millis(250),
             }
         );
     }
