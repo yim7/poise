@@ -69,7 +69,7 @@
 - Test: `server/src/assembly.rs`
 - Test: `tui/src/main.rs`
 
-- [ ] **Step 1: 先写失败测试，固定“现行入口和生产路径都不再使用 environment”**
+- [x] **Step 1: 先写失败测试，固定“现行入口和生产路径都不再使用 environment”**
 
 在 `server/src/config.rs` 添加：
 
@@ -166,7 +166,7 @@ fn startup_db_path_does_not_depend_on_exchange_deployment() {
 
 在 `tui/src/main.rs` 保留并扩展当前慢速 e2e 配置约束测试，要求源码中不存在 `environment = "test"` 夹具片段。
 
-- [ ] **Step 2: 运行定向测试，确认当前行为仍依赖 environment**
+- [x] **Step 2: 运行定向测试，确认当前行为仍依赖 environment**
 
 Run:
 `cargo test -p poise-server parses_config_without_environment_field`
@@ -198,7 +198,7 @@ Run:
 Expected:
 - FAIL，原因是 `tui` 慢速 e2e 配置夹具仍包含 `environment`
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 要求：
 - `Config` 删除 `environment`
@@ -211,7 +211,7 @@ Expected:
 - `tui` 慢速 e2e 配置 helper 去掉 `environment`
 - 不引入 `deployment -> db_path` 新映射
 
-- [ ] **Step 4: 运行回归**
+- [x] **Step 4: 运行回归**
 
 Run:
 `cargo test -p poise-server parses_config_without_environment_field`
@@ -261,7 +261,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add server/src/config.rs server/src/instance_dir.rs server/src/main.rs server/src/assembly.rs server/src/state_bootstrap.rs README.md configs/binance-testnet.demo.toml configs/test.demo.toml tui/src/main.rs docs/superpowers/plans/2026-04-09-remove-environment.md
@@ -269,7 +269,7 @@ git commit -m "refactor: remove environment from runtime surfaces"
 ```
 
 提交后回写：
-- [ ] Task 1 commit: `<SHA>`
+- [x] Task 1 commit: `ae812ab31d89b598899a7d1b062d11e3c4c0a011`
 
 ---
 
