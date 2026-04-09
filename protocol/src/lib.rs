@@ -547,7 +547,10 @@ mod tests {
                     detail_json["strategy"]["min_rebalance_units"].as_f64(),
                     Some(0.5)
                 );
-                assert_eq!(detail_json["ledger"]["unrealized_pnl"].as_f64(), Some(265.2));
+                assert_eq!(
+                    detail_json["ledger"]["unrealized_pnl"].as_f64(),
+                    Some(265.2)
+                );
                 assert_eq!(
                     detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
                     Some(0.0)
@@ -576,7 +579,10 @@ mod tests {
         .unwrap();
 
         let detail_json = serde_json::to_value(&detail).unwrap();
-        assert_eq!(detail_json["ledger"]["unrealized_pnl"].as_f64(), Some(265.2));
+        assert_eq!(
+            detail_json["ledger"]["unrealized_pnl"].as_f64(),
+            Some(265.2)
+        );
         assert_eq!(
             detail.ledger.unresolved_gaps[0].reason,
             TrackLedgerGapReasonView::UnsupportedCommissionAsset

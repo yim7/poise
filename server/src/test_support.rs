@@ -17,8 +17,8 @@ use tokio::sync::broadcast;
 
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
-use crate::runtime::TrackReconcileGuards;
 use crate::runtime::AccountMarginGuardStore;
+use crate::runtime::TrackReconcileGuards;
 use crate::server_context::{EffectWorkerState, RuntimeState};
 use crate::submit_preflight::SubmitPreflight;
 
@@ -57,8 +57,14 @@ impl RuntimeTestContext {
         self.observation_service.track_instruments().await
     }
 
-    pub(crate) async fn observe_market(&self, id: &str, reference_price: f64) -> Result<TrackTransition, anyhow::Error> {
-        self.observation_service.observe_market(id, reference_price).await
+    pub(crate) async fn observe_market(
+        &self,
+        id: &str,
+        reference_price: f64,
+    ) -> Result<TrackTransition, anyhow::Error> {
+        self.observation_service
+            .observe_market(id, reference_price)
+            .await
     }
 
     pub(crate) async fn observe_position(
@@ -66,7 +72,9 @@ impl RuntimeTestContext {
         id: &str,
         observation: PositionObservation,
     ) -> Result<TrackTransition, anyhow::Error> {
-        self.observation_service.observe_position(id, observation).await
+        self.observation_service
+            .observe_position(id, observation)
+            .await
     }
 
     pub(crate) async fn observe_order_with_absorb_result(
@@ -102,8 +110,14 @@ impl EffectWorkerTestContext {
         self.manager.clone()
     }
 
-    pub(crate) async fn observe_market(&self, id: &str, reference_price: f64) -> Result<TrackTransition, anyhow::Error> {
-        self.observation_service.observe_market(id, reference_price).await
+    pub(crate) async fn observe_market(
+        &self,
+        id: &str,
+        reference_price: f64,
+    ) -> Result<TrackTransition, anyhow::Error> {
+        self.observation_service
+            .observe_market(id, reference_price)
+            .await
     }
 
     pub(crate) async fn observe_order_with_absorb_result(

@@ -653,8 +653,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::timestamp_display::format_local_timestamp_for_display;
     use super::{pnl_lines, render};
+    use crate::timestamp_display::format_local_timestamp_for_display;
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         terminal
@@ -875,10 +875,7 @@ mod tests {
                 .as_deref()
                 .expect("fixture should include stats started at"),
         );
-        let pnl_text = pnl_lines(&detail)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
+        let pnl_text = pnl_lines(&detail).iter().map(line_text).collect::<Vec<_>>();
         let text = render_text_with_size(detail, 180, 36);
 
         assert!(text.contains("Market"));
@@ -956,10 +953,7 @@ mod tests {
         detail.ledger.trading_fee_cumulative = 12.34;
         detail.ledger.funding_fee_cumulative = -5.67;
 
-        let pnl_text = pnl_lines(&detail)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
+        let pnl_text = pnl_lines(&detail).iter().map(line_text).collect::<Vec<_>>();
 
         assert!(pnl_text[0].contains("total ↓ -123456789.12"));
         assert!(pnl_text[0].contains("unrealized ↓ -111111111.11"));
@@ -980,10 +974,7 @@ mod tests {
             observed_at: "2026-04-06T10:00:00Z".to_string(),
         }];
 
-        let pnl_text = pnl_lines(&detail)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>();
+        let pnl_text = pnl_lines(&detail).iter().map(line_text).collect::<Vec<_>>();
 
         assert_eq!(
             pnl_text[2],

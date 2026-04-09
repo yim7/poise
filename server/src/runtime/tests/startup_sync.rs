@@ -348,11 +348,7 @@ async fn startup_sync_rebuilds_submit_pending_slot_to_current_plan_before_follow
     );
     assert_eq!(order.status, OrderStatus::Submitting);
 
-    let transition = fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
 }
 
@@ -453,11 +449,7 @@ async fn startup_sync_clears_orphaned_submit_pending_slot_without_effect() {
         Some(true)
     );
 
-    let transition = fixture
-        .state
-        .observe_market("BTCUSDT", 95.0)
-        .await
-        .unwrap();
+    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
 }
 
@@ -1049,16 +1041,16 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone(), events).await,
+        build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
     let runtime = ServerRuntime::with_account_capacity_snapshots(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone() as Arc<dyn ExecutionPort>,
+        exchange.execution_port(),
         market_data as Arc<dyn MarketDataPort>,
         account as Arc<dyn AccountPort>,
-        exchange as Arc<dyn MetadataPort>,
+        exchange.metadata_port(),
         HashMap::new(),
         Duration::from_secs(1),
     );

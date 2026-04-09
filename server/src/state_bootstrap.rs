@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{SecondsFormat, Utc};
-use poise_application::{AccountMonitorStore, TrackEffectStore, TrackMutationStore, TrackQueryStore};
+use poise_application::{
+    AccountMonitorStore, TrackEffectStore, TrackMutationStore, TrackQueryStore,
+};
 use poise_core::strategy::TrackConfig;
 use poise_engine::track::Instrument;
 use poise_storage::sqlite::SqliteStorage;
@@ -403,9 +405,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use poise_application::TrackMutationStore;
     use poise_application::TrackQueryStore;
     use poise_engine::manager::TrackManager;
-    use poise_application::TrackMutationStore;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_storage::sqlite::SqliteStorage;
 

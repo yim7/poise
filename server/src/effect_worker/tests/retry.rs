@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[tokio::test]
 async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arrives() {
     let repository = Arc::new(MemoryRepository::default());
@@ -18,7 +17,7 @@ async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arriv
         realized_pnl: 0.0,
         status: OrderStatus::New,
     });
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
     let snapshot = snapshot_with_working_order();
 
     repository.seed_snapshot("btc-core", snapshot.clone()).await;
@@ -70,7 +69,8 @@ async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arriv
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     let error = worker
@@ -138,7 +138,7 @@ async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_
         realized_pnl: 0.0,
         status: OrderStatus::New,
     });
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
     let snapshot = snapshot_with_working_order();
 
     repository.seed_snapshot("btc-core", snapshot.clone()).await;
@@ -183,7 +183,8 @@ async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     let error = worker
@@ -239,13 +240,7 @@ async fn submit_recovery_proceed_keeps_active_pending_target_when_rounded_reques
         maker_fee_rate: 0.0,
         taker_fee_rate: 0.0,
     };
-    let state = test_state_with_track(
-        repository.clone(),
-        exchange.clone(),
-        config.clone(),
-        exchange_rules,
-    )
-    .await;
+    let state = test_state_with_track(repository.clone(), config.clone(), exchange_rules).await;
     let snapshot = snapshot_with_submit_pending_order(
         94.99,
         config.clone(),
@@ -297,7 +292,8 @@ async fn submit_recovery_proceed_keeps_active_pending_target_when_rounded_reques
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange,
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -324,12 +320,9 @@ async fn effect_worker_stops_polling_new_effects_after_shutdown_signal() {
         submit_started.clone(),
         release_submit.clone(),
     ));
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     let submit_effect = match transition.effects.as_slice() {
         [TrackEffect::SubmitOrder { .. }] => repository
             .list_all_effects()
@@ -357,8 +350,8 @@ async fn effect_worker_stops_polling_new_effects_after_shutdown_signal() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker = EffectWorker::with_shutdown_rx(
         state.clone(),
-        exchange.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_millis(1),
         shutdown_rx,
     );
@@ -399,12 +392,9 @@ async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_f
         release_submit.clone(),
     ));
     exchange.set_position_qty(15.0).await;
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -412,7 +402,8 @@ async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_f
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     let task = tokio::spawn(async move { worker.run_once().await });
@@ -478,12 +469,9 @@ async fn outcome_unknown_marks_track_stale_before_reconcile() {
         release_get_position.clone(),
     ));
     exchange.set_position_qty(15.0).await;
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -491,7 +479,8 @@ async fn outcome_unknown_marks_track_stale_before_reconcile() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     let task = tokio::spawn(async move { worker.run_once().await });

@@ -7,10 +7,10 @@ use poise_core::risk::CapacityBudget;
 use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
-use crate::ledger::TrackLedgerState;
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
+use crate::ledger::TrackLedgerState;
 use crate::ports::OrderStatus;
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
@@ -914,8 +914,14 @@ mod tests {
             serde_json::from_value(future_ledger_snapshot_json()).unwrap();
         let roundtrip = serde_json::to_value(restored).unwrap();
 
-        assert_eq!(roundtrip["ledger_state"]["realized_pnl_day"], json!("2026-03-29"));
-        assert_eq!(roundtrip["ledger_state"]["gross_realized_pnl_today"], json!(1.0));
+        assert_eq!(
+            roundtrip["ledger_state"]["realized_pnl_day"],
+            json!("2026-03-29")
+        );
+        assert_eq!(
+            roundtrip["ledger_state"]["gross_realized_pnl_today"],
+            json!(1.0)
+        );
         assert_eq!(
             roundtrip["ledger_state"]["gross_realized_pnl_cumulative"],
             json!(2.0)

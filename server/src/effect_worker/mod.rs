@@ -27,16 +27,14 @@ pub struct EffectWorker {
 
 impl EffectWorker {
     #[cfg(test)]
-    pub fn new<E>(
+    pub fn new(
         state: impl Into<EffectWorkerState>,
-        exchange: Arc<E>,
+        execution: Arc<dyn ExecutionPort>,
+        account: Arc<dyn AccountPort>,
         poll_interval: Duration,
-    ) -> Self
-    where
-        E: ExecutionPort + AccountPort + 'static,
-    {
+    ) -> Self {
         let (_, shutdown_rx) = watch::channel(false);
-        Self::with_shutdown_rx(state, exchange.clone(), exchange, poll_interval, shutdown_rx)
+        Self::with_shutdown_rx(state, execution, account, poll_interval, shutdown_rx)
     }
 
     pub fn with_shutdown_rx(

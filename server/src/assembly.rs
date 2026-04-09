@@ -31,8 +31,6 @@ use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RuntimeHandles, ServerRuntime, TrackReconcileGuards,
 };
-#[cfg(test)]
-use crate::test_support::{EffectWorkerTestContext, RuntimeTestContext};
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
 };
@@ -40,6 +38,8 @@ use crate::state_bootstrap::StateRepositories;
 use crate::submit_preflight::SubmitPreflight;
 #[cfg(test)]
 use crate::test_support::build_test_contexts_from_runtime_states;
+#[cfg(test)]
+use crate::test_support::{EffectWorkerTestContext, RuntimeTestContext};
 
 pub struct ServerPlatform {
     http_state: HttpState,
@@ -118,35 +118,6 @@ pub async fn assemble(config: &Config, repositories: StateRepositories) -> Resul
 }
 
 #[cfg(test)]
-pub(crate) async fn assemble_with_components<R, E>(
-    config: &Config,
-    exchange: Arc<E>,
-    market_data: Arc<dyn MarketDataPort>,
-    repository: Arc<R>,
-    clock: Arc<dyn ClockPort>,
-) -> Result<ServerPlatform>
-where
-    E: ExecutionPort + AccountSummaryPort + AccountPort + MetadataPort + 'static,
-    R: poise_application::TrackMutationStore
-        + poise_application::TrackQueryStore
-        + poise_application::TrackEffectStore
-        + 'static,
-{
-    let repositories = StateRepositories::new(repository);
-    assemble_with_exchange_ports(
-        config,
-        exchange.clone(),
-        market_data,
-        exchange.clone(),
-        exchange.clone(),
-        exchange,
-        repositories,
-        clock,
-    )
-    .await
-}
-
-#[cfg(test)]
 pub(crate) async fn assemble_with_exchange_ports(
     config: &Config,
     execution: Arc<dyn ExecutionPort>,
@@ -189,8 +160,7 @@ async fn assemble_with_state_store(
         let instrument = track.instrument(config.exchange.venue());
         let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
         let account_capacity_snapshot =
-            load_account_capacity_snapshot_with_retry(exchange.account(), &instrument)
-                .await?;
+            load_account_capacity_snapshot_with_retry(exchange.account(), &instrument).await?;
         if track.budget().max_notional > account_capacity_snapshot.max_increase_notional {
             return Err(anyhow!(
                 "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
@@ -288,15 +258,16 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
     );
     #[cfg(test)]
-    let (runtime_test_context, effect_worker_test_context) = build_test_contexts_from_runtime_states(
-        runtime_state.clone(),
-        effect_worker_state.clone(),
-        manager.clone(),
-        notifications.clone(),
-        projector.clone(),
-        command_service.clone(),
-        observation_service.clone(),
-    );
+    let (runtime_test_context, effect_worker_test_context) =
+        build_test_contexts_from_runtime_states(
+            runtime_state.clone(),
+            effect_worker_state.clone(),
+            manager.clone(),
+            notifications.clone(),
+            projector.clone(),
+            command_service.clone(),
+            observation_service.clone(),
+        );
 
     Ok(ServerPlatform {
         http_state,
@@ -543,9 +514,9 @@ mod tests {
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
     use crate::test_support::{
-        build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        build_http_state as build_test_http_state,
-        build_websocket_state as build_test_websocket_state, unavailable_account_monitor,
+        build_http_state as build_test_http_state, build_runtime_and_effect_worker_test_contexts,
+        build_test_application_services, build_websocket_state as build_test_websocket_state,
+        unavailable_account_monitor,
     };
     use poise_application::{TrackDebugQueryService, TrackQueryService};
 
@@ -746,9 +717,11 @@ notional_per_unit = 3000.0
         assert_eq!(manager.list_tracks().len(), 2);
         let track = manager.get_track("btc-core").unwrap();
         assert_eq!(track.budget().max_notional, 3000.0);
-        assert!(crate::instance_dir::InstanceDir::new(instance_dir.path())
-            .db_path(&suffix)
-            .exists());
+        assert!(
+            crate::instance_dir::InstanceDir::new(instance_dir.path())
+                .db_path(&suffix)
+                .exists()
+        );
     }
 
     #[test]
@@ -882,11 +855,14 @@ notional_per_unit = 3000.0
             account_monitor: Default::default(),
         };
 
-        let platform = super::assemble_with_components(
+        let platform = super::assemble_with_exchange_ports(
             &config,
             exchange.clone(),
             Arc::new(FakeMarketData::empty()),
-            repository,
+            exchange.clone(),
+            exchange.clone(),
+            exchange.clone(),
+            StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
         .await
@@ -931,17 +907,22 @@ notional_per_unit = 3000.0
             account_monitor: Default::default(),
         };
 
-        let result = super::assemble_with_components(
+        let result = super::assemble_with_exchange_ports(
             &config,
-            exchange,
+            exchange.clone(),
             Arc::new(FakeMarketData::empty()),
-            repository,
+            exchange.clone(),
+            exchange.clone(),
+            exchange,
+            StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
         .await;
 
         let error = match result {
-            Ok(_) => panic!("assemble_with_components should reject insufficient account margin"),
+            Ok(_) => {
+                panic!("assemble_with_exchange_ports should reject insufficient account margin")
+            }
             Err(error) => error,
         };
 
@@ -1058,7 +1039,14 @@ notional_per_unit = 3000.0
         let state = platform.runtime_test_context();
 
         assert_eq!(state.track_instruments().await.len(), 1);
-        assert!(state.runtime_state().account_monitor.current_summary().await.is_none());
+        assert!(
+            state
+                .runtime_state()
+                .account_monitor
+                .current_summary()
+                .await
+                .is_none()
+        );
         let _receiver = state.notifications.subscribe();
     }
 
@@ -1131,7 +1119,10 @@ notional_per_unit = 3000.0
                 mark_price: 85.0,
                 timestamp: chrono::Utc::now(),
             };
-            tick_state.observe_market("btc-core", tick.reference_price).await.map(|_| ())
+            tick_state
+                .observe_market("btc-core", tick.reference_price)
+                .await
+                .map(|_| ())
         });
 
         let second_save_started = tokio::time::timeout(
@@ -1191,14 +1182,19 @@ notional_per_unit = 3000.0
         config: &Config,
         instance_dir: &std::path::Path,
     ) -> Result<ServerPlatform> {
-        let db_path = crate::instance_dir::InstanceDir::new(instance_dir).db_path(&config.environment);
+        let db_path =
+            crate::instance_dir::InstanceDir::new(instance_dir).db_path(&config.environment);
         super::ensure_parent_dir(&db_path)?;
         let repository = Arc::new(SqliteStorage::new(&db_path)?);
-        super::assemble_with_components(
+        let exchange = Arc::new(FakeExchange);
+        super::assemble_with_exchange_ports(
             config,
-            Arc::new(FakeExchange),
+            exchange.clone(),
             Arc::new(FakeMarketData::empty()),
-            repository,
+            exchange.clone(),
+            exchange.clone(),
+            exchange,
+            StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
         .await
@@ -1291,8 +1287,10 @@ notional_per_unit = 3000.0
                 runtime: crate::runtime::ServerRuntime::new(
                     runtime_test_context.runtime_state(),
                     effect_worker_test_context.effect_worker_state.clone(),
-                    exchange,
+                    exchange.clone(),
                     market_data,
+                    exchange.clone(),
+                    exchange,
                 ),
             },
             btc_sender,
@@ -1367,7 +1365,6 @@ notional_per_unit = 3000.0
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Ok(Vec::new())
         }
-
     }
 
     #[async_trait::async_trait]
@@ -1436,7 +1433,6 @@ notional_per_unit = 3000.0
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Err(anyhow!("not used in tests"))
         }
-
     }
 
     #[async_trait::async_trait]
@@ -1512,7 +1508,6 @@ notional_per_unit = 3000.0
         async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
             Err(anyhow!("not used in tests"))
         }
-
     }
 
     #[async_trait::async_trait]

@@ -1,15 +1,27 @@
 use super::*;
 
 #[tokio::test]
+async fn effect_worker_accepts_distinct_execution_and_account_ports() {
+    let repository = Arc::new(MemoryRepository::default());
+    let exchange = Arc::new(FakeExchange::default());
+    let state = test_state(repository).await;
+
+    let worker = EffectWorker::new(
+        state,
+        exchange.execution_port(),
+        exchange.account_port(),
+        Duration::from_secs(60),
+    );
+    worker.run_once().await.unwrap();
+}
+
+#[tokio::test]
 async fn submit_success_updates_working_order_via_receipt_writeback() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -33,7 +45,8 @@ async fn submit_success_updates_working_order_via_receipt_writeback() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange,
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -73,12 +86,9 @@ async fn submit_success_updates_working_order_via_receipt_writeback() {
 async fn effect_worker_writeback_keeps_round_target_without_working_order_target_copy() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -94,7 +104,8 @@ async fn effect_worker_writeback_keeps_round_target_without_working_order_target
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange,
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -128,12 +139,9 @@ async fn effect_worker_writeback_keeps_round_target_without_working_order_target
 async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository, exchange.clone()).await;
+    let state = test_state(repository).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -141,7 +149,8 @@ async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
 
     let worker = EffectWorker::new(
         state,
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -153,12 +162,9 @@ async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
 async fn stale_submit_effect_syncs_exchange_before_submitting() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -170,7 +176,8 @@ async fn stale_submit_effect_syncs_exchange_before_submitting() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -199,12 +206,9 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
         submit_started.clone(),
         release_submit.clone(),
     ));
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
-    let transition = state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
     assert!(matches!(
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
@@ -219,7 +223,8 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     let task = tokio::spawn(async move { worker.run_once().await });
@@ -232,7 +237,7 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
 
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
     repository
         .seed_snapshot("btc-core", snapshot_with_recovery_anomaly())
@@ -272,7 +277,8 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange,
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -301,4 +307,3 @@ async fn submit_preflight_assumes_single_effect_worker_execution_order() {
     );
     assert_eq!(fresh_decision, SubmitPreflightDecision::Direct);
 }
-

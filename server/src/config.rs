@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use poise_binance as binance;
 use poise_application::AccountMonitorConfig;
+use poise_binance as binance;
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
 use poise_engine::track::{Instrument, TrackId, Venue};
@@ -58,20 +58,6 @@ impl ExchangeConfig {
     pub fn venue(&self) -> Venue {
         match self {
             Self::Binance(_) => Venue::Binance,
-        }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn api_key(&self) -> Option<&str> {
-        match self {
-            Self::Binance(config) => config.api_key.as_deref(),
-        }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn api_secret(&self) -> Option<&str> {
-        match self {
-            Self::Binance(config) => config.api_secret.as_deref(),
         }
     }
 }
@@ -148,16 +134,26 @@ fn default_min_rebalance_units() -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use poise_engine::track::Venue;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+    use poise_engine::track::Venue;
 
-    use super::{AccountMonitorConfig, default_bind_address, parse_config};
+    use super::{AccountMonitorConfig, ExchangeConfig, default_bind_address, parse_config};
 
     #[test]
     fn config_module_examples_do_not_use_paper_environment() {
         let source = include_str!("config.rs");
 
         assert!(!source.contains("environment = \"paper\""));
+    }
+
+    #[test]
+    fn exchange_config_does_not_expose_direct_credential_accessors() {
+        let source = include_str!("config.rs");
+        let api_key_signature = ["pub", " fn", " api_key", "("].concat();
+        let api_secret_signature = ["pub", " fn", " api_secret", "("].concat();
+
+        assert!(!source.contains(&api_key_signature));
+        assert!(!source.contains(&api_secret_signature));
     }
 
     #[test]
@@ -208,8 +204,12 @@ out_of_band_policy = "hold"
             config.tracks[1].out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Hold
         );
-        assert_eq!(config.exchange.api_key(), Some("demo-key"));
-        assert_eq!(config.exchange.api_secret(), Some("demo-secret"));
+        match &config.exchange {
+            ExchangeConfig::Binance(exchange) => {
+                assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
+                assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
+            }
+        }
     }
 
     #[test]
@@ -292,8 +292,12 @@ notional_per_unit = 375.0
         .unwrap();
 
         assert_eq!(config.bind_address, default_bind_address());
-        assert_eq!(config.exchange.api_key(), None);
-        assert_eq!(config.exchange.api_secret(), None);
+        match &config.exchange {
+            ExchangeConfig::Binance(exchange) => {
+                assert_eq!(exchange.api_key, None);
+                assert_eq!(exchange.api_secret, None);
+            }
+        }
         assert_eq!(
             config.tracks[0].track_config().shape_family,
             poise_core::strategy::ShapeFamily::Linear

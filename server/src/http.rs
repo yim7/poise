@@ -358,7 +358,9 @@ mod tests {
             ),
             websocket_state: build_websocket_state(
                 &services,
-                Arc::new(TrackQueryService::new(repository as Arc<dyn TrackQueryStore>)),
+                Arc::new(TrackQueryService::new(
+                    repository as Arc<dyn TrackQueryStore>,
+                )),
                 projector,
                 account_monitor,
                 account_projector,

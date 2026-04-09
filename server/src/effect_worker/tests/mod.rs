@@ -17,8 +17,8 @@ use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::OrderObservation;
 use poise_engine::ports::{
-    AccountPort, ClockPort, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
-    OrderStatus, Position,
+    AccountPort, ClockPort, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest, OrderStatus,
+    Position,
 };
 use poise_engine::runtime::{
     ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,

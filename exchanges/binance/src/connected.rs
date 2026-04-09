@@ -16,78 +16,136 @@ use crate::{Config, rest::BinanceRestClient, ws::BinanceWsClient};
 pub async fn connect(config: &Config) -> Result<Connected> {
     let endpoints = config.endpoints();
     let (api_key, api_secret) = config.credentials()?;
-
-    Ok(Connected::new(BinanceAdapter::new(
+    let rest = Arc::new(BinanceRestClient::new(
+        endpoints.rest_base_url(),
         api_key,
         api_secret,
-        endpoints.rest_base_url(),
+    ));
+    let ws = Arc::new(BinanceWsClient::new(
+        Arc::clone(&rest),
         endpoints.ws_base_url(),
-    )))
+    ));
+
+    Ok(Connected::from_clients(rest, ws))
 }
 
 #[derive(Clone)]
 pub struct Connected {
-    adapter: Arc<BinanceAdapter>,
+    execution: Arc<dyn ExecutionPort>,
+    market_data: Arc<dyn MarketDataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
+    account: Arc<dyn AccountPort>,
+    metadata: Arc<dyn MetadataPort>,
 }
 
 impl Connected {
-    fn new(adapter: BinanceAdapter) -> Self {
+    fn from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> Self {
+        Self::from_parts(
+            Arc::new(BinanceExecution::new(Arc::clone(&rest))),
+            Arc::new(BinanceMarketData::new(Arc::clone(&ws))),
+            Arc::new(BinanceAccountSummary::new(Arc::clone(&rest))),
+            Arc::new(BinanceAccount::new(Arc::clone(&rest), ws)),
+            Arc::new(BinanceMetadata::new(rest)),
+        )
+    }
+
+    fn from_parts(
+        execution: Arc<dyn ExecutionPort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account_summary: Arc<dyn AccountSummaryPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
+    ) -> Self {
         Self {
-            adapter: Arc::new(adapter),
+            execution,
+            market_data,
+            account_summary,
+            account,
+            metadata,
         }
     }
 
     pub fn execution(&self) -> Arc<dyn ExecutionPort> {
-        self.adapter.clone()
+        Arc::clone(&self.execution)
     }
 
     pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
-        self.adapter.clone()
+        Arc::clone(&self.market_data)
     }
 
     pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
-        self.adapter.clone()
+        Arc::clone(&self.account_summary)
     }
 
     pub fn account(&self) -> Arc<dyn AccountPort> {
-        self.adapter.clone()
+        Arc::clone(&self.account)
     }
 
     pub fn metadata(&self) -> Arc<dyn MetadataPort> {
-        self.adapter.clone()
+        Arc::clone(&self.metadata)
     }
 }
 
-struct BinanceAdapter {
-    #[allow(dead_code)]
+struct BinanceExecution {
     rest: Arc<BinanceRestClient>,
-    #[allow(dead_code)]
-    ws: BinanceWsClient,
 }
 
-impl BinanceAdapter {
-    pub fn new(
-        api_key: impl Into<String>,
-        api_secret: impl Into<String>,
-        rest_base_url: impl Into<String>,
-        ws_base_url: impl Into<String>,
-    ) -> Self {
-        let rest = Arc::new(BinanceRestClient::new(rest_base_url, api_key, api_secret));
-        let ws = BinanceWsClient::new(Arc::clone(&rest), ws_base_url);
+impl BinanceExecution {
+    fn new(rest: Arc<BinanceRestClient>) -> Self {
+        Self { rest }
+    }
+}
 
+struct BinanceMarketData {
+    ws: Arc<BinanceWsClient>,
+}
+
+impl BinanceMarketData {
+    fn new(ws: Arc<BinanceWsClient>) -> Self {
+        Self { ws }
+    }
+}
+
+struct BinanceAccountSummary {
+    rest: Arc<BinanceRestClient>,
+}
+
+impl BinanceAccountSummary {
+    fn new(rest: Arc<BinanceRestClient>) -> Self {
+        Self { rest }
+    }
+}
+
+struct BinanceAccount {
+    rest: Arc<BinanceRestClient>,
+    ws: Arc<BinanceWsClient>,
+}
+
+impl BinanceAccount {
+    fn new(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> Self {
         Self { rest, ws }
     }
 }
 
+struct BinanceMetadata {
+    rest: Arc<BinanceRestClient>,
+}
+
+impl BinanceMetadata {
+    fn new(rest: Arc<BinanceRestClient>) -> Self {
+        Self { rest }
+    }
+}
+
 #[async_trait]
-impl AccountSummaryPort for BinanceAdapter {
+impl AccountSummaryPort for BinanceAccountSummary {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         self.rest.get_account_summary().await
     }
 }
 
 #[async_trait]
-impl ExecutionPort for BinanceAdapter {
+impl ExecutionPort for BinanceExecution {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
         self.rest.new_order(&req).await
     }
@@ -112,7 +170,7 @@ impl ExecutionPort for BinanceAdapter {
 }
 
 #[async_trait]
-impl AccountPort for BinanceAdapter {
+impl AccountPort for BinanceAccount {
     async fn get_account_capacity_snapshot(
         &self,
         instrument: &Instrument,
@@ -128,7 +186,7 @@ impl AccountPort for BinanceAdapter {
 }
 
 #[async_trait]
-impl MetadataPort for BinanceAdapter {
+impl MetadataPort for BinanceMetadata {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
         self.rest.get_exchange_info(&instrument.symbol).await
     }
@@ -139,7 +197,7 @@ impl MetadataPort for BinanceAdapter {
 }
 
 #[async_trait]
-impl MarketDataPort for BinanceAdapter {
+impl MarketDataPort for BinanceMarketData {
     async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
         self.ws.subscribe_prices(instrument).await
     }
@@ -163,18 +221,114 @@ mod tests {
 
     use super::*;
 
+    struct FakeExecutionPort;
+    struct FakeMarketDataPort;
+    struct FakeAccountSummaryPort;
+    struct FakeAccountPort;
+    struct FakeMetadataPort;
+
+    #[async_trait]
+    impl ExecutionPort for FakeExecutionPort {
+        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+            unreachable!("not used in test")
+        }
+
+        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+            unreachable!("not used in test")
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+            unreachable!("not used in test")
+        }
+
+        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+            unreachable!("not used in test")
+        }
+
+        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+            unreachable!("not used in test")
+        }
+    }
+
+    #[async_trait]
+    impl MarketDataPort for FakeMarketDataPort {
+        async fn subscribe_prices(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
+            unreachable!("not used in test")
+        }
+    }
+
+    #[async_trait]
+    impl AccountSummaryPort for FakeAccountSummaryPort {
+        async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+            unreachable!("not used in test")
+        }
+    }
+
+    #[async_trait]
+    impl AccountPort for FakeAccountPort {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<AccountCapacitySnapshot> {
+            unreachable!("not used in test")
+        }
+
+        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+            unreachable!("not used in test")
+        }
+    }
+
+    #[async_trait]
+    impl MetadataPort for FakeMetadataPort {
+        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
+            unreachable!("not used in test")
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+            unreachable!("not used in test")
+        }
+    }
+
     fn build_test_connected() -> Connected {
-        Connected::new(BinanceAdapter::new(
+        build_test_connected_with_urls("http://127.0.0.1:18080", "ws://127.0.0.1:19080")
+    }
+
+    fn build_test_connected_with_urls(
+        rest_base_url: impl Into<String>,
+        ws_base_url: impl Into<String>,
+    ) -> Connected {
+        let rest = Arc::new(BinanceRestClient::new(
+            rest_base_url,
             "api-key",
             "secret-key",
-            "http://127.0.0.1:18080",
-            "ws://127.0.0.1:19080",
-        ))
+        ));
+        let ws = Arc::new(BinanceWsClient::new(Arc::clone(&rest), ws_base_url));
+        Connected::from_clients(rest, ws)
     }
 
     #[test]
     fn connected_exposes_all_required_ports() {
         let connected = build_test_connected();
+
+        let _execution: Arc<dyn ExecutionPort> = connected.execution();
+        let _market_data: Arc<dyn MarketDataPort> = connected.market_data();
+        let _account_summary: Arc<dyn AccountSummaryPort> = connected.account_summary();
+        let _account: Arc<dyn AccountPort> = connected.account();
+        let _metadata: Arc<dyn MetadataPort> = connected.metadata();
+    }
+
+    #[test]
+    fn connected_can_be_built_from_distinct_port_components() {
+        let connected = Connected::from_parts(
+            Arc::new(FakeExecutionPort),
+            Arc::new(FakeMarketDataPort),
+            Arc::new(FakeAccountSummaryPort),
+            Arc::new(FakeAccountPort),
+            Arc::new(FakeMetadataPort),
+        );
 
         let _execution: Arc<dyn ExecutionPort> = connected.execution();
         let _market_data: Arc<dyn MarketDataPort> = connected.market_data();
@@ -194,14 +348,10 @@ mod tests {
             }"#,
         )])
         .await;
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            server.base_url(),
-            "ws://127.0.0.1:1",
-        );
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
 
-        let receipt = adapter
+        let receipt = execution
             .submit_order(OrderRequest {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
@@ -234,14 +384,10 @@ mod tests {
             }"#,
         )])
         .await;
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            server.base_url(),
-            "ws://127.0.0.1:1",
-        );
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
 
-        adapter
+        execution
             .submit_order(OrderRequest {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Sell,
@@ -268,14 +414,10 @@ mod tests {
             }"#,
         )])
         .await;
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            server.base_url(),
-            "ws://127.0.0.1:1",
-        );
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
 
-        adapter
+        execution
             .submit_order(OrderRequest {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
@@ -302,14 +444,10 @@ mod tests {
             }"#,
         )])
         .await;
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            server.base_url(),
-            "ws://127.0.0.1:1",
-        );
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
 
-        adapter
+        execution
             .cancel_order(&Instrument::new(Venue::Binance, "BTCUSDT"), "12345")
             .await
             .unwrap();
@@ -335,14 +473,10 @@ mod tests {
             }]"#,
         )])
         .await;
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            server.base_url(),
-            "ws://127.0.0.1:1",
-        );
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
 
-        let position = adapter
+        let position = execution
             .get_position(&Instrument::new(Venue::Binance, "BTCUSDT"))
             .await
             .unwrap();
@@ -379,14 +513,10 @@ mod tests {
             ),
         ])
         .await;
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            server.base_url(),
-            "ws://127.0.0.1:1",
-        );
+        let account =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").account();
 
-        let snapshot = adapter
+        let snapshot = account
             .get_account_capacity_snapshot(&Instrument::new(Venue::Binance, "BTCUSDT"))
             .await
             .unwrap();
@@ -424,14 +554,11 @@ mod tests {
             websocket.close(None).await.unwrap();
         });
 
-        let adapter = BinanceAdapter::new(
-            "api-key",
-            "secret-key",
-            "http://127.0.0.1:1",
-            format!("ws://{}", address),
-        );
+        let market_data =
+            build_test_connected_with_urls("http://127.0.0.1:1", format!("ws://{}", address))
+                .market_data();
 
-        let mut receiver = adapter
+        let mut receiver = market_data
             .subscribe_prices(&Instrument::new(Venue::Binance, "BTCUSDT"))
             .await
             .unwrap();

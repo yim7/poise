@@ -55,13 +55,8 @@ pub(super) fn spawn_user_task(
                 );
                 continue;
             };
-            if let Err(error) = apply_user_data_event(
-                &state.reconcile,
-                execution.as_ref(),
-                &track_id,
-                event,
-            )
-            .await
+            if let Err(error) =
+                apply_user_data_event(&state.reconcile, execution.as_ref(), &track_id, event).await
             {
                 tracing::warn!(
                     "failed to apply user data update for {}: {}",

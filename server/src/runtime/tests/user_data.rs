@@ -117,14 +117,16 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone(), events).await,
+        build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone(),
+        exchange.execution_port(),
         market_data as Arc<dyn MarketDataPort>,
+        exchange.account_port(),
+        exchange.metadata_port(),
     );
 
     let user_task = runtime.spawn_user_task(
@@ -209,14 +211,16 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
         &services,
         persistence.clone(),
         persistence.clone(),
-        build_test_account_monitor(exchange.clone(), events).await,
+        build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
     let runtime = ServerRuntime::new(
         state.runtime_state(),
         worker_state.effect_worker_state,
-        exchange.clone(),
+        exchange.execution_port(),
         market_data as Arc<dyn MarketDataPort>,
+        exchange.account_port(),
+        exchange.metadata_port(),
     );
 
     let user_task = runtime.spawn_user_task(

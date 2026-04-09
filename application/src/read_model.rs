@@ -149,7 +149,8 @@ mod tests {
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
+        WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};

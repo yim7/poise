@@ -189,8 +189,7 @@ impl TrackManager {
         }
         track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
         track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
-        track.risk_state.realized_pnl_cumulative =
-            track.ledger_state.gross_realized_pnl_cumulative;
+        track.risk_state.realized_pnl_cumulative = track.ledger_state.gross_realized_pnl_cumulative;
         Ok(())
     }
 
@@ -667,8 +666,7 @@ impl TrackManager {
             .apply_gross_realized_pnl(today, observation.realized_pnl);
         track.risk_state.realized_pnl_day = track.ledger_state.realized_pnl_day;
         track.risk_state.realized_pnl_today = track.ledger_state.gross_realized_pnl_today;
-        track.risk_state.realized_pnl_cumulative =
-            track.ledger_state.gross_realized_pnl_cumulative;
+        track.risk_state.realized_pnl_cumulative = track.ledger_state.gross_realized_pnl_cumulative;
 
         if track.executor_state.diagnostics.recovery_anomaly.is_some() {
             return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
@@ -3658,7 +3656,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(absorb_result, crate::executor::OrderUpdateAbsorbResult::Applied);
+        assert_eq!(
+            absorb_result,
+            crate::executor::OrderUpdateAbsorbResult::Applied
+        );
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(
             inventory_core_order(track).map(|order| order.status),

@@ -227,7 +227,11 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<StoredTrackEvent>> {
-            Ok(self.events.get(track_id.as_str()).cloned().unwrap_or_default())
+            Ok(self
+                .events
+                .get(track_id.as_str())
+                .cloned()
+                .unwrap_or_default())
         }
 
         async fn list_recent_track_effects(

@@ -39,7 +39,9 @@ impl TrackLedgerState {
 
     pub fn apply_delta(&mut self, trading_day: NaiveDate, delta: &LedgerDelta) {
         match delta {
-            LedgerDelta::GrossRealizedPnl(amount) => self.apply_gross_realized_pnl(trading_day, *amount),
+            LedgerDelta::GrossRealizedPnl(amount) => {
+                self.apply_gross_realized_pnl(trading_day, *amount)
+            }
             LedgerDelta::TradingFee(amount) => {
                 self.trading_fee_cumulative += amount;
             }
@@ -65,7 +67,8 @@ impl TrackLedgerState {
     }
 
     pub fn net_realized_pnl(&self) -> f64 {
-        self.gross_realized_pnl_cumulative - self.trading_fee_cumulative + self.funding_fee_cumulative
+        self.gross_realized_pnl_cumulative - self.trading_fee_cumulative
+            + self.funding_fee_cumulative
     }
 }
 
@@ -134,7 +137,10 @@ mod tests {
 
         ledger.apply_gross_realized_pnl(NaiveDate::from_ymd_opt(2026, 3, 25).unwrap(), -5.0);
 
-        assert_eq!(ledger.realized_pnl_day, NaiveDate::from_ymd_opt(2026, 3, 25));
+        assert_eq!(
+            ledger.realized_pnl_day,
+            NaiveDate::from_ymd_opt(2026, 3, 25)
+        );
         assert!((ledger.gross_realized_pnl_today + 5.0).abs() < f64::EPSILON);
         assert!((ledger.gross_realized_pnl_cumulative - 12.5).abs() < f64::EPSILON);
     }

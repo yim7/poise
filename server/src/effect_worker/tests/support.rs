@@ -1,13 +1,9 @@
 use super::*;
 use poise_engine::ports::UserDataEvent;
 
-pub(crate) async fn test_state(
-    repository: Arc<MemoryRepository>,
-    exchange: Arc<FakeExchange>,
-) -> EffectWorkerTestContext {
+pub(crate) async fn test_state(repository: Arc<MemoryRepository>) -> EffectWorkerTestContext {
     test_state_with_track(
         repository,
-        exchange,
         test_config(),
         ExchangeRules {
             price_tick: 0.1,
@@ -23,7 +19,6 @@ pub(crate) async fn test_state(
 
 pub(crate) async fn test_state_with_track(
     repository: Arc<MemoryRepository>,
-    _exchange: Arc<FakeExchange>,
     config: TrackConfig,
     exchange_rules: ExchangeRules,
 ) -> EffectWorkerTestContext {
@@ -53,11 +48,7 @@ pub(crate) async fn test_state_with_track(
         notifications.clone(),
         account_margin_guard.clone(),
     );
-    build_effect_worker_test_context(
-        &services,
-        mutation_store,
-        effect_store,
-    )
+    build_effect_worker_test_context(&services, mutation_store, effect_store)
 }
 
 pub(crate) fn btc_instrument() -> Instrument {
@@ -330,6 +321,18 @@ impl FakeExchange {
     pub(crate) fn get_open_orders_calls(&self) -> usize {
         self.get_open_orders_calls.load(Ordering::SeqCst)
     }
+
+    pub(crate) fn execution_port(self: &Arc<Self>) -> Arc<dyn ExecutionPort> {
+        Arc::new(FakeExecutionPort {
+            exchange: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn account_port(self: &Arc<Self>) -> Arc<dyn AccountPort> {
+        Arc::new(FakeAccountPort {
+            exchange: Arc::clone(self),
+        })
+    }
 }
 
 impl Default for FakeExchange {
@@ -338,14 +341,18 @@ impl Default for FakeExchange {
     }
 }
 
+struct FakeExecutionPort {
+    exchange: Arc<FakeExchange>,
+}
+
 #[async_trait::async_trait]
-impl ExecutionPort for FakeExchange {
+impl ExecutionPort for FakeExecutionPort {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
-        self.effects.lock().await.push(req.clone());
-        if let Some(notify) = &self.submit_started {
+        self.exchange.effects.lock().await.push(req.clone());
+        if let Some(notify) = &self.exchange.submit_started {
             notify.notify_waiters();
         }
-        if let Some(notify) = &self.release_submit {
+        if let Some(notify) = &self.exchange.release_submit {
             notify.notified().await;
         }
         Ok(OrderReceipt {
@@ -356,7 +363,7 @@ impl ExecutionPort for FakeExchange {
     }
 
     async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
-        if let Some(message) = &self.cancel_order_error {
+        if let Some(message) = &self.exchange.cancel_order_error {
             return Err(anyhow!(message.clone()));
         }
         Ok(())
@@ -367,25 +374,32 @@ impl ExecutionPort for FakeExchange {
     }
 
     async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
-        self.get_position_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(notify) = &self.get_position_started {
+        self.exchange
+            .get_position_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some(notify) = &self.exchange.get_position_started {
             notify.notify_waiters();
         }
-        if let Some(notify) = &self.release_get_position {
+        if let Some(notify) = &self.exchange.release_get_position {
             notify.notified().await;
         }
-        Ok(self.position.lock().await.clone())
+        Ok(self.exchange.position.lock().await.clone())
     }
 
     async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-        self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.open_orders.lock().await.clone())
+        self.exchange
+            .get_open_orders_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(self.exchange.open_orders.lock().await.clone())
     }
+}
 
+struct FakeAccountPort {
+    exchange: Arc<FakeExchange>,
 }
 
 #[async_trait::async_trait]
-impl AccountPort for FakeExchange {
+impl AccountPort for FakeAccountPort {
     async fn get_account_capacity_snapshot(
         &self,
         _instrument: &Instrument,
@@ -395,9 +409,8 @@ impl AccountPort for FakeExchange {
         })
     }
 
-    async fn subscribe_user_data(
-        &self,
-    ) -> Result<tokio::sync::mpsc::Receiver<UserDataEvent>> {
+    async fn subscribe_user_data(&self) -> Result<tokio::sync::mpsc::Receiver<UserDataEvent>> {
+        let _ = &self.exchange;
         let (_sender, receiver) = tokio::sync::mpsc::channel(1);
         Ok(receiver)
     }

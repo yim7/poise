@@ -130,6 +130,10 @@ pub(crate) async fn runtime_fixture_with_options(
         open_orders,
         user_receiver,
     ));
+    let execution = exchange.execution_port();
+    let account_summary = exchange.account_summary_port();
+    let account = exchange.account_port();
+    let metadata = exchange.metadata_port();
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
     let market_data = Arc::new(FakeMarketData::new(price_receiver));
@@ -155,7 +159,7 @@ pub(crate) async fn runtime_fixture_with_options(
 
     let (events, _) = broadcast::channel(16);
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    let account_monitor = build_test_account_monitor(exchange.clone(), events.clone()).await;
+    let account_monitor = build_test_account_monitor(account_summary, events.clone()).await;
     let services = build_test_application_services(
         manager,
         persistence.clone(),
@@ -175,8 +179,10 @@ pub(crate) async fn runtime_fixture_with_options(
         runtime: ServerRuntime::with_reconcile_and_account_refresh_intervals(
             state.runtime_state(),
             worker_state.effect_worker_state.clone(),
-            exchange.clone(),
+            execution,
             market_data as Arc<dyn MarketDataPort>,
+            account,
+            metadata,
             options.recovery_retry_interval,
             options.audit_interval,
             options.account_refresh_interval,
@@ -190,44 +196,57 @@ pub(crate) async fn runtime_fixture_with_options(
     }
 }
 
-pub(crate) async fn test_state<R, E>(
-    exchange: Arc<E>,
+pub(crate) async fn test_state<R>(
+    metadata: Arc<dyn MetadataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     persistence: Arc<R>,
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     budget: CapacityBudget,
 ) -> RuntimeTestContext
 where
-    E: ExecutionPort + AccountPort + AccountSummaryPort + MetadataPort + 'static,
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
-    test_launch_contexts(exchange, persistence, restored_snapshot, budget)
-        .await
-        .0
+    test_launch_contexts(
+        metadata,
+        account_summary,
+        persistence,
+        restored_snapshot,
+        budget,
+    )
+    .await
+    .0
 }
 
-pub(crate) async fn test_launch_contexts<R, E>(
-    exchange: Arc<E>,
+pub(crate) async fn test_launch_contexts<R>(
+    metadata: Arc<dyn MetadataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     persistence: Arc<R>,
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     budget: CapacityBudget,
 ) -> (RuntimeTestContext, EffectWorkerTestContext)
 where
-    E: ExecutionPort + AccountPort + AccountSummaryPort + MetadataPort + 'static,
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
-    test_launch_contexts_with_config(exchange, persistence, restored_snapshot, budget, test_config())
-        .await
+    test_launch_contexts_with_config(
+        metadata,
+        account_summary,
+        persistence,
+        restored_snapshot,
+        budget,
+        test_config(),
+    )
+    .await
 }
 
-pub(crate) async fn test_launch_contexts_with_config<R, E>(
-    exchange: Arc<E>,
+pub(crate) async fn test_launch_contexts_with_config<R>(
+    metadata: Arc<dyn MetadataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     persistence: Arc<R>,
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     budget: CapacityBudget,
     config: TrackConfig,
 ) -> (RuntimeTestContext, EffectWorkerTestContext)
 where
-    E: ExecutionPort + AccountPort + AccountSummaryPort + MetadataPort + 'static,
     R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
 {
     let clock = Arc::new(FixedClock(
@@ -241,7 +260,7 @@ where
             instrument.clone(),
             config,
             budget,
-            exchange.get_exchange_info(&instrument).await.unwrap().rules,
+            metadata.get_exchange_info(&instrument).await.unwrap().rules,
         )
         .unwrap();
     if let Some(snapshot) = restored_snapshot {
@@ -259,8 +278,10 @@ where
         events.clone(),
         account_margin_guard.clone(),
     );
-    let account_monitor = build_test_account_monitor(exchange, events).await;
-    let _ = Arc::new(TrackQueryService::new(persistence as Arc<dyn TrackQueryStore>));
+    let account_monitor = build_test_account_monitor(account_summary, events).await;
+    let _ = Arc::new(TrackQueryService::new(
+        persistence as Arc<dyn TrackQueryStore>,
+    ));
     build_runtime_and_effect_worker_test_contexts(
         &services,
         mutation_store,
@@ -291,13 +312,10 @@ pub(crate) async fn shutdown(handles: RuntimeHandles) {
     let _ = handles.account_task.await;
 }
 
-pub(crate) async fn build_test_account_monitor<E>(
-    exchange: Arc<E>,
+pub(crate) async fn build_test_account_monitor(
+    exchange: Arc<dyn AccountSummaryPort>,
     notifications: broadcast::Sender<poise_application::ApplicationNotification>,
-) -> Arc<AccountMonitor>
-where
-    E: AccountSummaryPort + 'static,
-{
+) -> Arc<AccountMonitor> {
     let account_store: Arc<dyn AccountMonitorStore> =
         Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap());
     account_store
@@ -498,7 +516,10 @@ pub(crate) fn position_event_at(
     }
 }
 
-pub(crate) fn order_event_at(event_time: chrono::DateTime<Utc>, order: ExchangeOrder) -> UserDataEvent {
+pub(crate) fn order_event_at(
+    event_time: chrono::DateTime<Utc>,
+    order: ExchangeOrder,
+) -> UserDataEvent {
     UserDataEvent {
         event_time,
         payload: UserDataPayload::OrderUpdate(order),
@@ -532,7 +553,11 @@ pub(crate) fn working_order(
     }
 }
 
-pub(crate) fn set_executor_state(snapshot: &mut TrackRuntimeSnapshot, order: WorkingOrder, state: SlotState) {
+pub(crate) fn set_executor_state(
+    snapshot: &mut TrackRuntimeSnapshot,
+    order: WorkingOrder,
+    state: SlotState,
+) {
     let desired_exposure = snapshot
         .desired_exposure
         .clone()
@@ -772,12 +797,36 @@ impl FakeExchange {
         *self.position.lock().unwrap() = position;
     }
 
+    pub(crate) fn account_summary_port(self: &Arc<Self>) -> Arc<dyn AccountSummaryPort> {
+        Arc::new(FakeExchangeAccountSummaryPort {
+            exchange: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn execution_port(self: &Arc<Self>) -> Arc<dyn ExecutionPort> {
+        Arc::new(FakeExchangeExecutionPort {
+            exchange: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn account_port(self: &Arc<Self>) -> Arc<dyn AccountPort> {
+        Arc::new(FakeExchangeAccountPort {
+            exchange: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn metadata_port(self: &Arc<Self>) -> Arc<dyn MetadataPort> {
+        Arc::new(FakeExchangeMetadataPort {
+            exchange: Arc::clone(self),
+        })
+    }
 }
 
 #[async_trait::async_trait]
-impl poise_engine::ports::AccountSummaryPort for FakeExchange {
+impl poise_engine::ports::AccountSummaryPort for FakeExchangeAccountSummaryPort {
     async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
-        self.get_account_summary_calls
+        self.exchange
+            .get_account_summary_calls
             .fetch_add(1, Ordering::SeqCst);
         Ok(poise_engine::ports::AccountSummarySnapshot {
             equity: 1_000_000.0,
@@ -789,19 +838,23 @@ impl poise_engine::ports::AccountSummaryPort for FakeExchange {
 }
 
 #[async_trait::async_trait]
-impl ExecutionPort for FakeExchange {
+impl ExecutionPort for FakeExchangeExecutionPort {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
-        self.submitted_orders.lock().unwrap().push(req.clone());
-        if let Some(notify) = &self.submit_started {
+        self.exchange
+            .submitted_orders
+            .lock()
+            .unwrap()
+            .push(req.clone());
+        if let Some(notify) = &self.exchange.submit_started {
             notify.notify_waiters();
         }
-        if let Some(notify) = &self.release_submit {
+        if let Some(notify) = &self.exchange.release_submit {
             notify.notified().await;
         }
-        if let Some(error) = self.submit_error.lock().unwrap().clone() {
+        if let Some(error) = self.exchange.submit_error.lock().unwrap().clone() {
             return Err(anyhow!(error));
         }
-        let order_id = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let order_id = self.exchange.sequence.fetch_add(1, Ordering::SeqCst);
         Ok(OrderReceipt {
             order_id: format!("order-{order_id}"),
             client_order_id: req.client_order_id,
@@ -810,14 +863,16 @@ impl ExecutionPort for FakeExchange {
     }
 
     async fn cancel_order(&self, _instrument: &Instrument, order_id: &str) -> Result<()> {
-        self.canceled_order_ids
+        self.exchange
+            .canceled_order_ids
             .lock()
             .unwrap()
             .push(order_id.to_string());
-        if let Some(error) = self.cancel_order_error.lock().unwrap().clone() {
+        if let Some(error) = self.exchange.cancel_order_error.lock().unwrap().clone() {
             return Err(anyhow!(error));
         }
-        self.open_orders
+        self.exchange
+            .open_orders
             .lock()
             .unwrap()
             .retain(|order| order.order_id != order_id);
@@ -825,48 +880,64 @@ impl ExecutionPort for FakeExchange {
     }
 
     async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
-        self.cancel_all_symbols
+        self.exchange
+            .cancel_all_symbols
             .lock()
             .unwrap()
             .push(instrument.symbol.clone());
-        if let Some(error) = self.cancel_all_error.lock().unwrap().clone() {
+        if let Some(error) = self.exchange.cancel_all_error.lock().unwrap().clone() {
             return Err(anyhow!(error));
         }
-        self.open_orders.lock().unwrap().clear();
+        self.exchange.open_orders.lock().unwrap().clear();
         Ok(())
     }
 
     async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
-        self.get_position_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(notify) = &self.get_position_started {
+        self.exchange
+            .get_position_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some(notify) = &self.exchange.get_position_started {
             notify.notify_waiters();
         }
-        let release_notify = { self.release_get_position.lock().unwrap().take() };
+        let release_notify = { self.exchange.release_get_position.lock().unwrap().take() };
         if let Some(notify) = release_notify {
             notify.notified().await;
         }
-        if self.position_failures_remaining.load(Ordering::SeqCst) > 0 {
-            self.position_failures_remaining
+        if self
+            .exchange
+            .position_failures_remaining
+            .load(Ordering::SeqCst)
+            > 0
+        {
+            self.exchange
+                .position_failures_remaining
                 .fetch_sub(1, Ordering::SeqCst);
             return Err(anyhow!("temporary get_position timeout"));
         }
-        Ok(self.position.lock().unwrap().clone())
+        Ok(self.exchange.position.lock().unwrap().clone())
     }
 
     async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-        self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
-        if self.open_orders_failures_remaining.load(Ordering::SeqCst) > 0 {
-            self.open_orders_failures_remaining
+        self.exchange
+            .get_open_orders_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .exchange
+            .open_orders_failures_remaining
+            .load(Ordering::SeqCst)
+            > 0
+        {
+            self.exchange
+                .open_orders_failures_remaining
                 .fetch_sub(1, Ordering::SeqCst);
             return Err(anyhow!("temporary get_open_orders timeout"));
         }
-        Ok(self.open_orders.lock().unwrap().clone())
+        Ok(self.exchange.open_orders.lock().unwrap().clone())
     }
-
 }
 
 #[async_trait::async_trait]
-impl AccountPort for FakeExchange {
+impl AccountPort for FakeExchangeAccountPort {
     async fn get_account_capacity_snapshot(
         &self,
         _instrument: &Instrument,
@@ -877,9 +948,11 @@ impl AccountPort for FakeExchange {
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        self.subscribe_user_data_calls
+        self.exchange
+            .subscribe_user_data_calls
             .fetch_add(1, Ordering::SeqCst);
-        self.user_receiver
+        self.exchange
+            .user_receiver
             .lock()
             .await
             .take()
@@ -888,20 +961,44 @@ impl AccountPort for FakeExchange {
 }
 
 #[async_trait::async_trait]
-impl MetadataPort for FakeExchange {
+impl MetadataPort for FakeExchangeMetadataPort {
     async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-        Ok(self.exchange_info.clone())
+        Ok(self.exchange.exchange_info.clone())
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-        self.get_server_time_calls.fetch_add(1, Ordering::SeqCst);
-        if self.server_time_failures_remaining.load(Ordering::SeqCst) > 0 {
-            self.server_time_failures_remaining
+        self.exchange
+            .get_server_time_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .exchange
+            .server_time_failures_remaining
+            .load(Ordering::SeqCst)
+            > 0
+        {
+            self.exchange
+                .server_time_failures_remaining
                 .fetch_sub(1, Ordering::SeqCst);
             return Err(anyhow!("temporary get_server_time timeout"));
         }
-        Ok(self.server_time)
+        Ok(self.exchange.server_time)
     }
+}
+
+struct FakeExchangeAccountSummaryPort {
+    exchange: Arc<FakeExchange>,
+}
+
+struct FakeExchangeExecutionPort {
+    exchange: Arc<FakeExchange>,
+}
+
+struct FakeExchangeAccountPort {
+    exchange: Arc<FakeExchange>,
+}
+
+struct FakeExchangeMetadataPort {
+    exchange: Arc<FakeExchange>,
 }
 
 #[derive(Default)]
@@ -1722,7 +1819,10 @@ pub(crate) struct FakeMarketDataPort;
 
 #[async_trait::async_trait]
 impl MarketDataPort for FakeMarketDataPort {
-    async fn subscribe_prices(&self, _instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+    async fn subscribe_prices(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<PriceTick>> {
         let (_sender, receiver) = mpsc::channel(1);
         Ok(receiver)
     }
@@ -1781,7 +1881,10 @@ impl Default for FakeAccountPort {
 
 #[async_trait::async_trait]
 impl AccountPort for FakeAccountPort {
-    async fn get_account_capacity_snapshot(&self, _instrument: &Instrument) -> Result<AccountCapacitySnapshot> {
+    async fn get_account_capacity_snapshot(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<AccountCapacitySnapshot> {
         Ok(AccountCapacitySnapshot {
             max_increase_notional: 1_000_000.0,
         })

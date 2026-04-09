@@ -7,8 +7,8 @@ use poise_protocol::{
     InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
     TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionStatsView,
-    TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView,
-    TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView,
+    TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView,
+    TrackLedgerView, TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView,
     TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
@@ -172,7 +172,9 @@ fn project_ledger_gap_reason(reason: LedgerGapReason) -> TrackLedgerGapReasonVie
         }
         LedgerGapReason::MissingCommissionAsset => TrackLedgerGapReasonView::MissingCommissionAsset,
         LedgerGapReason::MissingSymbol => TrackLedgerGapReasonView::MissingSymbol,
-        LedgerGapReason::UnsupportedFundingAsset => TrackLedgerGapReasonView::UnsupportedFundingAsset,
+        LedgerGapReason::UnsupportedFundingAsset => {
+            TrackLedgerGapReasonView::UnsupportedFundingAsset
+        }
     }
 }
 
@@ -356,12 +358,12 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use poise_application::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
-    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_application::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
+    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::TrackStatus;
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -394,7 +396,10 @@ mod tests {
         assert_eq!(item.execution.active_slot_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
         assert!((item_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
-        assert_eq!(item_json["ledger"]["has_unresolved_gaps"].as_bool(), Some(true));
+        assert_eq!(
+            item_json["ledger"]["has_unresolved_gaps"].as_bool(),
+            Some(true)
+        );
 
         let mut anomaly_source = source_with_submitting_effect();
         anomaly_source.has_recovery_anomaly = true;
@@ -423,7 +428,8 @@ mod tests {
     #[test]
     fn projects_list_item_lightweight_ledger_view() {
         let source = source_with_submitting_effect();
-        let item_json = serde_json::to_value(TrackProjector::new().project_list_item(&source)).unwrap();
+        let item_json =
+            serde_json::to_value(TrackProjector::new().project_list_item(&source)).unwrap();
 
         assert!((item_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
         assert_eq!(
@@ -436,15 +442,14 @@ mod tests {
     #[test]
     fn projects_detail_ledger_from_unified_ledger_state() {
         let source = source_with_submitting_effect();
-        let detail_json = serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
+        let detail_json =
+            serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
 
         assert_eq!(
             detail_json["ledger"]["gross_realized_pnl"].as_f64(),
             Some(980.1)
         );
-        assert!(
-            (detail_json["ledger"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9
-        );
+        assert!((detail_json["ledger"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9);
         assert_eq!(
             detail_json["ledger"]["trading_fee_cumulative"].as_f64(),
             Some(12.3)
@@ -458,9 +463,16 @@ mod tests {
     #[test]
     fn projects_all_unresolved_ledger_gaps() {
         let source = source_with_submitting_effect();
-        let detail_json = serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
+        let detail_json =
+            serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
 
-        assert_eq!(detail_json["ledger"]["unresolved_gaps"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            detail_json["ledger"]["unresolved_gaps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(
             detail_json["ledger"]["unresolved_gaps"][0]["gap_key"].as_str(),
             Some("binance:order_trade_update:btcusdt:12345:commission_asset")
@@ -812,8 +824,7 @@ mod tests {
                 funding_fee_cumulative: -4.0,
                 unresolved_gaps: vec![
                     LedgerGapRecord {
-                        gap_key:
-                            "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
+                        gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
                         reason: LedgerGapReason::UnsupportedCommissionAsset,
                         observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
                         source: "ORDER_TRADE_UPDATE".into(),

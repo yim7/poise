@@ -96,7 +96,10 @@ mod tests {
         );
         assert_eq!(
             Deployment::Testnet.endpoints(),
-            Endpoints::new("https://demo-fapi.binance.com", "wss://fstream.binancefuture.com")
+            Endpoints::new(
+                "https://demo-fapi.binance.com",
+                "wss://fstream.binancefuture.com"
+            )
         );
         assert_eq!(
             Deployment::Custom {

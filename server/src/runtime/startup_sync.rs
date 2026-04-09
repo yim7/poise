@@ -3,9 +3,7 @@ use std::future::Future;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::ports::{
-    ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload,
-};
+use poise_engine::ports::{ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -77,8 +75,8 @@ pub(super) async fn replay_startup_user_data(
                 &track_id,
                 event,
             )
-                .await
-                .map_err(super::mutate_error)?;
+            .await
+            .map_err(super::mutate_error)?;
         }
     }
 

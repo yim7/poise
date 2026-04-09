@@ -65,22 +65,21 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 impl ServerRuntime {
     #[cfg(test)]
-    pub fn new<E>(
+    pub fn new(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<E>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
-    ) -> Self
-    where
-        E: ExecutionPort + AccountPort + MetadataPort + 'static,
-    {
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
+    ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange.clone(),
+            execution,
             market_data,
-            exchange.clone(),
-            exchange,
+            account,
+            metadata,
             HashMap::new(),
             Duration::from_secs(1),
             Duration::from_secs(5),
@@ -113,24 +112,23 @@ impl ServerRuntime {
     }
 
     #[cfg(test)]
-    fn with_reconcile_intervals<E>(
+    fn with_reconcile_intervals(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<E>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
-    ) -> Self
-    where
-        E: ExecutionPort + AccountPort + MetadataPort + 'static,
-    {
+    ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange.clone(),
+            execution,
             market_data,
-            exchange.clone(),
-            exchange,
+            account,
+            metadata,
             HashMap::new(),
             recovery_retry_interval,
             audit_interval,
@@ -139,25 +137,24 @@ impl ServerRuntime {
     }
 
     #[cfg(test)]
-    fn with_reconcile_and_account_refresh_intervals<E>(
+    fn with_reconcile_and_account_refresh_intervals(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        exchange: Arc<E>,
+        execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
-    ) -> Self
-    where
-        E: ExecutionPort + AccountPort + MetadataPort + 'static,
-    {
+    ) -> Self {
         Self::with_reconcile_intervals_and_account_capacity_snapshots(
             state,
             effect_worker_state,
-            exchange.clone(),
+            execution,
             market_data,
-            exchange.clone(),
-            exchange,
+            account,
+            metadata,
             HashMap::new(),
             recovery_retry_interval,
             audit_interval,
@@ -353,7 +350,6 @@ impl ReconcileStateAccess for RuntimeTestContext {
     }
 }
 
-
 async fn retry_startup_step<T, F, Fut>(step_name: &'static str, operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -388,8 +384,7 @@ async fn sync_exchange_state_from_exchange(
     instrument: &poise_engine::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
-    reconcile::sync_exchange_state_from_exchange(state, execution, track_id, instrument, mode)
-        .await
+    reconcile::sync_exchange_state_from_exchange(state, execution, track_id, instrument, mode).await
 }
 
 fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {

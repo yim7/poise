@@ -1,11 +1,10 @@
 use super::*;
 
-
 #[tokio::test]
 async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
 
     repository
         .seed_snapshot("btc-core", snapshot_with_recovery_anomaly())
@@ -44,7 +43,8 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -63,7 +63,7 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
 async fn cancel_success_clears_working_order_slot_without_waiting_for_order_event() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
     let snapshot = snapshot_with_working_order();
 
     repository.seed_snapshot("btc-core", snapshot.clone()).await;
@@ -92,7 +92,8 @@ async fn cancel_success_clears_working_order_slot_without_waiting_for_order_even
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange,
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -122,7 +123,7 @@ async fn cancel_success_clears_working_order_slot_without_waiting_for_order_even
 async fn stale_cancel_effect_syncs_exchange_before_canceling() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
     let snapshot = snapshot_with_working_order();
 
     repository.seed_snapshot("btc-core", snapshot.clone()).await;
@@ -155,7 +156,8 @@ async fn stale_cancel_effect_syncs_exchange_before_canceling() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -178,7 +180,7 @@ async fn stale_cancel_effect_syncs_exchange_before_canceling() {
 async fn stale_cancel_all_effect_syncs_exchange_before_canceling() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
     let snapshot = snapshot_with_working_order();
 
     repository.seed_snapshot("btc-core", snapshot.clone()).await;
@@ -210,7 +212,8 @@ async fn stale_cancel_all_effect_syncs_exchange_before_canceling() {
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -236,7 +239,7 @@ async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_
         "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
     ));
     exchange.set_position_qty(15.0).await;
-    let state = test_state(repository.clone(), exchange.clone()).await;
+    let state = test_state(repository.clone()).await;
     let snapshot = snapshot_with_working_order();
 
     repository.seed_snapshot("btc-core", snapshot.clone()).await;
@@ -265,7 +268,8 @@ async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_
 
     let worker = EffectWorker::new(
         state.clone(),
-        exchange.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
         Duration::from_secs(60),
     );
     worker.run_once().await.unwrap();
@@ -285,15 +289,13 @@ async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_
 async fn fresh_effects_do_not_trigger_extra_sync() {
     let submit_repository = Arc::new(MemoryRepository::default());
     let submit_exchange = Arc::new(FakeExchange::default());
-    let submit_state = test_state(submit_repository.clone(), submit_exchange.clone()).await;
-    submit_state
-        .observe_market("btc-core", 95.0)
-        .await
-        .unwrap();
+    let submit_state = test_state(submit_repository.clone()).await;
+    submit_state.observe_market("btc-core", 95.0).await.unwrap();
 
     let submit_worker = EffectWorker::new(
         submit_state,
-        submit_exchange.clone(),
+        submit_exchange.execution_port(),
+        submit_exchange.account_port(),
         Duration::from_secs(60),
     );
     submit_worker.run_once().await.unwrap();
@@ -303,7 +305,7 @@ async fn fresh_effects_do_not_trigger_extra_sync() {
 
     let cancel_repository = Arc::new(MemoryRepository::default());
     let cancel_exchange = Arc::new(FakeExchange::default());
-    let cancel_state = test_state(cancel_repository.clone(), cancel_exchange.clone()).await;
+    let cancel_state = test_state(cancel_repository.clone()).await;
     let snapshot = snapshot_with_working_order();
     cancel_repository
         .seed_snapshot("btc-core", snapshot.clone())
@@ -333,7 +335,8 @@ async fn fresh_effects_do_not_trigger_extra_sync() {
 
     let cancel_worker = EffectWorker::new(
         cancel_state,
-        cancel_exchange.clone(),
+        cancel_exchange.execution_port(),
+        cancel_exchange.account_port(),
         Duration::from_secs(60),
     );
     cancel_worker.run_once().await.unwrap();

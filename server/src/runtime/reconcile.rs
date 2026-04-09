@@ -10,12 +10,12 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::server_context::ReconcileState;
 use crate::order_outcome::reconcile_execution;
+use crate::server_context::ReconcileState;
 
 use super::{
-    ReconcileExecution, ReconcileStateAccess, ReconcileRequest, ServerRuntime,
-    order_observation, position_observation, preserve_track_mutation_error,
+    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, ServerRuntime, order_observation,
+    position_observation, preserve_track_mutation_error,
 };
 
 #[derive(Debug, Clone)]
@@ -34,8 +34,13 @@ pub(super) fn spawn_recovery_task(
     let audit_interval = runtime.audit_interval;
 
     tokio::spawn(async move {
-        let instruments = state.reconcile.observation_service.track_instruments().await;
-        let mut tracked = seed_recovery_tracking(&state.reconcile, &instruments, retry_interval).await;
+        let instruments = state
+            .reconcile
+            .observation_service
+            .track_instruments()
+            .await;
+        let mut tracked =
+            seed_recovery_tracking(&state.reconcile, &instruments, retry_interval).await;
         let mut next_audit_at = instruments
             .iter()
             .map(|track| (track.id.clone(), Instant::now() + audit_interval))
