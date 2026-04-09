@@ -417,14 +417,14 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_state_repository_requires_explicit_bootstrap_mode() {
-        let config = test_config(unique_test_environment(), 90.0);
-
-        let db_path = crate::instance_dir::InstanceDir::new(std::env::temp_dir())
-            .db_path(&config.environment);
+        let environment = unique_test_environment();
+        let config = test_config(90.0);
+        let db_path = test_db_path(&environment);
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .unwrap();
         let _ = prepared.repositories.mutation_store();
+        cleanup_environment(&environment);
     }
 
     #[tokio::test]
@@ -442,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn strict_mode_rejects_persisted_config_mismatch() {
         let environment = unique_test_environment();
-        let config = test_config(environment.clone(), 90.0);
+        let config = test_config(90.0);
         let db_path = test_db_path(&environment);
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
@@ -462,7 +462,7 @@ mod tests {
     #[tokio::test]
     async fn rebuild_mode_recreates_repository_after_mismatch() {
         let environment = unique_test_environment();
-        let config = test_config(environment.clone(), 90.0);
+        let config = test_config(90.0);
         let db_path = test_db_path(&environment);
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
         std::fs::write(format!("{}-wal", db_path.display()), b"wal").unwrap();
@@ -529,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn rebuild_mode_recovers_from_unreadable_existing_database() {
         let environment = unique_test_environment();
-        let config = test_config(environment.clone(), 90.0);
+        let config = test_config(90.0);
         let db_path = test_db_path(&environment);
         super::ensure_parent_dir(&db_path).unwrap();
         std::fs::write(&db_path, b"not-a-sqlite-database").unwrap();
@@ -565,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn restore_backup_recovers_original_state_after_rebuild() {
         let environment = unique_test_environment();
-        let config = test_config(environment.clone(), 90.0);
+        let config = test_config(90.0);
         let db_path = test_db_path(&environment);
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
@@ -587,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn run_startup_restores_backup_after_failed_operation() {
         let environment = unique_test_environment();
-        let config = test_config(environment.clone(), 90.0);
+        let config = test_config(90.0);
         let db_path = test_db_path(&environment);
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
@@ -631,7 +631,7 @@ mod tests {
     #[tokio::test]
     async fn strict_mode_returns_structured_mismatch() {
         let environment = unique_test_environment();
-        let config = test_config(environment.clone(), 90.0);
+        let config = test_config(90.0);
         let db_path = test_db_path(&environment);
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
@@ -671,13 +671,12 @@ mod tests {
     async fn strict_mode_rejects_persisted_track_missing_from_config() {
         let environment = unique_test_environment();
         let config = Config {
-            environment: environment.clone(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![],
             exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
-        let seeded_config = test_config(environment.clone(), 80.0);
+        let seeded_config = test_config(80.0);
         let db_path = test_db_path(&environment);
         persist_snapshot_with_lower_price(&seeded_config, &db_path, 80.0).await;
 
@@ -710,7 +709,7 @@ mod tests {
     async fn rebuild_mode_only_touches_database_under_current_instance_dir() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config_with_instance_dir(temp_dir.path(), "mainnet", 90.0);
-        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path("mainnet");
+        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path();
 
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
@@ -735,9 +734,8 @@ mod tests {
         )
     }
 
-    fn test_config(environment: String, lower_price: f64) -> Config {
+    fn test_config(lower_price: f64) -> Config {
         Config {
-            environment,
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
@@ -765,11 +763,12 @@ mod tests {
         environment: &str,
         lower_price: f64,
     ) -> Config {
-        test_config(environment.to_string(), lower_price)
+        let _ = environment;
+        test_config(lower_price)
     }
 
     fn test_db_path(environment: &str) -> PathBuf {
-        crate::instance_dir::InstanceDir::new(std::env::temp_dir()).db_path(environment)
+        crate::instance_dir::InstanceDir::new(std::env::temp_dir().join(environment)).db_path()
     }
 
     async fn persist_snapshot_with_lower_price(_config: &Config, db_path: &Path, lower_price: f64) {
@@ -815,6 +814,6 @@ mod tests {
         let _ = std::fs::remove_file(test_db_path(environment));
         let _ = std::fs::remove_file(format!("{}-wal", test_db_path(environment).display()));
         let _ = std::fs::remove_file(format!("{}-shm", test_db_path(environment).display()));
-        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(".data").join(environment));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(environment));
     }
 }

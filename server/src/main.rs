@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     let options = parse_startup_options(env::args().skip(1))?;
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
-    let db_path = instance_dir.db_path(&config.environment);
+    let db_path = instance_dir.db_path();
     let prepared_state =
         match state_bootstrap::prepare_state_repository(&config, &db_path, options.bootstrap_mode)
             .await
@@ -209,7 +209,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
@@ -232,15 +231,6 @@ mod tests {
     };
 
     use super::{StartupOptions, parse_startup_options};
-
-    fn unique_test_environment() -> String {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        format!(
-            "main-test-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        )
-    }
 
     #[test]
     fn parse_startup_options_requires_instance_dir() {
@@ -571,7 +561,6 @@ mod tests {
 
     #[tokio::test]
     async fn startup_flow_serves_track_list_and_detail() {
-        let suffix = unique_test_environment();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = listener.local_addr().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -582,7 +571,6 @@ mod tests {
             &config_path,
             format!(
                 r#"
-environment = "{suffix}"
 bind_address = "{bind_address}"
 
 [exchange]
@@ -604,8 +592,7 @@ notional_per_unit = 375.0
         .unwrap();
 
         let config = crate::config::load_config(&config_path).unwrap();
-        let db_path =
-            crate::instance_dir::InstanceDir::new(&instance_dir).db_path(&config.environment);
+        let db_path = crate::instance_dir::InstanceDir::new(&instance_dir).db_path();
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
         let exchange = Arc::new(FakeExchange);
@@ -660,14 +647,78 @@ notional_per_unit = 375.0
         let _ = runtime_handles.recovery_task.await;
     }
 
+    #[test]
+    fn startup_db_path_does_not_depend_on_exchange_deployment() {
+        let instance_dir = tempfile::tempdir().unwrap();
+        let config_path = instance_dir.path().join("config.toml");
+
+        fs::write(
+            &config_path,
+            r#"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+        let testnet_config = crate::config::load_config(&config_path).unwrap();
+        let testnet_path = crate::instance_dir::InstanceDir::new(instance_dir.path()).db_path();
+
+        fs::write(
+            &config_path,
+            r#"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "mainnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+        let mainnet_config = crate::config::load_config(&config_path).unwrap();
+        let mainnet_path = crate::instance_dir::InstanceDir::new(instance_dir.path()).db_path();
+
+        assert_eq!(testnet_config.bind_address, mainnet_config.bind_address);
+        assert_eq!(testnet_path, mainnet_path);
+        assert_eq!(
+            mainnet_path,
+            instance_dir
+                .path()
+                .join(".data")
+                .join("poise-server.sqlite")
+        );
+    }
+
     #[tokio::test]
     async fn start_platform_binds_listener_before_starting_runtime() {
-        let suffix = unique_test_environment();
         let occupied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind_address = occupied_listener.local_addr().unwrap();
 
         let config = crate::config::Config {
-            environment: suffix.clone(),
             bind_address: bind_address.to_string(),
             tracks: vec![crate::config::TrackDefinition {
                 track_id: "btc-core".into(),
@@ -693,8 +744,7 @@ notional_per_unit = 375.0
             account_monitor: Default::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
-        let db_path =
-            crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path(&config.environment);
+        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path();
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let storage = Arc::new(SqliteStorage::new(&db_path).unwrap());
         let exchange = Arc::new(FakeExchange);

@@ -24,10 +24,8 @@ impl InstanceDir {
         self.root.join(".logs")
     }
 
-    pub fn db_path(&self, environment: &str) -> PathBuf {
-        self.data_root()
-            .join(environment)
-            .join("poise-server.sqlite")
+    pub fn db_path(&self) -> PathBuf {
+        self.data_root().join("poise-server.sqlite")
     }
 }
 
@@ -44,5 +42,15 @@ mod tests {
         assert_eq!(dir.config_path(), PathBuf::from("/tmp/poise/a/config.toml"));
         assert_eq!(dir.data_root(), PathBuf::from("/tmp/poise/a/.data"));
         assert_eq!(dir.logs_root(), PathBuf::from("/tmp/poise/a/.logs"));
+    }
+
+    #[test]
+    fn instance_dir_db_path_is_fixed_under_instance_data_root() {
+        let dir = InstanceDir::new("/tmp/poise/a");
+
+        assert_eq!(
+            dir.db_path(),
+            PathBuf::from("/tmp/poise/a/.data/poise-server.sqlite")
+        );
     }
 }

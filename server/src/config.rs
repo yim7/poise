@@ -11,7 +11,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub environment: String,
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
     pub tracks: Vec<TrackDefinition>,
@@ -140,10 +139,12 @@ mod tests {
     use super::{AccountMonitorConfig, ExchangeConfig, default_bind_address, parse_config};
 
     #[test]
-    fn config_module_examples_do_not_use_paper_environment() {
+    fn config_module_examples_do_not_define_environment() {
         let source = include_str!("config.rs");
+        let environment_field_signature = ["pub", " environment", ":"].concat();
 
         assert!(!source.contains("environment = \"paper\""));
+        assert!(!source.contains(&environment_field_signature));
     }
 
     #[test]
@@ -160,7 +161,6 @@ mod tests {
     fn parses_config_file_with_tracks_and_exchange() {
         let config = parse_config(
             r#"
-environment = "test"
 bind_address = "127.0.0.1:9000"
 
 [exchange]
@@ -191,7 +191,6 @@ out_of_band_policy = "hold"
         )
         .unwrap();
 
-        assert_eq!(config.environment, "test");
         assert_eq!(config.bind_address, "127.0.0.1:9000");
         assert_eq!(config.tracks.len(), 2);
         assert_eq!(config.tracks[0].symbol, "BTCUSDT");
@@ -216,8 +215,6 @@ out_of_band_policy = "hold"
     fn parses_service_level_exchange_config_and_track_symbols() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 deployment = "testnet"
@@ -244,8 +241,6 @@ notional_per_unit = 3000.0
     fn rejects_legacy_track_level_venue_field() {
         let error = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 deployment = "testnet"
@@ -274,8 +269,6 @@ notional_per_unit = 3000.0
     fn defaults_bind_address_and_exchange_credentials_for_testnet() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -313,8 +306,6 @@ notional_per_unit = 375.0
     fn defaults_min_rebalance_units_to_point_five() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -337,8 +328,6 @@ notional_per_unit = 375.0
     fn rejects_negative_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -362,8 +351,6 @@ min_rebalance_units = -0.1
     fn rejects_non_finite_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -387,8 +374,6 @@ min_rebalance_units = nan
     fn parses_optional_tick_timeout_secs() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -412,8 +397,6 @@ tick_timeout_secs = 45
     fn parses_snake_case_strategy_enums() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -441,8 +424,6 @@ out_of_band_policy = "reduce_only"
     fn budget_uses_explicit_risk_limits_when_configured() {
         let config = parse_config(
             r#"
-environment = "test"
-
 [exchange]
 venue = "binance"
 
@@ -471,8 +452,6 @@ stop_loss_pct = 5.0
     fn budget_uses_safe_defaults_when_risk_limits_omitted() {
         let config = parse_config(
             r#"
-environment = "test"
-
 [exchange]
 venue = "binance"
 
@@ -499,8 +478,6 @@ notional_per_unit = 375.0
     fn parses_explicit_track_id_from_config_instead_of_deriving_from_symbol() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -527,7 +504,6 @@ notional_per_unit = 375.0
         let equivalent_track_step = (track.upper_price - track.lower_price)
             / (track.long_exposure_units + track.short_exposure_units);
 
-        assert_eq!(config.environment, "testnet");
         assert_eq!(config.tracks.len(), 1);
         assert_eq!(track.track_id().as_str(), "btc-core");
         assert_eq!(track.upper_price - track.lower_price, 5500.0);
@@ -561,11 +537,69 @@ notional_per_unit = 375.0
     }
 
     #[test]
+    fn demo_configs_define_exchange_only_at_service_level() {
+        for raw in [
+            include_str!("../../configs/binance-testnet.demo.toml"),
+            include_str!("../../configs/test.demo.toml"),
+        ] {
+            assert_eq!(raw.matches("venue = ").count(), 1);
+            assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
+        }
+    }
+
+    #[test]
+    fn readme_example_matches_service_level_exchange_boundary() {
+        let raw = include_str!("../../README.md");
+
+        assert!(raw.contains("[exchange]\nvenue = \"binance\"\ndeployment = \"testnet\""));
+        assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
+        assert!(!raw.contains("environment = \"testnet\" 时，服务端固定接 Binance"));
+        assert!(!raw.contains("environment = \"mainnet\" 时，服务端固定接 Binance"));
+        assert!(!raw.contains("configs/binance-mainnet.demo.toml"));
+        assert!(!raw.contains("environment = \"testnet\""));
+        assert!(!raw.contains("environment = \"mainnet\""));
+        assert!(!raw.contains("environment = \"test\""));
+    }
+
+    #[test]
+    fn parses_config_without_environment_field() {
+        let config = parse_config(
+            r#"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.bind_address, "127.0.0.1:8000");
+    }
+
+    #[test]
+    fn demo_configs_do_not_define_environment() {
+        for raw in [
+            include_str!("../../configs/binance-testnet.demo.toml"),
+            include_str!("../../configs/test.demo.toml"),
+        ] {
+            assert!(!raw.contains("environment = "));
+        }
+    }
+
+    #[test]
     fn defaults_account_monitor_thresholds() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 
@@ -588,8 +622,6 @@ notional_per_unit = 375.0
     fn rejects_inverted_account_monitor_thresholds() {
         let error = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 

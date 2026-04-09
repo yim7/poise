@@ -536,21 +536,10 @@ mod tests {
         }
     }
 
-    fn unique_test_environment() -> String {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        format!(
-            "assembly-test-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        )
-    }
-
     #[test]
     fn track_instrument_uses_service_exchange_venue() {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 deployment = "testnet"
@@ -578,8 +567,6 @@ notional_per_unit = 3000.0
     {
         let config = parse_config(
             r#"
-environment = "testnet"
-
 [exchange]
 venue = "binance"
 deployment = "testnet"
@@ -614,11 +601,9 @@ notional_per_unit = 3000.0
     }
 
     #[tokio::test]
-    async fn build_exchange_ignores_top_level_environment_for_binance_endpoint_selection() {
+    async fn build_exchange_uses_exchange_deployment_for_binance_endpoint_selection() {
         let config = parse_config(
             r#"
-environment = "test"
-
 [exchange]
 venue = "binance"
 deployment = "mainnet"
@@ -645,7 +630,6 @@ notional_per_unit = 3000.0
     #[tokio::test]
     async fn assemble_accepts_prepared_state_store_instead_of_bootstrap_flag() {
         let config = Config {
-            environment: unique_test_environment(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![],
             exchange: ExchangeConfig::default(),
@@ -664,10 +648,7 @@ notional_per_unit = 3000.0
 
     #[tokio::test]
     async fn assembles_platform_with_all_instances_registered() {
-        let suffix = unique_test_environment();
-
         let config = Config {
-            environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![
                 TrackDefinition {
@@ -719,7 +700,7 @@ notional_per_unit = 3000.0
         assert_eq!(track.budget().max_notional, 3000.0);
         assert!(
             crate::instance_dir::InstanceDir::new(instance_dir.path())
-                .db_path(&suffix)
+                .db_path()
                 .exists()
         );
     }
@@ -743,10 +724,7 @@ notional_per_unit = 3000.0
 
     #[tokio::test]
     async fn assemble_rejects_duplicate_symbols() {
-        let suffix = unique_test_environment();
-
         let config = Config {
-            environment: suffix,
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![
                 TrackDefinition {
@@ -794,9 +772,7 @@ notional_per_unit = 3000.0
 
     #[tokio::test]
     async fn assemble_requires_exchange_credentials_for_real_runtime() {
-        let suffix = unique_test_environment();
         let config = Config {
-            environment: suffix,
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
@@ -833,7 +809,6 @@ notional_per_unit = 3000.0
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let exchange = Arc::new(FlakyExchangeInfoExchange::new(2));
         let config = Config {
-            environment: unique_test_environment(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
@@ -885,7 +860,6 @@ notional_per_unit = 3000.0
             max_increase_notional: 500.0,
         });
         let config = Config {
-            environment: unique_test_environment(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
@@ -979,9 +953,7 @@ notional_per_unit = 3000.0
 
     #[tokio::test]
     async fn pause_command_persists_across_reassembly() {
-        let suffix = unique_test_environment();
         let config = Config {
-            environment: suffix.clone(),
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![TrackDefinition {
                 track_id: "btc-core".into(),
@@ -1182,8 +1154,7 @@ notional_per_unit = 3000.0
         config: &Config,
         instance_dir: &std::path::Path,
     ) -> Result<ServerPlatform> {
-        let db_path =
-            crate::instance_dir::InstanceDir::new(instance_dir).db_path(&config.environment);
+        let db_path = crate::instance_dir::InstanceDir::new(instance_dir).db_path();
         super::ensure_parent_dir(&db_path)?;
         let repository = Arc::new(SqliteStorage::new(&db_path)?);
         let exchange = Arc::new(FakeExchange);
