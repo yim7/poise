@@ -137,13 +137,13 @@
   Expected:
   - 通过，说明 definition normalize、registry 派生和 restore revision owner 已经定住。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
   Run:
   - `git add application/src/track_definition.rs application/src/lib.rs engine/src/persisted_runtime.rs engine/src/lib.rs server/src/config.rs server/src/state_bootstrap.rs server/src/assembly.rs server/src/main.rs server/src/test_support.rs`
   - `git commit -m "refactor: bootstrap prepared track registry"`
 
-  Commit SHA: `<pending>`
+  Commit SHA: `89f0423`
 
 ### Task 2: 重写 query-facing source 与读模型
 
