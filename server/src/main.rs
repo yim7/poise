@@ -51,8 +51,8 @@ async fn main() -> Result<()> {
             Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
         };
     let (platform, runtime_handles, listener) = prepared_state
-        .run_startup(|repositories| async {
-            let platform = assembly::assemble(&config, repositories).await?;
+        .run_startup(|repositories, prepared_registry| async {
+            let platform = assembly::assemble(&config, prepared_registry, repositories).await?;
             start_platform(&config, platform).await
         })
         .await?;
@@ -216,6 +216,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::get;
     use chrono::Utc;
+    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
@@ -231,6 +232,20 @@ mod tests {
     };
 
     use super::{StartupOptions, parse_startup_options};
+
+    fn test_prepared_registry(config: &crate::config::Config) -> Arc<PreparedTrackRegistry> {
+        let configured = config
+            .tracks
+            .iter()
+            .map(|track| {
+                ConfiguredTrackDefinition::try_from_input(
+                    track.to_configured_input(config.exchange.venue()),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        Arc::new(PreparedTrackRegistry::new(configured).unwrap())
+    }
 
     #[test]
     fn parse_startup_options_requires_instance_dir() {
@@ -598,6 +613,7 @@ notional_per_unit = 375.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             exchange.clone(),
             Arc::new(FakeMarketData::default()),
             exchange.clone(),
@@ -728,9 +744,9 @@ notional_per_unit = 375.0
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
@@ -750,6 +766,7 @@ notional_per_unit = 375.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             exchange.clone(),
             Arc::new(FailingStartMarketData),
             exchange.clone(),

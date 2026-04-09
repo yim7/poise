@@ -6,6 +6,7 @@ pub mod loss_guard;
 pub mod manager;
 pub mod observation;
 pub mod ports;
+pub mod persisted_runtime;
 pub mod reconciler;
 pub mod runtime;
 pub mod snapshot;

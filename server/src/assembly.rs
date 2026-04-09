@@ -8,9 +8,9 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, TrackBudgetCatalog, TrackCommandService,
-    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackMutationStore,
-    TrackObservationService, TrackQueryService, TrackServiceSet,
+    AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackBudgetCatalog,
+    TrackCommandService, TrackDebugQueryService, TrackEffectService, TrackEffectStore,
+    TrackMutationStore, TrackObservationService, TrackQueryService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
 use poise_engine::manager::TrackManager;
@@ -103,23 +103,27 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
     }
 }
 
-pub async fn assemble(config: &Config, repositories: StateRepositories) -> Result<ServerPlatform> {
+pub async fn assemble(
+    config: &Config,
+    prepared_registry: Arc<PreparedTrackRegistry>,
+    repositories: StateRepositories,
+) -> Result<ServerPlatform> {
     validate_unique_instruments(
-        config
-            .tracks
+        prepared_registry
             .iter()
-            .map(|track| track.instrument(config.exchange.venue())),
+            .map(|track| track.instrument().clone()),
     )?;
-    validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
+    validate_unique_track_ids(prepared_registry.iter().map(|track| track.track_id().clone()))?;
     let exchange = build_exchange(&config.exchange).await?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_state_store(config, exchange, repositories, clock).await
+    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
 }
 
 #[cfg(test)]
 pub(crate) async fn assemble_with_exchange_ports(
     config: &Config,
+    prepared_registry: Arc<PreparedTrackRegistry>,
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
     account_summary: Arc<dyn AccountSummaryPort>,
@@ -136,28 +140,28 @@ pub(crate) async fn assemble_with_exchange_ports(
         account,
         metadata,
     );
-    assemble_with_state_store(config, exchange, repositories, clock).await
+    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
 }
 
 async fn assemble_with_state_store(
     config: &Config,
+    prepared_registry: Arc<PreparedTrackRegistry>,
     exchange: Exchange,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
     validate_unique_instruments(
-        config
-            .tracks
+        prepared_registry
             .iter()
-            .map(|track| track.instrument(config.exchange.venue())),
+            .map(|track| track.instrument().clone()),
     )?;
-    validate_unique_track_ids(config.tracks.iter().map(|track| track.track_id()))?;
+    validate_unique_track_ids(prepared_registry.iter().map(|track| track.track_id().clone()))?;
 
     let mut manager = TrackManager::new(clock);
     let mut account_capacity_snapshots = HashMap::new();
-    for track in &config.tracks {
-        let track_id = track.track_id();
-        let instrument = track.instrument(config.exchange.venue());
+    for track in prepared_registry.iter() {
+        let track_id = track.track_id().clone();
+        let instrument = track.instrument().clone();
         let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
         let account_capacity_snapshot =
             load_account_capacity_snapshot_with_retry(exchange.account(), &instrument).await?;
@@ -173,7 +177,7 @@ async fn assemble_with_state_store(
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             instrument,
-            track.track_config(),
+            track.track_config().clone(),
             track.budget(),
             info.rules,
             track.tick_timeout_secs(),
@@ -188,10 +192,9 @@ async fn assemble_with_state_store(
     let query_store = repositories.query_store();
     let effect_store = repositories.effect_store();
     let budget_catalog = TrackBudgetCatalog::from_iter(
-        config
-            .tracks
+        prepared_registry
             .iter()
-            .map(|track| (track.track_id(), track.budget())),
+            .map(|track| (track.track_id().clone(), track.budget())),
     );
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let write_services = TrackServiceSet::new(
@@ -524,7 +527,10 @@ mod tests {
         build_test_application_services, build_websocket_state as build_test_websocket_state,
         test_budget_catalog, unavailable_account_monitor,
     };
-    use poise_application::{TrackDebugQueryService, TrackQueryService};
+    use poise_application::{
+        ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService,
+        TrackQueryService,
+    };
 
     use super::{
         ServerPlatform, SystemClock, assemble, build_exchange, validate_unique_instruments,
@@ -540,6 +546,20 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         }
+    }
+
+    fn test_prepared_registry(config: &Config) -> Arc<PreparedTrackRegistry> {
+        let configured = config
+            .tracks
+            .iter()
+            .map(|track| {
+                ConfiguredTrackDefinition::try_from_input(
+                    track.to_configured_input(config.exchange.venue()),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        Arc::new(PreparedTrackRegistry::new(configured).unwrap())
     }
 
     #[test]
@@ -562,7 +582,11 @@ notional_per_unit = 3000.0
         )
         .unwrap();
 
-        let instrument = config.tracks[0].instrument(config.exchange.venue());
+        let instrument = test_prepared_registry(&config)
+            .get(&TrackId::new("btc-core"))
+            .unwrap()
+            .instrument()
+            .clone();
 
         assert_eq!(instrument.venue, Venue::Binance);
         assert_eq!(instrument.symbol, "BTCUSDT");
@@ -592,6 +616,7 @@ notional_per_unit = 3000.0
 
         let platform = super::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             Arc::new(FakeExecutionPort::default()),
             Arc::new(FakeMarketDataPort::default()),
             Arc::new(FakeAccountSummaryPort::default()),
@@ -644,7 +669,10 @@ notional_per_unit = 3000.0
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
 
-        let error = assemble(&config, repositories).await.err().unwrap();
+        let error = assemble(&config, test_prepared_registry(&config), repositories)
+            .await
+            .err()
+            .unwrap();
         assert!(
             error
                 .to_string()
@@ -665,9 +693,9 @@ notional_per_unit = 3000.0
                     long_exposure_units: 8.0,
                     short_exposure_units: 8.0,
                     notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                    out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                     max_notional: None,
                     daily_loss_limit: 300.0,
                     total_loss_limit: 600.0,
@@ -681,9 +709,9 @@ notional_per_unit = 3000.0
                     long_exposure_units: 5.0,
                     short_exposure_units: 3.0,
                     notional_per_unit: 500.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                    out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                     max_notional: None,
                     daily_loss_limit: 300.0,
                     total_loss_limit: 600.0,
@@ -741,9 +769,9 @@ notional_per_unit = 3000.0
                     long_exposure_units: 8.0,
                     short_exposure_units: 8.0,
                     notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                    out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                     max_notional: None,
                     daily_loss_limit: 300.0,
                     total_loss_limit: 600.0,
@@ -757,9 +785,9 @@ notional_per_unit = 3000.0
                     long_exposure_units: 6.0,
                     short_exposure_units: 6.0,
                     notional_per_unit: 250.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                    out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                     max_notional: None,
                     daily_loss_limit: 300.0,
                     total_loss_limit: 600.0,
@@ -772,7 +800,10 @@ notional_per_unit = 3000.0
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
-        let error = assemble(&config, repositories).await.err().unwrap();
+        let error = assemble(&config, test_prepared_registry(&config), repositories)
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("duplicate instrument"));
     }
 
@@ -788,9 +819,9 @@ notional_per_unit = 3000.0
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
@@ -802,7 +833,10 @@ notional_per_unit = 3000.0
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
-        let error = assemble(&config, repositories).await.err().unwrap();
+        let error = assemble(&config, test_prepared_registry(&config), repositories)
+            .await
+            .err()
+            .unwrap();
         assert!(
             error
                 .to_string()
@@ -824,9 +858,9 @@ notional_per_unit = 3000.0
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
@@ -838,6 +872,7 @@ notional_per_unit = 3000.0
 
         let platform = super::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             exchange.clone(),
             Arc::new(FakeMarketData::empty()),
             exchange.clone(),
@@ -875,9 +910,9 @@ notional_per_unit = 3000.0
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: Some(20_000.0),
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
@@ -889,6 +924,7 @@ notional_per_unit = 3000.0
 
         let result = super::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             exchange.clone(),
             Arc::new(FakeMarketData::empty()),
             exchange.clone(),
@@ -969,9 +1005,9 @@ notional_per_unit = 3000.0
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
@@ -1166,6 +1202,7 @@ notional_per_unit = 3000.0
         let exchange = Arc::new(FakeExchange);
         super::assemble_with_exchange_ports(
             config,
+            test_prepared_registry(config),
             exchange.clone(),
             Arc::new(FakeMarketData::empty()),
             exchange.clone(),

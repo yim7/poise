@@ -6,7 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use chrono::{SecondsFormat, Utc};
 use poise_application::{
-    AccountMonitorStore, TrackEffectStore, TrackMutationStore, TrackQueryStore,
+    AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectStore,
+    TrackMutationStore, TrackQueryStore,
 };
 use poise_core::strategy::TrackConfig;
 use poise_engine::track::Instrument;
@@ -84,6 +85,7 @@ pub struct StateRepositories {
 
 pub struct PreparedStateStore {
     repositories: StateRepositories,
+    prepared_registry: Arc<PreparedTrackRegistry>,
     db_path: PathBuf,
     rebuild_backup: Option<StateBackup>,
 }
@@ -102,10 +104,10 @@ struct BackupFile {
 impl PreparedStateStore {
     pub async fn run_startup<T, F, Fut>(mut self, startup: F) -> Result<T>
     where
-        F: FnOnce(StateRepositories) -> Fut,
+        F: FnOnce(StateRepositories, Arc<PreparedTrackRegistry>) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        match startup(self.repositories.clone()).await {
+        match startup(self.repositories.clone(), Arc::clone(&self.prepared_registry)).await {
             Ok(result) => {
                 self.rebuild_backup = None;
                 Ok(result)
@@ -129,6 +131,10 @@ impl PreparedStateStore {
                 "also failed to restore rebuilt local state after startup failure: {restore_error}"
             )),
         }
+    }
+
+    pub fn registry(&self) -> &PreparedTrackRegistry {
+        &self.prepared_registry
     }
 }
 
@@ -204,17 +210,19 @@ pub async fn prepare_state_repository(
 ) -> BootstrapResult<PreparedStateStore> {
     ensure_parent_dir(&db_path).map_err(unexpected)?;
     let db_path = db_path.to_path_buf();
+    let prepared_registry = Arc::new(build_prepared_registry(config).map_err(unexpected)?);
 
     match mode {
         StateBootstrapMode::Strict => {
             let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
-            let mismatches = detect_persisted_state_mismatches(config, &repository)
+            let mismatches = detect_persisted_state_mismatches(prepared_registry.as_ref(), &repository)
                 .await
                 .map_err(unexpected)?;
             if mismatches.is_empty() {
                 let repository = Arc::new(repository);
                 return Ok(PreparedStateStore {
                     repositories: StateRepositories::from_sqlite_storage(repository),
+                    prepared_registry,
                     db_path,
                     rebuild_backup: None,
                 });
@@ -241,11 +249,22 @@ pub async fn prepare_state_repository(
             let repository = Arc::new(repository);
             Ok(PreparedStateStore {
                 repositories: StateRepositories::from_sqlite_storage(repository),
+                prepared_registry,
                 db_path,
                 rebuild_backup,
             })
         }
     }
+}
+
+fn build_prepared_registry(config: &Config) -> Result<PreparedTrackRegistry> {
+    let mut configured = Vec::with_capacity(config.tracks.len());
+    for track in &config.tracks {
+        configured.push(ConfiguredTrackDefinition::try_from_input(
+            track.to_configured_input(config.exchange.venue()),
+        )?);
+    }
+    PreparedTrackRegistry::new(configured)
 }
 
 fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
@@ -257,7 +276,7 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 }
 
 async fn detect_persisted_state_mismatches(
-    config: &Config,
+    prepared_registry: &PreparedTrackRegistry,
     repository: &SqliteStorage,
 ) -> Result<Vec<PersistedStateMismatch>> {
     let persisted_snapshots = TrackQueryStore::list_track_snapshots(repository).await?;
@@ -270,18 +289,18 @@ async fn detect_persisted_state_mismatches(
     }
 
     let mut mismatches = Vec::new();
-    for track in &config.tracks {
-        let Some(snapshot) = persisted_by_id.remove(track.track_id.as_str()) else {
+    for track in prepared_registry.iter() {
+        let Some(snapshot) = persisted_by_id.remove(track.track_id().as_str()) else {
             continue;
         };
 
-        let expected_instrument = track.instrument(config.exchange.venue());
+        let expected_instrument = track.instrument().clone();
         let actual_instrument = snapshot.instrument.clone();
-        let expected_config = track.track_config();
+        let expected_config = track.track_config().clone();
         let actual_config = snapshot.config.clone();
         if expected_instrument != actual_instrument || expected_config != actual_config {
             mismatches.push(PersistedStateMismatch {
-                track_id: track.track_id.clone(),
+                track_id: track.track_id().as_str().to_string(),
                 detail: PersistedStateMismatchDetail::DefinitionChanged {
                     expected_instrument,
                     actual_instrument,
@@ -404,6 +423,7 @@ fn state_file_path(base_path: &std::path::Path, suffix: &str) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use poise_application::PreparedTrackRegistry;
     use poise_application::TrackMutationStore;
     use poise_application::TrackQueryStore;
     use poise_engine::manager::TrackManager;
@@ -423,6 +443,20 @@ mod tests {
             .await
             .unwrap();
         let _ = prepared.repositories.mutation_store();
+    }
+
+    #[tokio::test]
+    async fn prepare_state_repository_builds_prepared_track_registry_for_startup() {
+        let instance_dir = tempfile::tempdir().unwrap();
+        let config = test_config(90.0);
+        let db_path = test_db_path(instance_dir.path());
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
+            .await
+            .unwrap();
+
+        let registry: &PreparedTrackRegistry = prepared.registry();
+        assert_eq!(registry.iter().count(), 1);
+        assert!(registry.get(&TrackId::new("btc-core")).is_some());
     }
 
     #[tokio::test]
@@ -589,7 +623,9 @@ mod tests {
             .await
             .unwrap();
         let error = prepared
-            .run_startup(|_| async { Err::<(), anyhow::Error>(anyhow::anyhow!("startup failed")) })
+            .run_startup(|_, _| async {
+                Err::<(), anyhow::Error>(anyhow::anyhow!("startup failed"))
+            })
             .await
             .unwrap_err();
 
@@ -741,9 +777,9 @@ mod tests {
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
