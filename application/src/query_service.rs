@@ -1,49 +1,29 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_core::risk::CapacityBudget;
 use poise_engine::track::TrackId;
 
-use crate::{TrackQueryStore, TrackReadModel};
+use crate::{
+    PreparedTrackRegistry, TrackQueryStore, TrackReadModel, TrackReadSource, TrackRuntimeReadState,
+};
 
 const LIST_EFFECTS_LIMIT: usize = 20;
 const DETAIL_EVENTS_LIMIT: usize = 20;
 const DETAIL_EFFECTS_LIMIT: usize = 20;
 
-#[derive(Debug, Clone, Default)]
-pub struct TrackBudgetCatalog {
-    budgets: HashMap<String, CapacityBudget>,
-}
-
-impl TrackBudgetCatalog {
-    pub fn from_iter(entries: impl IntoIterator<Item = (TrackId, CapacityBudget)>) -> Self {
-        Self {
-            budgets: entries
-                .into_iter()
-                .map(|(track_id, budget)| (track_id.as_str().to_string(), budget))
-                .collect(),
-        }
-    }
-
-    fn get(&self, track_id: &TrackId) -> Result<CapacityBudget> {
-        self.budgets
-            .get(track_id.as_str())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing track budget for `{}`", track_id.as_str()))
-    }
-}
-
 pub struct TrackQueryService {
     repository: Arc<dyn TrackQueryStore>,
-    budget_catalog: TrackBudgetCatalog,
+    prepared_registry: Arc<PreparedTrackRegistry>,
 }
 
 impl TrackQueryService {
-    pub fn new(repository: Arc<dyn TrackQueryStore>, budget_catalog: TrackBudgetCatalog) -> Self {
+    pub fn new(
+        repository: Arc<dyn TrackQueryStore>,
+        prepared_registry: Arc<PreparedTrackRegistry>,
+    ) -> Self {
         Self {
             repository,
-            budget_catalog,
+            prepared_registry,
         }
     }
 
@@ -62,15 +42,15 @@ impl TrackQueryService {
                 .repository
                 .list_recent_track_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
                 .await?;
-            let budget = self.budget_catalog.get(&snapshot.snapshot.track_id)?;
-
-            sources.push(TrackReadModel::from_snapshot(
+            let source = self.read_source_from_snapshot(
+                snapshot.snapshot.track_id.clone(),
                 snapshot.snapshot,
-                budget,
                 snapshot.updated_at,
                 Vec::new(),
                 recent_effects,
-            ));
+            )?;
+
+            sources.push(TrackReadModel::from_source(source));
         }
 
         Ok(sources)
@@ -92,15 +72,38 @@ impl TrackQueryService {
             .repository
             .list_recent_track_effects(track_id, DETAIL_EFFECTS_LIMIT)
             .await?;
-        let budget = self.budget_catalog.get(track_id)?;
+        Ok(Some(TrackReadModel::from_source(
+            self.read_source_from_snapshot(
+                track_id.clone(),
+                snapshot.snapshot,
+                snapshot.updated_at,
+                recent_track_events,
+                recent_effects,
+            )?,
+        )))
+    }
 
-        Ok(Some(TrackReadModel::from_snapshot(
-            snapshot.snapshot,
-            budget,
-            snapshot.updated_at,
+    fn read_source_from_snapshot(
+        &self,
+        track_id: TrackId,
+        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        recent_track_events: Vec<crate::StoredTrackEvent>,
+        recent_effects: Vec<crate::PersistedTrackEffect>,
+    ) -> Result<TrackReadSource> {
+        let definition = self
+            .prepared_registry
+            .get(&track_id)
+            .ok_or_else(|| anyhow::anyhow!("missing prepared track definition for `{}`", track_id.as_str()))?
+            .read_definition();
+
+        Ok(TrackReadSource {
+            definition,
+            runtime: TrackRuntimeReadState::from_snapshot(snapshot),
+            updated_at,
             recent_track_events,
             recent_effects,
-        )))
+        })
     }
 }
 
@@ -113,7 +116,6 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
@@ -127,10 +129,11 @@ mod tests {
     use poise_engine::transition::TrackEffect;
 
     use crate::{
-        EffectStatus, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
+        ConfiguredTrackDefinition, ConfiguredTrackInput, EffectStatus, PersistedTrackEffect,
+        PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
     };
 
-    use super::{TrackBudgetCatalog, TrackQueryService};
+    use super::TrackQueryService;
 
     #[tokio::test]
     async fn list_track_sources_reads_all_registered_snapshots() {
@@ -172,19 +175,34 @@ mod tests {
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = TrackQueryService::new(
-            repository.clone(),
-            TrackBudgetCatalog::from_iter([(TrackId::new("btc-core"), test_budget())]),
-        );
+        let service = TrackQueryService::new(repository.clone(), test_prepared_registry());
         (service, repository)
     }
 
-    fn test_budget() -> CapacityBudget {
-        CapacityBudget {
-            max_notional: 3000.0,
-            daily_loss_limit: 100.0,
-            total_loss_limit: 300.0,
-        }
+    fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
+        Arc::new(
+            PreparedTrackRegistry::new(vec![
+                ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+                    track_id: TrackId::new("btc-core"),
+                    venue: Venue::Binance,
+                    symbol: "BTCUSDT".into(),
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(ShapeFamily::Linear),
+                    out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+                    max_notional: None,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
+                    tick_timeout_secs: Some(30),
+                })
+                .unwrap(),
+            ])
+            .unwrap(),
+        )
     }
 
     struct FakeReadRepository {

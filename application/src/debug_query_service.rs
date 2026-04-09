@@ -56,7 +56,6 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
@@ -70,8 +69,9 @@ mod tests {
     use poise_engine::transition::TrackEffect;
 
     use crate::{
-        DiagnosticSeverity, EffectStatus, PersistedTrackEffect, StoredTrackEvent,
-        StoredTrackSnapshot, TrackBudgetCatalog, TrackQueryService, TrackQueryStore,
+        ConfiguredTrackDefinition, ConfiguredTrackInput, DiagnosticSeverity, EffectStatus,
+        PersistedTrackEffect, PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot,
+        TrackQueryService, TrackQueryStore,
     };
 
     use super::TrackDebugQueryService;
@@ -81,7 +81,7 @@ mod tests {
         let repository = Arc::new(FakeReadRepository::new());
         let service = TrackDebugQueryService::new(Arc::new(TrackQueryService::new(
             repository,
-            TrackBudgetCatalog::from_iter([(TrackId::new("btc-core"), test_budget())]),
+            test_prepared_registry(),
         )));
 
         let diagnostics = service
@@ -104,12 +104,30 @@ mod tests {
         );
     }
 
-    fn test_budget() -> CapacityBudget {
-        CapacityBudget {
-            max_notional: 3000.0,
-            daily_loss_limit: 100.0,
-            total_loss_limit: 300.0,
-        }
+    fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
+        Arc::new(
+            PreparedTrackRegistry::new(vec![
+                ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+                    track_id: TrackId::new("btc-core"),
+                    venue: Venue::Binance,
+                    symbol: "BTCUSDT".into(),
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(ShapeFamily::Linear),
+                    out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+                    max_notional: None,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
+                    tick_timeout_secs: Some(30),
+                })
+                .unwrap(),
+            ])
+            .unwrap(),
+        )
     }
 
     struct FakeReadRepository {

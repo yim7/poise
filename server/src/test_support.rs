@@ -3,16 +3,17 @@
 use std::sync::Arc;
 
 use poise_application::{
-    AccountCapacityGuard, AccountMonitor, ApplicationNotification, TrackBudgetCatalog,
-    TrackCommandService, TrackEffectService, TrackEffectStore, TrackMutationStore,
-    TrackObservationService, TrackServiceSet,
+    AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
+    ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectService,
+    TrackEffectStore, TrackMutationStore, TrackObservationService, TrackServiceSet,
 };
 use poise_core::risk::CapacityBudget;
+use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::OrderUpdateAbsorbResult;
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::track::TrackId;
+use poise_engine::track::{TrackId, Venue};
 use poise_engine::transition::TrackTransition;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -179,12 +180,46 @@ pub(crate) fn test_budget() -> CapacityBudget {
     }
 }
 
-pub(crate) fn test_budget_catalog(track_id: &str) -> TrackBudgetCatalog {
-    budget_catalog_for(track_id, test_budget())
+pub(crate) fn test_prepared_registry(track_id: &str) -> Arc<PreparedTrackRegistry> {
+    prepared_registry_for(track_id, default_symbol_for(track_id), test_budget())
 }
 
-pub(crate) fn budget_catalog_for(track_id: &str, budget: CapacityBudget) -> TrackBudgetCatalog {
-    TrackBudgetCatalog::from_iter([(TrackId::new(track_id), budget)])
+fn prepared_registry_for(
+    track_id: &str,
+    symbol: &str,
+    budget: CapacityBudget,
+) -> Arc<PreparedTrackRegistry> {
+    Arc::new(
+        PreparedTrackRegistry::new(vec![
+            ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+                track_id: TrackId::new(track_id),
+                venue: Venue::Binance,
+                symbol: symbol.to_string(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(ShapeFamily::Linear),
+                out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+                max_notional: Some(budget.max_notional),
+                daily_loss_limit: budget.daily_loss_limit,
+                total_loss_limit: budget.total_loss_limit,
+                tick_timeout_secs: Some(30),
+            })
+            .unwrap(),
+        ])
+        .unwrap(),
+    )
+}
+
+fn default_symbol_for(track_id: &str) -> &str {
+    match track_id {
+        "btc-core" | "BTCUSDT" => "BTCUSDT",
+        "eth-core" | "ETHUSDT" => "ETHUSDT",
+        _ => track_id,
+    }
 }
 
 pub(crate) fn build_http_state(

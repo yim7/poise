@@ -8,9 +8,9 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackBudgetCatalog,
-    TrackCommandService, TrackDebugQueryService, TrackEffectService, TrackEffectStore,
-    TrackMutationStore, TrackObservationService, TrackQueryService, TrackServiceSet,
+    AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
+    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackMutationStore,
+    TrackObservationService, TrackQueryService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
 use poise_engine::manager::TrackManager;
@@ -191,11 +191,6 @@ async fn assemble_with_state_store(
     let mutation_store = repositories.mutation_store();
     let query_store = repositories.query_store();
     let effect_store = repositories.effect_store();
-    let budget_catalog = TrackBudgetCatalog::from_iter(
-        prepared_registry
-            .iter()
-            .map(|track| (track.track_id().clone(), track.budget())),
-    );
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let write_services = TrackServiceSet::new(
         manager,
@@ -209,7 +204,10 @@ async fn assemble_with_state_store(
     let effect_service = Arc::new(write_services.effect);
     #[cfg(test)]
     let manager = observation_service.manager();
-    let query_service = Arc::new(TrackQueryService::new(query_store, budget_catalog));
+    let query_service = Arc::new(TrackQueryService::new(
+        query_store,
+        prepared_registry.clone(),
+    ));
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     let projector = Arc::new(TrackProjector::new());
     let account_projector = Arc::new(AccountProjector::new());
@@ -525,7 +523,7 @@ mod tests {
     use crate::test_support::{
         build_http_state as build_test_http_state, build_runtime_and_effect_worker_test_contexts,
         build_test_application_services, build_websocket_state as build_test_websocket_state,
-        test_budget_catalog, unavailable_account_monitor,
+        unavailable_account_monitor,
     };
     use poise_application::{
         ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService,
@@ -1264,7 +1262,7 @@ notional_per_unit = 3000.0
         );
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_budget_catalog("btc-core"),
+            crate::test_support::test_prepared_registry("btc-core"),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
         let projector = Arc::new(TrackProjector::new());

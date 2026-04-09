@@ -8,6 +8,7 @@ pub mod notifications;
 pub mod query_service;
 pub mod read_model;
 pub mod track_definition;
+pub mod track_read_source;
 pub mod track_command_service;
 pub mod track_effect_service;
 pub mod track_effect_store;
@@ -26,12 +27,13 @@ pub use mutation_executor::{
     TrackMutationError, TrackServiceSet, is_loaded_track_invariant_violation,
 };
 pub use notifications::ApplicationNotification;
-pub use query_service::{TrackBudgetCatalog, TrackQueryService};
+pub use query_service::TrackQueryService;
 pub use read_model::{ReadModelSlot, TrackReadModel};
 pub use track_definition::{
     ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry,
     TrackPreparedDefinition, TrackReadDefinition,
 };
+pub use track_read_source::{TrackReadSource, TrackRuntimeReadState};
 pub use track_command_service::TrackCommandService;
 pub use track_effect_service::TrackEffectService;
 pub use track_effect_store::TrackEffectStore;

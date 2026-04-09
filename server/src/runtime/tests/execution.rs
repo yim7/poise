@@ -1207,7 +1207,7 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
     assert!(instance.risk.account_capacity_constraint.increase_blocked);
     let source = TrackQueryService::new(
         persistence.clone() as Arc<dyn TrackQueryStore>,
-        crate::test_support::test_budget_catalog("BTCUSDT"),
+        crate::test_support::test_prepared_registry("BTCUSDT"),
     )
     .load_track_detail_source(&TrackId::new("BTCUSDT"))
     .await

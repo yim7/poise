@@ -281,7 +281,7 @@ where
     let account_monitor = build_test_account_monitor(account_summary, events).await;
     let _ = Arc::new(TrackQueryService::new(
         persistence as Arc<dyn TrackQueryStore>,
-        crate::test_support::test_budget_catalog("BTCUSDT"),
+        crate::test_support::test_prepared_registry("BTCUSDT"),
     ));
     build_runtime_and_effect_worker_test_contexts(
         &services,

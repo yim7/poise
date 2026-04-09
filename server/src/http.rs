@@ -258,7 +258,7 @@ mod tests {
     use crate::server_context::{HttpState, WebSocketState};
     use crate::test_support::{
         build_http_state, build_test_application_services, build_websocket_state,
-        test_budget_catalog, unavailable_account_monitor,
+        test_prepared_registry, unavailable_account_monitor,
     };
 
     use poise_application::{
@@ -344,7 +344,7 @@ mod tests {
         );
         let query_service = Arc::new(TrackQueryService::new(
             query_store,
-            test_budget_catalog("btc-core"),
+            test_prepared_registry("btc-core"),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
         let projector = Arc::new(TrackProjector::new());
@@ -363,7 +363,7 @@ mod tests {
                 &services,
                 Arc::new(TrackQueryService::new(
                     repository as Arc<dyn TrackQueryStore>,
-                    test_budget_catalog("btc-core"),
+                    test_prepared_registry("btc-core"),
                 )),
                 projector,
                 account_monitor,
@@ -434,7 +434,7 @@ mod tests {
         let account_projector = Arc::new(AccountProjector::new());
         let query_service = Arc::new(TrackQueryService::new(
             query_store,
-            test_budget_catalog("btc-core"),
+            test_prepared_registry("btc-core"),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
         HttpTestState {
@@ -858,7 +858,7 @@ mod tests {
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_budget_catalog("btc-core"),
+            test_prepared_registry("btc-core"),
         ));
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(

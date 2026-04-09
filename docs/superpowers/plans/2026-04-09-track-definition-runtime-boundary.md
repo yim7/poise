@@ -164,14 +164,14 @@
 - Test: `server/src/http.rs`
 - Test: `server/src/websocket.rs`
 
-- [ ] **Step 1: 写失败测试，固定 query 只从 registry + runtime 组合读侧 source**
+- [x] **Step 1: 写失败测试，固定 query 只从 registry + runtime 组合读侧 source**
 
   增加测试，至少覆盖：
   - `TrackQueryService` 从 `PreparedTrackRegistry` 读 `TrackReadDefinition`，从 `TrackQueryStore` 读 runtime 和 events/effects
   - `TrackReadModel::from_source(...)` 不再直接吃 `TrackRuntimeSnapshot`
   - HTTP / WebSocket 测试 helper 不再构造 `TrackBudgetCatalog`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现还依赖旧 query 接口**
+- [x] **Step 2: 运行定向测试，确认当前实现还依赖旧 query 接口**
 
   Run:
   - `cargo test -p poise-application query_service::tests:: -- --nocapture`
@@ -181,7 +181,7 @@
   Expected:
   - 失败，原因是 query service 仍依赖 `TrackBudgetCatalog`，读模型仍直接消费 runtime snapshot。
 
-- [ ] **Step 3: 实现 `TrackReadSource` 路径并删除 `TrackBudgetCatalog`**
+- [x] **Step 3: 实现 `TrackReadSource` 路径并删除 `TrackBudgetCatalog`**
 
   最小实现：
   - 新增 `application/src/track_read_source.rs`
@@ -189,7 +189,7 @@
   - `TrackReadModel::from_source(...)` 只消费 `TrackReadSource`
   - `server` 的 HTTP / WebSocket / test helper 改成消费 bootstrap 提供的 registry，而不是传 budget catalog
 
-- [ ] **Step 4: 运行定向测试，确认 query 边界已经改成 definition + runtime 组合**
+- [x] **Step 4: 运行定向测试，确认 query 边界已经改成 definition + runtime 组合**
 
   Run:
   - `cargo test -p poise-application query_service::tests:: -- --nocapture`
