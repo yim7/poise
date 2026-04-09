@@ -200,13 +200,13 @@
   Expected:
   - 通过，说明 query 已不再依赖 `TrackBudgetCatalog` 和 restore artifact 直读。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
   Run:
   - `git add application/src/track_read_source.rs application/src/lib.rs application/src/query_service.rs application/src/read_model.rs application/src/track_query_store.rs server/src/assembly.rs server/src/http.rs server/src/websocket.rs server/src/test_support.rs server/src/runtime/tests/support.rs`
   - `git commit -m "refactor: project tracks from prepared registry"`
 
-  Commit SHA: `<pending>`
+  Commit SHA: `0b495e1`
 
 ### Task 3: 把 persisted runtime 改成 runtime-only snapshot，并补最小 persisted track presence
 
