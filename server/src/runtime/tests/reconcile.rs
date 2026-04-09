@@ -13,7 +13,7 @@ async fn test_state_accepts_distinct_metadata_and_account_summary_ports() {
     .await;
 
     let instance = current_instance(&state).await;
-    assert_eq!(instance.instrument.symbol, "BTCUSDT");
+    assert_eq!(instance.track_id.as_str(), "BTCUSDT");
 }
 
 #[tokio::test]

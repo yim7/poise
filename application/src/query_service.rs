@@ -94,7 +94,12 @@ impl TrackQueryService {
         let definition = self
             .prepared_registry
             .get(&track_id)
-            .ok_or_else(|| anyhow::anyhow!("missing prepared track definition for `{}`", track_id.as_str()))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing prepared track definition for `{}`",
+                    track_id.as_str()
+                )
+            })?
             .read_definition();
 
         Ok(TrackReadSource {

@@ -113,7 +113,11 @@ pub async fn assemble(
             .iter()
             .map(|track| track.instrument().clone()),
     )?;
-    validate_unique_track_ids(prepared_registry.iter().map(|track| track.track_id().clone()))?;
+    validate_unique_track_ids(
+        prepared_registry
+            .iter()
+            .map(|track| track.track_id().clone()),
+    )?;
     let exchange = build_exchange(&config.exchange).await?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
@@ -155,7 +159,11 @@ async fn assemble_with_state_store(
             .iter()
             .map(|track| track.instrument().clone()),
     )?;
-    validate_unique_track_ids(prepared_registry.iter().map(|track| track.track_id().clone()))?;
+    validate_unique_track_ids(
+        prepared_registry
+            .iter()
+            .map(|track| track.track_id().clone()),
+    )?;
 
     let mut manager = TrackManager::new(clock);
     let mut account_capacity_snapshots = HashMap::new();
@@ -526,8 +534,7 @@ mod tests {
         unavailable_account_monitor,
     };
     use poise_application::{
-        ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService,
-        TrackQueryService,
+        ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService, TrackQueryService,
     };
 
     use super::{

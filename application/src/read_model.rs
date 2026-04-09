@@ -237,11 +237,11 @@ mod tests {
                     unrealized_pnl: 0.0,
                     ..RiskState::default()
                 },
-            observed: ObservedState {
-                reference_price: Some(101.25),
-                out_of_band_since: None,
-                last_tick_at: None,
-                market_data_stale_since: None,
+                observed: ObservedState {
+                    reference_price: Some(101.25),
+                    out_of_band_since: None,
+                    last_tick_at: None,
+                    market_data_stale_since: None,
                 },
             }),
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),

@@ -69,8 +69,10 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
 pub fn parse_config(input: &str) -> Result<Config> {
     let config: Config = toml_edit::de::from_str(input).context("failed to parse TOML config")?;
     for track in &config.tracks {
-        ConfiguredTrackDefinition::try_from_input(track.to_configured_input(config.exchange.venue()))
-            .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
+        ConfiguredTrackDefinition::try_from_input(
+            track.to_configured_input(config.exchange.venue()),
+        )
+        .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
     }
     config.account_monitor.validate()?;
     Ok(config)
@@ -135,7 +137,8 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let input: ConfiguredTrackInput = config.tracks[0].to_configured_input(config.exchange.venue());
+        let input: ConfiguredTrackInput =
+            config.tracks[0].to_configured_input(config.exchange.venue());
         assert_eq!(input.track_id.as_str(), "btc-core");
         assert_eq!(input.venue, Venue::Binance);
         assert_eq!(input.symbol, "BTCUSDT");
@@ -204,8 +207,14 @@ out_of_band_policy = "hold"
         assert_eq!(config.tracks.len(), 2);
         assert_eq!(config.tracks[0].symbol, "BTCUSDT");
         assert_eq!(config.tracks[0].track_id().as_str(), "btc-core");
-        assert_eq!(config.tracks[1].shape_family, Some(poise_core::strategy::ShapeFamily::Concave));
-        assert_eq!(config.tracks[1].out_of_band_policy, Some(poise_core::strategy::OutOfBandPolicy::Hold));
+        assert_eq!(
+            config.tracks[1].shape_family,
+            Some(poise_core::strategy::ShapeFamily::Concave)
+        );
+        assert_eq!(
+            config.tracks[1].out_of_band_policy,
+            Some(poise_core::strategy::OutOfBandPolicy::Hold)
+        );
         match &config.exchange {
             ExchangeConfig::Binance(exchange) => {
                 assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
@@ -303,8 +312,14 @@ total_loss_limit = 600.0
                 assert_eq!(exchange.api_secret, None);
             }
         }
-        assert_eq!(track.track_config().shape_family, poise_core::strategy::ShapeFamily::Linear);
-        assert_eq!(track.track_config().out_of_band_policy, poise_core::strategy::OutOfBandPolicy::Freeze);
+        assert_eq!(
+            track.track_config().shape_family,
+            poise_core::strategy::ShapeFamily::Linear
+        );
+        assert_eq!(
+            track.track_config().out_of_band_policy,
+            poise_core::strategy::OutOfBandPolicy::Freeze
+        );
         assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }
 
@@ -438,9 +453,10 @@ out_of_band_policy = "reduce_only"
         let track = &config.tracks[0];
         assert_eq!(track.shape_family, Some(ShapeFamily::Concave));
         assert_eq!(track.out_of_band_policy, Some(OutOfBandPolicy::ReduceOnly));
-        let configured =
-            ConfiguredTrackDefinition::try_from_input(track.to_configured_input(config.exchange.venue()))
-                .unwrap();
+        let configured = ConfiguredTrackDefinition::try_from_input(
+            track.to_configured_input(config.exchange.venue()),
+        )
+        .unwrap();
         assert_eq!(configured.budget().max_notional, 3000.0);
     }
 

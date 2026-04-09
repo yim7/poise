@@ -279,6 +279,33 @@ impl SqliteStorage {
             .context("failed to join load_account_monitor_state_row blocking task")?
     }
 
+    fn list_persisted_track_presence_blocking(
+        conn: Arc<Mutex<Connection>>,
+    ) -> Result<Vec<TrackId>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT track_id
+                 FROM persisted_track_presence
+                 ORDER BY track_id ASC",
+            )
+            .context("failed to prepare persisted track presence query")?;
+        let track_ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("failed to query persisted track presence")?
+            .map(|track_id| track_id.map(TrackId::new))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize persisted track presence")?;
+        Ok(track_ids)
+    }
+
+    pub async fn list_persisted_track_presence(&self) -> Result<Vec<TrackId>> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || Self::list_persisted_track_presence_blocking(conn))
+            .await
+            .context("failed to join list_persisted_track_presence blocking task")?
+    }
+
     pub async fn save_account_monitor_state_row(&self, row: &AccountMonitorStateRow) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let row = row.clone();

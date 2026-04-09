@@ -531,6 +531,12 @@ pub(crate) fn test_snapshot() -> TrackRuntimeSnapshot {
     test_snapshot_with_config(test_config())
 }
 
+fn snapshot_restore_revision(
+    config: &TrackConfig,
+) -> poise_engine::persisted_runtime::TrackRestoreRevision {
+    poise_engine::persisted_runtime::TrackRestoreRevision::for_track(&btc_instrument(), config)
+}
+
 pub(crate) fn working_order(
     order_id: Option<&str>,
     client_order_id: &str,
@@ -604,8 +610,7 @@ pub(crate) fn inventory_core_order(
 pub(crate) fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnapshot {
     let mut snapshot = TrackRuntimeSnapshot {
         track_id: TrackId::new("BTCUSDT"),
-        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-        config,
+        restore_revision: snapshot_restore_revision(&config),
         status: TrackStatus::Active,
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(6.0)),

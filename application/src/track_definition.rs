@@ -56,7 +56,9 @@ impl ConfiguredTrackDefinition {
         };
         validate_config(&track_config).map_err(|error| anyhow!(error))?;
 
-        let implied_max_notional = track_config.long_exposure_units.max(track_config.short_exposure_units)
+        let implied_max_notional = track_config
+            .long_exposure_units
+            .max(track_config.short_exposure_units)
             * track_config.notional_per_unit;
         let budget = CapacityBudget {
             max_notional: input.max_notional.unwrap_or(implied_max_notional),
