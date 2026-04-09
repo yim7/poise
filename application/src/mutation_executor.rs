@@ -923,9 +923,10 @@ impl MutationExecutor {
         let Some(mut snapshot) = manager.snapshot(id) else {
             return Ok(());
         };
-        let constraint = self
-            .account_margin_guard
-            .constraint_for(&snapshot.instrument);
+        let Some(track) = manager.get_track(id) else {
+            return Ok(());
+        };
+        let constraint = self.account_margin_guard.constraint_for(track.instrument());
         if snapshot.risk.account_capacity_constraint == constraint {
             return Ok(());
         }
@@ -1364,8 +1365,8 @@ pub(crate) mod test_support {
                 },
                 CapacityBudget {
                     max_notional: 3_000.0,
-                    daily_loss_limit: -300.0,
-                    stop_loss_pct: 10.0,
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
                 },
                 ExchangeRules {
                     price_tick: 0.1,

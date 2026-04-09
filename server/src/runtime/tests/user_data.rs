@@ -383,10 +383,13 @@ async fn terminal_order_update_reconciles_without_waiting_for_new_tick() {
 
 #[tokio::test]
 async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_no_domain_event() {
+    let config = test_config();
     let mut snapshot = TrackRuntimeSnapshot {
         track_id: TrackId::new("BTCUSDT"),
-        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-        config: test_config(),
+        restore_revision: poise_engine::persisted_runtime::TrackRestoreRevision::for_track(
+            &Instrument::new(Venue::Binance, "BTCUSDT"),
+            &config,
+        ),
         status: TrackStatus::Active,
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(0.0)),

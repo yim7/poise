@@ -1248,6 +1248,7 @@ dependencies = [
  "poise-core",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -1275,6 +1276,7 @@ dependencies = [
  "poise-protocol",
  "poise-storage",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

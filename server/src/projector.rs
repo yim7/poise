@@ -6,7 +6,7 @@ use poise_protocol::{
     ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
     InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
-    TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionStatsView,
+    TrackBudgetView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionStatsView,
     TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView,
     TrackLedgerView, TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView,
     TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
@@ -82,6 +82,11 @@ impl TrackProjector {
                 min_rebalance_units: source.min_rebalance_units,
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
+            },
+            budget: TrackBudgetView {
+                max_notional: source.budget.max_notional,
+                daily_loss_limit: source.budget.daily_loss_limit,
+                total_loss_limit: source.budget.total_loss_limit,
             },
             market: TrackMarketView {
                 mark_price: source.reference_price,
@@ -813,6 +818,11 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: OutOfBandPolicy::Freeze,
+            budget: poise_core::risk::CapacityBudget {
+                max_notional: 3000.0,
+                daily_loss_limit: 100.0,
+                total_loss_limit: 300.0,
+            },
             reference_price: Some(101.25),
             current_exposure: 3.5,
             desired_exposure: Some(4.0),
@@ -820,7 +830,9 @@ mod tests {
                 realized_pnl_day: Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,
+                trading_fee_today: 0.0,
                 trading_fee_cumulative: 12.3,
+                funding_fee_today: 0.0,
                 funding_fee_cumulative: -4.0,
                 unresolved_gaps: vec![
                     LedgerGapRecord {

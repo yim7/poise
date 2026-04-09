@@ -3,6 +3,7 @@ use poise_core::risk::{self, ExposureIntent, RiskDecision};
 use poise_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use poise_core::types::Exposure;
 
+use crate::loss_guard::build_loss_guard_snapshot;
 use crate::runtime::{AccountCapacityConstraint, TrackRuntime, TrackStatus};
 
 pub struct TargetReconcileResult {
@@ -57,8 +58,7 @@ pub fn reconcile_target(track: &TrackRuntime, reference_price: f64) -> TargetRec
         current: track.current_exposure.clone(),
         target: target.clone(),
         unit_notional: track.config.notional_per_unit,
-        realized_pnl_today: track.risk_state.realized_pnl_today,
-        unrealized_pnl: track.risk_state.unrealized_pnl,
+        loss_guard: build_loss_guard_snapshot(&track.ledger_state, &track.risk_state),
     };
 
     let decision = risk::evaluate_risk(&intent, &track.budget);
@@ -248,8 +248,8 @@ mod tests {
     fn test_budget() -> CapacityBudget {
         CapacityBudget {
             max_notional: 3000.0,
-            daily_loss_limit: -120.0,
-            stop_loss_pct: 4.0,
+            daily_loss_limit: 120.0,
+            total_loss_limit: 500.0,
         }
     }
 
@@ -391,12 +391,21 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_target_uses_risk_state_pnl_to_cap_target() {
+    fn reconcile_builds_loss_guard_snapshot_from_ledger_accessors() {
         let mut track = test_runtime();
         track.status = TrackStatus::Active;
         track.current_exposure = Exposure(2.0);
-        track.risk_state.realized_pnl_today = -100.0;
-        track.risk_state.unrealized_pnl = -25.0;
+        track.ledger_state.realized_pnl_day =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap());
+        track.ledger_state.gross_realized_pnl_today = 100.0;
+        track.ledger_state.gross_realized_pnl_cumulative = 320.0;
+        track.ledger_state.trading_fee_today = 8.0;
+        track.ledger_state.trading_fee_cumulative = 20.0;
+        track.ledger_state.funding_fee_today = -2.0;
+        track.ledger_state.funding_fee_cumulative = -5.0;
+        track.risk_state.unrealized_pnl = -215.0;
+        track.budget.daily_loss_limit = 120.0;
+        track.budget.total_loss_limit = 500.0;
 
         let result = reconcile_target(&track, 90.0);
 

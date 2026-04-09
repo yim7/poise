@@ -70,8 +70,8 @@ min_rebalance_units = 0.5
 shape_family = "linear"
 out_of_band_policy = "freeze"
 max_notional = 3750.0
-daily_loss_limit = -375.0
-stop_loss_pct = 10.0
+daily_loss_limit = 375.0
+total_loss_limit = 750.0
 tick_timeout_secs = 30
 ```
 
@@ -84,7 +84,7 @@ tick_timeout_secs = 30
 - `exchange.deployment = "mainnet"` 时，服务端接 Binance USDⓈ-M Futures 主网地址
 - 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
-- 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit < 0`、`stop_loss_pct > 0`
+- 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
 - 示例里的 `btc-core` 区间总带宽是 `2000 USD`，在线性模式下等效每格约 `100 USD`
 - 联调前要按当前测试网价格手动平移这个区间
 - `min_rebalance_units` 当前表示“触发下一次执行动作的最小目标变化”，不再只是 `current_exposure -> latest_target` 的停手阈值

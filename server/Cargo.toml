@@ -27,5 +27,6 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 poise-application = { path = "../application", features = ["server-test-support"] }
 reqwest.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }

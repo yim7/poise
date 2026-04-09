@@ -160,7 +160,7 @@ mod tests {
     use crate::server_context::WebSocketState;
     use crate::test_support::{
         build_effect_worker_test_context, build_test_application_services, build_websocket_state,
-        unavailable_account_monitor,
+        test_prepared_registry, unavailable_account_monitor,
     };
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
@@ -225,7 +225,8 @@ mod tests {
             account_margin_guard.clone(),
         );
         let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackQueryStore>
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            test_prepared_registry("btc-core"),
         ));
         let websocket_state = build_websocket_state(
             &services,
@@ -270,7 +271,8 @@ mod tests {
             account_margin_guard.clone(),
         );
         let query_service = Arc::new(TrackQueryService::new(
-            repository.clone() as Arc<dyn TrackQueryStore>
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            test_prepared_registry("btc-core"),
         ));
         let websocket_state = build_websocket_state(
             &services,
@@ -659,8 +661,8 @@ mod tests {
                 },
                 CapacityBudget {
                     max_notional: 3000.0,
-                    daily_loss_limit: -100.0,
-                    stop_loss_pct: 10.0,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
                 },
                 ExchangeRules {
                     price_tick: 0.0,
@@ -686,7 +688,6 @@ mod tests {
     }
 
     fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
-        snapshot.risk.realized_pnl_cumulative = 980.1;
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.realized_pnl_day =
             Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap());

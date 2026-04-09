@@ -281,6 +281,7 @@ where
     let account_monitor = build_test_account_monitor(account_summary, events).await;
     let _ = Arc::new(TrackQueryService::new(
         persistence as Arc<dyn TrackQueryStore>,
+        crate::test_support::test_prepared_registry("BTCUSDT"),
     ));
     build_runtime_and_effect_worker_test_contexts(
         &services,
@@ -453,8 +454,8 @@ pub(crate) fn rounded_submit_test_config() -> TrackConfig {
 pub(crate) fn test_budget() -> CapacityBudget {
     CapacityBudget {
         max_notional: 3000.0,
-        daily_loss_limit: -120.0,
-        stop_loss_pct: 10.0,
+        daily_loss_limit: 120.0,
+        total_loss_limit: 300.0,
     }
 }
 
@@ -530,6 +531,12 @@ pub(crate) fn test_snapshot() -> TrackRuntimeSnapshot {
     test_snapshot_with_config(test_config())
 }
 
+fn snapshot_restore_revision(
+    config: &TrackConfig,
+) -> poise_engine::persisted_runtime::TrackRestoreRevision {
+    poise_engine::persisted_runtime::TrackRestoreRevision::for_track(&btc_instrument(), config)
+}
+
 pub(crate) fn working_order(
     order_id: Option<&str>,
     client_order_id: &str,
@@ -603,8 +610,7 @@ pub(crate) fn inventory_core_order(
 pub(crate) fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnapshot {
     let mut snapshot = TrackRuntimeSnapshot {
         track_id: TrackId::new("BTCUSDT"),
-        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-        config,
+        restore_revision: snapshot_restore_revision(&config),
         status: TrackStatus::Active,
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(6.0)),

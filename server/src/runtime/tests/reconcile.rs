@@ -13,7 +13,7 @@ async fn test_state_accepts_distinct_metadata_and_account_summary_ports() {
     .await;
 
     let instance = current_instance(&state).await;
-    assert_eq!(instance.instrument.symbol, "BTCUSDT");
+    assert_eq!(instance.track_id.as_str(), "BTCUSDT");
 }
 
 #[tokio::test]
@@ -294,8 +294,8 @@ async fn filled_order_updates_realized_pnl_and_trips_daily_loss_cap() {
         vec![],
         CapacityBudget {
             max_notional: 3000.0,
-            daily_loss_limit: -10.0,
-            stop_loss_pct: 10.0,
+            daily_loss_limit: 10.0,
+            total_loss_limit: 300.0,
         },
     )
     .await;
@@ -320,7 +320,7 @@ async fn filled_order_updates_realized_pnl_and_trips_daily_loss_cap() {
         .unwrap();
 
     wait_until_instance(&fixture.state, |instance| {
-        (instance.risk.realized_pnl_today + 20.0).abs() < f64::EPSILON
+        (instance.ledger_state.gross_realized_pnl_today + 20.0).abs() < f64::EPSILON
     })
     .await;
 

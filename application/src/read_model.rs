@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
+use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
 use poise_engine::ledger::TrackLedgerState;
 use poise_engine::runtime::{SlotState, TrackStatus};
-use poise_engine::snapshot::TrackRuntimeSnapshot;
 
+use crate::TrackReadSource;
 use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,7 @@ pub struct TrackReadModel {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: OutOfBandPolicy,
+    pub budget: CapacityBudget,
     pub reference_price: Option<f64>,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
@@ -57,26 +59,20 @@ pub struct ReadModelSlot {
 }
 
 impl TrackReadModel {
-    pub fn from_snapshot(
-        snapshot: TrackRuntimeSnapshot,
-        updated_at: DateTime<Utc>,
-        recent_track_events: Vec<StoredTrackEvent>,
-        recent_effects: Vec<PersistedTrackEffect>,
-    ) -> Self {
-        let TrackRuntimeSnapshot {
-            track_id,
-            instrument,
-            config,
-            status,
-            current_exposure,
-            desired_exposure,
-            manual_target_override,
-            executor_state,
-            replacement_gate_reason,
-            ledger_state,
-            risk,
-            observed,
-        } = snapshot;
+    pub fn from_source(source: TrackReadSource) -> Self {
+        let definition = source.definition;
+        let runtime = source.runtime;
+        let status = runtime.status;
+        let reference_price = runtime.reference_price;
+        let current_exposure = runtime.current_exposure;
+        let desired_exposure = runtime.desired_exposure;
+        let manual_target_override = runtime.manual_target_override;
+        let replacement_gate_reason = runtime.replacement_gate_reason;
+        let ledger_state = runtime.ledger_state;
+        let unrealized_pnl = runtime.unrealized_pnl;
+        let has_account_margin_guard = runtime.has_account_margin_guard;
+        let has_stale_market_data = runtime.market_data_stale_since.is_some();
+        let executor_state = runtime.executor_state;
 
         let slots = executor_state
             .slots
@@ -96,24 +92,25 @@ impl TrackReadModel {
             .collect();
 
         Self {
-            track_id: track_id.as_str().to_string(),
-            venue: instrument.venue.as_str().to_string(),
-            symbol: instrument.symbol,
+            track_id: definition.track_id.as_str().to_string(),
+            venue: definition.instrument.venue.as_str().to_string(),
+            symbol: definition.instrument.symbol,
             status,
-            updated_at,
-            lower_price: config.lower_price,
-            upper_price: config.upper_price,
-            long_exposure_units: config.long_exposure_units,
-            short_exposure_units: config.short_exposure_units,
-            notional_per_unit: config.notional_per_unit,
-            min_rebalance_units: config.min_rebalance_units,
-            shape_family: config.shape_family,
-            out_of_band_policy: config.out_of_band_policy,
-            reference_price: observed.reference_price,
+            updated_at: source.updated_at,
+            lower_price: definition.track_config.lower_price,
+            upper_price: definition.track_config.upper_price,
+            long_exposure_units: definition.track_config.long_exposure_units,
+            short_exposure_units: definition.track_config.short_exposure_units,
+            notional_per_unit: definition.track_config.notional_per_unit,
+            min_rebalance_units: definition.track_config.min_rebalance_units,
+            shape_family: definition.track_config.shape_family,
+            out_of_band_policy: definition.track_config.out_of_band_policy,
+            budget: definition.budget,
+            reference_price,
             current_exposure: current_exposure.0,
             desired_exposure: desired_exposure.map(|value| value.0),
             ledger_state,
-            unrealized_pnl: risk.unrealized_pnl,
+            unrealized_pnl,
             executor_mode: executor_state.diagnostics.mode.clone(),
             inventory_gap: executor_state.diagnostics.inventory_gap.0,
             gap_started_at: executor_state.diagnostics.gap_started_at,
@@ -122,13 +119,13 @@ impl TrackReadModel {
             stats_started_at: executor_state.stats.started_at,
             recovery_anomaly: executor_state.diagnostics.recovery_anomaly.clone(),
             has_recovery_anomaly: executor_state.diagnostics.recovery_anomaly.is_some(),
-            has_account_margin_guard: risk.account_capacity_constraint.increase_blocked,
-            has_stale_market_data: observed.market_data_stale_since.is_some(),
+            has_account_margin_guard,
+            has_stale_market_data,
             replacement_gate_reason,
             slots,
             manual_target_override: manual_target_override.map(|value| value.0),
-            recent_track_events,
-            recent_effects,
+            recent_track_events: source.recent_track_events,
+            recent_effects: source.recent_effects,
         }
     }
 }
@@ -144,9 +141,11 @@ fn project_slot_label(index: usize, slot_name: &str) -> String {
 mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -158,23 +157,41 @@ mod tests {
 
     use super::TrackReadModel;
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
+    use crate::{TrackReadDefinition, TrackReadSource, TrackRuntimeReadState};
+
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
 
     #[test]
     fn read_model_from_snapshot_flattens_runtime_state() {
-        let read_model = TrackReadModel::from_snapshot(
-            TrackRuntimeSnapshot {
+        let track_config = test_track_config();
+        let read_model = TrackReadModel::from_source(TrackReadSource {
+            definition: TrackReadDefinition {
                 track_id: TrackId::new("btc-core"),
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                config: TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: OutOfBandPolicy::Freeze,
+                track_config: track_config.clone(),
+                budget: CapacityBudget {
+                    max_notional: 3000.0,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
                 },
+            },
+            runtime: TrackRuntimeReadState::from_snapshot(TrackRuntimeSnapshot {
+                track_id: TrackId::new("btc-core"),
+                restore_revision: TrackRestoreRevision::for_track(
+                    &Instrument::new(Venue::Binance, "BTCUSDT"),
+                    &track_config,
+                ),
                 status: TrackStatus::Active,
                 current_exposure: Exposure(3.5),
                 desired_exposure: Some(Exposure(4.0)),
@@ -216,9 +233,6 @@ mod tests {
                 ledger_state: Default::default(),
                 replacement_gate_reason: None,
                 risk: RiskState {
-                    realized_pnl_day: None,
-                    realized_pnl_today: 0.0,
-                    realized_pnl_cumulative: 0.0,
                     unrealized_pnl: 0.0,
                     ..RiskState::default()
                 },
@@ -228,9 +242,9 @@ mod tests {
                     last_tick_at: None,
                     market_data_stale_since: None,
                 },
-            },
-            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            vec![StoredTrackEvent {
+            }),
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            recent_track_events: vec![StoredTrackEvent {
                 id: 1,
                 track_id: TrackId::new("btc-core"),
                 event: DomainEvent::ExposureTargetChanged {
@@ -239,7 +253,7 @@ mod tests {
                 },
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
             }],
-            vec![PersistedTrackEffect {
+            recent_effects: vec![PersistedTrackEffect {
                 effect_id: "btc-core:batch-1:0".into(),
                 track_id: TrackId::new("btc-core"),
                 batch_id: "batch-1".into(),
@@ -261,7 +275,7 @@ mod tests {
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
                 updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             }],
-        );
+        });
 
         assert_eq!(read_model.track_id, "btc-core");
         assert_eq!(read_model.symbol, "BTCUSDT");

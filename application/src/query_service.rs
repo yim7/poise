@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use poise_engine::track::TrackId;
 
-use crate::{TrackQueryStore, TrackReadModel};
+use crate::{
+    PreparedTrackRegistry, TrackQueryStore, TrackReadModel, TrackReadSource, TrackRuntimeReadState,
+};
 
 const LIST_EFFECTS_LIMIT: usize = 20;
 const DETAIL_EVENTS_LIMIT: usize = 20;
@@ -11,11 +13,18 @@ const DETAIL_EFFECTS_LIMIT: usize = 20;
 
 pub struct TrackQueryService {
     repository: Arc<dyn TrackQueryStore>,
+    prepared_registry: Arc<PreparedTrackRegistry>,
 }
 
 impl TrackQueryService {
-    pub fn new(repository: Arc<dyn TrackQueryStore>) -> Self {
-        Self { repository }
+    pub fn new(
+        repository: Arc<dyn TrackQueryStore>,
+        prepared_registry: Arc<PreparedTrackRegistry>,
+    ) -> Self {
+        Self {
+            repository,
+            prepared_registry,
+        }
     }
 
     pub async fn list_track_sources(&self) -> Result<Vec<TrackReadModel>> {
@@ -33,13 +42,15 @@ impl TrackQueryService {
                 .repository
                 .list_recent_track_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
                 .await?;
-
-            sources.push(TrackReadModel::from_snapshot(
+            let source = self.read_source_from_snapshot(
+                snapshot.snapshot.track_id.clone(),
                 snapshot.snapshot,
                 snapshot.updated_at,
                 Vec::new(),
                 recent_effects,
-            ));
+            )?;
+
+            sources.push(TrackReadModel::from_source(source));
         }
 
         Ok(sources)
@@ -61,13 +72,43 @@ impl TrackQueryService {
             .repository
             .list_recent_track_effects(track_id, DETAIL_EFFECTS_LIMIT)
             .await?;
+        Ok(Some(TrackReadModel::from_source(
+            self.read_source_from_snapshot(
+                track_id.clone(),
+                snapshot.snapshot,
+                snapshot.updated_at,
+                recent_track_events,
+                recent_effects,
+            )?,
+        )))
+    }
 
-        Ok(Some(TrackReadModel::from_snapshot(
-            snapshot.snapshot,
-            snapshot.updated_at,
+    fn read_source_from_snapshot(
+        &self,
+        track_id: TrackId,
+        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        recent_track_events: Vec<crate::StoredTrackEvent>,
+        recent_effects: Vec<crate::PersistedTrackEffect>,
+    ) -> Result<TrackReadSource> {
+        let definition = self
+            .prepared_registry
+            .get(&track_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing prepared track definition for `{}`",
+                    track_id.as_str()
+                )
+            })?
+            .read_definition();
+
+        Ok(TrackReadSource {
+            definition,
+            runtime: TrackRuntimeReadState::from_snapshot(snapshot),
+            updated_at,
             recent_track_events,
             recent_effects,
-        )))
+        })
     }
 }
 
@@ -83,6 +124,7 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -93,10 +135,24 @@ mod tests {
     use poise_engine::transition::TrackEffect;
 
     use crate::{
-        EffectStatus, PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
+        ConfiguredTrackDefinition, ConfiguredTrackInput, EffectStatus, PersistedTrackEffect,
+        PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
     };
 
     use super::TrackQueryService;
+
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
 
     #[tokio::test]
     async fn list_track_sources_reads_all_registered_snapshots() {
@@ -138,8 +194,34 @@ mod tests {
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = TrackQueryService::new(repository.clone());
+        let service = TrackQueryService::new(repository.clone(), test_prepared_registry());
         (service, repository)
+    }
+
+    fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
+        Arc::new(
+            PreparedTrackRegistry::new(vec![
+                ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+                    track_id: TrackId::new("btc-core"),
+                    venue: Venue::Binance,
+                    symbol: "BTCUSDT".into(),
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(ShapeFamily::Linear),
+                    out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+                    max_notional: None,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
+                    tick_timeout_secs: Some(30),
+                })
+                .unwrap(),
+            ])
+            .unwrap(),
+        )
     }
 
     struct FakeReadRepository {
@@ -249,19 +331,13 @@ mod tests {
     }
 
     fn test_snapshot() -> TrackRuntimeSnapshot {
+        let config = test_track_config();
         TrackRuntimeSnapshot {
             track_id: TrackId::new("btc-core"),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
+            restore_revision: TrackRestoreRevision::for_track(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &config,
+            ),
             status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
             desired_exposure: Some(Exposure(4.0)),
@@ -303,9 +379,6 @@ mod tests {
             ledger_state: Default::default(),
             replacement_gate_reason: None,
             risk: RiskState {
-                realized_pnl_day: None,
-                realized_pnl_today: 0.0,
-                realized_pnl_cumulative: 980.1,
                 unrealized_pnl: 265.2,
                 ..RiskState::default()
             },

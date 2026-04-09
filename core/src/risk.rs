@@ -6,7 +6,14 @@ use crate::types::Exposure;
 pub struct CapacityBudget {
     pub max_notional: f64,
     pub daily_loss_limit: f64,
-    pub stop_loss_pct: f64,
+    pub total_loss_limit: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LossGuardSnapshot {
+    pub net_realized_pnl_today: f64,
+    pub net_realized_pnl_cumulative: f64,
+    pub unrealized_pnl: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,8 +21,7 @@ pub struct ExposureIntent {
     pub current: Exposure,
     pub target: Exposure,
     pub unit_notional: f64,
-    pub realized_pnl_today: f64,
-    pub unrealized_pnl: f64,
+    pub loss_guard: LossGuardSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,12 +36,12 @@ pub fn validate_capacity_budget(budget: &CapacityBudget) -> Result<(), String> {
         return Err("max_notional must be finite and > 0".to_string());
     }
 
-    if !budget.daily_loss_limit.is_finite() || budget.daily_loss_limit >= 0.0 {
-        return Err("daily_loss_limit must be finite and < 0".to_string());
+    if !budget.daily_loss_limit.is_finite() || budget.daily_loss_limit <= 0.0 {
+        return Err("daily_loss_limit must be finite and > 0".to_string());
     }
 
-    if !budget.stop_loss_pct.is_finite() || budget.stop_loss_pct <= 0.0 {
-        return Err("stop_loss_pct must be finite and > 0".to_string());
+    if !budget.total_loss_limit.is_finite() || budget.total_loss_limit <= 0.0 {
+        return Err("total_loss_limit must be finite and > 0".to_string());
     }
 
     Ok(())
@@ -43,14 +49,13 @@ pub fn validate_capacity_budget(budget: &CapacityBudget) -> Result<(), String> {
 
 /// 纯函数：评估风控。
 pub fn evaluate_risk(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskDecision {
-    let total_pnl = intent.realized_pnl_today + intent.unrealized_pnl;
+    let daily_loss_amount =
+        (-(intent.loss_guard.net_realized_pnl_today + intent.loss_guard.unrealized_pnl)).max(0.0);
+    let total_loss_amount = (-(intent.loss_guard.net_realized_pnl_cumulative
+        + intent.loss_guard.unrealized_pnl))
+        .max(0.0);
 
-    if total_pnl <= budget.daily_loss_limit {
-        return RiskDecision::Cap(Exposure(0.0));
-    }
-
-    if budget.max_notional > 0.0
-        && ((-total_pnl / budget.max_notional) * 100.0) >= budget.stop_loss_pct
+    if daily_loss_amount >= budget.daily_loss_limit || total_loss_amount >= budget.total_loss_limit
     {
         return RiskDecision::Cap(Exposure(0.0));
     }
@@ -72,8 +77,16 @@ mod tests {
     fn budget() -> CapacityBudget {
         CapacityBudget {
             max_notional: 3000.0,
-            daily_loss_limit: -120.0,
-            stop_loss_pct: 4.0,
+            daily_loss_limit: 120.0,
+            total_loss_limit: 500.0,
+        }
+    }
+
+    fn empty_loss_guard() -> LossGuardSnapshot {
+        LossGuardSnapshot {
+            net_realized_pnl_today: 0.0,
+            net_realized_pnl_cumulative: 0.0,
+            unrealized_pnl: 0.0,
         }
     }
 
@@ -83,8 +96,7 @@ mod tests {
             current: Exposure(0.0),
             target: Exposure(4.0),
             unit_notional: 375.0,
-            realized_pnl_today: 0.0,
-            unrealized_pnl: 0.0,
+            loss_guard: empty_loss_guard(),
         };
         let decision = evaluate_risk(&intent, &budget());
         assert!(matches!(decision, RiskDecision::Allow(_)));
@@ -96,8 +108,7 @@ mod tests {
             current: Exposure(8.0),
             target: Exposure(4.0),
             unit_notional: 375.0,
-            realized_pnl_today: 0.0,
-            unrealized_pnl: 0.0,
+            loss_guard: empty_loss_guard(),
         };
         let decision = evaluate_risk(&intent, &budget());
         assert!(matches!(decision, RiskDecision::Allow(_)));
@@ -109,8 +120,7 @@ mod tests {
             current: Exposure(4.0),
             target: Exposure(4.0),
             unit_notional: 375.0,
-            realized_pnl_today: 0.0,
-            unrealized_pnl: 0.0,
+            loss_guard: empty_loss_guard(),
         };
         let decision = evaluate_risk(&intent, &budget());
         assert!(matches!(decision, RiskDecision::Allow(_)));
@@ -122,8 +132,7 @@ mod tests {
             current: Exposure(0.0),
             target: Exposure(10.0),
             unit_notional: 375.0,
-            realized_pnl_today: 0.0,
-            unrealized_pnl: 0.0,
+            loss_guard: empty_loss_guard(),
         };
 
         let decision = evaluate_risk(&intent, &budget());
@@ -132,13 +141,16 @@ mod tests {
     }
 
     #[test]
-    fn caps_to_zero_when_daily_loss_limit_is_breached() {
+    fn caps_to_zero_when_daily_loss_limit_is_breached_with_positive_limit() {
         let intent = ExposureIntent {
             current: Exposure(4.0),
             target: Exposure(8.0),
             unit_notional: 375.0,
-            realized_pnl_today: -100.0,
-            unrealized_pnl: -25.0,
+            loss_guard: LossGuardSnapshot {
+                net_realized_pnl_today: -90.0,
+                net_realized_pnl_cumulative: -90.0,
+                unrealized_pnl: -35.0,
+            },
         };
 
         let decision = evaluate_risk(&intent, &budget());
@@ -147,16 +159,19 @@ mod tests {
     }
 
     #[test]
-    fn caps_to_zero_when_stop_loss_pct_is_breached() {
+    fn caps_to_zero_when_total_loss_limit_is_breached() {
         let intent = ExposureIntent {
             current: Exposure(4.0),
             target: Exposure(8.0),
             unit_notional: 375.0,
-            realized_pnl_today: -50.0,
-            unrealized_pnl: -70.0,
+            loss_guard: LossGuardSnapshot {
+                net_realized_pnl_today: -10.0,
+                net_realized_pnl_cumulative: -480.0,
+                unrealized_pnl: -30.0,
+            },
         };
         let budget = CapacityBudget {
-            daily_loss_limit: -200.0,
+            daily_loss_limit: 200.0,
             ..budget()
         };
 
@@ -177,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_capacity_budget_rejects_non_negative_daily_loss_limit() {
+    fn validate_capacity_budget_rejects_non_positive_daily_loss_limit() {
         let error = validate_capacity_budget(&CapacityBudget {
             daily_loss_limit: 0.0,
             ..budget()
@@ -188,14 +203,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_capacity_budget_rejects_non_positive_stop_loss_pct() {
+    fn validate_capacity_budget_rejects_non_positive_total_loss_limit() {
         let error = validate_capacity_budget(&CapacityBudget {
-            stop_loss_pct: 0.0,
+            total_loss_limit: 0.0,
             ..budget()
         })
         .unwrap_err();
 
-        assert!(error.contains("stop_loss_pct"));
+        assert!(error.contains("total_loss_limit"));
     }
 
     #[test]

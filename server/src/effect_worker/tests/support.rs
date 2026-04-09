@@ -55,11 +55,17 @@ pub(crate) fn btc_instrument() -> Instrument {
     Instrument::new(Venue::Binance, "BTCUSDT")
 }
 
+fn snapshot_restore_revision(
+    config: &TrackConfig,
+) -> poise_engine::persisted_runtime::TrackRestoreRevision {
+    poise_engine::persisted_runtime::TrackRestoreRevision::for_track(&btc_instrument(), config)
+}
+
 pub(crate) fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
+    let config = test_config();
     TrackRuntimeSnapshot {
         track_id: TrackId::new("btc-core"),
-        instrument: btc_instrument(),
-        config: test_config(),
+        restore_revision: snapshot_restore_revision(&config),
         status: TrackStatus::Active,
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(6.0)),
@@ -103,10 +109,10 @@ pub(crate) fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
 }
 
 pub(crate) fn snapshot_with_working_order() -> TrackRuntimeSnapshot {
+    let config = test_config();
     TrackRuntimeSnapshot {
         track_id: TrackId::new("btc-core"),
-        instrument: btc_instrument(),
-        config: test_config(),
+        restore_revision: snapshot_restore_revision(&config),
         status: TrackStatus::Active,
         current_exposure: Exposure(2.0),
         desired_exposure: Some(Exposure(6.0)),
@@ -164,8 +170,7 @@ pub(crate) fn snapshot_with_submit_pending_order(
 ) -> TrackRuntimeSnapshot {
     TrackRuntimeSnapshot {
         track_id: TrackId::new("btc-core"),
-        instrument: btc_instrument(),
-        config: config.clone(),
+        restore_revision: snapshot_restore_revision(&config),
         status: TrackStatus::Active,
         current_exposure: Exposure(0.0),
         desired_exposure: Some(poise_core::strategy::desired_exposure(
@@ -229,8 +234,8 @@ pub(crate) fn test_config() -> TrackConfig {
 pub(crate) fn test_budget() -> CapacityBudget {
     CapacityBudget {
         max_notional: 3000.0,
-        daily_loss_limit: -120.0,
-        stop_loss_pct: 10.0,
+        daily_loss_limit: 120.0,
+        total_loss_limit: 300.0,
     }
 }
 

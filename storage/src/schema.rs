@@ -12,9 +12,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS track_snapshots (
             track_id TEXT PRIMARY KEY,
-            venue TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            config_json TEXT NOT NULL,
+            restore_revision TEXT,
             status TEXT NOT NULL,
             current_exposure REAL NOT NULL,
             desired_exposure REAL,
@@ -30,6 +28,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             out_of_band_since TEXT,
             last_tick_at TEXT,
             market_data_stale_since TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS persisted_track_presence (
+            track_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
 
@@ -98,15 +102,14 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
     add_column_if_missing(conn, "track_snapshots", "last_tick_at", "TEXT")?;
     add_column_if_missing(conn, "track_snapshots", "market_data_stale_since", "TEXT")?;
+    add_column_if_missing(conn, "track_snapshots", "restore_revision", "TEXT")?;
 
     ensure_columns_present(
         conn,
         "track_snapshots",
         &[
             "track_id",
-            "venue",
-            "symbol",
-            "config_json",
+            "restore_revision",
             "status",
             "current_exposure",
             "desired_exposure",
@@ -126,6 +129,11 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         ],
     )?;
     ensure_columns_present(conn, "track_events", &["track_id"])?;
+    ensure_columns_present(
+        conn,
+        "persisted_track_presence",
+        &["track_id", "created_at", "updated_at"],
+    )?;
     ensure_columns_present(
         conn,
         "track_effects",
@@ -387,7 +395,11 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(columns.contains(&"track_id".to_string()));
+        assert!(columns.contains(&"restore_revision".to_string()));
         assert!(columns.contains(&"desired_exposure".to_string()));
+        assert!(!columns.contains(&"venue".to_string()));
+        assert!(!columns.contains(&"symbol".to_string()));
+        assert!(!columns.contains(&"config_json".to_string()));
         assert!(!columns.contains(&"pending_order_json".to_string()));
     }
 
@@ -404,9 +416,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE track_snapshots (
                 track_id TEXT PRIMARY KEY,
-                venue TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                config_json TEXT NOT NULL,
+                restore_revision TEXT,
                 status TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 desired_exposure REAL,
@@ -433,6 +443,9 @@ mod tests {
 
         assert!(columns.contains(&"replacement_gate_reason_json".to_string()));
         assert!(columns.contains(&"desired_exposure".to_string()));
+        assert!(!columns.contains(&"venue".to_string()));
+        assert!(!columns.contains(&"symbol".to_string()));
+        assert!(!columns.contains(&"config_json".to_string()));
     }
 
     #[test]

@@ -71,6 +71,8 @@ pub struct TrackDetailView {
     pub identity: TrackIdentityView,
     pub status: TrackStatusPanelView,
     pub strategy: TrackStrategyView,
+    #[serde(default)]
+    pub budget: TrackBudgetView,
     pub market: TrackMarketView,
     pub position: TrackPositionView,
     pub ledger: TrackLedgerView,
@@ -102,6 +104,13 @@ pub struct TrackStrategyView {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: OutOfBandPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrackBudgetView {
+    pub max_notional: f64,
+    pub daily_loss_limit: f64,
+    pub total_loss_limit: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

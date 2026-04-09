@@ -12,13 +12,10 @@ use poise_application::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
-use poise_core::events::{DomainEvent, ReplacementGateReason};
-use poise_core::strategy::{TrackConfig, validate_config};
-use poise_core::types::Exposure;
-use poise_engine::ledger::TrackLedgerState;
-use poise_engine::runtime::{ExecutorState, RiskState, TrackStatus};
-use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
-use poise_engine::track::{Instrument, TrackId, Venue};
+use poise_core::events::DomainEvent;
+use poise_engine::persisted_runtime::{PersistedRuntimeCodec, PersistedRuntimeRow};
+use poise_engine::snapshot::TrackRuntimeSnapshot;
+use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 
 pub struct SqliteStorage {
@@ -55,48 +52,113 @@ impl SqliteStorage {
 
     fn from_connection(conn: Connection) -> Result<Self> {
         schema::initialize(&conn).context("failed to initialize sqlite schema")?;
+        Self::backfill_restore_revision_from_legacy_definition_columns(&conn)
+            .context("failed to migrate legacy track definitions into restore_revision")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
 
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .with_context(|| format!("failed to inspect sqlite table `{table}`"))?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .with_context(|| format!("failed to query sqlite table info for `{table}`"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .with_context(|| format!("failed to deserialize sqlite table info for `{table}`"))?;
+        Ok(columns.iter().any(|candidate| candidate == column))
+    }
+
+    fn backfill_restore_revision_from_legacy_definition_columns(conn: &Connection) -> Result<()> {
+        let has_venue = Self::table_has_column(conn, "track_snapshots", "venue")?;
+        let has_symbol = Self::table_has_column(conn, "track_snapshots", "symbol")?;
+        let has_config_json = Self::table_has_column(conn, "track_snapshots", "config_json")?;
+
+        let legacy_column_count = [has_venue, has_symbol, has_config_json]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+        if legacy_column_count == 0 {
+            return Ok(());
+        }
+        if legacy_column_count != 3 {
+            return Err(anyhow!(
+                "track_snapshots contains partial legacy definition columns; expected venue, symbol, and config_json together"
+            ));
+        }
+
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("failed to begin restore_revision backfill transaction")?;
+        let result = (|| -> Result<()> {
+            let pending_rows = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT track_id, venue, symbol, config_json
+                         FROM track_snapshots
+                         WHERE restore_revision IS NULL",
+                    )
+                    .context(
+                        "failed to query legacy track definitions for restore revision backfill",
+                    )?;
+                stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .context(
+                    "failed to iterate legacy track definitions for restore revision backfill",
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context(
+                    "failed to deserialize legacy track definitions for restore revision backfill",
+                )?
+            };
+
+            for (track_id, venue, symbol, config_json) in pending_rows {
+                let (venue, symbol, config_json) = match (venue, symbol, config_json) {
+                    (Some(venue), Some(symbol), Some(config_json)) => (venue, symbol, config_json),
+                    _ => {
+                        return Err(anyhow!(
+                            "track `{track_id}` is missing legacy definition columns required to backfill restore_revision"
+                        ));
+                    }
+                };
+                let restore_revision =
+                    PersistedRuntimeCodec::restore_revision_from_legacy_definition(
+                        &venue,
+                        &symbol,
+                        &config_json,
+                    )?;
+                conn.execute(
+                    "UPDATE track_snapshots
+                     SET restore_revision = ?1
+                     WHERE track_id = ?2",
+                    params![restore_revision.as_str(), track_id],
+                )
+                .context("failed to backfill restore_revision from legacy track definition")?;
+            }
+
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn
+                .execute_batch("COMMIT")
+                .context("failed to commit restore_revision backfill transaction"),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     fn lock_connection(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
         conn.lock()
             .map_err(|err| anyhow!("failed to lock sqlite connection: {err}"))
-    }
-
-    fn deserialize_track_config(config_json: &str) -> rusqlite::Result<TrackConfig> {
-        let config: TrackConfig = serde_json::from_str(config_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
-        })?;
-        validate_config(&config).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
-            )
-        })?;
-        Ok(config)
-    }
-
-    fn deserialize_track_status(status_json: &str) -> rusqlite::Result<TrackStatus> {
-        serde_json::from_str(status_json).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
-        })
-    }
-
-    fn deserialize_venue(venue: &str) -> rusqlite::Result<Venue> {
-        match venue {
-            "binance" => Ok(Venue::Binance),
-            other => Err(rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unknown venue `{other}`"),
-                )),
-            )),
-        }
     }
 
     fn deserialize_domain_event(event_json: &str) -> rusqlite::Result<DomainEvent> {
@@ -316,6 +378,33 @@ impl SqliteStorage {
             .context("failed to join load_account_monitor_state_row blocking task")?
     }
 
+    fn list_persisted_track_presence_blocking(
+        conn: Arc<Mutex<Connection>>,
+    ) -> Result<Vec<TrackId>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT track_id
+                 FROM persisted_track_presence
+                 ORDER BY track_id ASC",
+            )
+            .context("failed to prepare persisted track presence query")?;
+        let track_ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("failed to query persisted track presence")?
+            .map(|track_id| track_id.map(TrackId::new))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize persisted track presence")?;
+        Ok(track_ids)
+    }
+
+    pub async fn list_persisted_track_presence(&self) -> Result<Vec<TrackId>> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || Self::list_persisted_track_presence_blocking(conn))
+            .await
+            .context("failed to join list_persisted_track_presence blocking task")?
+    }
+
     pub async fn save_account_monitor_state_row(&self, row: &AccountMonitorStateRow) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let row = row.clone();
@@ -334,8 +423,6 @@ impl SqliteStorage {
         effects: Vec<TrackEffect>,
         effect_status_update: Option<EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite> {
-        let config_json =
-            serde_json::to_string(&state.config).context("failed to serialize track config")?;
         let status_json =
             serde_json::to_string(&state.status).context("failed to serialize track status")?;
         let executor_state_json = serde_json::to_string(&state.executor_state)
@@ -346,25 +433,9 @@ impl SqliteStorage {
             .map(serde_json::to_string)
             .transpose()
             .context("failed to serialize replacement gate reason")?;
-        let ledger_state = if state.ledger_state.is_empty()
-            && (state.risk.realized_pnl_day.is_some()
-                || state.risk.realized_pnl_today.abs() > f64::EPSILON
-                || state.risk.realized_pnl_cumulative.abs() > f64::EPSILON)
-        {
-            TrackLedgerState::from_legacy_realized(
-                state.risk.realized_pnl_day,
-                state.risk.realized_pnl_today,
-                state.risk.realized_pnl_cumulative,
-            )
-        } else {
-            state.ledger_state.clone()
-        };
+        let ledger_state = state.ledger_state.clone();
         let ledger_state_json =
             serde_json::to_string(&ledger_state).context("failed to serialize ledger state")?;
-        let realized_pnl_day = state
-            .risk
-            .realized_pnl_day
-            .map(|day| day.format("%F").to_string());
         let out_of_band_since = state
             .observed
             .out_of_band_since
@@ -388,9 +459,7 @@ impl SqliteStorage {
         tx.execute(
             "INSERT OR REPLACE INTO track_snapshots (
                 track_id,
-                venue,
-                symbol,
-                config_json,
+                restore_revision,
                 status,
                 current_exposure,
                 desired_exposure,
@@ -398,31 +467,26 @@ impl SqliteStorage {
                 executor_state_json,
                 replacement_gate_reason_json,
                 ledger_state_json,
-                realized_pnl_day,
-                realized_pnl_today,
-                realized_pnl_cumulative,
                 unrealized_pnl,
                 reference_price,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 id,
-                state.instrument.venue.as_str(),
-                state.instrument.symbol,
-                config_json,
+                state.restore_revision.as_str(),
                 status_json,
                 state.current_exposure.0,
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
-                state.manual_target_override.as_ref().map(|exposure| exposure.0),
+                state
+                    .manual_target_override
+                    .as_ref()
+                    .map(|exposure| exposure.0),
                 executor_state_json,
                 replacement_gate_reason_json,
                 ledger_state_json,
-                realized_pnl_day,
-                state.risk.realized_pnl_today,
-                state.risk.realized_pnl_cumulative,
                 state.risk.unrealized_pnl,
                 state.observed.reference_price,
                 out_of_band_since,
@@ -432,6 +496,15 @@ impl SqliteStorage {
             ],
         )
         .context("failed to save track snapshot")?;
+
+        tx.execute(
+            "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(track_id) DO UPDATE SET
+                 updated_at = excluded.updated_at",
+            params![id, updated_at_text, updated_at_text],
+        )
+        .context("failed to upsert persisted track presence")?;
 
         for event in events {
             let event_json =
@@ -537,7 +610,8 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
+                "SELECT track_id, status, current_exposure, desired_exposure,
+                        restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
                         realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -560,7 +634,8 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
+                "SELECT track_id, status, current_exposure, desired_exposure,
+                        restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
                         realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -577,146 +652,47 @@ impl SqliteStorage {
     }
 
     fn track_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRuntimeSnapshot> {
-        let venue: String = row.get(1)?;
-        let config_json: String = row.get(3)?;
-        let status_json: String = row.get(4)?;
-        let executor_state_json: String = row.get(8)?;
-        let replacement_gate_reason_json: Option<String> = row.get(9)?;
-        let ledger_state_json: Option<String> = row.get(10)?;
-        let realized_pnl_day: Option<String> = row.get(11)?;
-        let out_of_band_since: Option<String> = row.get(16)?;
-        let last_tick_at: Option<String> = row.get(17)?;
-        let market_data_stale_since: Option<String> = row.get(18)?;
-        let config = Self::deserialize_track_config(&config_json)?;
-        let status = Self::deserialize_track_status(&status_json)?;
-        let venue = Self::deserialize_venue(&venue)?;
-        let executor_state =
-            serde_json::from_str::<ExecutorState>(&executor_state_json).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    8,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-        let replacement_gate_reason = replacement_gate_reason_json
-            .map(|json| {
-                serde_json::from_str::<ReplacementGateReason>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        9,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
-        let ledger_state = ledger_state_json
-            .map(|json| {
-                serde_json::from_str::<TrackLedgerState>(&json).map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        10,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
-        let realized_pnl_day = realized_pnl_day
-            .map(|value| {
-                NaiveDate::parse_from_str(&value, "%F").map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        11,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })
-            })
-            .transpose()?;
-        let desired_exposure = row.get::<_, Option<f64>>(6)?.map(Exposure);
-        let manual_target_override = row.get::<_, Option<f64>>(7)?.map(Exposure);
-        let realized_pnl_today: f64 = row.get(12)?;
-        let realized_pnl_cumulative: f64 = row.get(13)?;
-        let unrealized_pnl: f64 = row.get(14)?;
-        let out_of_band_since = out_of_band_since
-            .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            16,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-            })
-            .transpose()?;
-        let last_tick_at = last_tick_at
-            .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            17,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-            })
-            .transpose()?;
-        let market_data_stale_since = market_data_stale_since
-            .map(|value| {
-                DateTime::parse_from_rfc3339(&value)
-                    .map(|parsed| parsed.with_timezone(&Utc))
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            18,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-            })
-            .transpose()?;
-
-        Ok(TrackRuntimeSnapshot {
+        let runtime = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
             track_id: TrackId::new(row.get::<_, String>(0)?),
-            instrument: Instrument::new(venue, row.get::<_, String>(2)?),
-            config,
-            status,
-            current_exposure: Exposure(row.get(5)?),
-            desired_exposure,
-            manual_target_override,
-            executor_state,
-            replacement_gate_reason,
-            ledger_state: ledger_state.unwrap_or_else(|| {
-                TrackLedgerState::from_legacy_realized(
-                    realized_pnl_day,
-                    realized_pnl_today,
-                    realized_pnl_cumulative,
-                )
-            }),
-            risk: RiskState {
-                realized_pnl_day,
-                realized_pnl_today,
-                realized_pnl_cumulative,
-                unrealized_pnl,
-                ..RiskState::default()
-            },
-            observed: ObservedState {
-                reference_price: row.get(15)?,
-                out_of_band_since,
-                last_tick_at,
-                market_data_stale_since,
-            },
+            status_json: row.get(1)?,
+            current_exposure: row.get(2)?,
+            desired_exposure: row.get(3)?,
+            restore_revision: row.get(4)?,
+            manual_target_override: row.get(5)?,
+            executor_state_json: row.get(6)?,
+            replacement_gate_reason_json: row.get(7)?,
+            ledger_state_json: row.get(8)?,
+            realized_pnl_day: row.get(9)?,
+            realized_pnl_today: row.get(10)?,
+            realized_pnl_cumulative: row.get(11)?,
+            unrealized_pnl: row.get(12)?,
+            reference_price: row.get(13)?,
+            out_of_band_since: row.get(14)?,
+            last_tick_at: row.get(15)?,
+            market_data_stale_since: row.get(16)?,
         })
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    err.to_string(),
+                )),
+            )
+        })?;
+
+        Ok(runtime)
     }
 
     fn stored_track_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredTrackSnapshot> {
-        let updated_at: String = row.get(19)?;
+        let updated_at: String = row.get(17)?;
 
         Ok(StoredTrackSnapshot {
             snapshot: Self::track_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 19)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 17)?,
         })
     }
 
@@ -726,7 +702,8 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT track_id, venue, symbol, config_json, status, current_exposure, desired_exposure,
+                "SELECT track_id, status, current_exposure, desired_exposure,
+                        restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
                         realized_pnl_day, realized_pnl_today, realized_pnl_cumulative, unrealized_pnl,
@@ -1313,6 +1290,7 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionRound, ExecutionSlot, ExecutionStats, ExecutorDiagnostics, ExecutorState,
@@ -1323,20 +1301,30 @@ mod tests {
     use poise_engine::transition::TrackEffect;
     use rusqlite::Connection;
 
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
+
+    fn test_instrument(symbol: &str) -> Instrument {
+        Instrument::new(Venue::Binance, symbol)
+    }
+
     fn test_snapshot() -> TrackRuntimeSnapshot {
+        let instrument = test_instrument("BTCUSDT");
+        let config = test_track_config();
+
         TrackRuntimeSnapshot {
             track_id: TrackId::new("test-1"),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
+            restore_revision: TrackRestoreRevision::for_track(&instrument, &config),
             status: TrackStatus::Active,
             current_exposure: Exposure(4.0),
             desired_exposure: Some(Exposure(6.0)),
@@ -1346,7 +1334,9 @@ mod tests {
                 realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
                 gross_realized_pnl_today: 12.5,
                 gross_realized_pnl_cumulative: 17.5,
+                trading_fee_today: 1.2,
                 trading_fee_cumulative: 3.2,
+                funding_fee_today: -0.5,
                 funding_fee_cumulative: -1.5,
                 unresolved_gaps: vec![
                     LedgerGapRecord {
@@ -1370,9 +1360,6 @@ mod tests {
                 ],
             },
             risk: RiskState {
-                realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
-                realized_pnl_today: 12.5,
-                realized_pnl_cumulative: 17.5,
                 unrealized_pnl: -3.0,
                 ..RiskState::default()
             },
@@ -1460,7 +1447,8 @@ mod tests {
     fn test_snapshot_for(track_id: &str, symbol: &str) -> TrackRuntimeSnapshot {
         let mut snapshot = test_snapshot();
         snapshot.track_id = TrackId::new(track_id);
-        snapshot.instrument = Instrument::new(Venue::Binance, symbol);
+        snapshot.restore_revision =
+            TrackRestoreRevision::for_track(&test_instrument(symbol), &test_track_config());
         snapshot
     }
 
@@ -1541,7 +1529,7 @@ mod tests {
                 &btc_snapshot,
                 &[],
                 &[TrackEffect::CancelAll {
-                    instrument: btc_snapshot.instrument.clone(),
+                    instrument: test_instrument("BTCUSDT"),
                 }],
             )
             .await
@@ -1571,7 +1559,7 @@ mod tests {
                 &snapshot,
                 &[],
                 &[TrackEffect::CancelAll {
-                    instrument: snapshot.instrument.clone(),
+                    instrument: test_instrument(symbol),
                 }],
             )
             .await
@@ -1602,7 +1590,7 @@ mod tests {
                 &snapshot,
                 &[],
                 &[TrackEffect::CancelAll {
-                    instrument: snapshot.instrument.clone(),
+                    instrument: test_instrument(symbol),
                 }],
             )
             .await
@@ -1745,22 +1733,66 @@ mod tests {
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.track_id.as_str(), "test-1");
-        assert_eq!(loaded.instrument.symbol, "BTCUSDT");
+        assert_eq!(
+            loaded.restore_revision,
+            TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
+        );
         assert_eq!(loaded.status, TrackStatus::Active);
-        assert_eq!(loaded.config, snapshot.config);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(
-            loaded.risk.realized_pnl_day,
+            loaded.ledger_state.realized_pnl_day,
             Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap())
         );
-        assert!((loaded.risk.realized_pnl_today - 12.5).abs() < f64::EPSILON);
+        assert!((loaded.ledger_state.gross_realized_pnl_today - 12.5).abs() < f64::EPSILON);
         assert!((loaded.risk.unrealized_pnl + 3.0).abs() < f64::EPSILON);
         assert_eq!(loaded.observed.reference_price, Some(95.0));
         assert_eq!(
             loaded.observed.out_of_band_since,
             snapshot.observed.out_of_band_since
         );
+    }
+
+    #[test]
+    fn initialize_creates_persisted_track_presence_table() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let conn = storage.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'persisted_track_presence'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn save_transition_records_persisted_track_presence() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT track_id
+                 FROM persisted_track_presence
+                 WHERE track_id = ?1",
+                params!["test-1"],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+
+        assert_eq!(found.as_deref(), Some("test-1"));
     }
 
     #[tokio::test]
@@ -1788,6 +1820,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_transition_leaves_legacy_realized_columns_at_defaults() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot();
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let (realized_pnl_day, realized_pnl_today, realized_pnl_cumulative): (
+            Option<String>,
+            f64,
+            f64,
+        ) = conn
+            .query_row(
+                "SELECT realized_pnl_day, realized_pnl_today, realized_pnl_cumulative
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
+                params!["test-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(realized_pnl_day, None);
+        assert_eq!(realized_pnl_today, 0.0);
+        assert_eq!(realized_pnl_cumulative, 0.0);
+    }
+
+    #[tokio::test]
     async fn save_and_load_track_runtime_snapshot_roundtrip() {
         let storage = SqliteStorage::in_memory().unwrap();
         let snapshot = test_snapshot();
@@ -1802,7 +1864,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!((loaded.risk.realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
+        assert!((loaded.ledger_state.gross_realized_pnl_cumulative - 17.5).abs() < f64::EPSILON);
         assert_eq!(loaded, snapshot);
     }
 
@@ -1971,7 +2033,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
@@ -2006,7 +2068,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
@@ -2037,7 +2099,7 @@ mod tests {
         let snapshot = test_snapshot();
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
@@ -2074,7 +2136,7 @@ mod tests {
 
         let btc_effects = vec![
             TrackEffect::CancelAll {
-                instrument: btc_snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
@@ -2128,7 +2190,7 @@ mod tests {
         let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let effects = vec![
             TrackEffect::CancelAll {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
             },
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
@@ -2155,7 +2217,7 @@ mod tests {
         let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
         let replacement_effects = vec![
             TrackEffect::CancelOrder {
-                instrument: snapshot.instrument.clone(),
+                instrument: test_instrument("BTCUSDT"),
                 order_id: "old-order-1".into(),
             },
             TrackEffect::SubmitOrder {
@@ -2562,85 +2624,476 @@ mod tests {
         )
         .unwrap();
 
-        let storage = SqliteStorage::from_connection(conn).unwrap();
-        let result = storage.load_track_state("legacy-track").await;
+        let result = SqliteStorage::from_connection(conn);
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn load_track_state_defaults_missing_min_rebalance_units_from_stored_config_json() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let snapshot = test_snapshot();
+    async fn from_connection_backfills_restore_revision_from_legacy_definition_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
+                restore_revision TEXT,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                desired_exposure REAL,
+                manual_target_override REAL,
+                executor_state_json TEXT,
+                replacement_gate_reason_json TEXT,
+                ledger_state_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                last_tick_at TEXT,
+                market_data_stale_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                venue,
+                symbol,
+                config_json,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL, ?8, NULL, 0, 0, 0, ?9, NULL, NULL, NULL, ?10)",
+            params![
+                "test-1",
+                "binance",
+                "BTCUSDT",
+                serde_json::json!({
+                    "lower_price": 90.0,
+                    "upper_price": 110.0,
+                    "long_exposure_units": 8.0,
+                    "short_exposure_units": 8.0,
+                    "notional_per_unit": 375.0,
+                    "shape_family": "linear",
+                    "out_of_band_policy": "freeze"
+                })
+                .to_string(),
+                "\"active\"",
+                0.0,
+                serde_json::to_string(&ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
+                ))
+                .unwrap(),
+                serde_json::to_string(&TrackLedgerState::default()).unwrap(),
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
 
-        storage
-            .save_transition("test-1", &snapshot, &[], &[])
-            .await
-            .unwrap();
-
-        storage
-            .conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE track_snapshots SET config_json = ?1 WHERE track_id = ?2",
-                params![
-                    serde_json::json!({
-                        "lower_price": 90.0,
-                        "upper_price": 110.0,
-                        "long_exposure_units": 8.0,
-                        "short_exposure_units": 8.0,
-                        "notional_per_unit": 375.0,
-                        "shape_family": "linear",
-                        "out_of_band_policy": "freeze"
-                    })
-                    .to_string(),
-                    "test-1"
-                ],
-            )
-            .unwrap();
-
+        let storage = SqliteStorage::from_connection(conn).unwrap();
         let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
         assert_eq!(
-            loaded.config.min_rebalance_units,
-            DEFAULT_MIN_REBALANCE_UNITS
+            loaded.restore_revision,
+            TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
         );
     }
 
     #[tokio::test]
-    async fn load_track_state_rejects_invalid_min_rebalance_units_in_stored_config_json() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let snapshot = test_snapshot();
+    async fn load_track_state_from_runtime_only_snapshot_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
+                restore_revision TEXT,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                desired_exposure REAL,
+                manual_target_override REAL,
+                executor_state_json TEXT,
+                replacement_gate_reason_json TEXT,
+                ledger_state_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                last_tick_at TEXT,
+                market_data_stale_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, NULL, 0, 0, 0, ?7, NULL, NULL, NULL, ?8)",
+            params![
+                "test-1",
+                TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
+                    .as_str(),
+                "\"active\"",
+                1.0,
+                serde_json::to_string(&ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
+                ))
+                .unwrap(),
+                serde_json::to_string(&TrackLedgerState::default()).unwrap(),
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
 
-        storage
-            .save_transition("test-1", &snapshot, &[], &[])
-            .await
-            .unwrap();
+        let storage = SqliteStorage::from_connection(conn).unwrap();
+        let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
 
-        storage
-            .conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE track_snapshots SET config_json = ?1 WHERE track_id = ?2",
-                params![
-                    serde_json::json!({
-                        "lower_price": 90.0,
-                        "upper_price": 110.0,
-                        "long_exposure_units": 8.0,
-                        "short_exposure_units": 8.0,
-                        "notional_per_unit": 375.0,
-                        "min_rebalance_units": -0.1,
-                        "shape_family": "linear",
-                        "out_of_band_policy": "freeze"
-                    })
-                    .to_string(),
-                    "test-1"
-                ],
-            )
-            .unwrap();
+        assert_eq!(loaded.track_id.as_str(), "test-1");
+        assert_eq!(loaded.restore_revision.as_str().len(), 64);
+    }
 
-        let result = storage.load_track_state("test-1").await;
+    #[tokio::test]
+    async fn from_connection_rejects_invalid_legacy_config_when_backfilling_restore_revision() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
+                restore_revision TEXT,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                desired_exposure REAL,
+                manual_target_override REAL,
+                executor_state_json TEXT,
+                replacement_gate_reason_json TEXT,
+                ledger_state_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                last_tick_at TEXT,
+                market_data_stale_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                venue,
+                symbol,
+                config_json,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL, ?8, NULL, 0, 0, 0, ?9, NULL, NULL, NULL, ?10)",
+            params![
+                "test-1",
+                "binance",
+                "BTCUSDT",
+                serde_json::json!({
+                    "lower_price": 90.0,
+                    "upper_price": 110.0,
+                    "long_exposure_units": 8.0,
+                    "short_exposure_units": 8.0,
+                    "notional_per_unit": 375.0,
+                    "min_rebalance_units": -0.1,
+                    "shape_family": "linear",
+                    "out_of_band_policy": "freeze"
+                })
+                .to_string(),
+                "\"active\"",
+                0.0,
+                serde_json::to_string(&ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
+                ))
+                .unwrap(),
+                serde_json::to_string(&TrackLedgerState::default()).unwrap(),
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
+
+        let result = SqliteStorage::from_connection(conn);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn from_connection_rejects_partial_legacy_definition_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
+                restore_revision TEXT,
+                venue TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                desired_exposure REAL,
+                manual_target_override REAL,
+                executor_state_json TEXT,
+                replacement_gate_reason_json TEXT,
+                ledger_state_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                last_tick_at TEXT,
+                market_data_stale_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                venue,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, NULL, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, NULL, 0, 0, 0, ?7, NULL, NULL, NULL, ?8)",
+            params![
+                "test-1",
+                "binance",
+                "\"active\"",
+                0.0,
+                serde_json::to_string(&ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
+                ))
+                .unwrap(),
+                serde_json::to_string(&TrackLedgerState::default()).unwrap(),
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
+
+        let result = SqliteStorage::from_connection(conn);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn backfill_restore_revision_is_atomic_when_a_later_row_is_invalid() {
+        let db_path = temp_db_path();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
+                restore_revision TEXT,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                desired_exposure REAL,
+                manual_target_override REAL,
+                executor_state_json TEXT,
+                replacement_gate_reason_json TEXT,
+                ledger_state_json TEXT,
+                realized_pnl_day TEXT,
+                realized_pnl_today REAL NOT NULL DEFAULT 0,
+                realized_pnl_cumulative REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                last_tick_at TEXT,
+                market_data_stale_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let executor_state_json = serde_json::to_string(&ExecutorState::empty(
+            Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
+        ))
+        .unwrap();
+        let ledger_state_json = serde_json::to_string(&TrackLedgerState::default()).unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                venue,
+                symbol,
+                config_json,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL, ?8, NULL, 0, 0, 0, ?9, NULL, NULL, NULL, ?10)",
+            params![
+                "valid-track",
+                "binance",
+                "BTCUSDT",
+                serde_json::json!({
+                    "lower_price": 90.0,
+                    "upper_price": 110.0,
+                    "long_exposure_units": 8.0,
+                    "short_exposure_units": 8.0,
+                    "notional_per_unit": 375.0,
+                    "shape_family": "linear",
+                    "out_of_band_policy": "freeze"
+                })
+                .to_string(),
+                "\"active\"",
+                0.0,
+                executor_state_json,
+                ledger_state_json,
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                venue,
+                symbol,
+                config_json,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                realized_pnl_day,
+                realized_pnl_today,
+                realized_pnl_cumulative,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL, ?8, NULL, 0, 0, 0, ?9, NULL, NULL, NULL, ?10)",
+            params![
+                "invalid-track",
+                "binance",
+                "ETHUSDT",
+                serde_json::json!({
+                    "lower_price": 90.0,
+                    "upper_price": 110.0,
+                    "long_exposure_units": 8.0,
+                    "short_exposure_units": 8.0,
+                    "notional_per_unit": 375.0,
+                    "min_rebalance_units": -0.1,
+                    "shape_family": "linear",
+                    "out_of_band_policy": "freeze"
+                })
+                .to_string(),
+                "\"active\"",
+                0.0,
+                serde_json::to_string(&ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
+                ))
+                .unwrap(),
+                serde_json::to_string(&TrackLedgerState::default()).unwrap(),
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = SqliteStorage::new(&db_path);
+        assert!(result.is_err());
+
+        let verify_conn = Connection::open(&db_path).unwrap();
+        let revisions = verify_conn
+            .prepare(
+                "SELECT restore_revision
+                 FROM track_snapshots
+                 ORDER BY track_id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, Option<String>>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(revisions, vec![None, None]);
+
+        let _ = fs::remove_file(db_path);
     }
 
     #[tokio::test]

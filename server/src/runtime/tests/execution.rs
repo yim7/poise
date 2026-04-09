@@ -1205,11 +1205,14 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
 
     let instance = current_instance(&state).await;
     assert!(instance.risk.account_capacity_constraint.increase_blocked);
-    let source = TrackQueryService::new(persistence.clone() as Arc<dyn TrackQueryStore>)
-        .load_track_detail_source(&TrackId::new("BTCUSDT"))
-        .await
-        .unwrap()
-        .unwrap();
+    let source = TrackQueryService::new(
+        persistence.clone() as Arc<dyn TrackQueryStore>,
+        crate::test_support::test_prepared_registry("BTCUSDT"),
+    )
+    .load_track_detail_source(&TrackId::new("BTCUSDT"))
+    .await
+    .unwrap()
+    .unwrap();
     let detail = state.projector.project_detail(&source);
     assert_eq!(
         detail.execution.execution_status,

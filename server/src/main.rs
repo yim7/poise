@@ -51,8 +51,8 @@ async fn main() -> Result<()> {
             Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
         };
     let (platform, runtime_handles, listener) = prepared_state
-        .run_startup(|repositories| async {
-            let platform = assembly::assemble(&config, repositories).await?;
+        .run_startup(|repositories, prepared_registry| async {
+            let platform = assembly::assemble(&config, prepared_registry, repositories).await?;
             start_platform(&config, platform).await
         })
         .await?;
@@ -145,44 +145,27 @@ fn render_startup_error(error: &StateBootstrapError) -> String {
 
             for mismatch in mismatches {
                 match &mismatch.detail {
-                    PersistedStateMismatchDetail::DefinitionChanged {
-                        expected_instrument,
-                        actual_instrument,
-                        expected_config,
-                        actual_config,
+                    PersistedStateMismatchDetail::RestoreRevisionMismatch {
+                        expected_revision,
+                        actual_revision,
                     } => {
-                        let instrument_line = if expected_instrument != actual_instrument {
-                            format!(
-                                "\n  instrument: expected `{}:{}`, persisted `{}:{}`",
-                                expected_instrument.venue.as_str(),
-                                expected_instrument.symbol,
-                                actual_instrument.venue.as_str(),
-                                actual_instrument.symbol
-                            )
-                        } else {
-                            String::new()
-                        };
                         rendered.push_str(&format!(
-                            "\ntrack `{}`:{}\n  expected config: {}\n  persisted config: {}",
+                            "\ntrack `{}`:\n  restore revision: expected `{}`, persisted `{}`",
                             mismatch.track_id,
-                            instrument_line,
-                            serde_json::to_string(expected_config)
-                                .expect("track config should serialize"),
-                            serde_json::to_string(actual_config)
-                                .expect("track config should serialize"),
+                            expected_revision.as_str(),
+                            actual_revision.as_str(),
                         ));
                     }
-                    PersistedStateMismatchDetail::PersistedTrackMissingFromConfig {
-                        actual_instrument,
-                        actual_config,
-                    } => {
+                    PersistedStateMismatchDetail::PersistedTrackMissingRuntime => {
                         rendered.push_str(&format!(
-                            "\ntrack `{}`:\n  persisted instrument: `{}:{}`\n  persisted config: {}\n  config status: missing from current config",
+                            "\ntrack `{}`:\n  persisted runtime is missing while persisted track presence still exists",
                             mismatch.track_id,
-                            actual_instrument.venue.as_str(),
-                            actual_instrument.symbol,
-                            serde_json::to_string(actual_config)
-                                .expect("track config should serialize"),
+                        ));
+                    }
+                    PersistedStateMismatchDetail::PersistedTrackMissingFromConfig => {
+                        rendered.push_str(&format!(
+                            "\ntrack `{}`:\n  config status: missing from current config",
+                            mismatch.track_id,
                         ));
                     }
                 }
@@ -216,7 +199,9 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::get;
     use chrono::Utc;
+    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
     use poise_core::types::ExchangeRules;
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
         OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick,
@@ -231,6 +216,20 @@ mod tests {
     };
 
     use super::{StartupOptions, parse_startup_options};
+
+    fn test_prepared_registry(config: &crate::config::Config) -> Arc<PreparedTrackRegistry> {
+        let configured = config
+            .tracks
+            .iter()
+            .map(|track| {
+                ConfiguredTrackDefinition::try_from_input(
+                    track.to_configured_input(config.exchange.venue()),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        Arc::new(PreparedTrackRegistry::new(configured).unwrap())
+    }
 
     #[test]
     fn parse_startup_options_requires_instance_dir() {
@@ -284,38 +283,57 @@ mod tests {
     fn render_startup_error_formats_structured_mismatch_for_cli() {
         let rendered = super::render_startup_error(&StateBootstrapError::PersistedStateMismatch {
             db_path: std::path::PathBuf::from(".data/testnet/poise-server.sqlite"),
-            mismatches: vec![crate::state_bootstrap::PersistedStateMismatch {
-                track_id: "btc-core".into(),
-                detail: PersistedStateMismatchDetail::DefinitionChanged {
-                    expected_instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    actual_instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    expected_config: poise_core::strategy::TrackConfig {
-                        lower_price: 90.0,
-                        upper_price: 110.0,
-                        long_exposure_units: 8.0,
-                        short_exposure_units: 8.0,
-                        notional_per_unit: 375.0,
-                        min_rebalance_units: 0.5,
-                        shape_family: poise_core::strategy::ShapeFamily::Linear,
-                        out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
-                    },
-                    actual_config: poise_core::strategy::TrackConfig {
-                        lower_price: 80.0,
-                        upper_price: 110.0,
-                        long_exposure_units: 8.0,
-                        short_exposure_units: 8.0,
-                        notional_per_unit: 375.0,
-                        min_rebalance_units: 0.5,
-                        shape_family: poise_core::strategy::ShapeFamily::Linear,
-                        out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+            mismatches: vec![
+                crate::state_bootstrap::PersistedStateMismatch {
+                    track_id: "btc-core".into(),
+                    detail: PersistedStateMismatchDetail::RestoreRevisionMismatch {
+                        expected_revision: TrackRestoreRevision::for_track(
+                            &Instrument::new(Venue::Binance, "BTCUSDT"),
+                            &poise_core::strategy::TrackConfig {
+                                lower_price: 90.0,
+                                upper_price: 110.0,
+                                long_exposure_units: 8.0,
+                                short_exposure_units: 8.0,
+                                notional_per_unit: 375.0,
+                                min_rebalance_units: 0.5,
+                                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                            },
+                        ),
+                        actual_revision: TrackRestoreRevision::for_track(
+                            &Instrument::new(Venue::Binance, "BTCUSDT"),
+                            &poise_core::strategy::TrackConfig {
+                                lower_price: 80.0,
+                                upper_price: 110.0,
+                                long_exposure_units: 8.0,
+                                short_exposure_units: 8.0,
+                                notional_per_unit: 375.0,
+                                min_rebalance_units: 0.5,
+                                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                            },
+                        ),
                     },
                 },
-            }],
+                crate::state_bootstrap::PersistedStateMismatch {
+                    track_id: "eth-core".into(),
+                    detail: PersistedStateMismatchDetail::PersistedTrackMissingRuntime,
+                },
+                crate::state_bootstrap::PersistedStateMismatch {
+                    track_id: "sol-core".into(),
+                    detail: PersistedStateMismatchDetail::PersistedTrackMissingFromConfig,
+                },
+            ],
             suggested_action: SuggestedAction::RebuildState,
         });
 
         assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
         assert!(rendered.contains("btc-core"));
+        assert!(rendered.contains("restore revision"));
+        assert!(rendered.contains("eth-core"));
+        assert!(rendered.contains("persisted runtime is missing"));
+        assert!(rendered.contains("sol-core"));
+        assert!(rendered.contains("missing from current config"));
         assert!(rendered.contains("--rebuild-state"));
         assert!(rendered.contains("--instance-dir <path>"));
     }
@@ -586,6 +604,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#
             ),
         )
@@ -598,6 +618,7 @@ notional_per_unit = 375.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             exchange.clone(),
             Arc::new(FakeMarketData::default()),
             exchange.clone(),
@@ -671,6 +692,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -696,6 +719,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -728,12 +753,12 @@ notional_per_unit = 375.0
                 long_exposure_units: 8.0,
                 short_exposure_units: 8.0,
                 notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::OutOfBandPolicy::Freeze,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
-                daily_loss_limit: None,
-                stop_loss_pct: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
                 tick_timeout_secs: None,
             }],
             exchange: crate::config::ExchangeConfig::Binance(poise_binance::Config {
@@ -750,6 +775,7 @@ notional_per_unit = 375.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
+            test_prepared_registry(&config),
             exchange.clone(),
             Arc::new(FailingStartMarketData),
             exchange.clone(),

@@ -59,6 +59,7 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -69,16 +70,33 @@ mod tests {
     use poise_engine::transition::TrackEffect;
 
     use crate::{
-        DiagnosticSeverity, EffectStatus, PersistedTrackEffect, StoredTrackEvent,
-        StoredTrackSnapshot, TrackQueryService, TrackQueryStore,
+        ConfiguredTrackDefinition, ConfiguredTrackInput, DiagnosticSeverity, EffectStatus,
+        PersistedTrackEffect, PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot,
+        TrackQueryService, TrackQueryStore,
     };
 
     use super::TrackDebugQueryService;
 
+    fn test_track_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: OutOfBandPolicy::Freeze,
+        }
+    }
+
     #[tokio::test]
     async fn load_track_diagnostics_projects_only_diagnostic_events_in_order() {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = TrackDebugQueryService::new(Arc::new(TrackQueryService::new(repository)));
+        let service = TrackDebugQueryService::new(Arc::new(TrackQueryService::new(
+            repository,
+            test_prepared_registry(),
+        )));
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -98,6 +116,32 @@ mod tests {
             diagnostics[1].observed_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 10).unwrap()
         );
+    }
+
+    fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
+        Arc::new(
+            PreparedTrackRegistry::new(vec![
+                ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+                    track_id: TrackId::new("btc-core"),
+                    venue: Venue::Binance,
+                    symbol: "BTCUSDT".into(),
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: Some(0.5),
+                    shape_family: Some(ShapeFamily::Linear),
+                    out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+                    max_notional: None,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
+                    tick_timeout_secs: Some(30),
+                })
+                .unwrap(),
+            ])
+            .unwrap(),
+        )
     }
 
     struct FakeReadRepository {
@@ -209,19 +253,13 @@ mod tests {
     }
 
     fn test_snapshot() -> TrackRuntimeSnapshot {
+        let config = test_track_config();
         TrackRuntimeSnapshot {
             track_id: TrackId::new("btc-core"),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            config: TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
-            },
+            restore_revision: TrackRestoreRevision::for_track(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &config,
+            ),
             status: TrackStatus::Active,
             current_exposure: Exposure(3.5),
             desired_exposure: Some(Exposure(4.0)),
@@ -263,9 +301,6 @@ mod tests {
             replacement_gate_reason: None,
             ledger_state: Default::default(),
             risk: RiskState {
-                realized_pnl_day: None,
-                realized_pnl_today: 0.0,
-                realized_pnl_cumulative: 980.1,
                 unrealized_pnl: 0.0,
                 ..RiskState::default()
             },

@@ -1,11 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use poise_application::AccountMonitorConfig;
+use poise_application::{AccountMonitorConfig, ConfiguredTrackDefinition, ConfiguredTrackInput};
 use poise_binance as binance;
-use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig, validate_config};
-use poise_engine::track::{Instrument, TrackId, Venue};
+use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+use poise_engine::track::{TrackId, Venue};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -13,7 +12,7 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
-    pub tracks: Vec<TrackDefinition>,
+    pub tracks: Vec<TrackFileDefinition>,
     pub exchange: ExchangeConfig,
     #[serde(default)]
     pub account_monitor: AccountMonitorConfig,
@@ -21,7 +20,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrackDefinition {
+pub struct TrackFileDefinition {
     pub track_id: String,
     pub symbol: String,
     pub lower_price: f64,
@@ -29,17 +28,16 @@ pub struct TrackDefinition {
     pub long_exposure_units: f64,
     pub short_exposure_units: f64,
     pub notional_per_unit: f64,
-    #[serde(default = "default_min_rebalance_units")]
-    pub min_rebalance_units: f64,
-    #[serde(default = "default_shape_family")]
-    pub shape_family: ShapeFamily,
-    #[serde(default = "default_out_of_band_policy")]
-    pub out_of_band_policy: OutOfBandPolicy,
+    pub min_rebalance_units: Option<f64>,
+    pub shape_family: Option<ShapeFamily>,
+    pub out_of_band_policy: Option<OutOfBandPolicy>,
     pub max_notional: Option<f64>,
-    pub daily_loss_limit: Option<f64>,
-    pub stop_loss_pct: Option<f64>,
+    pub daily_loss_limit: f64,
+    pub total_loss_limit: f64,
     pub tick_timeout_secs: Option<u64>,
 }
+
+pub type TrackDefinition = TrackFileDefinition;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "venue", rename_all = "snake_case")]
@@ -71,28 +69,25 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
 pub fn parse_config(input: &str) -> Result<Config> {
     let config: Config = toml_edit::de::from_str(input).context("failed to parse TOML config")?;
     for track in &config.tracks {
-        validate_config(&track.track_config())
-            .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
+        ConfiguredTrackDefinition::try_from_input(
+            track.to_configured_input(config.exchange.venue()),
+        )
+        .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
     }
     config.account_monitor.validate()?;
     Ok(config)
 }
 
-impl TrackDefinition {
-    pub fn tick_timeout_secs(&self) -> u64 {
-        self.tick_timeout_secs.unwrap_or(30)
-    }
-
+impl TrackFileDefinition {
     pub fn track_id(&self) -> TrackId {
         TrackId::new(self.track_id.clone())
     }
 
-    pub fn instrument(&self, venue: Venue) -> Instrument {
-        Instrument::new(venue, self.symbol.clone())
-    }
-
-    pub fn track_config(&self) -> TrackConfig {
-        TrackConfig {
+    pub fn to_configured_input(&self, venue: Venue) -> ConfiguredTrackInput {
+        ConfiguredTrackInput {
+            track_id: self.track_id(),
+            venue,
+            symbol: self.symbol.clone(),
             lower_price: self.lower_price,
             upper_price: self.upper_price,
             long_exposure_units: self.long_exposure_units,
@@ -101,16 +96,10 @@ impl TrackDefinition {
             min_rebalance_units: self.min_rebalance_units,
             shape_family: self.shape_family,
             out_of_band_policy: self.out_of_band_policy,
-        }
-    }
-
-    pub fn budget(&self) -> CapacityBudget {
-        let implied_max_notional =
-            self.long_exposure_units.max(self.short_exposure_units) * self.notional_per_unit;
-        CapacityBudget {
-            max_notional: self.max_notional.unwrap_or(implied_max_notional),
-            daily_loss_limit: self.daily_loss_limit.unwrap_or(-implied_max_notional * 0.1),
-            stop_loss_pct: self.stop_loss_pct.unwrap_or(10.0),
+            max_notional: self.max_notional,
+            daily_loss_limit: self.daily_loss_limit,
+            total_loss_limit: self.total_loss_limit,
+            tick_timeout_secs: self.tick_timeout_secs,
         }
     }
 }
@@ -119,24 +108,43 @@ fn default_bind_address() -> String {
     "127.0.0.1:8000".to_string()
 }
 
-fn default_shape_family() -> ShapeFamily {
-    ShapeFamily::Linear
-}
-
-fn default_out_of_band_policy() -> OutOfBandPolicy {
-    OutOfBandPolicy::Freeze
-}
-
-fn default_min_rebalance_units() -> f64 {
-    poise_core::strategy::DEFAULT_MIN_REBALANCE_UNITS
-}
-
 #[cfg(test)]
 mod tests {
+    use poise_application::{ConfiguredTrackDefinition, ConfiguredTrackInput};
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use poise_engine::track::Venue;
 
     use super::{AccountMonitorConfig, ExchangeConfig, default_bind_address, parse_config};
+
+    #[test]
+    fn track_file_definition_maps_mechanically_to_configured_track_input() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        let input: ConfiguredTrackInput =
+            config.tracks[0].to_configured_input(config.exchange.venue());
+        assert_eq!(input.track_id.as_str(), "btc-core");
+        assert_eq!(input.venue, Venue::Binance);
+        assert_eq!(input.symbol, "BTCUSDT");
+        assert_eq!(input.min_rebalance_units, None);
+        assert_eq!(input.tick_timeout_secs, None);
+    }
 
     #[test]
     fn config_module_examples_do_not_define_environment() {
@@ -176,6 +184,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 6.0
 notional_per_unit = 3000.0
+daily_loss_limit = 1200.0
+total_loss_limit = 2400.0
 
 [[tracks]]
 track_id = "eth-core"
@@ -185,6 +195,8 @@ upper_price = 2600.0
 long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
+daily_loss_limit = 800.0
+total_loss_limit = 1600.0
 shape_family = "concave"
 out_of_band_policy = "hold"
 "#,
@@ -197,11 +209,11 @@ out_of_band_policy = "hold"
         assert_eq!(config.tracks[0].track_id().as_str(), "btc-core");
         assert_eq!(
             config.tracks[1].shape_family,
-            poise_core::strategy::ShapeFamily::Concave
+            Some(poise_core::strategy::ShapeFamily::Concave)
         );
         assert_eq!(
             config.tracks[1].out_of_band_policy,
-            poise_core::strategy::OutOfBandPolicy::Hold
+            Some(poise_core::strategy::OutOfBandPolicy::Hold)
         );
         match &config.exchange {
             ExchangeConfig::Binance(exchange) => {
@@ -229,6 +241,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 6.0
 notional_per_unit = 3000.0
+daily_loss_limit = 1200.0
+total_loss_limit = 2400.0
 "#,
         )
         .unwrap();
@@ -280,7 +294,14 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
+        )
+        .unwrap();
+
+        let track = ConfiguredTrackDefinition::try_from_input(
+            config.tracks[0].to_configured_input(config.exchange.venue()),
         )
         .unwrap();
 
@@ -292,14 +313,14 @@ notional_per_unit = 375.0
             }
         }
         assert_eq!(
-            config.tracks[0].track_config().shape_family,
+            track.track_config().shape_family,
             poise_core::strategy::ShapeFamily::Linear
         );
         assert_eq!(
-            config.tracks[0].track_config().out_of_band_policy,
+            track.track_config().out_of_band_policy,
             poise_core::strategy::OutOfBandPolicy::Freeze
         );
-        assert!((config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
+        assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -317,11 +338,18 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
 
-        assert!((config.tracks[0].track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
+        let track = ConfiguredTrackDefinition::try_from_input(
+            config.tracks[0].to_configured_input(config.exchange.venue()),
+        )
+        .unwrap();
+
+        assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -339,6 +367,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 min_rebalance_units = -0.1
 "#,
         )
@@ -362,6 +392,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 min_rebalance_units = nan
 "#,
         )
@@ -385,6 +417,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 tick_timeout_secs = 45
 "#,
         )
@@ -408,6 +442,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 4.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 shape_family = "concave"
 out_of_band_policy = "reduce_only"
 "#,
@@ -415,9 +451,13 @@ out_of_band_policy = "reduce_only"
         .unwrap();
 
         let track = &config.tracks[0];
-        assert_eq!(track.shape_family, ShapeFamily::Concave);
-        assert_eq!(track.out_of_band_policy, OutOfBandPolicy::ReduceOnly);
-        assert_eq!(track.budget().max_notional, 3000.0);
+        assert_eq!(track.shape_family, Some(ShapeFamily::Concave));
+        assert_eq!(track.out_of_band_policy, Some(OutOfBandPolicy::ReduceOnly));
+        let configured = ConfiguredTrackDefinition::try_from_input(
+            track.to_configured_input(config.exchange.venue()),
+        )
+        .unwrap();
+        assert_eq!(configured.budget().max_notional, 3000.0);
     }
 
     #[test]
@@ -436,21 +476,25 @@ long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
 max_notional = 5000.0
-daily_loss_limit = -200.0
-stop_loss_pct = 5.0
+daily_loss_limit = 200.0
+total_loss_limit = 500.0
 "#,
         )
         .unwrap();
 
-        let budget = config.tracks[0].budget();
+        let budget = ConfiguredTrackDefinition::try_from_input(
+            config.tracks[0].to_configured_input(config.exchange.venue()),
+        )
+        .unwrap()
+        .budget();
         assert!((budget.max_notional - 5000.0).abs() < f64::EPSILON);
-        assert!((budget.daily_loss_limit - (-200.0)).abs() < f64::EPSILON);
-        assert!((budget.stop_loss_pct - 5.0).abs() < f64::EPSILON);
+        assert!((budget.daily_loss_limit - 200.0).abs() < f64::EPSILON);
+        assert!((budget.total_loss_limit - 500.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn budget_uses_safe_defaults_when_risk_limits_omitted() {
-        let config = parse_config(
+    fn rejects_missing_risk_limits() {
+        let error = parse_config(
             r#"
 [exchange]
 venue = "binance"
@@ -465,13 +509,9 @@ short_exposure_units = 8.0
 notional_per_unit = 375.0
 "#,
         )
-        .unwrap();
+        .unwrap_err();
 
-        let budget = config.tracks[0].budget();
-        let implied_max = 8.0 * 375.0;
-        assert!((budget.max_notional - implied_max).abs() < f64::EPSILON);
-        assert!((budget.daily_loss_limit - (-implied_max * 0.1)).abs() < f64::EPSILON);
-        assert!((budget.stop_loss_pct - 10.0).abs() < f64::EPSILON);
+        assert!(format!("{error:#}").contains("daily_loss_limit"));
     }
 
     #[test]
@@ -489,6 +529,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -520,7 +562,7 @@ notional_per_unit = 375.0
         assert!(raw.contains("tick_timeout_secs ="));
         assert!(raw.contains("max_notional ="));
         assert!(raw.contains("daily_loss_limit ="));
-        assert!(raw.contains("stop_loss_pct ="));
+        assert!(raw.contains("total_loss_limit ="));
     }
 
     #[test]
@@ -533,7 +575,7 @@ notional_per_unit = 375.0
         assert!(raw.contains("tick_timeout_secs ="));
         assert!(raw.contains("max_notional ="));
         assert!(raw.contains("daily_loss_limit ="));
-        assert!(raw.contains("stop_loss_pct ="));
+        assert!(raw.contains("total_loss_limit ="));
     }
 
     #[test]
@@ -579,6 +621,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -611,6 +655,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap();
@@ -637,6 +683,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
 "#,
         )
         .unwrap_err();
