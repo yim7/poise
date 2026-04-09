@@ -20,10 +20,6 @@ impl InstanceDir {
         self.root.join(".data")
     }
 
-    pub fn logs_root(&self) -> PathBuf {
-        self.root.join(".logs")
-    }
-
     pub fn db_path(&self) -> PathBuf {
         self.data_root().join("poise-server.sqlite")
     }
@@ -36,12 +32,19 @@ mod tests {
     use super::InstanceDir;
 
     #[test]
-    fn instance_dir_resolves_config_data_and_log_paths() {
+    fn instance_dir_module_does_not_expose_logs_root() {
+        let source = include_str!("instance_dir.rs");
+        let logs_root_signature = ["pub", " fn", " logs_root", "("].concat();
+
+        assert!(!source.contains(&logs_root_signature));
+    }
+
+    #[test]
+    fn instance_dir_resolves_config_and_data_paths() {
         let dir = InstanceDir::new("/tmp/poise/a");
 
         assert_eq!(dir.config_path(), PathBuf::from("/tmp/poise/a/config.toml"));
         assert_eq!(dir.data_root(), PathBuf::from("/tmp/poise/a/.data"));
-        assert_eq!(dir.logs_root(), PathBuf::from("/tmp/poise/a/.logs"));
     }
 
     #[test]
