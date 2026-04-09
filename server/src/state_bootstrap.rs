@@ -403,7 +403,6 @@ fn state_file_path(base_path: &std::path::Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use poise_application::TrackMutationStore;
     use poise_application::TrackQueryStore;
@@ -417,14 +416,13 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_state_repository_requires_explicit_bootstrap_mode() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
             .unwrap();
         let _ = prepared.repositories.mutation_store();
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
@@ -441,9 +439,9 @@ mod tests {
 
     #[tokio::test]
     async fn strict_mode_rejects_persisted_config_mismatch() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
         let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
@@ -456,14 +454,13 @@ mod tests {
                 .to_string()
                 .contains("persisted state does not match current config")
         );
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
     async fn rebuild_mode_recreates_repository_after_mismatch() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
         std::fs::write(format!("{}-wal", db_path.display()), b"wal").unwrap();
         std::fs::write(format!("{}-shm", db_path.display()), b"shm").unwrap();
@@ -523,14 +520,13 @@ mod tests {
                     .unwrap_or(false)
             });
         assert!(backup_shm_exists);
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
     async fn rebuild_mode_recovers_from_unreadable_existing_database() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         super::ensure_parent_dir(&db_path).unwrap();
         std::fs::write(&db_path, b"not-a-sqlite-database").unwrap();
 
@@ -559,14 +555,13 @@ mod tests {
                     .unwrap_or(false)
             });
         assert!(backup_exists);
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
     async fn restore_backup_recovers_original_state_after_rebuild() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
         let mut prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
@@ -581,14 +576,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.config.lower_price, 80.0);
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
     async fn run_startup_restores_backup_after_failed_operation() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
@@ -607,7 +601,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.config.lower_price, 80.0);
-        cleanup_environment(&environment);
     }
 
     #[test]
@@ -630,9 +623,9 @@ mod tests {
 
     #[tokio::test]
     async fn strict_mode_returns_structured_mismatch() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
 
         let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
@@ -663,13 +656,11 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
     async fn strict_mode_rejects_persisted_track_missing_from_config() {
-        let environment = unique_test_environment();
+        let instance_dir = tempfile::tempdir().unwrap();
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![],
@@ -677,7 +668,7 @@ mod tests {
             account_monitor: Default::default(),
         };
         let seeded_config = test_config(80.0);
-        let db_path = test_db_path(&environment);
+        let db_path = test_db_path(instance_dir.path());
         persist_snapshot_with_lower_price(&seeded_config, &db_path, 80.0).await;
 
         let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
@@ -701,15 +692,13 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-
-        cleanup_environment(&environment);
     }
 
     #[tokio::test]
     async fn rebuild_mode_only_touches_database_under_current_instance_dir() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = test_config_with_instance_dir(temp_dir.path(), "mainnet", 90.0);
-        let db_path = crate::instance_dir::InstanceDir::new(temp_dir.path()).db_path();
+        let instance_dir = tempfile::tempdir().unwrap();
+        let config = test_config(90.0);
+        let db_path = test_db_path(instance_dir.path());
 
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
@@ -723,15 +712,22 @@ mod tests {
             .unwrap();
         assert!(loaded.is_none());
         assert!(db_path.exists());
+        assert!(db_path.starts_with(instance_dir.path()));
     }
 
-    fn unique_test_environment() -> String {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-        format!(
-            "state-bootstrap-test-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        )
+    #[test]
+    fn state_bootstrap_tests_do_not_use_environment_bucket_helpers() {
+        let source = include_str!("state_bootstrap.rs");
+        let unique_test_environment_signature = ["fn ", "unique_test_environment", "()"].concat();
+        let cleanup_environment_signature = ["fn ", "cleanup_environment", "("].concat();
+        let test_db_path_signature = ["fn ", "test_db_path", "(environment:"].concat();
+        let test_config_with_instance_dir_signature =
+            ["fn ", "test_config_with_instance_dir", "("].concat();
+
+        assert!(!source.contains(&unique_test_environment_signature));
+        assert!(!source.contains(&cleanup_environment_signature));
+        assert!(!source.contains(&test_db_path_signature));
+        assert!(!source.contains(&test_config_with_instance_dir_signature));
     }
 
     fn test_config(lower_price: f64) -> Config {
@@ -758,17 +754,8 @@ mod tests {
         }
     }
 
-    fn test_config_with_instance_dir(
-        _instance_dir: &Path,
-        environment: &str,
-        lower_price: f64,
-    ) -> Config {
-        let _ = environment;
-        test_config(lower_price)
-    }
-
-    fn test_db_path(environment: &str) -> PathBuf {
-        crate::instance_dir::InstanceDir::new(std::env::temp_dir().join(environment)).db_path()
+    fn test_db_path(instance_dir: &Path) -> PathBuf {
+        crate::instance_dir::InstanceDir::new(instance_dir).db_path()
     }
 
     async fn persist_snapshot_with_lower_price(_config: &Config, db_path: &Path, lower_price: f64) {
@@ -808,12 +795,5 @@ mod tests {
             .save_transition("btc-core", &manager.snapshot("btc-core").unwrap(), &[], &[])
             .await
             .unwrap();
-    }
-
-    fn cleanup_environment(environment: &str) {
-        let _ = std::fs::remove_file(test_db_path(environment));
-        let _ = std::fs::remove_file(format!("{}-wal", test_db_path(environment).display()));
-        let _ = std::fs::remove_file(format!("{}-shm", test_db_path(environment).display()));
-        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(environment));
     }
 }
