@@ -3,7 +3,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicTickerMessage {
-    pub topic: String,
     pub ts: i64,
     pub data: PublicTickerData,
 }

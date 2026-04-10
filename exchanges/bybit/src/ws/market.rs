@@ -77,10 +77,14 @@ async fn subscribe(websocket: &mut super::WebSocket, symbol: &str) -> Result<()>
 }
 
 pub(super) fn parse_linear_ticker_message(payload: &str) -> Result<Option<PriceTick>> {
-    let message: PublicTickerMessage = serde_json::from_str(payload)?;
-    if !message.topic.starts_with("tickers.") {
+    let value: serde_json::Value = serde_json::from_str(payload)?;
+    let Some(topic) = value.get("topic").and_then(|topic| topic.as_str()) else {
+        return Ok(None);
+    };
+    if !topic.starts_with("tickers.") {
         return Ok(None);
     }
+    let message: PublicTickerMessage = serde_json::from_value(value)?;
 
     let mark_price = parse_decimal("data.markPrice", &message.data.mark_price)?;
     let timestamp = Utc
@@ -138,6 +142,19 @@ mod tests {
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             }
         );
+    }
+
+    #[test]
+    fn ignores_subscription_ack_messages() {
+        let payload = r#"{
+            "success": true,
+            "op": "subscribe",
+            "conn_id": "test"
+        }"#;
+
+        let tick = parse_linear_ticker_message(payload).unwrap();
+
+        assert!(tick.is_none());
     }
 
     #[tokio::test]
