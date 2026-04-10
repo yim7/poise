@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use tokio::time::Duration;
@@ -124,9 +124,7 @@ impl BybitRestClient {
         let response: ServerTimeResult = self
             .send_request(Method::GET, "/v5/market/time", Vec::new(), AuthMode::None)
             .await?;
-        Utc.timestamp_opt(response.time_second, 0)
-            .single()
-            .context("invalid Bybit server time")
+        response.try_into()
     }
 
     pub fn sign_v5_payload(&self, payload: &str) -> String {

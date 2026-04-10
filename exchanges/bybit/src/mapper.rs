@@ -5,7 +5,7 @@ use poise_engine::ports::{AccountCapacitySnapshot, AccountSummarySnapshot, Excha
 use poise_engine::track::{Instrument, Venue};
 
 use crate::rest::models::{
-    InstrumentInfoResult, ServerTimeResponse, UnifiedWalletBalance, WalletBalanceResult,
+    InstrumentInfoResult, ServerTimeResult, UnifiedWalletBalance, WalletBalanceResult,
 };
 
 pub(crate) fn build_account_capacity_snapshot(
@@ -49,8 +49,8 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
                     "lotSizeFilter.minNotionalValue",
                     info.lot_size_filter.min_notional_value.as_deref(),
                 )?,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
+                maker_fee_rate: 0.0002,
+                taker_fee_rate: 0.00055,
             },
         })
     }
@@ -71,13 +71,13 @@ impl WalletBalanceResult {
     }
 }
 
-impl TryFrom<ServerTimeResponse> for chrono::DateTime<Utc> {
+impl TryFrom<ServerTimeResult> for chrono::DateTime<Utc> {
     type Error = anyhow::Error;
 
-    fn try_from(value: ServerTimeResponse) -> Result<Self, Self::Error> {
-        Utc.timestamp_opt(value.result.time_second, 0)
+    fn try_from(value: ServerTimeResult) -> Result<Self, Self::Error> {
+        Utc.timestamp_opt(value.time_second, 0)
             .single()
-            .ok_or_else(|| anyhow!("invalid Bybit server time: {}", value.result.time_second))
+            .ok_or_else(|| anyhow!("invalid Bybit server time: {}", value.time_second))
     }
 }
 
@@ -102,8 +102,8 @@ fn required_decimal(field: &str, value: Option<&str>) -> Result<f64> {
 mod tests {
     use super::*;
     use crate::rest::models::{
-        InstrumentInfoResult, LinearInstrumentInfo, LotSizeFilter, PriceFilter, ServerTimeResponse,
-        ServerTimeResult, UnifiedWalletBalance, WalletBalanceResult,
+        InstrumentInfoResult, LinearInstrumentInfo, LotSizeFilter, PriceFilter, ServerTimeResult,
+        UnifiedWalletBalance, WalletBalanceResult,
     };
     use poise_core::types::ExchangeRules;
 
@@ -135,8 +135,8 @@ mod tests {
                 quantity_step: 0.001,
                 min_qty: 0.001,
                 min_notional: 5.0,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
+                maker_fee_rate: 0.0002,
+                taker_fee_rate: 0.00055,
             }
         );
     }
@@ -196,10 +196,8 @@ mod tests {
 
     #[test]
     fn parses_bybit_server_time() {
-        let response = ServerTimeResponse {
-            result: ServerTimeResult {
-                time_second: 1_700_000_000,
-            },
+        let response = ServerTimeResult {
+            time_second: 1_700_000_000,
         };
 
         let time = chrono::DateTime::<Utc>::try_from(response).unwrap();

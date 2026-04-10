@@ -177,7 +177,7 @@ impl MarketDataPort for BybitMarketData {
 #[async_trait]
 impl AccountSummaryPort for BybitAccountSummary {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        Err(not_wired("account summary"))
+        self._rest.get_account_summary().await
     }
 }
 
@@ -185,9 +185,11 @@ impl AccountSummaryPort for BybitAccountSummary {
 impl AccountPort for BybitAccount {
     async fn get_account_capacity_snapshot(
         &self,
-        _instrument: &Instrument,
+        instrument: &Instrument,
     ) -> Result<AccountCapacitySnapshot> {
-        Err(not_wired("account"))
+        self._rest
+            .get_account_capacity_snapshot(&instrument.symbol)
+            .await
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
@@ -197,18 +199,29 @@ impl AccountPort for BybitAccount {
 
 #[async_trait]
 impl MetadataPort for BybitMetadata {
-    async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-        Err(not_wired("metadata"))
+    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
+        self._rest.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-        Err(not_wired("metadata"))
+        self._rest.get_server_time().await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use poise_engine::track::Venue;
+
     use super::*;
+    use crate::Deployment;
 
     #[tokio::test]
     async fn connected_exposes_all_required_ports() {
@@ -225,5 +238,162 @@ mod tests {
         let _account_summary = connected.account_summary();
         let _account = connected.account();
         let _metadata = connected.metadata();
+    }
+
+    #[tokio::test]
+    async fn connected_rest_ports_are_wired_to_bybit_rest_client() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","priceFilter":{"tickSize":"0.10"},"lotSizeFilter":{"qtyStep":"0.001","minOrderQty":"0.001","minNotionalValue":"5"}}]}}"#,
+            ),
+            MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{"timeSecond":1700000000}}"#),
+        ])
+        .await;
+
+        let rest = Arc::new(
+            crate::rest::BybitRestClient::with_http_client_and_timestamp_provider(
+                server.base_url(),
+                "api-key",
+                "secret-key",
+                Arc::new(|| 1_700_000_000_000),
+                reqwest::Client::new(),
+            ),
+        );
+        let account_summary = BybitAccountSummary::new(Arc::clone(&rest));
+        let account = BybitAccount::new(
+            Arc::clone(&rest),
+            Arc::new(BybitWsClient::new(Arc::clone(&rest), Deployment::Mainnet)),
+        );
+        let metadata = BybitMetadata::new(Arc::clone(&rest));
+        let instrument = poise_engine::track::Instrument::new(Venue::Bybit, "BTCUSDT");
+
+        let summary = account_summary.get_account_summary().await.unwrap();
+        let capacity = account
+            .get_account_capacity_snapshot(&instrument)
+            .await
+            .unwrap();
+        let info = metadata.get_exchange_info(&instrument).await.unwrap();
+        let server_time = metadata.get_server_time().await.unwrap();
+        let requests = server.requests();
+
+        assert_eq!(summary.available, 100.25);
+        assert_eq!(capacity.max_increase_notional, 100.25);
+        assert_eq!(info.instrument, instrument);
+        assert_eq!(server_time.timestamp(), 1_700_000_000);
+        assert_eq!(requests.len(), 4);
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.path.contains("not wired"))
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockResponse {
+        status: u16,
+        body: String,
+    }
+
+    impl MockResponse {
+        fn json(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+    }
+
+    struct MockHttpServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    }
+
+    impl MockHttpServer {
+        async fn spawn(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let queued_responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+            let stored_requests = Arc::clone(&requests);
+
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let mut buffer = vec![0_u8; 4096];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    let request = parse_request(&String::from_utf8_lossy(&buffer[..read]));
+                    stored_requests.lock().unwrap().push(request);
+
+                    let response = queued_responses.lock().unwrap().pop_front().unwrap();
+                    let status_text = if response.status == 200 { "OK" } else { "ERR" };
+                    let raw = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                        response.status,
+                        status_text,
+                        response.body.len(),
+                        response.body
+                    );
+                    socket.write_all(raw.as_bytes()).await.unwrap();
+                }
+            });
+
+            Self {
+                base_url: format!("http://{}", address),
+                requests,
+            }
+        }
+
+        fn base_url(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn requests(&self) -> Vec<RecordedRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn parse_request(raw: &str) -> RecordedRequest {
+        let mut lines = raw.split("\r\n");
+        let request_line = lines.next().unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap().to_string();
+        let path = request_parts.next().unwrap().to_string();
+        let mut headers = HashMap::new();
+
+        for line in lines {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
+
+        RecordedRequest {
+            method,
+            path,
+            headers,
+        }
     }
 }
