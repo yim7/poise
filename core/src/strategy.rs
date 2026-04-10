@@ -82,8 +82,8 @@ fn default_min_rebalance_units() -> f64 {
 ///
 /// 使用围绕价格带中点对称的控仓曲线：
 /// - Linear:      h(u) = -sign(u) * |u|
-/// - Inertial:    h(u) = -sign(u) * |u|^(1/3)
-/// - Responsive:  h(u) = -sign(u) * |u|^3
+/// - Inertial:    h(u) = -sign(u) * |u|^0.65
+/// - Responsive:  h(u) = -sign(u) * |u|^1.6
 pub fn desired_exposure(price: f64, config: &TrackConfig) -> Exposure {
     let position = signed_band_position(price, config);
     let span = (config.long_exposure_units + config.short_exposure_units) / 2.0;
@@ -100,8 +100,8 @@ fn signed_band_position(price: f64, config: &TrackConfig) -> f64 {
 fn mirrored_shape_value(position: f64, shape_family: ShapeFamily) -> f64 {
     let magnitude = match shape_family {
         ShapeFamily::Linear => position.abs(),
-        ShapeFamily::Inertial => position.abs().powf(1.0 / 3.0),
-        ShapeFamily::Responsive => position.abs().powi(3),
+        ShapeFamily::Inertial => position.abs().powf(0.65),
+        ShapeFamily::Responsive => position.abs().powf(1.6),
     };
 
     if position >= 0.0 {
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn stronger_shape_family_curves_have_clear_inventory_separation_halfway_to_center() {
+    fn stronger_shape_family_curves_have_tuned_inventory_separation_halfway_to_center() {
         let inertial = desired_exposure(
             95.0,
             &TrackConfig {
@@ -339,9 +339,9 @@ mod tests {
             },
         );
 
-        assert_close(inertial.0, 6.35);
+        assert_close(inertial.0, 5.10);
         assert_close(linear.0, 4.0);
-        assert_close(responsive.0, 1.0);
+        assert_close(responsive.0, 2.64);
         assert!(inertial.0 > linear.0);
         assert!(linear.0 > responsive.0);
     }
