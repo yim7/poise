@@ -916,15 +916,25 @@ git commit -m "feat: add bybit websocket integration"
 
 ### Task 5: 接通 Bybit `ExecutionPort` 并完成最终闭环回归
 
+验收记录：
+- 状态：已完成
+- 提交：`504c0c4 feat: add bybit execution integration`
+- 验证：
+  - `cargo test -p poise-bybit`
+  - `cargo test -p poise-server`
+  - `cargo build -p poise-server`
+  - `cargo fmt --all --check`
+
 **Files:**
 - Modify: `exchanges/bybit/src/rest/client.rs`
 - Modify: `exchanges/bybit/src/rest/models.rs`
 - Modify: `exchanges/bybit/src/mapper.rs`
 - Modify: `exchanges/bybit/src/connected.rs`
+- Modify: `exchanges/bybit/src/ws/account.rs`
 - Test: `exchanges/bybit/src/mapper.rs`
 - Test: `exchanges/bybit/src/rest/client.rs`
 
-- [ ] **Step 1: 先写失败测试，固定下单、撤单、查仓位和查挂单语义**
+- [x] **Step 1: 先写失败测试，固定下单、撤单、查仓位和查挂单语义**
 
 在 `exchanges/bybit/src/mapper.rs` 增加下单和订单状态映射测试：
 
@@ -987,7 +997,7 @@ async fn create_order_uses_linear_limit_gtc_and_position_idx_zero() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前交易 REST 还没接通**
+- [x] **Step 2: 运行定向测试，确认当前交易 REST 还没接通**
 
 Run:
 `cargo test -p poise-bybit converts_create_order_response_into_order_receipt -- --exact`
@@ -1001,7 +1011,7 @@ Run:
 Expected:
 - FAIL，原因是当前 `ExecutionPort` 还没有走 Bybit REST
 
-- [ ] **Step 3: 写最小实现，接通 `ExecutionPort`**
+- [x] **Step 3: 写最小实现，接通 `ExecutionPort`**
 
 实现范围：
 
@@ -1027,7 +1037,7 @@ Expected:
 - open orders 映射到现有 `ExchangeOrder`
 - 非 one-way 的 `positionIdx != 0` 明确失败
 
-- [ ] **Step 4: 跑 Bybit 最终回归**
+- [x] **Step 4: 跑 Bybit 最终回归**
 
 Run:
 `cargo test -p poise-bybit`
@@ -1047,7 +1057,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/rest/client.rs exchanges/bybit/src/rest/models.rs exchanges/bybit/src/mapper.rs exchanges/bybit/src/connected.rs
