@@ -102,12 +102,69 @@ mod tests {
     }
 
     #[test]
-    fn credentials_require_api_key_and_api_secret() {
-        let error = Config::default().credentials().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing required exchange.api_key")
-        );
+    fn credentials_handle_missing_fields_whitespace_and_success() {
+        enum Expectation {
+            Err(&'static str),
+            Ok(&'static str, &'static str),
+        }
+
+        struct Case {
+            name: &'static str,
+            api_key: Option<&'static str>,
+            api_secret: Option<&'static str>,
+            expect: Expectation,
+        }
+
+        let cases = [
+            Case {
+                name: "missing api_key",
+                api_key: None,
+                api_secret: Some("demo-secret"),
+                expect: Expectation::Err("missing required exchange.api_key"),
+            },
+            Case {
+                name: "missing api_secret",
+                api_key: Some("demo-key"),
+                api_secret: None,
+                expect: Expectation::Err("missing required exchange.api_secret"),
+            },
+            Case {
+                name: "trims surrounding whitespace",
+                api_key: Some("  demo-key  "),
+                api_secret: Some("\n demo-secret \t"),
+                expect: Expectation::Ok("demo-key", "demo-secret"),
+            },
+            Case {
+                name: "success path",
+                api_key: Some("demo-key"),
+                api_secret: Some("demo-secret"),
+                expect: Expectation::Ok("demo-key", "demo-secret"),
+            },
+        ];
+
+        for case in cases {
+            let config = Config {
+                deployment: Deployment::Testnet,
+                api_key: case.api_key.map(str::to_string),
+                api_secret: case.api_secret.map(str::to_string),
+            };
+
+            match case.expect {
+                Expectation::Err(expected) => {
+                    let error = config.credentials().unwrap_err();
+                    assert!(
+                        error.to_string().contains(expected),
+                        "case `{}` produced `{}`",
+                        case.name,
+                        error
+                    );
+                }
+                Expectation::Ok(expected_key, expected_secret) => {
+                    let (api_key, api_secret) = config.credentials().unwrap();
+                    assert_eq!(api_key, expected_key, "case `{}`", case.name);
+                    assert_eq!(api_secret, expected_secret, "case `{}`", case.name);
+                }
+            }
+        }
     }
 }

@@ -170,7 +170,7 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn parses_config_file_with_tracks_and_exchange() {
+    fn parses_binance_exchange_config_and_tracks() {
         let config = parse_config(
             r#"
 bind_address = "127.0.0.1:9000"
@@ -219,15 +219,11 @@ out_of_band_policy = "hold"
             config.tracks[1].out_of_band_policy,
             Some(poise_core::strategy::OutOfBandPolicy::Hold)
         );
-        match &config.exchange {
-            ExchangeConfig::Binance(exchange) => {
-                assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
-                assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
-            }
-            ExchangeConfig::Bybit(exchange) => {
-                assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
-                assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
-            }
+        if let ExchangeConfig::Binance(exchange) = &config.exchange {
+            assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
+            assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
+        } else {
+            panic!("expected Binance fixture to parse as ExchangeConfig::Binance");
         }
     }
 
@@ -285,6 +281,13 @@ total_loss_limit = 600.0
 
         assert_eq!(config.exchange.venue(), Venue::Bybit);
         assert_eq!(config.tracks[0].symbol, "BTCUSDT");
+        if let ExchangeConfig::Bybit(exchange) = &config.exchange {
+            assert_eq!(exchange.deployment, poise_bybit::Deployment::Testnet);
+            assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
+            assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
+        } else {
+            panic!("expected Bybit fixture to parse as ExchangeConfig::Bybit");
+        }
     }
 
     #[test]
@@ -342,15 +345,11 @@ total_loss_limit = 600.0
         .unwrap();
 
         assert_eq!(config.bind_address, default_bind_address());
-        match &config.exchange {
-            ExchangeConfig::Binance(exchange) => {
-                assert_eq!(exchange.api_key, None);
-                assert_eq!(exchange.api_secret, None);
-            }
-            ExchangeConfig::Bybit(exchange) => {
-                assert_eq!(exchange.api_key, None);
-                assert_eq!(exchange.api_secret, None);
-            }
+        if let ExchangeConfig::Binance(exchange) = &config.exchange {
+            assert_eq!(exchange.api_key, None);
+            assert_eq!(exchange.api_secret, None);
+        } else {
+            panic!("expected default exchange to remain Binance");
         }
         assert_eq!(
             track.track_config().shape_family,
