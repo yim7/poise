@@ -19,7 +19,7 @@
 - `exchanges/bybit/Cargo.toml`
   - Bybit crate 依赖定义
 - `exchanges/bybit/src/lib.rs`
-  - 统一导出 `Config`、`Deployment`、`Endpoints`、`Connected`、`connect(...)`
+  - 当前导出 `Config`、`Deployment`；后续接入 `Connected`、`connect(...)`
 - `exchanges/bybit/src/config.rs`
   - Bybit 配置、主网/测试网 endpoint、凭证校验
 - `exchanges/bybit/src/connected.rs`
@@ -74,6 +74,16 @@
 
 ### Task 1: 固定共享层 Bybit 边界与 workspace 入口
 
+验收记录：
+- 状态：已完成
+- 实现提交：`f298c63 feat: add bybit config boundary`
+- 修正提交：`ac7b7b2 fix: tighten bybit config surface`
+- 验证：
+  - `cargo test -p poise-engine track::tests::venue_as_str_supports_bybit -- --exact`
+  - `cargo test -p poise-server config::tests::parses_service_level_exchange_config_and_track_symbols -- --exact`
+  - `cargo test -p poise-server config::tests::parses_bybit_exchange_config_and_tracks -- --exact`
+  - `cargo test -p poise-bybit config::tests::credentials_handle_missing_fields_whitespace_and_success -- --exact`
+
 **Files:**
 - Create: `exchanges/bybit/Cargo.toml`
 - Create: `exchanges/bybit/src/lib.rs`
@@ -85,7 +95,7 @@
 - Test: `exchanges/bybit/src/config.rs`
 - Test: `server/src/config.rs`
 
-- [ ] **Step 1: 先写失败测试，固定 workspace / venue / 配置边界**
+- [x] **Step 1: 先写失败测试，固定 workspace / venue / 配置边界**
 
 在 `engine/src/track.rs` 增加 `Venue::Bybit` 测试：
 
@@ -158,7 +168,7 @@ total_loss_limit = 600.0
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前代码还没有 Bybit 边界**
+- [x] **Step 2: 运行定向测试，确认当前代码还没有 Bybit 边界**
 
 Run:
 `cargo test -p poise-server parses_bybit_exchange_config_and_tracks -- --exact`
@@ -172,7 +182,7 @@ Run:
 Expected:
 - FAIL，原因是当前 `Venue` 还没有 `Bybit`
 
-- [ ] **Step 3: 写最小实现，接通 workspace / venue / 配置**
+- [x] **Step 3: 写最小实现，接通 workspace / venue / 配置**
 
 在 `engine/src/track.rs` 增加枚举分支：
 
