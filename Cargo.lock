@@ -1231,6 +1231,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "poise-bybit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+]
+
+[[package]]
 name = "poise-core"
 version = "0.1.0"
 dependencies = [
@@ -1271,6 +1279,7 @@ dependencies = [
  "futures-util",
  "poise-application",
  "poise-binance",
+ "poise-bybit",
  "poise-core",
  "poise-engine",
  "poise-protocol",

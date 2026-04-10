@@ -10,6 +10,7 @@ axum.workspace = true
 chrono.workspace = true
 poise-application = { path = "../application" }
 poise-binance = { path = "../exchanges/binance" }
+poise-bybit = { path = "../exchanges/bybit" }
 poise-core = { path = "../core" }
 poise-engine = { path = "../engine" }
 poise-protocol = { path = "../protocol" }

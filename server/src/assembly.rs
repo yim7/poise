@@ -100,6 +100,7 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
                 connected.metadata(),
             ))
         }
+        ExchangeConfig::Bybit(_) => Err(anyhow!("bybit exchange is not wired yet")),
     }
 }
 

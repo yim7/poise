@@ -6,6 +6,7 @@ members = [
     "storage",
     "protocol",
     "exchanges/binance",
+    "exchanges/bybit",
     "server",
     "tui",
 ]

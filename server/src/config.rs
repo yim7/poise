@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use poise_application::{AccountMonitorConfig, ConfiguredTrackDefinition, ConfiguredTrackInput};
 use poise_binance as binance;
+use poise_bybit as bybit;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_engine::track::{TrackId, Venue};
 use serde::Deserialize;
@@ -44,6 +45,7 @@ pub type TrackDefinition = TrackFileDefinition;
 #[serde(tag = "venue", rename_all = "snake_case")]
 pub enum ExchangeConfig {
     Binance(binance::Config),
+    Bybit(bybit::Config),
 }
 
 impl Default for ExchangeConfig {
@@ -56,6 +58,7 @@ impl ExchangeConfig {
     pub fn venue(&self) -> Venue {
         match self {
             Self::Binance(_) => Venue::Binance,
+            Self::Bybit(_) => Venue::Bybit,
         }
     }
 }
@@ -221,6 +224,10 @@ out_of_band_policy = "hold"
                 assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
                 assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
             }
+            ExchangeConfig::Bybit(exchange) => {
+                assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
+                assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
+            }
         }
     }
 
@@ -249,6 +256,34 @@ total_loss_limit = 2400.0
         .unwrap();
 
         assert_eq!(config.exchange.venue(), Venue::Binance);
+        assert_eq!(config.tracks[0].symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn parses_bybit_exchange_config_and_tracks() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "bybit"
+deployment = "testnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.exchange.venue(), Venue::Bybit);
         assert_eq!(config.tracks[0].symbol, "BTCUSDT");
     }
 
@@ -309,6 +344,10 @@ total_loss_limit = 600.0
         assert_eq!(config.bind_address, default_bind_address());
         match &config.exchange {
             ExchangeConfig::Binance(exchange) => {
+                assert_eq!(exchange.api_key, None);
+                assert_eq!(exchange.api_secret, None);
+            }
+            ExchangeConfig::Bybit(exchange) => {
                 assert_eq!(exchange.api_key, None);
                 assert_eq!(exchange.api_secret, None);
             }
