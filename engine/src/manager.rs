@@ -1528,6 +1528,35 @@ mod tests {
     }
 
     #[test]
+    fn restore_track_state_rejects_shape_family_revision_mismatch() {
+        let mut manager = test_manager_with_active_track();
+        let snapshot = {
+            let mut runtime = TrackRuntime::new(
+                TrackId::new("btc-core"),
+                test_instrument("BTCUSDT"),
+                TrackConfig {
+                    shape_family: ShapeFamily::Inertial,
+                    ..test_config()
+                },
+                test_budget(),
+                test_exchange_rules(),
+                Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
+            );
+            runtime.status = TrackStatus::Active;
+            runtime.current_exposure = poise_core::types::Exposure(0.0);
+            runtime.reference_price = Some(90.0);
+            runtime.snapshot()
+        };
+
+        let error = manager.restore_track_state(&snapshot).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot restore revision mismatch")
+        );
+    }
+
+    #[test]
     fn restore_from_snapshot_keeps_runtime_budget_during_reconcile() {
         let mut runtime = TrackRuntime::new(
             TrackId::new("btc-core"),

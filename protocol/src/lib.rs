@@ -364,8 +364,8 @@ pub enum StreamEvent {
 #[serde(rename_all = "snake_case")]
 pub enum ShapeFamily {
     Linear,
-    Convex,
-    Concave,
+    Inertial,
+    Responsive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,8 +404,8 @@ impl fmt::Display for ShapeFamily {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Linear => "linear",
-            Self::Convex => "convex",
-            Self::Concave => "concave",
+            Self::Inertial => "inertial",
+            Self::Responsive => "responsive",
         };
 
         f.write_str(value)
@@ -439,10 +439,23 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSummaryView, RiskSignalView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackLedgerGapReasonView,
-        TrackListResponse,
+        AccountSummaryView, RiskSignalView, ShapeFamily, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
+        TrackLedgerGapReasonView, TrackListResponse,
     };
+
+    #[test]
+    fn shape_family_serializes_new_behavior_names() {
+        let payload = serde_json::to_string(&ShapeFamily::Responsive).unwrap();
+        assert_eq!(payload, "\"responsive\"");
+        assert_eq!(ShapeFamily::Inertial.to_string(), "inertial");
+    }
+
+    #[test]
+    fn shape_family_rejects_legacy_geometry_names() {
+        assert!(serde_json::from_str::<ShapeFamily>("\"concave\"").is_err());
+        assert!(serde_json::from_str::<ShapeFamily>("\"convex\"").is_err());
+    }
 
     #[test]
     fn deserializes_track_list_response() {

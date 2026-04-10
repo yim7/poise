@@ -21,8 +21,8 @@ pub struct TrackConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ShapeFamily {
     Linear,
-    Convex,
-    Concave,
+    Inertial,
+    Responsive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,24 +80,35 @@ fn default_min_rebalance_units() -> f64 {
 
 /// 纯函数：给定价格和配置，返回目标占用。
 ///
-/// 使用策略族设计文档中定义的 g(x) = 1 - x^p 公式：
-/// - Linear: p=1, g(x) = 1 - x
-/// - Convex: p=2, g(x) = 1 - x²
-/// - Concave: p=0.5, g(x) = 1 - √x
-///
-/// target = -short_exposure_units + (long_exposure_units + short_exposure_units) * g(x)
+/// 使用围绕价格带中点对称的控仓曲线：
+/// - Linear:      h(u) = -sign(u) * |u|
+/// - Inertial:    h(u) = -sign(u) * |u|^(1/3)
+/// - Responsive:  h(u) = -sign(u) * |u|^3
 pub fn desired_exposure(price: f64, config: &TrackConfig) -> Exposure {
-    let x =
-        ((price - config.lower_price) / (config.upper_price - config.lower_price)).clamp(0.0, 1.0);
-    let g = match config.shape_family {
-        ShapeFamily::Linear => 1.0 - x,
-        ShapeFamily::Convex => 1.0 - x.powi(2),
-        ShapeFamily::Concave => 1.0 - x.sqrt(),
+    let position = signed_band_position(price, config);
+    let span = (config.long_exposure_units + config.short_exposure_units) / 2.0;
+    let bias = (config.long_exposure_units - config.short_exposure_units) / 2.0;
+
+    Exposure(bias + span * mirrored_shape_value(position, config.shape_family))
+}
+
+fn signed_band_position(price: f64, config: &TrackConfig) -> f64 {
+    let half_band = (config.upper_price - config.lower_price) / 2.0;
+    ((price - config.band_center()) / half_band).clamp(-1.0, 1.0)
+}
+
+fn mirrored_shape_value(position: f64, shape_family: ShapeFamily) -> f64 {
+    let magnitude = match shape_family {
+        ShapeFamily::Linear => position.abs(),
+        ShapeFamily::Inertial => position.abs().powf(1.0 / 3.0),
+        ShapeFamily::Responsive => position.abs().powi(3),
     };
-    Exposure(
-        -config.short_exposure_units
-            + (config.long_exposure_units + config.short_exposure_units) * g,
-    )
+
+    if position >= 0.0 {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 pub fn band_status(price: f64, config: &TrackConfig) -> BandStatus {
@@ -136,6 +147,13 @@ impl TrackConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 0.02,
+            "expected {expected}, got {actual}"
+        );
+    }
 
     fn neutral_config() -> TrackConfig {
         TrackConfig {
@@ -272,14 +290,60 @@ mod tests {
     }
 
     #[test]
-    fn convex_shape_slower_departure() {
+    fn neutral_curve_is_symmetric_around_center_for_every_shape_family() {
+        for shape_family in [
+            ShapeFamily::Linear,
+            ShapeFamily::Inertial,
+            ShapeFamily::Responsive,
+        ] {
+            let config = TrackConfig {
+                shape_family,
+                ..neutral_config()
+            };
+
+            let lower_side = desired_exposure(95.0, &config).0;
+            let upper_side = desired_exposure(105.0, &config).0;
+
+            assert_close(lower_side, -upper_side);
+        }
+    }
+
+    #[test]
+    fn biased_curve_shifts_center_by_capacity_difference() {
         let config = TrackConfig {
-            shape_family: ShapeFamily::Convex,
+            long_exposure_units: 10.0,
+            short_exposure_units: 6.0,
             ..neutral_config()
         };
-        let linear_mid = desired_exposure(95.0, &neutral_config());
-        let convex_mid = desired_exposure(95.0, &config);
-        assert!(convex_mid.0 > linear_mid.0);
+
+        assert_close(desired_exposure(100.0, &config).0, 2.0);
+        assert_close(desired_exposure(90.0, &config).0, 10.0);
+        assert_close(desired_exposure(110.0, &config).0, -6.0);
+    }
+
+    #[test]
+    fn stronger_shape_family_curves_have_clear_inventory_separation_halfway_to_center() {
+        let inertial = desired_exposure(
+            95.0,
+            &TrackConfig {
+                shape_family: ShapeFamily::Inertial,
+                ..neutral_config()
+            },
+        );
+        let linear = desired_exposure(95.0, &neutral_config());
+        let responsive = desired_exposure(
+            95.0,
+            &TrackConfig {
+                shape_family: ShapeFamily::Responsive,
+                ..neutral_config()
+            },
+        );
+
+        assert_close(inertial.0, 6.35);
+        assert_close(linear.0, 4.0);
+        assert_close(responsive.0, 1.0);
+        assert!(inertial.0 > linear.0);
+        assert!(linear.0 > responsive.0);
     }
 
     #[test]

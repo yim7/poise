@@ -2095,7 +2095,7 @@ upper_price = 2600.0
 long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
-shape_family = "concave"
+shape_family = "inertial"
 out_of_band_policy = "hold"
 "#,
             );

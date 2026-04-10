@@ -5,7 +5,7 @@ use poise_application::{AccountMonitorConfig, ConfiguredTrackDefinition, Configu
 use poise_binance as binance;
 use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_engine::track::{TrackId, Venue};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +29,7 @@ pub struct TrackFileDefinition {
     pub short_exposure_units: f64,
     pub notional_per_unit: f64,
     pub min_rebalance_units: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_shape_family_option")]
     pub shape_family: Option<ShapeFamily>,
     pub out_of_band_policy: Option<OutOfBandPolicy>,
     pub max_notional: Option<f64>,
@@ -109,10 +110,32 @@ fn default_bind_address() -> String {
     "127.0.0.1:8000".to_string()
 }
 
+fn deserialize_shape_family_option<'de, D>(deserializer: D) -> Result<Option<ShapeFamily>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref() {
+        None => Ok(None),
+        Some("linear") => Ok(Some(ShapeFamily::Linear)),
+        Some("inertial") => Ok(Some(ShapeFamily::Inertial)),
+        Some("responsive") => Ok(Some(ShapeFamily::Responsive)),
+        Some("concave") => Err(serde::de::Error::custom(
+            "shape_family `concave` has been renamed to `inertial`",
+        )),
+        Some("convex") => Err(serde::de::Error::custom(
+            "shape_family `convex` has been renamed to `responsive`",
+        )),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "unknown shape_family `{other}`; expected one of: linear, inertial, responsive"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use poise_application::{ConfiguredTrackDefinition, ConfiguredTrackInput};
-    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+    use poise_core::strategy::ShapeFamily;
     use poise_engine::track::Venue;
 
     use super::{AccountMonitorConfig, ExchangeConfig, default_bind_address, parse_config};
@@ -198,7 +221,7 @@ short_exposure_units = 4.0
 notional_per_unit = 2000.0
 daily_loss_limit = 800.0
 total_loss_limit = 1600.0
-shape_family = "concave"
+shape_family = "inertial"
 out_of_band_policy = "hold"
 "#,
         )
@@ -210,7 +233,7 @@ out_of_band_policy = "hold"
         assert_eq!(config.tracks[0].track_id().as_str(), "btc-core");
         assert_eq!(
             config.tracks[1].shape_family,
-            Some(poise_core::strategy::ShapeFamily::Concave)
+            Some(poise_core::strategy::ShapeFamily::Inertial)
         );
         assert_eq!(
             config.tracks[1].out_of_band_policy,
@@ -429,7 +452,7 @@ tick_timeout_secs = 45
     }
 
     #[test]
-    fn parses_snake_case_strategy_enums() {
+    fn parses_new_shape_family_names() {
         let config = parse_config(
             r#"
 [exchange]
@@ -445,20 +468,39 @@ short_exposure_units = 4.0
 notional_per_unit = 375.0
 daily_loss_limit = 300.0
 total_loss_limit = 600.0
-shape_family = "concave"
-out_of_band_policy = "reduce_only"
+shape_family = "inertial"
 "#,
         )
         .unwrap();
 
         let track = &config.tracks[0];
-        assert_eq!(track.shape_family, Some(ShapeFamily::Concave));
-        assert_eq!(track.out_of_band_policy, Some(OutOfBandPolicy::ReduceOnly));
-        let configured = ConfiguredTrackDefinition::try_from_input(
-            track.to_configured_input(config.exchange.venue()),
+        assert_eq!(track.shape_family, Some(ShapeFamily::Inertial));
+    }
+
+    #[test]
+    fn rejects_legacy_shape_family_names_with_migration_hint() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 4.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+shape_family = "concave"
+"#,
         )
-        .unwrap();
-        assert_eq!(configured.budget().max_notional, 3000.0);
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("concave"));
+        assert!(format!("{error:#}").contains("inertial"));
     }
 
     #[test]

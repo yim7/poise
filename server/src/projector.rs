@@ -205,8 +205,8 @@ fn project_track_status(value: &EngineTrackStatus) -> ProtocolTrackStatus {
 fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolShapeFamily {
     match value {
         poise_core::strategy::ShapeFamily::Linear => ProtocolShapeFamily::Linear,
-        poise_core::strategy::ShapeFamily::Convex => ProtocolShapeFamily::Convex,
-        poise_core::strategy::ShapeFamily::Concave => ProtocolShapeFamily::Concave,
+        poise_core::strategy::ShapeFamily::Inertial => ProtocolShapeFamily::Inertial,
+        poise_core::strategy::ShapeFamily::Responsive => ProtocolShapeFamily::Responsive,
     }
 }
 

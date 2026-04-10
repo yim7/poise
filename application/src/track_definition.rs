@@ -257,7 +257,7 @@ mod tests {
             short_exposure_units: 6.0,
             notional_per_unit: 375.0,
             min_rebalance_units: Some(0.75),
-            shape_family: Some(ShapeFamily::Concave),
+            shape_family: Some(ShapeFamily::Inertial),
             out_of_band_policy: Some(OutOfBandPolicy::Hold),
             max_notional: Some(4200.0),
             daily_loss_limit: 300.0,
