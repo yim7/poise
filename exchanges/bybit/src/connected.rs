@@ -18,10 +18,10 @@ pub async fn connect(config: &Config) -> Result<Connected> {
     let deployment = config.deployment.clone();
     let rest = Arc::new(BybitRestClient::new(
         deployment.clone(),
-        api_key,
-        api_secret,
+        api_key.clone(),
+        api_secret.clone(),
     ));
-    let ws = Arc::new(BybitWsClient::new(Arc::clone(&rest), deployment));
+    let ws = Arc::new(BybitWsClient::new(deployment, api_key, api_secret));
 
     Ok(Connected::from_clients(rest, ws))
 }
@@ -166,11 +166,8 @@ impl ExecutionPort for BybitExecution {
 
 #[async_trait]
 impl MarketDataPort for BybitMarketData {
-    async fn subscribe_prices(
-        &self,
-        _instrument: &Instrument,
-    ) -> Result<mpsc::Receiver<PriceTick>> {
-        Err(not_wired("market data"))
+    async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+        self._ws.subscribe_prices(instrument).await
     }
 }
 
@@ -193,7 +190,7 @@ impl AccountPort for BybitAccount {
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        Err(not_wired("account"))
+        self._ws.subscribe_user_data().await
     }
 }
 
@@ -211,17 +208,19 @@ impl MetadataPort for BybitMetadata {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
+    use futures_util::{SinkExt, StreamExt};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        time::{Duration, timeout},
     };
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use poise_engine::track::Venue;
+    use poise_engine::track::{Instrument, Venue};
 
     use super::*;
-    use crate::Deployment;
 
     #[tokio::test]
     async fn connected_exposes_all_required_ports() {
@@ -268,11 +267,16 @@ mod tests {
                 reqwest::Client::new(),
             ),
         );
+        let ws = Arc::new(BybitWsClient::with_test_params(
+            "ws://127.0.0.1:1",
+            "ws://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+            std::time::Duration::from_millis(10),
+            Arc::new(|| 1_700_000_000_000),
+        ));
         let account_summary = BybitAccountSummary::new(Arc::clone(&rest));
-        let account = BybitAccount::new(
-            Arc::clone(&rest),
-            Arc::new(BybitWsClient::new(Arc::clone(&rest), Deployment::Mainnet)),
-        );
+        let account = BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws));
         let metadata = BybitMetadata::new(Arc::clone(&rest));
         let instrument = poise_engine::track::Instrument::new(Venue::Bybit, "BTCUSDT");
 
@@ -295,6 +299,124 @@ mod tests {
                 .iter()
                 .any(|request| request.path.contains("not wired"))
         );
+    }
+
+    #[tokio::test]
+    async fn connected_wires_market_and_private_ws_ports_to_bybit_ws_client() {
+        let public_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_addr = public_listener.local_addr().unwrap();
+        let private_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let private_addr = private_listener.local_addr().unwrap();
+
+        let market_messages = Arc::new(Mutex::new(Vec::new()));
+        let market_messages_server = Arc::clone(&market_messages);
+        tokio::spawn(async move {
+            let (stream, _) = public_listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = websocket.next().await {
+                market_messages_server.lock().unwrap().push(text);
+            }
+            websocket
+                .send(Message::Text(
+                    r#"{"topic":"tickers.BTCUSDT","ts":1700000000000,"data":{"symbol":"BTCUSDT","markPrice":"64000.10","indexPrice":"63999.90"}}"#.to_string(),
+                ))
+                .await
+                .unwrap();
+            websocket.close(None).await.unwrap();
+        });
+
+        let private_messages = Arc::new(Mutex::new(Vec::new()));
+        let private_messages_server = Arc::clone(&private_messages);
+        tokio::spawn(async move {
+            let (stream, _) = private_listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            while let Some(message) = websocket.next().await {
+                match message.unwrap() {
+                    Message::Text(text) => {
+                        private_messages_server.lock().unwrap().push(text.clone());
+                        if private_messages_server.lock().unwrap().len() == 2 {
+                            websocket
+                                .send(Message::Text(r#"{"success":true,"op":"auth"}"#.to_string()))
+                                .await
+                                .unwrap();
+                            websocket
+                                .send(Message::Text(
+                                    r#"{"success":true,"op":"subscribe"}"#.to_string(),
+                                ))
+                                .await
+                                .unwrap();
+                            websocket
+                                .send(Message::Text(
+                                    r#"{"topic":"order","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","orderId":"123","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}"#.to_string(),
+                                ))
+                                .await
+                                .unwrap();
+                            websocket.close(None).await.unwrap();
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let rest = Arc::new(
+            crate::rest::BybitRestClient::with_http_client_and_timestamp_provider(
+                "http://127.0.0.1:1",
+                "api-key",
+                "secret-key",
+                Arc::new(|| 1_700_000_000_000),
+                reqwest::Client::new(),
+            ),
+        );
+        let ws = Arc::new(BybitWsClient::with_test_params(
+            format!("ws://{public_addr}"),
+            format!("ws://{private_addr}"),
+            "api-key",
+            "secret-key",
+            Duration::from_millis(10),
+            Arc::new(|| 1_700_000_000_000),
+        ));
+        let connected = Connected::from_parts(
+            Arc::new(BybitExecution::new(Arc::clone(&rest))),
+            Arc::new(BybitMarketData::new(Arc::clone(&ws))),
+            Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
+            Arc::new(BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws))),
+            Arc::new(BybitMetadata::new(rest)),
+        );
+        let instrument = Instrument::new(Venue::Bybit, "BTCUSDT");
+
+        let mut prices = connected
+            .market_data()
+            .subscribe_prices(&instrument)
+            .await
+            .unwrap();
+        let mut user_data = connected.account().subscribe_user_data().await.unwrap();
+
+        let tick = timeout(Duration::from_secs(1), prices.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let event = timeout(Duration::from_secs(1), user_data.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(tick.mark_price, 64000.10);
+        assert_eq!(event.event_time.timestamp_millis(), 1_700_000_000_000);
+        assert!(matches!(
+            event.payload,
+            poise_engine::ports::UserDataPayload::OrderUpdate(_)
+        ));
+
+        let market_messages = market_messages.lock().unwrap();
+        let private_messages = private_messages.lock().unwrap();
+        assert_eq!(market_messages.len(), 1);
+        assert!(market_messages[0].contains("\"op\":\"subscribe\""));
+        assert_eq!(private_messages.len(), 2);
+        assert!(private_messages[0].contains("\"op\":\"auth\""));
+        assert!(private_messages[1].contains("\"op\":\"subscribe\""));
     }
 
     #[derive(Debug, Clone)]

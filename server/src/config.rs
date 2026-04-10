@@ -116,9 +116,11 @@ fn default_bind_address() -> String {
 mod tests {
     use poise_application::{ConfiguredTrackDefinition, ConfiguredTrackInput};
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
-    use poise_engine::track::Venue;
+    use poise_engine::track::{TrackId, Venue};
 
-    use super::{AccountMonitorConfig, ExchangeConfig, default_bind_address, parse_config};
+    use super::{
+        AccountMonitorConfig, ExchangeConfig, default_bind_address, load_config, parse_config,
+    };
 
     #[test]
     fn track_file_definition_maps_mechanically_to_configured_track_input() {
@@ -288,6 +290,22 @@ total_loss_limit = 600.0
         } else {
             panic!("expected Bybit fixture to parse as ExchangeConfig::Bybit");
         }
+    }
+
+    #[test]
+    fn parses_bybit_testnet_example_config() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../configs/bybit-testnet.demo.toml");
+        let config = load_config(&path).unwrap();
+
+        assert_eq!(config.exchange.venue(), Venue::Bybit);
+        if let ExchangeConfig::Bybit(exchange) = &config.exchange {
+            assert_eq!(exchange.deployment, poise_bybit::Deployment::Testnet);
+        } else {
+            panic!("expected Bybit fixture to parse as ExchangeConfig::Bybit");
+        }
+        assert_eq!(config.tracks.len(), 1);
+        assert_eq!(config.tracks[0].track_id(), TrackId::new("btc-core"));
     }
 
     #[test]

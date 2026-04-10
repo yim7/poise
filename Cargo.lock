@@ -1237,8 +1237,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures-util",
  "hex",
  "hmac",
+ "native-tls",
  "poise-core",
  "poise-engine",
  "reqwest",
@@ -1246,6 +1248,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
+ "tracing",
  "url",
 ]
 
