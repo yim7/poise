@@ -356,11 +356,12 @@ Commit: `ff53dc3`
 
 **Files:**
 - Modify: `README.md`
+- Modify: `docs/superpowers/specs/2026-04-10-shape-family-symmetry-design.md`
 - Modify: `docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md`
 - Modify: `docs/superpowers/specs/assets/2026-04-10-shape-family-symmetry-examples.svg`
 - Modify: `docs/superpowers/plans/2026-04-10-shape-family-symmetry.md`
 
-- [ ] **Step 1: 更新 README，只保留当前行为语义**
+- [x] **Step 1: 更新 README，只保留当前行为语义**
 
 在 `README.md` 的配置说明附近加入：
 
@@ -380,7 +381,7 @@ Commit: `ff53dc3`
 - 旧的 `concave / convex` 配置和值对应的持久化状态不再兼容，需要先清理后再启动
 ```
 
-- [ ] **Step 2: 把旧策略设计文档改成历史说明**
+- [x] **Step 2: 把旧策略设计文档改成历史说明**
 
 在 `docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md` 的 shape family 章节前加一段说明：
 
@@ -393,14 +394,14 @@ Commit: `ff53dc3`
 - 保留旧文档作为历史记录
 - 不把当前公式、当前命名和当前示例再复制一遍进去
 
-- [ ] **Step 3: 更新示意图标签**
+- [x] **Step 3: 更新示意图标签**
 
 在 `docs/superpowers/specs/assets/2026-04-10-shape-family-symmetry-examples.svg`：
 
 - 保持曲线走势不变
 - 只维护当前名字和当前中文说明
 
-- [ ] **Step 4: 用文本检查确认文档边界清楚**
+- [x] **Step 4: 用文本检查确认文档边界清楚**
 
 运行：
 
@@ -414,11 +415,13 @@ Commit: `ff53dc3`
 - 旧 spec 明确标成历史记录，并指向新设计
 - `cargo test --workspace --quiet` PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add README.md docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md docs/superpowers/specs/assets/2026-04-10-shape-family-symmetry-examples.svg docs/superpowers/plans/2026-04-10-shape-family-symmetry.md
+git add README.md docs/superpowers/specs/2026-04-10-shape-family-symmetry-design.md docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md docs/superpowers/specs/assets/2026-04-10-shape-family-symmetry-examples.svg docs/superpowers/plans/2026-04-10-shape-family-symmetry.md
 git commit -m "docs(strategy): document symmetric shape families"
 ```
 
 执行后在本 task 末尾回写 commit SHA。
+
+Commit: `7468f29`
