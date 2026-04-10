@@ -904,6 +904,148 @@ git commit -m "feat: add bybit websocket integration"
 
 ---
 
+### Task 5: 接通 Bybit `ExecutionPort` 并完成最终闭环回归
+
+**Files:**
+- Modify: `exchanges/bybit/src/rest/client.rs`
+- Modify: `exchanges/bybit/src/rest/models.rs`
+- Modify: `exchanges/bybit/src/mapper.rs`
+- Modify: `exchanges/bybit/src/connected.rs`
+- Test: `exchanges/bybit/src/mapper.rs`
+- Test: `exchanges/bybit/src/rest/client.rs`
+
+- [ ] **Step 1: 先写失败测试，固定下单、撤单、查仓位和查挂单语义**
+
+在 `exchanges/bybit/src/mapper.rs` 增加下单和订单状态映射测试：
+
+```rust
+#[test]
+fn converts_create_order_response_into_order_receipt() {
+    let response: BybitOrderResponse = serde_json::from_str(r#"
+    {
+      "result": {
+        "orderId": "123",
+        "orderLinkId": "client-1"
+      }
+    }
+    "#).unwrap();
+
+    let receipt = response.result.into_order_receipt().unwrap();
+    assert_eq!(receipt.order_id, "123");
+    assert_eq!(receipt.client_order_id, "client-1");
+    assert_eq!(receipt.status, OrderStatus::Submitting);
+}
+
+#[test]
+fn converts_one_way_position_snapshot_into_position() {
+    let position = BybitPosition {
+        symbol: "BTCUSDT".into(),
+        side: "Sell".into(),
+        size: "0.01".into(),
+        avg_price: "64000".into(),
+        unrealised_pnl: "10".into(),
+        position_idx: 0,
+    };
+
+    let converted = Position::try_from(position).unwrap();
+    assert_eq!(converted.qty, -0.01);
+}
+
+#[test]
+fn rejects_non_one_way_position_snapshot() {
+    let position = BybitPosition {
+        symbol: "BTCUSDT".into(),
+        side: "Buy".into(),
+        size: "0.01".into(),
+        avg_price: "64000".into(),
+        unrealised_pnl: "10".into(),
+        position_idx: 1,
+    };
+
+    let error = Position::try_from(position).unwrap_err();
+    assert!(error.to_string().contains("unsupported positionIdx"));
+}
+```
+
+在 `exchanges/bybit/src/rest/client.rs` 增加交易请求测试：
+
+```rust
+#[tokio::test]
+async fn create_order_uses_linear_limit_gtc_and_position_idx_zero() {
+    // mock server 断言 body 至少包含：
+    // category=linear, orderType=Limit, timeInForce=GTC, positionIdx=0
+}
+```
+
+- [ ] **Step 2: 运行定向测试，确认当前交易 REST 还没接通**
+
+Run:
+`cargo test -p poise-bybit converts_create_order_response_into_order_receipt -- --exact`
+
+Expected:
+- FAIL，原因是当前还没有 Bybit 交易 DTO / 映射
+
+Run:
+`cargo test -p poise-bybit create_order_uses_linear_limit_gtc_and_position_idx_zero -- --exact`
+
+Expected:
+- FAIL，原因是当前 `ExecutionPort` 还没有走 Bybit REST
+
+- [ ] **Step 3: 写最小实现，接通 `ExecutionPort`**
+
+实现范围：
+
+- `submit_order` -> `POST /v5/order/create`
+- `cancel_order` -> `POST /v5/order/cancel`
+- `cancel_all` -> `POST /v5/order/cancel-all`
+- `get_position` -> `GET /v5/position/list?category=linear&symbol=...`
+- `get_open_orders` -> `GET /v5/order/realtime?category=linear&symbol=...`
+
+固定参数：
+
+- `category = linear`
+- `orderType = Limit`
+- `timeInForce = GTC`
+- `positionIdx = 0`
+- `orderLinkId <- client_order_id`
+- `reduceOnly <- OrderRequest.reduce_only`
+
+映射要求：
+
+- create order 的 REST 回包映射为 `OrderReceipt { status: Submitting }`
+- one-way `Sell` 仓位数量映射为负数
+- open orders 映射到现有 `ExchangeOrder`
+- 非 one-way 的 `positionIdx != 0` 明确失败
+
+- [ ] **Step 4: 跑 Bybit 最终回归**
+
+Run:
+`cargo test -p poise-bybit`
+
+Expected:
+- PASS
+
+Run:
+`cargo test -p poise-server`
+
+Expected:
+- PASS
+
+Run:
+`cargo build -p poise-server`
+
+Expected:
+- PASS
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add exchanges/bybit/src/rest/client.rs exchanges/bybit/src/rest/models.rs exchanges/bybit/src/mapper.rs exchanges/bybit/src/connected.rs
+git commit -m "feat: add bybit execution integration"
+```
+
+---
+
 ## Self-Review
 
 ### Spec 覆盖
@@ -914,7 +1056,7 @@ git commit -m "feat: add bybit websocket integration"
 - `UNIFIED` 账户摘要：Task 3
 - one-way 约束：Task 4
 - 保守容量快照：Task 3
-- 全量交易闭环：Task 3、Task 4
+- 全量交易闭环：Task 4、Task 5
 - README 与示例配置：Task 4
 
 ### Placeholder 扫描
