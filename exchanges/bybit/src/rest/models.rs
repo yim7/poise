@@ -62,10 +62,5 @@ pub(crate) struct ServerTimeResult {
     pub time_second: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ServerTimeResponse {
-    pub result: ServerTimeResult,
-}
-
 #[cfg(test)]
 mod tests {}

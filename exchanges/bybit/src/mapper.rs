@@ -82,10 +82,17 @@ impl TryFrom<ServerTimeResult> for chrono::DateTime<Utc> {
 }
 
 fn first_wallet_balance(wallet_balance: &WalletBalanceResult) -> Result<&UnifiedWalletBalance> {
-    wallet_balance
+    let balance = wallet_balance
         .list
         .first()
-        .context("missing unified wallet balance entry")
+        .context("missing unified wallet balance entry")?;
+    if balance.account_type.as_deref() != Some("UNIFIED") {
+        return Err(anyhow!(
+            "expected wallet balance accountType=UNIFIED, got {}",
+            balance.account_type.as_deref().unwrap_or("missing")
+        ));
+    }
+    Ok(balance)
 }
 
 fn required_decimal(field: &str, value: Option<&str>) -> Result<f64> {
@@ -176,6 +183,25 @@ mod tests {
             .to_string();
 
         assert!(error.contains("totalEquity"));
+    }
+
+    #[test]
+    fn non_unified_wallet_balance_entries_fail_stably() {
+        let balances = WalletBalanceResult {
+            list: vec![UnifiedWalletBalance {
+                account_type: Some("CONTRACT".to_string()),
+                total_equity: Some("125.5".to_string()),
+                total_available_balance: Some("100.25".to_string()),
+                total_perp_upl: Some("-2.75".to_string()),
+            }],
+        };
+
+        let error = balances
+            .into_account_summary_snapshot()
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("accountType=UNIFIED"));
     }
 
     #[test]

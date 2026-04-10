@@ -127,16 +127,6 @@ impl BybitRestClient {
         response.try_into()
     }
 
-    pub fn sign_v5_payload(&self, payload: &str) -> String {
-        sign_v5_payload(
-            &self.api_secret,
-            self.signed_timestamp_ms(),
-            &self.api_key,
-            self.recv_window_ms,
-            payload,
-        )
-    }
-
     async fn send_request<T>(
         &self,
         method: Method,
@@ -298,22 +288,26 @@ mod tests {
         );
         assert_eq!(
             requests[1].headers.get("x-bapi-sign"),
-            Some(&client.sign_v5_payload("accountType=UNIFIED"))
+            Some(&sign_v5_payload(
+                "secret-key",
+                1_700_000_000_000,
+                "api-key",
+                5_000,
+                "accountType=UNIFIED"
+            ))
         );
     }
 
     #[test]
     fn signs_v5_payload_with_timestamp_recv_window_and_body() {
-        let client = BybitRestClient::with_http_client_and_timestamp_provider(
-            "http://127.0.0.1:0",
-            "api-key",
-            "secret-key",
-            Arc::new(|| 1_700_000_000_000),
-            build_http_client("http://127.0.0.1:0"),
-        );
-
         assert_eq!(
-            client.sign_v5_payload(r#"{"symbol":"BTCUSDT"}"#),
+            sign_v5_payload(
+                "secret-key",
+                1_700_000_000_000,
+                "api-key",
+                5_000,
+                r#"{"symbol":"BTCUSDT"}"#
+            ),
             "c12472cfb89cef80a14dcb760f2e33587a62b444a4dcfb6d243342752d34051d"
         );
     }
