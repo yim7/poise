@@ -12,6 +12,17 @@ use crate::rest::models::{
     UnifiedWalletBalance, WalletBalanceResult,
 };
 
+pub(crate) struct BybitActiveOrder {
+    pub symbol: String,
+    pub order_id: String,
+    pub client_order_id: Option<String>,
+    pub side: String,
+    pub price: String,
+    pub qty: String,
+    pub order_status: String,
+    pub position_idx: i64,
+}
+
 pub(crate) fn build_account_capacity_snapshot(
     wallet_balance: &WalletBalanceResult,
 ) -> Result<AccountCapacitySnapshot> {
@@ -116,16 +127,16 @@ impl TryFrom<OpenOrderSnapshot> for ExchangeOrder {
     type Error = anyhow::Error;
 
     fn try_from(value: OpenOrderSnapshot) -> Result<Self, Self::Error> {
-        build_bybit_open_order(
-            value.symbol,
-            value.order_id,
-            value.order_link_id,
-            &value.side,
-            &value.price,
-            &value.qty,
-            &value.order_status,
-            value.position_idx,
-        )
+        build_bybit_open_order(BybitActiveOrder {
+            symbol: value.symbol,
+            order_id: value.order_id,
+            client_order_id: value.order_link_id,
+            side: value.side,
+            price: value.price,
+            qty: value.qty,
+            order_status: value.order_status,
+            position_idx: value.position_idx,
+        })
     }
 }
 
@@ -242,16 +253,18 @@ pub(crate) fn build_bybit_position(
     })
 }
 
-pub(crate) fn build_bybit_open_order(
-    symbol: String,
-    order_id: String,
-    client_order_id: Option<String>,
-    side: &str,
-    price: &str,
-    qty: &str,
-    order_status: &str,
-    position_idx: i64,
-) -> Result<ExchangeOrder> {
+pub(crate) fn build_bybit_open_order(order: BybitActiveOrder) -> Result<ExchangeOrder> {
+    let BybitActiveOrder {
+        symbol,
+        order_id,
+        client_order_id,
+        side,
+        price,
+        qty,
+        order_status,
+        position_idx,
+    } = order;
+
     if position_idx != 0 {
         return Err(anyhow!(
             "Bybit one-way order snapshot requires positionIdx=0, got {position_idx}"
@@ -262,11 +275,11 @@ pub(crate) fn build_bybit_open_order(
         instrument: Instrument::new(Venue::Bybit, symbol),
         order_id,
         client_order_id: client_order_id.unwrap_or_default(),
-        side: parse_side(side)?,
-        price: parse_decimal("price", price)?,
-        qty: parse_decimal("qty", qty)?,
+        side: parse_side(&side)?,
+        price: parse_decimal("price", &price)?,
+        qty: parse_decimal("qty", &qty)?,
         realized_pnl: 0.0,
-        status: parse_order_status(order_status)?,
+        status: parse_order_status(&order_status)?,
     })
 }
 

@@ -480,12 +480,12 @@ mod tests {
             })
             .await
             .unwrap();
-        let _ = connected
+        connected
             .execution()
             .cancel_order(&instrument, "12345")
             .await
             .unwrap();
-        let _ = connected.execution().cancel_all(&instrument).await.unwrap();
+        connected.execution().cancel_all(&instrument).await.unwrap();
         let position = connected
             .execution()
             .get_position(&instrument)

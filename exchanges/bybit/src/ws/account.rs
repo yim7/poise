@@ -15,7 +15,9 @@ use super::{
     backoff_delay, connect_websocket,
     models::{OrderTopicMessage, OrderUpdate, PositionTopicMessage, PositionUpdate},
 };
-use crate::mapper::{build_bybit_open_order, build_bybit_position, should_track_bybit_order};
+use crate::mapper::{
+    BybitActiveOrder, build_bybit_open_order, build_bybit_position, should_track_bybit_order,
+};
 
 const PRIVATE_ORDER_TOPIC: &str = "order.linear";
 const PRIVATE_POSITION_TOPIC: &str = "position.linear";
@@ -186,16 +188,16 @@ fn parse_position_message(payload: &str) -> Result<Vec<UserDataEvent>> {
 }
 
 fn parse_order_update(update: OrderUpdate) -> Result<ExchangeOrder> {
-    build_bybit_open_order(
-        update.symbol,
-        update.order_id,
-        update.order_link_id,
-        &update.side,
-        &update.price,
-        &update.qty,
-        &update.order_status,
-        update.position_idx,
-    )
+    build_bybit_open_order(BybitActiveOrder {
+        symbol: update.symbol,
+        order_id: update.order_id,
+        client_order_id: update.order_link_id,
+        side: update.side,
+        price: update.price,
+        qty: update.qty,
+        order_status: update.order_status,
+        position_idx: update.position_idx,
+    })
 }
 
 fn parse_position_update(update: PositionUpdate) -> Result<Position> {
