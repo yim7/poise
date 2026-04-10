@@ -125,7 +125,7 @@ fn mirrored_shape_value(position: f64, shape_family: ShapeFamily) -> f64 {
 - `cargo test -p poise-core strategy::tests:: -- --nocapture` PASS
 - `cargo test --workspace --quiet` PASS，结果为 `658 passed, 3 ignored, 0 failed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/src/strategy.rs docs/superpowers/specs/2026-04-10-shape-family-symmetry-design.md docs/superpowers/plans/2026-04-10-shape-family-strength-tuning.md
@@ -133,3 +133,5 @@ git commit -m "feat(strategy): tune shape family strength"
 ```
 
 执行后在本 task 末尾回写 commit SHA。
+
+Commit: `1ffd92c`
