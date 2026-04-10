@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
-use crate::config::Endpoints;
-use crate::rest::BybitRestClient;
+use crate::{Deployment, rest::BybitRestClient};
 
 pub struct BybitWsClient {
     rest: Arc<BybitRestClient>,
-    endpoints: Endpoints,
+    deployment: Deployment,
 }
 
 impl BybitWsClient {
-    pub fn new(rest: Arc<BybitRestClient>, endpoints: Endpoints) -> Self {
-        Self { rest, endpoints }
+    pub fn new(rest: Arc<BybitRestClient>, deployment: Deployment) -> Self {
+        Self { rest, deployment }
     }
 
     #[allow(dead_code)]
@@ -19,7 +18,7 @@ impl BybitWsClient {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn endpoints(&self) -> &Endpoints {
-        &self.endpoints
+    pub(crate) fn deployment(&self) -> &Deployment {
+        &self.deployment
     }
 }

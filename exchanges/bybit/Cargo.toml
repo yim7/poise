@@ -10,3 +10,10 @@ async-trait.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 poise-engine = { path = "../../engine" }
+poise-core = { path = "../../core" }
+reqwest.workspace = true
+serde_json.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true

@@ -14,10 +14,14 @@ use poise_engine::track::Instrument;
 use crate::{Config, rest::BybitRestClient, ws::BybitWsClient};
 
 pub async fn connect(config: &Config) -> Result<Connected> {
-    let endpoints = config.endpoints();
     let (api_key, api_secret) = config.credentials()?;
-    let rest = Arc::new(BybitRestClient::new(endpoints.clone(), api_key, api_secret));
-    let ws = Arc::new(BybitWsClient::new(Arc::clone(&rest), endpoints));
+    let deployment = config.deployment.clone();
+    let rest = Arc::new(BybitRestClient::new(
+        deployment.clone(),
+        api_key,
+        api_secret,
+    ));
+    let ws = Arc::new(BybitWsClient::new(Arc::clone(&rest), deployment));
 
     Ok(Connected::from_clients(rest, ws))
 }

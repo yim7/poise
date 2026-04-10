@@ -1237,9 +1237,16 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "hex",
+ "hmac",
+ "poise-core",
  "poise-engine",
+ "reqwest",
  "serde",
+ "serde_json",
+ "sha2",
  "tokio",
+ "url",
 ]
 
 [[package]]
