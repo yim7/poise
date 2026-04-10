@@ -458,6 +458,16 @@ git commit -m "feat: wire bybit exchange assembly"
 
 ### Task 3: 实现 Bybit REST、映射和保守容量快照
 
+验收记录：
+- 状态：已完成
+- 实现提交：`2cf2ab0 feat: add bybit rest integration`
+- 修正提交：`d9e1f19 fix: wire bybit rest-backed ports`
+- 清理提交：`0f52ae9 refactor: enforce bybit unified wallet summary`
+- 验证：
+  - `cargo test -p poise-bybit --lib -- --nocapture`
+  - `cargo test -p poise-server assembly::tests::build_exchange_uses_exchange_deployment_for_bybit_endpoint_selection -- --exact`
+  - `cargo fmt --all --check`
+
 **Files:**
 - Create: `exchanges/bybit/src/mapper.rs`
 - Create: `exchanges/bybit/src/rest/auth.rs`
@@ -468,7 +478,7 @@ git commit -m "feat: wire bybit exchange assembly"
 - Test: `exchanges/bybit/src/rest/auth.rs`
 - Test: `exchanges/bybit/src/rest/client.rs`
 
-- [ ] **Step 1: 先写失败测试，固定 REST 映射和容量语义**
+- [x] **Step 1: 先写失败测试，固定 REST 映射和容量语义**
 
 在 `exchanges/bybit/src/mapper.rs` 增加规则映射测试：
 
@@ -573,7 +583,7 @@ fn signs_v5_payload_with_timestamp_recv_window_and_body() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前 REST 路径还没实现**
+- [x] **Step 2: 运行定向测试，确认当前 REST 路径还没实现**
 
 Run:
 `cargo test -p poise-bybit converts_linear_instrument_info_into_exchange_info -- --exact`
@@ -587,7 +597,7 @@ Run:
 Expected:
 - FAIL，原因是当前还没有 Bybit 账户余额 DTO 和容量快照映射
 
-- [ ] **Step 3: 写最小实现，完成 REST client、签名和 mapper**
+- [x] **Step 3: 写最小实现，完成 REST client、签名和 mapper**
 
 在 `exchanges/bybit/src/rest/auth.rs` 中实现签名：
 
@@ -651,7 +661,7 @@ impl AccountPort for BybitAccount {
 }
 ```
 
-- [ ] **Step 4: 运行 REST 与映射回归**
+- [x] **Step 4: 运行 REST 与映射回归**
 
 Run:
 `cargo test -p poise-bybit converts_linear_instrument_info_into_exchange_info -- --exact`
@@ -677,7 +687,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/mapper.rs exchanges/bybit/src/rest/auth.rs exchanges/bybit/src/rest/client.rs exchanges/bybit/src/rest/models.rs exchanges/bybit/src/connected.rs
