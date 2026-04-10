@@ -698,6 +698,16 @@ git commit -m "feat: add bybit rest integration"
 
 ### Task 4: 实现 Bybit WebSocket、one-way 约束和文档示例
 
+验收记录：
+- 状态：已完成
+- 实现提交：`03a75d7 feat: add bybit websocket integration`
+- 修正提交：`c177803 fix: ignore bybit market subscribe acks`
+- 验证：
+  - `cargo test -p poise-bybit`
+  - `cargo test -p poise-server`
+  - `cargo build -p poise-server`
+  - `cargo fmt --all --check`
+
 **Files:**
 - Create: `exchanges/bybit/src/ws/models.rs`
 - Create: `exchanges/bybit/src/ws/market.rs`
@@ -710,7 +720,7 @@ git commit -m "feat: add bybit rest integration"
 - Test: `exchanges/bybit/src/ws/account.rs`
 - Test: `README.md` 相关配置解析测试
 
-- [ ] **Step 1: 先写失败测试，固定 public/private WS 和 one-way 失败路径**
+- [x] **Step 1: 先写失败测试，固定 public/private WS 和 one-way 失败路径**
 
 在 `ws/market.rs` 增加 ticker 解析测试：
 
@@ -796,7 +806,7 @@ fn parses_bybit_testnet_example_config() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前 WS 和示例配置还没实现**
+- [x] **Step 2: 运行定向测试，确认当前 WS 和示例配置还没实现**
 
 Run:
 `cargo test -p poise-bybit parses_linear_ticker_message_into_price_tick -- --exact`
@@ -816,7 +826,7 @@ Run:
 Expected:
 - FAIL，原因是当前还没有示例配置文件
 
-- [ ] **Step 3: 写最小实现，补全 WS 和 README 示例**
+- [x] **Step 3: 写最小实现，补全 WS 和 README 示例**
 
 在 `ws/market.rs` 中保持价格口径与 Binance 对齐：
 
@@ -875,7 +885,7 @@ daily_loss_limit = 300.0
 total_loss_limit = 600.0
 ```
 
-- [ ] **Step 4: 跑 Bybit crate、server 和 README 示例回归**
+- [x] **Step 4: 跑 Bybit crate、server 和 README 示例回归**
 
 Run:
 `cargo test -p poise-bybit`
@@ -895,7 +905,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/ws/mod.rs exchanges/bybit/src/ws/models.rs exchanges/bybit/src/ws/market.rs exchanges/bybit/src/ws/account.rs configs/bybit-testnet.demo.toml README.md server/src/config.rs
