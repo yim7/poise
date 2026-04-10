@@ -290,6 +290,14 @@ git commit -m "feat: add bybit config boundary"
 
 ### Task 2: 建立 Bybit crate 骨架并接入 `build_exchange(...)`
 
+验收记录：
+- 状态：已完成
+- 提交：`0cb0fa8 feat: wire bybit exchange assembly`
+- 验证：
+  - `cargo test -p poise-bybit connected::tests::connected_exposes_all_required_ports -- --exact`
+  - `cargo test -p poise-server assembly::tests::build_exchange_uses_exchange_deployment_for_bybit_endpoint_selection -- --exact`
+  - `cargo fmt --all --check`
+
 **Files:**
 - Create: `exchanges/bybit/src/connected.rs`
 - Create: `exchanges/bybit/src/rest/mod.rs`
@@ -299,7 +307,7 @@ git commit -m "feat: add bybit config boundary"
 - Test: `exchanges/bybit/src/connected.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 先写失败测试，固定已连接入口和装配分支**
+- [x] **Step 1: 先写失败测试，固定已连接入口和装配分支**
 
 在 `exchanges/bybit/src/connected.rs` 增加端口暴露测试：
 
@@ -354,7 +362,7 @@ total_loss_limit = 600.0
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前还没有 Bybit 已连接入口**
+- [x] **Step 2: 运行定向测试，确认当前还没有 Bybit 已连接入口**
 
 Run:
 `cargo test -p poise-bybit connected_exposes_all_required_ports -- --exact`
@@ -368,7 +376,7 @@ Run:
 Expected:
 - FAIL，原因是当前 `build_exchange(...)` 还没有 Bybit 分支
 
-- [ ] **Step 3: 写最小实现，建立 crate 骨架和装配分支**
+- [x] **Step 3: 写最小实现，建立 crate 骨架和装配分支**
 
 创建 `exchanges/bybit/src/connected.rs`：
 
@@ -425,7 +433,7 @@ match config {
 }
 ```
 
-- [ ] **Step 4: 运行骨架与装配回归**
+- [x] **Step 4: 运行骨架与装配回归**
 
 Run:
 `cargo test -p poise-bybit connected_exposes_all_required_ports -- --exact`
@@ -439,7 +447,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/lib.rs exchanges/bybit/src/connected.rs exchanges/bybit/src/rest/mod.rs exchanges/bybit/src/ws/mod.rs server/src/assembly.rs
