@@ -1,11 +1,15 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 
-use poise_engine::ports::{AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo};
+use poise_engine::ports::{
+    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    OrderStatus, Position,
+};
 use poise_engine::track::{Instrument, Venue};
 
 use crate::rest::models::{
-    InstrumentInfoResult, ServerTimeResult, UnifiedWalletBalance, WalletBalanceResult,
+    CreateOrderResult, InstrumentInfoResult, OpenOrderSnapshot, PositionSnapshot, ServerTimeResult,
+    UnifiedWalletBalance, WalletBalanceResult,
 };
 
 pub(crate) fn build_account_capacity_snapshot(
@@ -81,6 +85,50 @@ impl TryFrom<ServerTimeResult> for chrono::DateTime<Utc> {
     }
 }
 
+impl TryFrom<CreateOrderResult> for OrderReceipt {
+    type Error = anyhow::Error;
+
+    fn try_from(value: CreateOrderResult) -> Result<Self, Self::Error> {
+        Ok(Self {
+            order_id: value.order_id,
+            client_order_id: value.order_link_id.unwrap_or_default(),
+            status: OrderStatus::Submitting,
+        })
+    }
+}
+
+impl TryFrom<PositionSnapshot> for Position {
+    type Error = anyhow::Error;
+
+    fn try_from(value: PositionSnapshot) -> Result<Self, Self::Error> {
+        build_bybit_position(
+            value.symbol,
+            value.side.as_deref(),
+            &value.size,
+            &value.avg_price,
+            &value.unrealised_pnl,
+            value.position_idx,
+        )
+    }
+}
+
+impl TryFrom<OpenOrderSnapshot> for ExchangeOrder {
+    type Error = anyhow::Error;
+
+    fn try_from(value: OpenOrderSnapshot) -> Result<Self, Self::Error> {
+        build_bybit_open_order(
+            value.symbol,
+            value.order_id,
+            value.order_link_id,
+            &value.side,
+            &value.price,
+            &value.qty,
+            &value.order_status,
+            value.position_idx,
+        )
+    }
+}
+
 fn first_wallet_balance(wallet_balance: &WalletBalanceResult) -> Result<&UnifiedWalletBalance> {
     let balance = wallet_balance
         .list
@@ -105,14 +153,106 @@ fn required_decimal(field: &str, value: Option<&str>) -> Result<f64> {
         .with_context(|| format!("invalid decimal for {field}: {value}"))
 }
 
+fn parse_decimal(field: &str, value: &str) -> Result<f64> {
+    value
+        .parse::<f64>()
+        .with_context(|| format!("invalid decimal for {field}: {value}"))
+}
+
+pub(crate) fn parse_side(value: &str) -> Result<poise_core::types::Side> {
+    match value {
+        "Buy" | "BUY" | "buy" => Ok(poise_core::types::Side::Buy),
+        "Sell" | "SELL" | "sell" => Ok(poise_core::types::Side::Sell),
+        other => Err(anyhow!("unsupported Bybit side: {other}")),
+    }
+}
+
+pub(crate) fn side_to_bybit(side: poise_core::types::Side) -> &'static str {
+    match side {
+        poise_core::types::Side::Buy => "Buy",
+        poise_core::types::Side::Sell => "Sell",
+    }
+}
+
+pub(crate) fn parse_order_status(value: &str) -> Result<OrderStatus> {
+    match value {
+        "New" | "NEW" => Ok(OrderStatus::New),
+        "PartiallyFilled" | "PARTIALLY_FILLED" => Ok(OrderStatus::PartiallyFilled),
+        "Filled" | "FILLED" => Ok(OrderStatus::Filled),
+        "Cancelled" | "CANCELED" => Ok(OrderStatus::Canceled),
+        "Rejected" | "REJECTED" => Ok(OrderStatus::Rejected),
+        "Expired" | "EXPIRED" => Ok(OrderStatus::Expired),
+        other => Err(anyhow!("unsupported Bybit order status: {other}")),
+    }
+}
+
+pub(crate) fn build_bybit_position(
+    symbol: String,
+    side: Option<&str>,
+    size: &str,
+    avg_price: &str,
+    unrealised_pnl: &str,
+    position_idx: i64,
+) -> Result<Position> {
+    if position_idx != 0 {
+        return Err(anyhow!(
+            "Bybit one-way position snapshot requires positionIdx=0, got {position_idx}"
+        ));
+    }
+
+    let qty = parse_decimal("size", size)?;
+    let side_multiplier = match side {
+        Some("Buy") | Some("BUY") | Some("buy") | None => 1.0,
+        Some("Sell") | Some("SELL") | Some("sell") => -1.0,
+        Some(other) => return Err(anyhow!("unsupported Bybit side: {other}")),
+    };
+
+    Ok(Position {
+        instrument: Instrument::new(Venue::Bybit, symbol),
+        qty: qty * side_multiplier,
+        avg_price: parse_decimal("avgPrice", avg_price)?,
+        unrealized_pnl: parse_decimal("unrealisedPnl", unrealised_pnl)?,
+    })
+}
+
+pub(crate) fn build_bybit_open_order(
+    symbol: String,
+    order_id: String,
+    client_order_id: Option<String>,
+    side: &str,
+    price: &str,
+    qty: &str,
+    order_status: &str,
+    position_idx: i64,
+) -> Result<ExchangeOrder> {
+    if position_idx != 0 {
+        return Err(anyhow!(
+            "Bybit one-way order snapshot requires positionIdx=0, got {position_idx}"
+        ));
+    }
+
+    Ok(ExchangeOrder {
+        instrument: Instrument::new(Venue::Bybit, symbol),
+        order_id,
+        client_order_id: client_order_id.unwrap_or_default(),
+        side: parse_side(side)?,
+        price: parse_decimal("price", price)?,
+        qty: parse_decimal("qty", qty)?,
+        realized_pnl: 0.0,
+        status: parse_order_status(order_status)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rest::models::{
-        InstrumentInfoResult, LinearInstrumentInfo, LotSizeFilter, PriceFilter, ServerTimeResult,
-        UnifiedWalletBalance, WalletBalanceResult,
+        CreateOrderResult, InstrumentInfoResult, LinearInstrumentInfo, LotSizeFilter,
+        OpenOrderSnapshot, PositionSnapshot, PriceFilter, ServerTimeResult, UnifiedWalletBalance,
+        WalletBalanceResult,
     };
-    use poise_core::types::ExchangeRules;
+    use poise_core::types::{ExchangeRules, Side};
+    use poise_engine::ports::{OrderReceipt, OrderStatus, Position};
 
     #[test]
     fn converts_linear_instrument_info_into_exchange_info() {
@@ -229,5 +369,102 @@ mod tests {
         let time = chrono::DateTime::<Utc>::try_from(response).unwrap();
 
         assert_eq!(time.timestamp(), 1_700_000_000);
+    }
+
+    #[test]
+    fn converts_create_order_response_into_order_receipt() {
+        let receipt = OrderReceipt::try_from(CreateOrderResult {
+            order_id: "12345".to_string(),
+            order_link_id: Some("client-1".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            receipt,
+            OrderReceipt {
+                order_id: "12345".to_string(),
+                client_order_id: "client-1".to_string(),
+                status: OrderStatus::Submitting,
+            }
+        );
+    }
+
+    #[test]
+    fn converts_one_way_position_snapshot_into_position() {
+        let position = Position::try_from(PositionSnapshot {
+            symbol: "BTCUSDT".to_string(),
+            side: Some("Sell".to_string()),
+            size: "0.25".to_string(),
+            avg_price: "65000.5".to_string(),
+            unrealised_pnl: "-12.5".to_string(),
+            position_idx: 0,
+        })
+        .unwrap();
+
+        assert_eq!(
+            position,
+            Position {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                qty: -0.25,
+                avg_price: 65000.5,
+                unrealized_pnl: -12.5,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_one_way_position_snapshot() {
+        let error = Position::try_from(PositionSnapshot {
+            symbol: "BTCUSDT".to_string(),
+            side: Some("Buy".to_string()),
+            size: "0.25".to_string(),
+            avg_price: "65000.5".to_string(),
+            unrealised_pnl: "-12.5".to_string(),
+            position_idx: 1,
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("positionIdx=0"));
+    }
+
+    #[test]
+    fn converts_open_order_snapshot_into_exchange_order() {
+        let order = ExchangeOrder::try_from(OpenOrderSnapshot {
+            symbol: "BTCUSDT".to_string(),
+            order_id: "12345".to_string(),
+            order_link_id: Some("client-1".to_string()),
+            side: "Buy".to_string(),
+            price: "65000.5".to_string(),
+            qty: "0.25".to_string(),
+            order_status: "PartiallyFilled".to_string(),
+            position_idx: 0,
+        })
+        .unwrap();
+
+        assert_eq!(order.instrument, Instrument::new(Venue::Bybit, "BTCUSDT"));
+        assert_eq!(order.client_order_id, "client-1");
+        assert_eq!(order.side, Side::Buy);
+        assert_eq!(order.price, 65000.5);
+        assert_eq!(order.qty, 0.25);
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+    }
+
+    #[test]
+    fn rejects_non_one_way_open_order_snapshot() {
+        let error = ExchangeOrder::try_from(OpenOrderSnapshot {
+            symbol: "BTCUSDT".to_string(),
+            order_id: "12345".to_string(),
+            order_link_id: Some("client-1".to_string()),
+            side: "Buy".to_string(),
+            price: "65000.5".to_string(),
+            qty: "0.25".to_string(),
+            order_status: "New".to_string(),
+            position_idx: 1,
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("positionIdx=0"));
     }
 }

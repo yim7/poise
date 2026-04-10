@@ -11,12 +11,19 @@ use tokio::time::Duration;
 use url::form_urlencoded::Serializer;
 use url::{Host, Url};
 
-use poise_engine::ports::{AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo};
+use poise_engine::ports::{
+    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    OrderRequest, Position,
+};
 
 use super::auth::sign_v5_payload;
-use super::models::{BybitResponse, InstrumentInfoResult, ServerTimeResult, WalletBalanceResult};
+use super::models::{
+    BybitResponse, CancelAllRequestBody, CancelOrderRequestBody, CreateOrderRequestBody,
+    CreateOrderResult, InstrumentInfoResult, OpenOrderListResult, PositionListResult,
+    ServerTimeResult, WalletBalanceResult,
+};
 use crate::Deployment;
-use crate::mapper::build_account_capacity_snapshot;
+use crate::mapper::{build_account_capacity_snapshot, build_bybit_position, side_to_bybit};
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
 
@@ -87,10 +94,78 @@ impl BybitRestClient {
                     ("category", "linear".to_string()),
                     ("symbol", symbol.to_string()),
                 ],
+                None,
                 AuthMode::None,
             )
             .await?;
         response.try_into()
+    }
+
+    pub async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+        let body = CreateOrderRequestBody {
+            category: "linear",
+            symbol: req.instrument.symbol.clone(),
+            side: side_to_bybit(req.side).to_string(),
+            order_type: "Limit",
+            qty: req.quantity.to_string(),
+            price: req.price.to_string(),
+            time_in_force: "GTC",
+            position_idx: 0,
+            order_link_id: req.client_order_id.clone(),
+            reduce_only: req.reduce_only,
+        };
+        let response: CreateOrderResult = self
+            .send_request(
+                Method::POST,
+                "/v5/order/create",
+                Vec::new(),
+                Some(
+                    serde_json::to_string(&body)
+                        .context("failed to serialize create order body")?,
+                ),
+                AuthMode::Signed,
+            )
+            .await?;
+        response.try_into()
+    }
+
+    pub async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+        let body = CancelOrderRequestBody {
+            category: "linear",
+            symbol: symbol.to_string(),
+            order_id: Some(order_id.to_string()),
+            order_link_id: None,
+        };
+        let _: serde_json::Value = self
+            .send_request(
+                Method::POST,
+                "/v5/order/cancel",
+                Vec::new(),
+                Some(
+                    serde_json::to_string(&body)
+                        .context("failed to serialize cancel order body")?,
+                ),
+                AuthMode::Signed,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn cancel_all(&self, symbol: &str) -> Result<()> {
+        let body = CancelAllRequestBody {
+            category: "linear",
+            symbol: symbol.to_string(),
+        };
+        let _: serde_json::Value = self
+            .send_request(
+                Method::POST,
+                "/v5/order/cancel-all",
+                Vec::new(),
+                Some(serde_json::to_string(&body).context("failed to serialize cancel-all body")?),
+                AuthMode::Signed,
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
@@ -99,6 +174,7 @@ impl BybitRestClient {
                 Method::GET,
                 "/v5/account/wallet-balance",
                 vec![("accountType", "UNIFIED".to_string())],
+                None,
                 AuthMode::Signed,
             )
             .await?;
@@ -114,15 +190,61 @@ impl BybitRestClient {
                 Method::GET,
                 "/v5/account/wallet-balance",
                 vec![("accountType", "UNIFIED".to_string())],
+                None,
                 AuthMode::Signed,
             )
             .await?;
         build_account_capacity_snapshot(&response)
     }
 
+    pub async fn get_position(&self, symbol: &str) -> Result<Position> {
+        let response: PositionListResult = self
+            .send_request(
+                Method::GET,
+                "/v5/position/list",
+                vec![
+                    ("category", "linear".to_string()),
+                    ("symbol", symbol.to_string()),
+                ],
+                None,
+                AuthMode::Signed,
+            )
+            .await?;
+        match response.list.into_iter().next() {
+            Some(position) => position.try_into(),
+            None => build_bybit_position(symbol.to_string(), None, "0", "0", "0", 0),
+        }
+    }
+
+    pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
+        let response: OpenOrderListResult = self
+            .send_request(
+                Method::GET,
+                "/v5/order/realtime",
+                vec![
+                    ("category", "linear".to_string()),
+                    ("symbol", symbol.to_string()),
+                ],
+                None,
+                AuthMode::Signed,
+            )
+            .await?;
+        response
+            .list
+            .into_iter()
+            .map(|order| order.try_into())
+            .collect()
+    }
+
     pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
         let response: ServerTimeResult = self
-            .send_request(Method::GET, "/v5/market/time", Vec::new(), AuthMode::None)
+            .send_request(
+                Method::GET,
+                "/v5/market/time",
+                Vec::new(),
+                None,
+                AuthMode::None,
+            )
             .await?;
         response.try_into()
     }
@@ -132,6 +254,7 @@ impl BybitRestClient {
         method: Method,
         path: &str,
         params: Vec<(&str, String)>,
+        body: Option<String>,
         auth_mode: AuthMode,
     ) -> Result<T>
     where
@@ -145,14 +268,20 @@ impl BybitRestClient {
         };
 
         let mut request = self.http.request(method.clone(), &url);
+        if let Some(body) = body.as_ref() {
+            request = request
+                .body(body.clone())
+                .header("Content-Type", "application/json");
+        }
         if matches!(auth_mode, AuthMode::Signed) {
             let timestamp = self.signed_timestamp_ms();
+            let signing_payload = body.as_deref().unwrap_or(&query_string);
             let sign = sign_v5_payload(
                 &self.api_secret,
                 timestamp,
                 &self.api_key,
                 self.recv_window_ms,
-                &query_string,
+                signing_payload,
             );
             request = request
                 .header("X-BAPI-API-KEY", &self.api_key)
@@ -257,6 +386,14 @@ mod tests {
                 200,
                 r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
             ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[]}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[]}}"#,
+            ),
         ])
         .await;
         let client = BybitRestClient::with_http_client_and_timestamp_provider(
@@ -269,9 +406,11 @@ mod tests {
 
         let _ = client.get_exchange_info("BTCUSDT").await.unwrap();
         let _ = client.get_account_summary().await.unwrap();
+        let _ = client.get_position("BTCUSDT").await.unwrap();
+        let _ = client.get_open_orders("BTCUSDT").await.unwrap();
         let requests = server.requests();
 
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         assert_eq!(requests[0].method, "GET");
         assert_eq!(
             requests[0].path,
@@ -281,6 +420,16 @@ mod tests {
         assert_eq!(
             requests[1].path,
             "/v5/account/wallet-balance?accountType=UNIFIED"
+        );
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(
+            requests[2].path,
+            "/v5/position/list?category=linear&symbol=BTCUSDT"
+        );
+        assert_eq!(requests[3].method, "GET");
+        assert_eq!(
+            requests[3].path,
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT"
         );
         assert_eq!(
             requests[1].headers.get("x-bapi-api-key"),
@@ -296,6 +445,73 @@ mod tests {
                 "accountType=UNIFIED"
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn submit_order_uses_linear_limit_gtc_body_fields() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-1"}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let receipt = client
+            .submit_order(OrderRequest {
+                instrument: poise_engine::track::Instrument::new(
+                    poise_engine::track::Venue::Bybit,
+                    "BTCUSDT",
+                ),
+                side: poise_core::types::Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.order_id, "12345");
+        assert_eq!(receipt.client_order_id, "client-1");
+        assert_eq!(receipt.status, poise_engine::ports::OrderStatus::Submitting);
+
+        let request = &server.requests()[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v5/order/create");
+        assert!(request.body.contains(r#""category":"linear""#));
+        assert!(request.body.contains(r#""orderType":"Limit""#));
+        assert!(request.body.contains(r#""timeInForce":"GTC""#));
+        assert!(request.body.contains(r#""positionIdx":0"#));
+    }
+
+    #[tokio::test]
+    async fn cancel_all_uses_symbol_body() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        client.cancel_all("BTCUSDT").await.unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v5/order/cancel-all");
+        assert!(request.body.contains(r#""category":"linear""#));
+        assert!(request.body.contains(r#""symbol":"BTCUSDT""#));
     }
 
     #[test]
@@ -386,10 +602,15 @@ mod tests {
         method: String,
         path: String,
         headers: HashMap<String, String>,
+        body: String,
     }
 
     fn parse_request(raw: &str) -> RecordedRequest {
-        let mut lines = raw.split("\r\n");
+        let (head, body) = raw
+            .split_once("\r\n\r\n")
+            .map(|(head, body)| (head, body.to_string()))
+            .unwrap_or((raw, String::new()));
+        let mut lines = head.split("\r\n");
         let request_line = lines.next().unwrap();
         let mut request_parts = request_line.split_whitespace();
         let method = request_parts.next().unwrap().to_string();
@@ -407,6 +628,7 @@ mod tests {
             method,
             path,
             headers,
+            body,
         }
     }
 }

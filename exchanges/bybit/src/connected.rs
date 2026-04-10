@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -137,30 +137,26 @@ impl BybitMetadata {
     }
 }
 
-fn not_wired(port_name: &str) -> anyhow::Error {
-    anyhow!("bybit {port_name} is not wired yet")
-}
-
 #[async_trait]
 impl ExecutionPort for BybitExecution {
-    async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-        Err(not_wired("execution"))
+    async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+        self._rest.submit_order(req).await
     }
 
-    async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
-        Err(not_wired("execution"))
+    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()> {
+        self._rest.cancel_order(&instrument.symbol, order_id).await
     }
 
-    async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
-        Err(not_wired("execution"))
+    async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
+        self._rest.cancel_all(&instrument.symbol).await
     }
 
-    async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
-        Err(not_wired("execution"))
+    async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+        self._rest.get_position(&instrument.symbol).await
     }
 
-    async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-        Err(not_wired("execution"))
+    async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        self._rest.get_open_orders(&instrument.symbol).await
     }
 }
 
@@ -218,6 +214,8 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+    use poise_core::types::Side;
+    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
@@ -419,6 +417,101 @@ mod tests {
         assert!(private_messages[1].contains("\"op\":\"subscribe\""));
     }
 
+    #[tokio::test]
+    async fn connected_wires_execution_port_to_bybit_rest_client() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-1"}}"#,
+            ),
+            MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{}}"#),
+            MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{}}"#),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"Buy","size":"0.010","avgPrice":"64000.10","unrealisedPnl":"1.25","positionIdx":0}]}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","orderId":"12345","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}}"#,
+            ),
+        ])
+        .await;
+
+        let rest = Arc::new(
+            crate::rest::BybitRestClient::with_http_client_and_timestamp_provider(
+                server.base_url(),
+                "api-key",
+                "secret-key",
+                Arc::new(|| 1_700_000_000_000),
+                reqwest::Client::new(),
+            ),
+        );
+        let ws = Arc::new(BybitWsClient::with_test_params(
+            "ws://127.0.0.1:1",
+            "ws://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+            Duration::from_millis(10),
+            Arc::new(|| 1_700_000_000_000),
+        ));
+        let connected = Connected::from_parts(
+            Arc::new(BybitExecution::new(Arc::clone(&rest))),
+            Arc::new(BybitMarketData::new(Arc::clone(&ws))),
+            Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
+            Arc::new(BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws))),
+            Arc::new(BybitMetadata::new(rest)),
+        );
+        let instrument = Instrument::new(Venue::Bybit, "BTCUSDT");
+
+        let receipt = connected
+            .execution()
+            .submit_order(OrderRequest {
+                instrument: instrument.clone(),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.010,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+        let _ = connected
+            .execution()
+            .cancel_order(&instrument, "12345")
+            .await
+            .unwrap();
+        let _ = connected.execution().cancel_all(&instrument).await.unwrap();
+        let position = connected
+            .execution()
+            .get_position(&instrument)
+            .await
+            .unwrap();
+        let open_orders = connected
+            .execution()
+            .get_open_orders(&instrument)
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.status, OrderStatus::Submitting);
+        assert_eq!(position.qty, 0.010);
+        assert_eq!(open_orders.len(), 1);
+        assert_eq!(open_orders[0].client_order_id, "client-1");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].path, "/v5/order/create");
+        assert_eq!(requests[1].path, "/v5/order/cancel");
+        assert_eq!(requests[2].path, "/v5/order/cancel-all");
+        assert_eq!(
+            requests[3].path,
+            "/v5/position/list?category=linear&symbol=BTCUSDT"
+        );
+        assert_eq!(
+            requests[4].path,
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT"
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct MockResponse {
         status: u16,
@@ -439,6 +532,7 @@ mod tests {
         method: String,
         path: String,
         headers: HashMap<String, String>,
+        body: String,
     }
 
     struct MockHttpServer {
@@ -496,7 +590,11 @@ mod tests {
     }
 
     fn parse_request(raw: &str) -> RecordedRequest {
-        let mut lines = raw.split("\r\n");
+        let (head, body) = raw
+            .split_once("\r\n\r\n")
+            .map(|(head, body)| (head, body.to_string()))
+            .unwrap_or((raw, String::new()));
+        let mut lines = head.split("\r\n");
         let request_line = lines.next().unwrap();
         let mut request_parts = request_line.split_whitespace();
         let method = request_parts.next().unwrap().to_string();
@@ -516,6 +614,7 @@ mod tests {
             method,
             path,
             headers,
+            body,
         }
     }
 }

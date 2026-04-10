@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -10,12 +10,12 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
-use poise_engine::track::{Instrument, Venue};
 
 use super::{
     backoff_delay, connect_websocket,
     models::{OrderTopicMessage, OrderUpdate, PositionTopicMessage, PositionUpdate},
 };
+use crate::mapper::{build_bybit_open_order, build_bybit_position};
 
 pub(super) async fn run_user_stream(
     url: String,
@@ -177,70 +177,27 @@ fn parse_position_message(payload: &str) -> Result<Vec<UserDataEvent>> {
 }
 
 fn parse_order_update(update: OrderUpdate) -> Result<ExchangeOrder> {
-    require_one_way(update.position_idx)?;
-    Ok(ExchangeOrder {
-        instrument: Instrument::new(Venue::Bybit, update.symbol),
-        order_id: update.order_id,
-        client_order_id: update.order_link_id.unwrap_or_default(),
-        side: parse_side(&update.side)?,
-        price: parse_decimal("price", &update.price)?,
-        qty: parse_decimal("qty", &update.qty)?,
-        realized_pnl: 0.0,
-        status: parse_order_status(&update.order_status)?,
-    })
+    build_bybit_open_order(
+        update.symbol,
+        update.order_id,
+        update.order_link_id,
+        &update.side,
+        &update.price,
+        &update.qty,
+        &update.order_status,
+        update.position_idx,
+    )
 }
 
 fn parse_position_update(update: PositionUpdate) -> Result<Position> {
-    require_one_way(update.position_idx)?;
-    let side_multiplier = match update.side.as_deref() {
-        Some("Buy") | Some("buy") | None => 1.0,
-        Some("Sell") | Some("sell") => -1.0,
-        Some(other) => return Err(anyhow!("unsupported Bybit position side: {other}")),
-    };
-
-    Ok(Position {
-        instrument: Instrument::new(Venue::Bybit, update.symbol),
-        qty: parse_decimal("size", &update.size)? * side_multiplier,
-        avg_price: parse_decimal("avgPrice", &update.avg_price)?,
-        unrealized_pnl: parse_decimal("unrealisedPnl", &update.unrealised_pnl)?,
-    })
-}
-
-fn require_one_way(position_idx: i64) -> Result<()> {
-    if position_idx != 0 {
-        return Err(anyhow!(
-            "Bybit private stream only supports one-way positions; positionIdx must be 0"
-        ));
-    }
-    Ok(())
-}
-
-fn parse_order_status(value: &str) -> Result<poise_engine::ports::OrderStatus> {
-    match value {
-        "New" | "NEW" => Ok(poise_engine::ports::OrderStatus::New),
-        "PartiallyFilled" | "PARTIALLY_FILLED" => {
-            Ok(poise_engine::ports::OrderStatus::PartiallyFilled)
-        }
-        "Filled" | "FILLED" => Ok(poise_engine::ports::OrderStatus::Filled),
-        "Cancelled" | "CANCELED" => Ok(poise_engine::ports::OrderStatus::Canceled),
-        "Rejected" | "REJECTED" => Ok(poise_engine::ports::OrderStatus::Rejected),
-        "Expired" | "EXPIRED" => Ok(poise_engine::ports::OrderStatus::Expired),
-        other => Err(anyhow!("unsupported Bybit order status: {other}")),
-    }
-}
-
-fn parse_side(value: &str) -> Result<poise_core::types::Side> {
-    match value {
-        "Buy" | "BUY" | "buy" => Ok(poise_core::types::Side::Buy),
-        "Sell" | "SELL" | "sell" => Ok(poise_core::types::Side::Sell),
-        other => Err(anyhow!("unsupported Bybit side: {other}")),
-    }
-}
-
-fn parse_decimal(field: &str, value: &str) -> Result<f64> {
-    value
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal for {field}: {value}"))
+    build_bybit_position(
+        update.symbol,
+        update.side.as_deref(),
+        &update.size,
+        &update.avg_price,
+        &update.unrealised_pnl,
+        update.position_idx,
+    )
 }
 
 #[cfg(test)]
@@ -252,6 +209,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_core::types::Side;
+    use poise_engine::track::{Instrument, Venue};
 
     use super::*;
     use crate::ws::BybitWsClient;
@@ -309,7 +267,7 @@ mod tests {
 
         let error = parse_user_data_message(payload).unwrap_err().to_string();
 
-        assert!(error.contains("positionIdx must be 0"));
+        assert!(error.contains("one-way"));
     }
 
     #[tokio::test]
