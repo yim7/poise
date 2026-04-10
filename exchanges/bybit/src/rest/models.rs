@@ -107,6 +107,25 @@ pub(crate) struct CancelOrderRequestBody {
 pub(crate) struct CancelAllRequestBody {
     pub category: &'static str,
     pub symbol: String,
+    #[serde(rename = "orderFilter")]
+    pub order_filter: &'static str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CancelAllResult {
+    #[serde(rename = "list")]
+    pub _list: Vec<CancelAllOrderAck>,
+    pub success: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CancelAllOrderAck {
+    #[serde(rename = "orderId")]
+    pub _order_id: String,
+    #[serde(default, rename = "orderLinkId")]
+    pub _order_link_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,6 +172,8 @@ pub(crate) struct OpenOrderSnapshot {
     pub qty: String,
     #[serde(rename = "orderStatus", deserialize_with = "deserialize_string")]
     pub order_status: String,
+    #[serde(default, rename = "stopOrderType")]
+    pub stop_order_type: Option<String>,
     #[serde(rename = "positionIdx", deserialize_with = "deserialize_i64")]
     pub position_idx: i64,
 }

@@ -15,7 +15,10 @@ use super::{
     backoff_delay, connect_websocket,
     models::{OrderTopicMessage, OrderUpdate, PositionTopicMessage, PositionUpdate},
 };
-use crate::mapper::{build_bybit_open_order, build_bybit_position};
+use crate::mapper::{build_bybit_open_order, build_bybit_position, should_track_bybit_order};
+
+const PRIVATE_ORDER_TOPIC: &str = "order.linear";
+const PRIVATE_POSITION_TOPIC: &str = "position.linear";
 
 pub(super) async fn run_user_stream(
     url: String,
@@ -95,7 +98,7 @@ async fn authenticate_and_subscribe(
         .send(Message::Text(
             serde_json::json!({
                 "op": "subscribe",
-                "args": ["order", "position"]
+                "args": [PRIVATE_ORDER_TOPIC, PRIVATE_POSITION_TOPIC]
             })
             .to_string(),
         ))
@@ -128,15 +131,15 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent
     };
 
     match topic {
-        "order" => parse_order_message(payload),
-        "position" => parse_position_message(payload),
+        PRIVATE_ORDER_TOPIC => parse_order_message(payload),
+        PRIVATE_POSITION_TOPIC => parse_position_message(payload),
         _ => Ok(Vec::new()),
     }
 }
 
 fn parse_order_message(payload: &str) -> Result<Vec<UserDataEvent>> {
     let message: OrderTopicMessage = serde_json::from_str(payload)?;
-    if message.topic != "order" {
+    if message.topic != PRIVATE_ORDER_TOPIC {
         return Ok(Vec::new());
     }
     let event_time = Utc
@@ -146,6 +149,12 @@ fn parse_order_message(payload: &str) -> Result<Vec<UserDataEvent>> {
 
     let mut events = Vec::with_capacity(message.data.len());
     for order in message.data {
+        if !should_track_bybit_order(
+            order.order_status.as_str(),
+            order.stop_order_type.as_deref(),
+        ) {
+            continue;
+        }
         events.push(UserDataEvent {
             event_time,
             payload: UserDataPayload::OrderUpdate(parse_order_update(order)?),
@@ -157,7 +166,7 @@ fn parse_order_message(payload: &str) -> Result<Vec<UserDataEvent>> {
 
 fn parse_position_message(payload: &str) -> Result<Vec<UserDataEvent>> {
     let message: PositionTopicMessage = serde_json::from_str(payload)?;
-    if message.topic != "position" {
+    if message.topic != PRIVATE_POSITION_TOPIC {
         return Ok(Vec::new());
     }
     let event_time = Utc
@@ -217,7 +226,7 @@ mod tests {
     #[test]
     fn parses_order_update_into_user_data_event() {
         let payload = r#"{
-            "topic": "order",
+            "topic": "order.linear",
             "creationTime": 1700000000000,
             "data": [{
                 "symbol": "BTCUSDT",
@@ -253,7 +262,7 @@ mod tests {
     #[test]
     fn rejects_non_one_way_position_update() {
         let payload = r#"{
-            "topic": "position",
+            "topic": "position.linear",
             "creationTime": 1700000000000,
             "data": [{
                 "symbol": "BTCUSDT",
@@ -268,6 +277,29 @@ mod tests {
         let error = parse_user_data_message(payload).unwrap_err().to_string();
 
         assert!(error.contains("one-way"));
+    }
+
+    #[test]
+    fn ignores_conditional_order_update() {
+        let payload = r#"{
+            "topic": "order.linear",
+            "creationTime": 1700000000000,
+            "data": [{
+                "symbol": "BTCUSDT",
+                "orderId": "123",
+                "orderLinkId": "client-1",
+                "side": "Buy",
+                "price": "64000.10",
+                "qty": "0.010",
+                "orderStatus": "Untriggered",
+                "stopOrderType": "Stop",
+                "positionIdx": 0
+            }]
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert!(events.is_empty());
     }
 
     #[tokio::test]
@@ -298,7 +330,7 @@ mod tests {
                                 .unwrap();
                             websocket
                                 .send(Message::Text(
-                                    r#"{"topic":"order","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","orderId":"123","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}"#.to_string(),
+                                    r#"{"topic":"order.linear","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","orderId":"123","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}"#.to_string(),
                                 ))
                                 .await
                                 .unwrap();
@@ -332,5 +364,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].contains("\"op\":\"auth\""));
         assert!(messages[1].contains("\"op\":\"subscribe\""));
+        assert!(messages[1].contains("order.linear"));
+        assert!(messages[1].contains("position.linear"));
     }
 }

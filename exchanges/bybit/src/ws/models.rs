@@ -39,6 +39,8 @@ pub(crate) struct OrderUpdate {
     pub qty: String,
     #[serde(deserialize_with = "deserialize_string")]
     pub order_status: String,
+    #[serde(default)]
+    pub stop_order_type: Option<String>,
     #[serde(deserialize_with = "deserialize_i64")]
     pub position_idx: i64,
 }

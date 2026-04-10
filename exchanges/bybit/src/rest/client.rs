@@ -18,14 +18,17 @@ use poise_engine::ports::{
 
 use super::auth::sign_v5_payload;
 use super::models::{
-    BybitResponse, CancelAllRequestBody, CancelOrderRequestBody, CreateOrderRequestBody,
-    CreateOrderResult, InstrumentInfoResult, OpenOrderListResult, PositionListResult,
-    ServerTimeResult, WalletBalanceResult,
+    BybitResponse, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
+    CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, OpenOrderListResult,
+    PositionListResult, ServerTimeResult, WalletBalanceResult,
 };
 use crate::Deployment;
-use crate::mapper::{build_account_capacity_snapshot, build_bybit_position, side_to_bybit};
+use crate::mapper::{
+    build_account_capacity_snapshot, build_bybit_position, should_track_bybit_order, side_to_bybit,
+};
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
+const ACTIVE_ORDER_FILTER: &str = "Order";
 
 #[derive(Debug, Clone, Copy)]
 enum AuthMode {
@@ -155,8 +158,9 @@ impl BybitRestClient {
         let body = CancelAllRequestBody {
             category: "linear",
             symbol: symbol.to_string(),
+            order_filter: ACTIVE_ORDER_FILTER,
         };
-        let _: serde_json::Value = self
+        let response: CancelAllResult = self
             .send_request(
                 Method::POST,
                 "/v5/order/cancel-all",
@@ -165,6 +169,11 @@ impl BybitRestClient {
                 AuthMode::Signed,
             )
             .await?;
+        if response.success.as_deref() != Some("1") {
+            return Err(anyhow!(
+                "Bybit cancel-all acknowledgement did not confirm success for active orders"
+            ));
+        }
         Ok(())
     }
 
@@ -224,6 +233,7 @@ impl BybitRestClient {
                 vec![
                     ("category", "linear".to_string()),
                     ("symbol", symbol.to_string()),
+                    ("orderFilter", ACTIVE_ORDER_FILTER.to_string()),
                 ],
                 None,
                 AuthMode::Signed,
@@ -232,7 +242,16 @@ impl BybitRestClient {
         response
             .list
             .into_iter()
-            .map(|order| order.try_into())
+            .filter_map(|order| {
+                if should_track_bybit_order(
+                    order.order_status.as_str(),
+                    order.stop_order_type.as_deref(),
+                ) {
+                    Some(order.try_into())
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -429,7 +448,7 @@ mod tests {
         assert_eq!(requests[3].method, "GET");
         assert_eq!(
             requests[3].path,
-            "/v5/order/realtime?category=linear&symbol=BTCUSDT"
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order"
         );
         assert_eq!(
             requests[1].headers.get("x-bapi-api-key"),
@@ -494,7 +513,7 @@ mod tests {
     async fn cancel_all_uses_symbol_body() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
-            r#"{"retCode":0,"retMsg":"OK","result":{}}"#,
+            r#"{"retCode":0,"retMsg":"OK","result":{"list":[],"success":"1"}}"#,
         )])
         .await;
         let client = BybitRestClient::with_http_client_and_timestamp_provider(
@@ -512,6 +531,27 @@ mod tests {
         assert_eq!(request.path, "/v5/order/cancel-all");
         assert!(request.body.contains(r#""category":"linear""#));
         assert!(request.body.contains(r#""symbol":"BTCUSDT""#));
+        assert!(request.body.contains(r#""orderFilter":"Order""#));
+    }
+
+    #[tokio::test]
+    async fn cancel_all_rejects_unsuccessful_ack() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"list":[],"success":"0"}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let error = client.cancel_all("BTCUSDT").await.unwrap_err().to_string();
+
+        assert!(error.contains("did not confirm success"));
     }
 
     #[test]

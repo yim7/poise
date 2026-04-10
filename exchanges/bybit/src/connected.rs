@@ -345,7 +345,7 @@ mod tests {
                                 .unwrap();
                             websocket
                                 .send(Message::Text(
-                                    r#"{"topic":"order","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","orderId":"123","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}"#.to_string(),
+                                    r#"{"topic":"order.linear","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","orderId":"123","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}"#.to_string(),
                                 ))
                                 .await
                                 .unwrap();
@@ -415,6 +415,8 @@ mod tests {
         assert_eq!(private_messages.len(), 2);
         assert!(private_messages[0].contains("\"op\":\"auth\""));
         assert!(private_messages[1].contains("\"op\":\"subscribe\""));
+        assert!(private_messages[1].contains("order.linear"));
+        assert!(private_messages[1].contains("position.linear"));
     }
 
     #[tokio::test]
@@ -425,14 +427,17 @@ mod tests {
                 r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-1"}}"#,
             ),
             MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{}}"#),
-            MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{}}"#),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[],"success":"1"}}"#,
+            ),
             MockResponse::json(
                 200,
                 r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"Buy","size":"0.010","avgPrice":"64000.10","unrealisedPnl":"1.25","positionIdx":0}]}}"#,
             ),
             MockResponse::json(
                 200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","orderId":"12345","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}}"#,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","orderId":"12345","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0,"stopOrderType":"UNKNOWN"}]}}"#,
             ),
         ])
         .await;
@@ -508,7 +513,7 @@ mod tests {
         );
         assert_eq!(
             requests[4].path,
-            "/v5/order/realtime?category=linear&symbol=BTCUSDT"
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order"
         );
     }
 

@@ -186,6 +186,21 @@ pub(crate) fn parse_order_status(value: &str) -> Result<OrderStatus> {
     }
 }
 
+pub(crate) fn should_track_bybit_order(order_status: &str, stop_order_type: Option<&str>) -> bool {
+    let stop_order_type = stop_order_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("UNKNOWN");
+    if !stop_order_type.eq_ignore_ascii_case("UNKNOWN") {
+        return false;
+    }
+
+    !matches!(
+        order_status,
+        "Untriggered" | "UNTRIGGERED" | "Triggered" | "TRIGGERED" | "Deactivated" | "DEACTIVATED"
+    )
+}
+
 pub(crate) fn build_bybit_position(
     symbol: String,
     side: Option<&str>,
@@ -201,17 +216,29 @@ pub(crate) fn build_bybit_position(
     }
 
     let qty = parse_decimal("size", size)?;
-    let side_multiplier = match side {
-        Some("Buy") | Some("BUY") | Some("buy") | None => 1.0,
-        Some("Sell") | Some("SELL") | Some("sell") => -1.0,
+    let normalized_side = side.map(str::trim).filter(|value| !value.is_empty());
+    let signed_qty = match normalized_side {
+        Some("Buy") | Some("BUY") | Some("buy") => qty,
+        Some("Sell") | Some("SELL") | Some("sell") => -qty,
+        None if qty == 0.0 => 0.0,
+        None => {
+            return Err(anyhow!(
+                "Bybit position side is empty for non-flat size {qty}"
+            ));
+        }
         Some(other) => return Err(anyhow!("unsupported Bybit side: {other}")),
     };
+    let allow_blank_numeric = qty == 0.0;
 
     Ok(Position {
         instrument: Instrument::new(Venue::Bybit, symbol),
-        qty: qty * side_multiplier,
-        avg_price: parse_decimal("avgPrice", avg_price)?,
-        unrealized_pnl: parse_decimal("unrealisedPnl", unrealised_pnl)?,
+        qty: signed_qty,
+        avg_price: parse_decimal_or_zero("avgPrice", avg_price, allow_blank_numeric)?,
+        unrealized_pnl: parse_decimal_or_zero(
+            "unrealisedPnl",
+            unrealised_pnl,
+            allow_blank_numeric,
+        )?,
     })
 }
 
@@ -241,6 +268,14 @@ pub(crate) fn build_bybit_open_order(
         realized_pnl: 0.0,
         status: parse_order_status(order_status)?,
     })
+}
+
+fn parse_decimal_or_zero(field: &str, value: &str, allow_blank_zero: bool) -> Result<f64> {
+    let value = value.trim();
+    if allow_blank_zero && value.is_empty() {
+        return Ok(0.0);
+    }
+    parse_decimal(field, value)
 }
 
 #[cfg(test)]
@@ -413,6 +448,29 @@ mod tests {
     }
 
     #[test]
+    fn converts_flat_position_snapshot_with_empty_side_into_zero_position() {
+        let position = Position::try_from(PositionSnapshot {
+            symbol: "BTCUSDT".to_string(),
+            side: Some(String::new()),
+            size: "0".to_string(),
+            avg_price: String::new(),
+            unrealised_pnl: String::new(),
+            position_idx: 0,
+        })
+        .unwrap();
+
+        assert_eq!(
+            position,
+            Position {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_non_one_way_position_snapshot() {
         let error = Position::try_from(PositionSnapshot {
             symbol: "BTCUSDT".to_string(),
@@ -438,6 +496,7 @@ mod tests {
             price: "65000.5".to_string(),
             qty: "0.25".to_string(),
             order_status: "PartiallyFilled".to_string(),
+            stop_order_type: None,
             position_idx: 0,
         })
         .unwrap();
@@ -460,11 +519,20 @@ mod tests {
             price: "65000.5".to_string(),
             qty: "0.25".to_string(),
             order_status: "New".to_string(),
+            stop_order_type: None,
             position_idx: 1,
         })
         .unwrap_err()
         .to_string();
 
         assert!(error.contains("positionIdx=0"));
+    }
+
+    #[test]
+    fn ignores_conditional_order_kinds_and_statuses() {
+        assert!(!should_track_bybit_order("Untriggered", Some("Stop")));
+        assert!(!should_track_bybit_order("New", Some("Stop")));
+        assert!(should_track_bybit_order("New", Some("UNKNOWN")));
+        assert!(should_track_bybit_order("Filled", None));
     }
 }
