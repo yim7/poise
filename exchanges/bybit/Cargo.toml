@@ -6,3 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+poise-engine = { path = "../../engine" }
