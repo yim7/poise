@@ -85,6 +85,12 @@ tick_timeout_secs = 30
 - 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
+- `shape_family` 当前支持 `linear`、`inertial`、`responsive`
+- 三者都按“围绕价格带中点对称”的控仓曲线解释
+- `inertial` 更恋边，从上下两侧往中间收仓都更慢
+- `responsive` 更恋中，从上下两侧往中间收仓都更快
+- `long_exposure_units` 和 `short_exposure_units` 只决定曲线整体上移或下移；`long > short` 表示偏多，`long < short` 表示偏空
+- 旧的 `concave / convex` 配置和值对应的持久化状态不再兼容，需要先清理后再启动
 - 示例里的 `btc-core` 区间总带宽是 `2000 USD`，在线性模式下等效每格约 `100 USD`
 - 联调前要按当前测试网价格手动平移这个区间
 - `min_rebalance_units` 当前表示“触发下一次执行动作的最小目标变化”，不再只是 `current_exposure -> latest_target` 的停手阈值

@@ -175,6 +175,8 @@ desired_exposure(price) =
 
 ## 6. 形状族
 
+> 历史说明：本节保留为 2026-03-24 的探索记录。`shape_family` 当前定义见 [2026-04-10-shape-family-symmetry-design.md](./2026-04-10-shape-family-symmetry-design.md)。
+
 ### 6.1 第一版约束
 
 第一版不允许任意自定义曲线，只预留一小组受约束的 `shape_family`：
