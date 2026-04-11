@@ -13,6 +13,7 @@ use poise_application::{
     TrackObservationService, TrackQueryService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
+use poise_bybit::connect as connect_bybit;
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{AccountPort, ClockPort, MetadataPort};
 #[cfg(test)]
@@ -93,6 +94,17 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
             let connected = connect_binance(binance_config).await?;
             Ok(Exchange::new(
                 Venue::Binance,
+                connected.execution(),
+                connected.market_data(),
+                connected.account_summary(),
+                connected.account(),
+                connected.metadata(),
+            ))
+        }
+        ExchangeConfig::Bybit(bybit_config) => {
+            let connected = connect_bybit(bybit_config).await?;
+            Ok(Exchange::new(
+                Venue::Bybit,
                 connected.execution(),
                 connected.market_data(),
                 connected.account_summary(),
@@ -695,6 +707,35 @@ total_loss_limit = 600.0
         let exchange = build_exchange(&config.exchange).await.unwrap();
 
         assert_eq!(exchange.venue(), Venue::Binance);
+    }
+
+    #[tokio::test]
+    async fn build_exchange_uses_exchange_deployment_for_bybit_endpoint_selection() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "bybit"
+deployment = "mainnet"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        let exchange = build_exchange(&config.exchange).await.unwrap();
+
+        assert_eq!(exchange.venue(), Venue::Bybit);
     }
 
     #[tokio::test]

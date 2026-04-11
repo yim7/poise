@@ -19,7 +19,7 @@
 - `exchanges/bybit/Cargo.toml`
   - Bybit crate 依赖定义
 - `exchanges/bybit/src/lib.rs`
-  - 统一导出 `Config`、`Deployment`、`Endpoints`、`Connected`、`connect(...)`
+  - 当前导出 `Config`、`Deployment`；后续接入 `Connected`、`connect(...)`
 - `exchanges/bybit/src/config.rs`
   - Bybit 配置、主网/测试网 endpoint、凭证校验
 - `exchanges/bybit/src/connected.rs`
@@ -74,6 +74,16 @@
 
 ### Task 1: 固定共享层 Bybit 边界与 workspace 入口
 
+验收记录：
+- 状态：已完成
+- 实现提交：`f298c63 feat: add bybit config boundary`
+- 修正提交：`ac7b7b2 fix: tighten bybit config surface`
+- 验证：
+  - `cargo test -p poise-engine track::tests::venue_as_str_supports_bybit -- --exact`
+  - `cargo test -p poise-server config::tests::parses_service_level_exchange_config_and_track_symbols -- --exact`
+  - `cargo test -p poise-server config::tests::parses_bybit_exchange_config_and_tracks -- --exact`
+  - `cargo test -p poise-bybit config::tests::credentials_handle_missing_fields_whitespace_and_success -- --exact`
+
 **Files:**
 - Create: `exchanges/bybit/Cargo.toml`
 - Create: `exchanges/bybit/src/lib.rs`
@@ -85,7 +95,7 @@
 - Test: `exchanges/bybit/src/config.rs`
 - Test: `server/src/config.rs`
 
-- [ ] **Step 1: 先写失败测试，固定 workspace / venue / 配置边界**
+- [x] **Step 1: 先写失败测试，固定 workspace / venue / 配置边界**
 
 在 `engine/src/track.rs` 增加 `Venue::Bybit` 测试：
 
@@ -158,7 +168,7 @@ total_loss_limit = 600.0
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前代码还没有 Bybit 边界**
+- [x] **Step 2: 运行定向测试，确认当前代码还没有 Bybit 边界**
 
 Run:
 `cargo test -p poise-server parses_bybit_exchange_config_and_tracks -- --exact`
@@ -172,7 +182,7 @@ Run:
 Expected:
 - FAIL，原因是当前 `Venue` 还没有 `Bybit`
 
-- [ ] **Step 3: 写最小实现，接通 workspace / venue / 配置**
+- [x] **Step 3: 写最小实现，接通 workspace / venue / 配置**
 
 在 `engine/src/track.rs` 增加枚举分支：
 
@@ -280,6 +290,14 @@ git commit -m "feat: add bybit config boundary"
 
 ### Task 2: 建立 Bybit crate 骨架并接入 `build_exchange(...)`
 
+验收记录：
+- 状态：已完成
+- 提交：`0cb0fa8 feat: wire bybit exchange assembly`
+- 验证：
+  - `cargo test -p poise-bybit connected::tests::connected_exposes_all_required_ports -- --exact`
+  - `cargo test -p poise-server assembly::tests::build_exchange_uses_exchange_deployment_for_bybit_endpoint_selection -- --exact`
+  - `cargo fmt --all --check`
+
 **Files:**
 - Create: `exchanges/bybit/src/connected.rs`
 - Create: `exchanges/bybit/src/rest/mod.rs`
@@ -289,7 +307,7 @@ git commit -m "feat: add bybit config boundary"
 - Test: `exchanges/bybit/src/connected.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 先写失败测试，固定已连接入口和装配分支**
+- [x] **Step 1: 先写失败测试，固定已连接入口和装配分支**
 
 在 `exchanges/bybit/src/connected.rs` 增加端口暴露测试：
 
@@ -344,7 +362,7 @@ total_loss_limit = 600.0
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前还没有 Bybit 已连接入口**
+- [x] **Step 2: 运行定向测试，确认当前还没有 Bybit 已连接入口**
 
 Run:
 `cargo test -p poise-bybit connected_exposes_all_required_ports -- --exact`
@@ -358,7 +376,7 @@ Run:
 Expected:
 - FAIL，原因是当前 `build_exchange(...)` 还没有 Bybit 分支
 
-- [ ] **Step 3: 写最小实现，建立 crate 骨架和装配分支**
+- [x] **Step 3: 写最小实现，建立 crate 骨架和装配分支**
 
 创建 `exchanges/bybit/src/connected.rs`：
 
@@ -415,7 +433,7 @@ match config {
 }
 ```
 
-- [ ] **Step 4: 运行骨架与装配回归**
+- [x] **Step 4: 运行骨架与装配回归**
 
 Run:
 `cargo test -p poise-bybit connected_exposes_all_required_ports -- --exact`
@@ -429,7 +447,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/lib.rs exchanges/bybit/src/connected.rs exchanges/bybit/src/rest/mod.rs exchanges/bybit/src/ws/mod.rs server/src/assembly.rs
@@ -439,6 +457,16 @@ git commit -m "feat: wire bybit exchange assembly"
 ---
 
 ### Task 3: 实现 Bybit REST、映射和保守容量快照
+
+验收记录：
+- 状态：已完成
+- 实现提交：`2cf2ab0 feat: add bybit rest integration`
+- 修正提交：`d9e1f19 fix: wire bybit rest-backed ports`
+- 清理提交：`0f52ae9 refactor: enforce bybit unified wallet summary`
+- 验证：
+  - `cargo test -p poise-bybit --lib -- --nocapture`
+  - `cargo test -p poise-server assembly::tests::build_exchange_uses_exchange_deployment_for_bybit_endpoint_selection -- --exact`
+  - `cargo fmt --all --check`
 
 **Files:**
 - Create: `exchanges/bybit/src/mapper.rs`
@@ -450,7 +478,7 @@ git commit -m "feat: wire bybit exchange assembly"
 - Test: `exchanges/bybit/src/rest/auth.rs`
 - Test: `exchanges/bybit/src/rest/client.rs`
 
-- [ ] **Step 1: 先写失败测试，固定 REST 映射和容量语义**
+- [x] **Step 1: 先写失败测试，固定 REST 映射和容量语义**
 
 在 `exchanges/bybit/src/mapper.rs` 增加规则映射测试：
 
@@ -555,7 +583,7 @@ fn signs_v5_payload_with_timestamp_recv_window_and_body() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前 REST 路径还没实现**
+- [x] **Step 2: 运行定向测试，确认当前 REST 路径还没实现**
 
 Run:
 `cargo test -p poise-bybit converts_linear_instrument_info_into_exchange_info -- --exact`
@@ -569,7 +597,7 @@ Run:
 Expected:
 - FAIL，原因是当前还没有 Bybit 账户余额 DTO 和容量快照映射
 
-- [ ] **Step 3: 写最小实现，完成 REST client、签名和 mapper**
+- [x] **Step 3: 写最小实现，完成 REST client、签名和 mapper**
 
 在 `exchanges/bybit/src/rest/auth.rs` 中实现签名：
 
@@ -633,7 +661,7 @@ impl AccountPort for BybitAccount {
 }
 ```
 
-- [ ] **Step 4: 运行 REST 与映射回归**
+- [x] **Step 4: 运行 REST 与映射回归**
 
 Run:
 `cargo test -p poise-bybit converts_linear_instrument_info_into_exchange_info -- --exact`
@@ -659,7 +687,7 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/mapper.rs exchanges/bybit/src/rest/auth.rs exchanges/bybit/src/rest/client.rs exchanges/bybit/src/rest/models.rs exchanges/bybit/src/connected.rs
@@ -669,6 +697,16 @@ git commit -m "feat: add bybit rest integration"
 ---
 
 ### Task 4: 实现 Bybit WebSocket、one-way 约束和文档示例
+
+验收记录：
+- 状态：已完成
+- 实现提交：`03a75d7 feat: add bybit websocket integration`
+- 修正提交：`c177803 fix: ignore bybit market subscribe acks`
+- 验证：
+  - `cargo test -p poise-bybit`
+  - `cargo test -p poise-server`
+  - `cargo build -p poise-server`
+  - `cargo fmt --all --check`
 
 **Files:**
 - Create: `exchanges/bybit/src/ws/models.rs`
@@ -682,7 +720,7 @@ git commit -m "feat: add bybit rest integration"
 - Test: `exchanges/bybit/src/ws/account.rs`
 - Test: `README.md` 相关配置解析测试
 
-- [ ] **Step 1: 先写失败测试，固定 public/private WS 和 one-way 失败路径**
+- [x] **Step 1: 先写失败测试，固定 public/private WS 和 one-way 失败路径**
 
 在 `ws/market.rs` 增加 ticker 解析测试：
 
@@ -768,7 +806,7 @@ fn parses_bybit_testnet_example_config() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前 WS 和示例配置还没实现**
+- [x] **Step 2: 运行定向测试，确认当前 WS 和示例配置还没实现**
 
 Run:
 `cargo test -p poise-bybit parses_linear_ticker_message_into_price_tick -- --exact`
@@ -788,7 +826,7 @@ Run:
 Expected:
 - FAIL，原因是当前还没有示例配置文件
 
-- [ ] **Step 3: 写最小实现，补全 WS 和 README 示例**
+- [x] **Step 3: 写最小实现，补全 WS 和 README 示例**
 
 在 `ws/market.rs` 中保持价格口径与 Binance 对齐：
 
@@ -847,7 +885,7 @@ daily_loss_limit = 300.0
 total_loss_limit = 600.0
 ```
 
-- [ ] **Step 4: 跑 Bybit crate、server 和 README 示例回归**
+- [x] **Step 4: 跑 Bybit crate、server 和 README 示例回归**
 
 Run:
 `cargo test -p poise-bybit`
@@ -867,11 +905,163 @@ Run:
 Expected:
 - PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add exchanges/bybit/src/ws/mod.rs exchanges/bybit/src/ws/models.rs exchanges/bybit/src/ws/market.rs exchanges/bybit/src/ws/account.rs configs/bybit-testnet.demo.toml README.md server/src/config.rs
 git commit -m "feat: add bybit websocket integration"
+```
+
+---
+
+### Task 5: 接通 Bybit `ExecutionPort` 并完成最终闭环回归
+
+验收记录：
+- 状态：已完成
+- 提交：`504c0c4 feat: add bybit execution integration`
+- 验证：
+  - `cargo test -p poise-bybit`
+  - `cargo test -p poise-server`
+  - `cargo build -p poise-server`
+  - `cargo fmt --all --check`
+
+**Files:**
+- Modify: `exchanges/bybit/src/rest/client.rs`
+- Modify: `exchanges/bybit/src/rest/models.rs`
+- Modify: `exchanges/bybit/src/mapper.rs`
+- Modify: `exchanges/bybit/src/connected.rs`
+- Modify: `exchanges/bybit/src/ws/account.rs`
+- Test: `exchanges/bybit/src/mapper.rs`
+- Test: `exchanges/bybit/src/rest/client.rs`
+
+- [x] **Step 1: 先写失败测试，固定下单、撤单、查仓位和查挂单语义**
+
+在 `exchanges/bybit/src/mapper.rs` 增加下单和订单状态映射测试：
+
+```rust
+#[test]
+fn converts_create_order_response_into_order_receipt() {
+    let response: BybitOrderResponse = serde_json::from_str(r#"
+    {
+      "result": {
+        "orderId": "123",
+        "orderLinkId": "client-1"
+      }
+    }
+    "#).unwrap();
+
+    let receipt = response.result.into_order_receipt().unwrap();
+    assert_eq!(receipt.order_id, "123");
+    assert_eq!(receipt.client_order_id, "client-1");
+    assert_eq!(receipt.status, OrderStatus::Submitting);
+}
+
+#[test]
+fn converts_one_way_position_snapshot_into_position() {
+    let position = BybitPosition {
+        symbol: "BTCUSDT".into(),
+        side: "Sell".into(),
+        size: "0.01".into(),
+        avg_price: "64000".into(),
+        unrealised_pnl: "10".into(),
+        position_idx: 0,
+    };
+
+    let converted = Position::try_from(position).unwrap();
+    assert_eq!(converted.qty, -0.01);
+}
+
+#[test]
+fn rejects_non_one_way_position_snapshot() {
+    let position = BybitPosition {
+        symbol: "BTCUSDT".into(),
+        side: "Buy".into(),
+        size: "0.01".into(),
+        avg_price: "64000".into(),
+        unrealised_pnl: "10".into(),
+        position_idx: 1,
+    };
+
+    let error = Position::try_from(position).unwrap_err();
+    assert!(error.to_string().contains("unsupported positionIdx"));
+}
+```
+
+在 `exchanges/bybit/src/rest/client.rs` 增加交易请求测试：
+
+```rust
+#[tokio::test]
+async fn create_order_uses_linear_limit_gtc_and_position_idx_zero() {
+    // mock server 断言 body 至少包含：
+    // category=linear, orderType=Limit, timeInForce=GTC, positionIdx=0
+}
+```
+
+- [x] **Step 2: 运行定向测试，确认当前交易 REST 还没接通**
+
+Run:
+`cargo test -p poise-bybit converts_create_order_response_into_order_receipt -- --exact`
+
+Expected:
+- FAIL，原因是当前还没有 Bybit 交易 DTO / 映射
+
+Run:
+`cargo test -p poise-bybit create_order_uses_linear_limit_gtc_and_position_idx_zero -- --exact`
+
+Expected:
+- FAIL，原因是当前 `ExecutionPort` 还没有走 Bybit REST
+
+- [x] **Step 3: 写最小实现，接通 `ExecutionPort`**
+
+实现范围：
+
+- `submit_order` -> `POST /v5/order/create`
+- `cancel_order` -> `POST /v5/order/cancel`
+- `cancel_all` -> `POST /v5/order/cancel-all`
+- `get_position` -> `GET /v5/position/list?category=linear&symbol=...`
+- `get_open_orders` -> `GET /v5/order/realtime?category=linear&symbol=...`
+
+固定参数：
+
+- `category = linear`
+- `orderType = Limit`
+- `timeInForce = GTC`
+- `positionIdx = 0`
+- `orderLinkId <- client_order_id`
+- `reduceOnly <- OrderRequest.reduce_only`
+
+映射要求：
+
+- create order 的 REST 回包映射为 `OrderReceipt { status: Submitting }`
+- one-way `Sell` 仓位数量映射为负数
+- open orders 映射到现有 `ExchangeOrder`
+- 非 one-way 的 `positionIdx != 0` 明确失败
+
+- [x] **Step 4: 跑 Bybit 最终回归**
+
+Run:
+`cargo test -p poise-bybit`
+
+Expected:
+- PASS
+
+Run:
+`cargo test -p poise-server`
+
+Expected:
+- PASS
+
+Run:
+`cargo build -p poise-server`
+
+Expected:
+- PASS
+
+- [x] **Step 5: 提交**
+
+```bash
+git add exchanges/bybit/src/rest/client.rs exchanges/bybit/src/rest/models.rs exchanges/bybit/src/mapper.rs exchanges/bybit/src/connected.rs
+git commit -m "feat: add bybit execution integration"
 ```
 
 ---
@@ -886,7 +1076,7 @@ git commit -m "feat: add bybit websocket integration"
 - `UNIFIED` 账户摘要：Task 3
 - one-way 约束：Task 4
 - 保守容量快照：Task 3
-- 全量交易闭环：Task 3、Task 4
+- 全量交易闭环：Task 4、Task 5
 - README 与示例配置：Task 4
 
 ### Placeholder 扫描

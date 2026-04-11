@@ -1,6 +1,6 @@
 # Poise
 
-`Poise` 是一个面向 Binance USDⓈ-M Futures 的探索型策略运行项目。当前主线把策略定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
+`Poise` 是一个面向 Binance / Bybit USDⓈ-M Futures 的探索型策略运行项目。当前主线把策略定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
 
 当前主线实现已经统一到下面这套结构：
 
@@ -17,6 +17,7 @@
 - [`storage/`](storage/)：SQLite 快照与领域事件存储
 - [`protocol/`](protocol/)：对外 HTTP / WebSocket DTO
 - [`exchanges/binance/`](exchanges/binance/)：Binance REST / WebSocket 适配
+- [`exchanges/bybit/`](exchanges/bybit/)：Bybit REST / WebSocket 适配
 - [`server/`](server/)：服务端装配、应用服务、HTTP / WS 入口
 - [`tui/`](tui/)：终端运维界面
 
@@ -39,6 +40,13 @@
 ```bash
 mkdir -p "$HOME/poise-instances/testnet-demo"
 cp configs/binance-testnet.demo.toml "$HOME/poise-instances/testnet-demo/config.toml"
+```
+
+手工联调 Bybit 测试网时，把上面的模板换成：
+
+```bash
+mkdir -p "$HOME/poise-instances/bybit-testnet-demo"
+cp configs/bybit-testnet.demo.toml "$HOME/poise-instances/bybit-testnet-demo/config.toml"
 ```
 
 补充说明：
@@ -79,9 +87,9 @@ tick_timeout_secs = 30
 
 - 可以继续追加 `[[tracks]]`，每个轨道都要配置唯一的 `track_id`
 - 当前同一交易所内每个 `symbol` 只能出现一次
-- `exchange.venue` 当前必须显式配置，现阶段仓库内只支持 `binance`
-- `exchange.deployment = "testnet"` 时，服务端接 Binance USDⓈ-M Futures 测试网地址
-- `exchange.deployment = "mainnet"` 时，服务端接 Binance USDⓈ-M Futures 主网地址
+- `exchange.venue` 当前必须显式配置，现阶段仓库内支持 `binance` 和 `bybit`
+- `exchange.deployment = "testnet"` 时，服务端接对应交易所的测试网地址
+- `exchange.deployment = "mainnet"` 时，服务端接对应交易所的主网地址
 - 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
@@ -129,7 +137,7 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet-demo"
 - 读取配置中的全部网格
 - 初始化 SQLite
 - 建立 HTTP / WebSocket 控制面
-- 接入 Binance 市场数据和用户流
+- 接入对应交易所的市场数据和用户流
 
 ### 3. 启动 TUI
 

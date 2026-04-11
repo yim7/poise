@@ -1,0 +1,23 @@
+[package]
+name = "poise-bybit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+chrono.workspace = true
+poise-engine = { path = "../../engine" }
+poise-core = { path = "../../core" }
+reqwest.workspace = true
+serde_json.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+tokio-tungstenite.workspace = true
+native-tls.workspace = true
+tracing.workspace = true

@@ -32,12 +32,14 @@ impl From<&str> for TrackId {
 #[serde(rename_all = "snake_case")]
 pub enum Venue {
     Binance,
+    Bybit,
 }
 
 impl Venue {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Binance => "binance",
+            Self::Bybit => "bybit",
         }
     }
 }
@@ -63,6 +65,16 @@ pub struct TrackDefinition {
     pub instrument: Instrument,
     pub config: TrackConfig,
     pub budget: CapacityBudget,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Venue;
+
+    #[test]
+    fn venue_as_str_supports_bybit() {
+        assert_eq!(Venue::Bybit.as_str(), "bybit");
+    }
 }
 
 impl TrackDefinition {
