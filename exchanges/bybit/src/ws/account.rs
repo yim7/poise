@@ -205,7 +205,7 @@ fn parse_position_update(update: PositionUpdate) -> Result<Position> {
         update.symbol,
         update.side.as_deref(),
         &update.size,
-        &update.avg_price,
+        &update.entry_price,
         &update.unrealised_pnl,
         update.position_idx,
     )
@@ -270,7 +270,7 @@ mod tests {
                 "symbol": "BTCUSDT",
                 "side": "Sell",
                 "size": "0.010",
-                "avgPrice": "64000.10",
+                "entryPrice": "64000.10",
                 "unrealisedPnl": "-1.25",
                 "positionIdx": 1
             }]
@@ -279,6 +279,39 @@ mod tests {
         let error = parse_user_data_message(payload).unwrap_err().to_string();
 
         assert!(error.contains("one-way"));
+    }
+
+    #[test]
+    fn parses_position_update_with_entry_price_field() {
+        let payload = r#"{
+            "topic": "position.linear",
+            "creationTime": 1700000000000,
+            "data": [{
+                "symbol": "BTCUSDT",
+                "side": "Buy",
+                "size": "0.010",
+                "entryPrice": "64000.10",
+                "unrealisedPnl": "1.25",
+                "positionIdx": 0
+            }]
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+        assert_eq!(events.len(), 1);
+
+        let event = &events[0];
+        match &event.payload {
+            UserDataPayload::PositionUpdate(position) => {
+                assert_eq!(
+                    position.instrument,
+                    Instrument::new(Venue::Bybit, "BTCUSDT")
+                );
+                assert_eq!(position.qty, 0.010);
+                assert_eq!(position.avg_price, 64000.10);
+                assert_eq!(position.unrealized_pnl, 1.25);
+            }
+            other => panic!("expected position update, got {other:?}"),
+        }
     }
 
     #[test]

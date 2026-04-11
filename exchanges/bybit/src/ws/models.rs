@@ -63,8 +63,8 @@ pub(crate) struct PositionUpdate {
     pub side: Option<String>,
     #[serde(deserialize_with = "deserialize_string")]
     pub size: String,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub avg_price: String,
+    #[serde(rename = "entryPrice", deserialize_with = "deserialize_string")]
+    pub entry_price: String,
     #[serde(deserialize_with = "deserialize_string")]
     pub unrealised_pnl: String,
     #[serde(deserialize_with = "deserialize_i64")]
