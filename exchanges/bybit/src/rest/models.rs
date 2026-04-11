@@ -58,7 +58,7 @@ pub(crate) struct UnifiedWalletBalance {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ServerTimeResult {
-    #[serde(rename = "timeSecond")]
+    #[serde(rename = "timeSecond", deserialize_with = "deserialize_i64")]
     pub time_second: i64,
 }
 
@@ -213,4 +213,16 @@ where
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_server_time_second_from_bybit_string_response() {
+        let response: BybitResponse<ServerTimeResult> = serde_json::from_str(
+            r#"{"retCode":0,"retMsg":"OK","result":{"timeSecond":"1775928345","timeNano":"1775928345295229586"},"retExtInfo":{},"time":1775928345295}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.result.time_second, 1_775_928_345);
+    }
+}
