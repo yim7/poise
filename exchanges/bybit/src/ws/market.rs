@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -27,19 +27,24 @@ pub(super) async fn run_market_stream(
                 if let Err(error) = subscribe(&mut websocket, &symbol).await {
                     tracing::warn!("failed to subscribe market stream: {error}");
                 } else {
+                    let mut ticker_state = TickerState::new(&symbol);
                     while let Some(message) = websocket.next().await {
                         match message {
-                            Ok(Message::Text(text)) => match parse_linear_ticker_message(&text) {
-                                Ok(Some(tick)) => {
-                                    if sender.send(tick).await.is_err() {
-                                        return;
+                            Ok(Message::Text(text)) => {
+                                match ticker_state.parse_linear_ticker_message(&text) {
+                                    Ok(Some(tick)) => {
+                                        if sender.send(tick).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "failed to parse market data message: {error}"
+                                        );
                                     }
                                 }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    tracing::warn!("failed to parse market data message: {error}");
-                                }
-                            },
+                            }
                             Ok(Message::Close(_)) => break,
                             Ok(_) => {}
                             Err(error) => {
@@ -76,28 +81,63 @@ async fn subscribe(websocket: &mut super::WebSocket, symbol: &str) -> Result<()>
     Ok(())
 }
 
-pub(super) fn parse_linear_ticker_message(payload: &str) -> Result<Option<PriceTick>> {
-    let value: serde_json::Value = serde_json::from_str(payload)?;
-    let Some(topic) = value.get("topic").and_then(|topic| topic.as_str()) else {
-        return Ok(None);
-    };
-    if !topic.starts_with("tickers.") {
-        return Ok(None);
+#[derive(Debug)]
+struct TickerState {
+    expected_symbol: String,
+    last_mark_price: Option<f64>,
+}
+
+impl TickerState {
+    fn new(expected_symbol: impl Into<String>) -> Self {
+        Self {
+            expected_symbol: expected_symbol.into(),
+            last_mark_price: None,
+        }
     }
-    let message: PublicTickerMessage = serde_json::from_value(value)?;
 
-    let mark_price = parse_decimal("data.markPrice", &message.data.mark_price)?;
-    let timestamp = Utc
-        .timestamp_millis_opt(message.ts)
-        .single()
-        .context("invalid ticker timestamp")?;
+    fn parse_linear_ticker_message(&mut self, payload: &str) -> Result<Option<PriceTick>> {
+        let value: serde_json::Value = serde_json::from_str(payload)?;
+        let Some(topic) = value.get("topic").and_then(|topic| topic.as_str()) else {
+            return Ok(None);
+        };
+        if !topic.starts_with("tickers.") {
+            return Ok(None);
+        }
+        let message: PublicTickerMessage = serde_json::from_value(value)?;
+        let Some(symbol) = message.topic.strip_prefix("tickers.") else {
+            return Ok(None);
+        };
+        if symbol != self.expected_symbol {
+            return Err(anyhow!(
+                "unexpected ticker topic: expected tickers.{}, got {}",
+                self.expected_symbol,
+                message.topic
+            ));
+        }
 
-    Ok(Some(PriceTick {
-        instrument: Instrument::new(Venue::Bybit, message.data.symbol),
-        reference_price: mark_price,
-        mark_price,
-        timestamp,
-    }))
+        let mark_price = match message.data.mark_price.as_deref() {
+            Some(value) => {
+                let mark_price = parse_decimal("data.markPrice", value)?;
+                self.last_mark_price = Some(mark_price);
+                mark_price
+            }
+            None => match self.last_mark_price {
+                Some(mark_price) => mark_price,
+                None => return Ok(None),
+            },
+        };
+        let timestamp = Utc
+            .timestamp_millis_opt(message.ts)
+            .single()
+            .context("invalid ticker timestamp")?;
+
+        Ok(Some(PriceTick {
+            instrument: Instrument::new(Venue::Bybit, &self.expected_symbol),
+            reference_price: mark_price,
+            mark_price,
+            timestamp,
+        }))
+    }
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
@@ -119,8 +159,13 @@ mod tests {
     use super::*;
     use crate::ws::BybitWsClient;
 
+    fn btc_ticker_state() -> TickerState {
+        TickerState::new("BTCUSDT")
+    }
+
     #[test]
-    fn parses_linear_ticker_message_into_price_tick() {
+    fn ticker_state_parses_snapshot_into_price_tick() {
+        let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
             "ts": 1700000000000,
@@ -131,7 +176,7 @@ mod tests {
             }
         }"#;
 
-        let tick = parse_linear_ticker_message(payload).unwrap().unwrap();
+        let tick = state.parse_linear_ticker_message(payload).unwrap().unwrap();
 
         assert_eq!(
             tick,
@@ -145,16 +190,135 @@ mod tests {
     }
 
     #[test]
-    fn ignores_subscription_ack_messages() {
+    fn ticker_state_ignores_subscription_ack_messages() {
+        let mut state = btc_ticker_state();
         let payload = r#"{
             "success": true,
             "op": "subscribe",
             "conn_id": "test"
         }"#;
 
-        let tick = parse_linear_ticker_message(payload).unwrap();
+        let tick = state.parse_linear_ticker_message(payload).unwrap();
 
         assert!(tick.is_none());
+    }
+
+    #[test]
+    fn ticker_state_ignores_delta_without_cached_mark_price() {
+        let mut state = btc_ticker_state();
+        let payload = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "delta",
+            "ts": 1700000005000,
+            "data": {
+                "symbol": "BTCUSDT",
+                "lastPrice": "64010.20"
+            }
+        }"#;
+
+        let tick = state.parse_linear_ticker_message(payload).unwrap();
+
+        assert!(tick.is_none());
+    }
+
+    #[test]
+    fn ticker_state_ignores_delta_without_symbol_or_cached_mark_price() {
+        let mut state = btc_ticker_state();
+        let payload = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "delta",
+            "ts": 1700000005000,
+            "data": {
+                "lastPrice": "64010.20"
+            }
+        }"#;
+
+        let tick = state.parse_linear_ticker_message(payload).unwrap();
+
+        assert!(tick.is_none());
+    }
+
+    #[test]
+    fn ticker_state_parses_delta_mark_price_with_symbol_from_topic() {
+        let mut state = btc_ticker_state();
+        let payload = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "delta",
+            "ts": 1700000005000,
+            "data": {
+                "markPrice": "64010.20"
+            }
+        }"#;
+
+        let tick = state.parse_linear_ticker_message(payload).unwrap().unwrap();
+
+        assert_eq!(
+            tick,
+            PriceTick {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                reference_price: 64010.20,
+                mark_price: 64010.20,
+                timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn ticker_state_reuses_previous_mark_price_for_delta_without_mark_price() {
+        let mut state = btc_ticker_state();
+        let snapshot = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "snapshot",
+            "ts": 1700000000000,
+            "data": {
+                "symbol": "BTCUSDT",
+                "markPrice": "64000.10"
+            }
+        }"#;
+        let delta = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "delta",
+            "ts": 1700000005000,
+            "data": {
+                "lastPrice": "64010.20"
+            }
+        }"#;
+
+        state
+            .parse_linear_ticker_message(snapshot)
+            .unwrap()
+            .unwrap();
+        let tick = state.parse_linear_ticker_message(delta).unwrap().unwrap();
+
+        assert_eq!(
+            tick,
+            PriceTick {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                reference_price: 64000.10,
+                mark_price: 64000.10,
+                timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn ticker_state_rejects_unexpected_topic_symbol() {
+        let mut state = btc_ticker_state();
+        let payload = r#"{
+            "topic": "tickers.ETHUSDT",
+            "type": "snapshot",
+            "ts": 1700000000000,
+            "data": {
+                "markPrice": "3200.10"
+            }
+        }"#;
+
+        let error = state
+            .parse_linear_ticker_message(payload)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unexpected ticker topic"));
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicTickerMessage {
+    pub topic: String,
     pub ts: i64,
     pub data: PublicTickerData,
 }
@@ -10,8 +11,8 @@ pub(crate) struct PublicTickerMessage {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicTickerData {
-    pub symbol: String,
-    pub mark_price: String,
+    #[serde(default)]
+    pub mark_price: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
