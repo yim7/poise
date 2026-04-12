@@ -577,12 +577,14 @@ Expected:
 - 报价恢复后会重新计算 `desired_exposure`，而不是保留旧目标到下一次偶然 reconcile
 - reconcile 已不再使用 `mark_price`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add engine/src/price_gate.rs engine/src/manager.rs engine/src/reconciler.rs engine/src/runtime.rs engine/src/observation.rs
 git commit -m "feat(engine): derive strategy price from book mid and gate price execution"
 ```
+
+实现提交：`b2a2372`
 
 ### Task 4: 切换执行定价，并让 `SubmitPurpose` 贯穿 submit / recovery / effect worker
 
