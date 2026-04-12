@@ -13,7 +13,7 @@ pub struct TargetReconcileResult {
     pub suppress_execution: bool,
 }
 
-pub fn reconcile_target(track: &TrackRuntime, reference_price: f64) -> TargetReconcileResult {
+pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReconcileResult {
     if matches!(track.status, TrackStatus::Terminated) {
         let target = Exposure(0.0);
         let delta = track.current_exposure.delta(&target);
@@ -47,7 +47,7 @@ pub fn reconcile_target(track: &TrackRuntime, reference_price: f64) -> TargetRec
         };
     }
 
-    let band = strategy::band_status(reference_price, &track.config);
+    let band = strategy::band_status(strategy_price, &track.config);
 
     let (target, new_status) = match &band {
         BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(track)),

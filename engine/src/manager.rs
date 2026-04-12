@@ -15,8 +15,9 @@ use crate::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
+use crate::price_gate::evaluate_price_execution_gate;
 use crate::reconciler;
-use crate::runtime::{ExecutorState, TrackRuntime, TrackStatus};
+use crate::runtime::{ExecutorState, StrategyPriceStatus, TrackRuntime, TrackStatus};
 use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
 use crate::transition::{TrackEffect, TrackTransition};
@@ -577,11 +578,20 @@ impl TrackManager {
     }
 
     fn cached_reference_price(&self, id: &TrackId) -> Result<Option<f64>> {
-        Ok(self
+        let track = self
             .tracks
             .get(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .reference_price)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+
+        if track.strategy_price.is_none() && track.reference_price.is_some() {
+            return Ok(track.reference_price);
+        }
+
+        if matches!(track.strategy_price_status, StrategyPriceStatus::Live) {
+            return Ok(track.reference_price.or(track.strategy_price));
+        }
+
+        Ok(None)
     }
 
     fn observe_market(
@@ -596,7 +606,31 @@ impl TrackManager {
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         track.last_tick_at = Some(now);
         track.market_data_stale_since = None;
-        self.reconcile_track(id, observation.mark_price)
+        track.mark_price = Some(observation.mark_price);
+        track.best_bid = observation.execution_quote.map(|quote| quote.best_bid);
+        track.best_ask = observation.execution_quote.map(|quote| quote.best_ask);
+        track.price_execution_gate = evaluate_price_execution_gate(
+            track.price_execution_gate,
+            track.mark_price,
+            observation.execution_quote,
+        );
+
+        let strategy_price = observation
+            .execution_quote
+            .map(|quote| (quote.best_bid + quote.best_ask) / 2.0);
+
+        match strategy_price {
+            Some(strategy_price) => {
+                track.strategy_price = Some(strategy_price);
+                track.reference_price = Some(strategy_price);
+                track.strategy_price_status = StrategyPriceStatus::Live;
+                self.reconcile_track(id, strategy_price)
+            }
+            None => {
+                track.strategy_price_status = StrategyPriceStatus::Stale;
+                Ok((vec![], vec![]))
+            }
+        }
     }
 
     fn observe_position(&mut self, id: &TrackId, observation: PositionObservation) -> Result<()> {
@@ -959,8 +993,8 @@ mod tests {
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
     use crate::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
-        WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState,
+        StrategyPriceStatus, TrackStatus, WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
@@ -1299,8 +1333,34 @@ mod tests {
     fn test_manager_with_cached_price(reference_price: f64) -> TrackManager {
         let mut manager = test_manager_with_active_track();
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
+        track.strategy_price = Some(reference_price);
+        track.strategy_price_status = StrategyPriceStatus::Live;
         track.reference_price = Some(reference_price);
         manager
+    }
+
+    fn quoted_market_observation(mark_price: f64) -> MarketObservation {
+        MarketObservation {
+            mark_price,
+            execution_quote: Some(ExecutionQuote {
+                best_bid: mark_price - 0.5,
+                best_ask: mark_price + 0.5,
+            }),
+        }
+    }
+
+    fn market_observation(mark_price: f64, best_bid: f64, best_ask: f64) -> MarketObservation {
+        MarketObservation {
+            mark_price,
+            execution_quote: Some(ExecutionQuote { best_bid, best_ask }),
+        }
+    }
+
+    fn market_observation_without_quote(mark_price: f64) -> MarketObservation {
+        MarketObservation {
+            mark_price,
+            execution_quote: None,
+        }
     }
 
     #[test]
@@ -1599,7 +1659,7 @@ mod tests {
             .observe(
                 &TrackId::new("btc-core"),
                 crate::observation::TrackObservation::Market(
-                    crate::observation::MarketObservation { mark_price: 95.0, execution_quote: None },
+                    quoted_market_observation(95.0),
                 ),
             )
             .unwrap();
@@ -1616,7 +1676,7 @@ mod tests {
             .observe(
                 &TrackId::new("btc-core"),
                 crate::observation::TrackObservation::Market(
-                    crate::observation::MarketObservation { mark_price: 95.0, execution_quote: None },
+                    quoted_market_observation(95.0),
                 ),
             )
             .unwrap();
@@ -1646,7 +1706,7 @@ mod tests {
             .observe(
                 &TrackId::new("btc-core"),
                 crate::observation::TrackObservation::Market(
-                    crate::observation::MarketObservation { mark_price: 95.0, execution_quote: None },
+                    quoted_market_observation(95.0),
                 ),
             )
             .unwrap();
@@ -1697,7 +1757,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
         assert!(!transition.events.is_empty());
@@ -1710,6 +1770,134 @@ mod tests {
     }
 
     #[test]
+    fn observe_market_derives_strategy_price_from_book_mid() {
+        let mut manager = test_manager_with_active_track();
+
+        let transition = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(market_observation(120.0, 94.0, 96.0)),
+            )
+            .unwrap();
+
+        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(
+            transition.snapshot.observed.strategy_price_status,
+            StrategyPriceStatus::Live
+        );
+        assert_eq!(transition.snapshot.observed.mark_price, Some(120.0));
+        assert_eq!(transition.snapshot.observed.best_bid, Some(94.0));
+        assert_eq!(transition.snapshot.observed.best_ask, Some(96.0));
+    }
+
+    #[test]
+    fn observe_market_keeps_last_strategy_price_and_marks_stale_when_quote_disappears() {
+        let mut manager = test_manager_with_active_track();
+
+        let first = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(quoted_market_observation(95.0)),
+            )
+            .unwrap();
+        let second = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(market_observation_without_quote(120.0)),
+            )
+            .unwrap();
+
+        assert_eq!(first.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(second.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(
+            second.snapshot.observed.strategy_price_status,
+            StrategyPriceStatus::Stale
+        );
+        assert_eq!(second.snapshot.observed.mark_price, Some(120.0));
+        assert_eq!(second.snapshot.desired_exposure, first.snapshot.desired_exposure);
+        assert!(second.effects.is_empty());
+    }
+
+    #[test]
+    fn reconcile_target_uses_strategy_price_instead_of_mark_price() {
+        let mut manager = test_manager_with_active_track();
+
+        let transition = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(market_observation(120.0, 94.5, 95.5)),
+            )
+            .unwrap();
+
+        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(transition.snapshot.observed.mark_price, Some(120.0));
+        assert_eq!(
+            transition.snapshot.desired_exposure,
+            Some(Exposure(4.0)),
+        );
+    }
+
+    #[test]
+    fn reconcile_target_keeps_existing_desired_exposure_when_strategy_price_is_stale() {
+        let mut manager = test_manager_with_active_track();
+
+        let first = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(quoted_market_observation(95.0)),
+            )
+            .unwrap();
+        let second = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(market_observation_without_quote(80.0)),
+            )
+            .unwrap();
+
+        assert_eq!(second.snapshot.desired_exposure, first.snapshot.desired_exposure);
+        assert_eq!(second.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(
+            second.snapshot.observed.strategy_price_status,
+            StrategyPriceStatus::Stale
+        );
+    }
+
+    #[test]
+    fn observe_market_recomputes_desired_exposure_after_quote_recovers() {
+        let mut manager = test_manager_with_active_track();
+
+        let initial = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(quoted_market_observation(95.0)),
+            )
+            .unwrap();
+        let stale = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(market_observation_without_quote(120.0)),
+            )
+            .unwrap();
+        let recovered = manager
+            .observe(
+                &TrackId::new("btc-core"),
+                TrackObservation::Market(quoted_market_observation(105.0)),
+            )
+            .unwrap();
+
+        assert_eq!(initial.snapshot.desired_exposure, Some(Exposure(4.0)));
+        assert_eq!(stale.snapshot.desired_exposure, Some(Exposure(4.0)));
+        assert_eq!(
+            recovered.snapshot.desired_exposure,
+            Some(Exposure(-4.0)),
+        );
+        assert_eq!(
+            recovered.snapshot.observed.strategy_price_status,
+            StrategyPriceStatus::Live
+        );
+    }
+
+    #[test]
     fn observe_market_returns_transition_with_effects_and_events() {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
@@ -1717,7 +1905,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1736,7 +1924,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1756,7 +1944,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1791,7 +1979,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1828,7 +2016,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1866,7 +2054,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 97.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(97.0)),
             )
             .unwrap();
 
@@ -1914,7 +2102,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 96.125, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(96.125)),
             )
             .unwrap();
 
@@ -1974,7 +2162,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 97.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(97.0)),
             )
             .unwrap();
 
@@ -2011,7 +2199,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -2066,7 +2254,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 99.95, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(99.95)),
             )
             .unwrap();
 
@@ -2115,13 +2303,13 @@ mod tests {
         let first = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 99.95, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(99.95)),
             )
             .unwrap();
         let second = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 99.95, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(99.95)),
             )
             .unwrap();
 
@@ -2171,7 +2359,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 99.95, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(99.95)),
             )
             .unwrap();
 
@@ -2218,7 +2406,7 @@ mod tests {
         let transition = manager
             .observe(
                 &track_id,
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -2253,7 +2441,7 @@ mod tests {
         let transition = manager
             .observe(
                 &track_id,
-                TrackObservation::Market(MarketObservation { mark_price: 100.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(100.0)),
             )
             .unwrap();
 
@@ -2407,7 +2595,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -3047,7 +3235,7 @@ mod tests {
         manager
             .observe(
                 &track_id,
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -3084,7 +3272,7 @@ mod tests {
         manager
             .observe(
                 &track_id,
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -3102,7 +3290,7 @@ mod tests {
         let transition = manager
             .observe(
                 &track_id,
-                TrackObservation::Market(MarketObservation { mark_price: 96.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(96.0)),
             )
             .unwrap();
 
@@ -3223,7 +3411,7 @@ mod tests {
         manager
             .observe(
                 &track_id,
-                TrackObservation::Market(MarketObservation { mark_price: 95.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -3753,7 +3941,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(MarketObservation { mark_price: 85.0, execution_quote: None }),
+                TrackObservation::Market(quoted_market_observation(85.0)),
             )
             .unwrap();
 

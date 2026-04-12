@@ -14,6 +14,7 @@ use crate::executor::{
 };
 use crate::ledger::TrackLedgerState;
 use crate::persisted_runtime::{PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed};
+use crate::price_gate::PriceExecutionGate;
 use crate::ports::OrderStatus;
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
@@ -191,6 +192,7 @@ pub struct TrackRuntime {
     pub(crate) best_ask: Option<f64>,
     // Legacy compatibility field while manager/executor still migrate to strategy_price.
     pub(crate) reference_price: Option<f64>,
+    pub(crate) price_execution_gate: PriceExecutionGate,
     pub(crate) out_of_band_since: Option<DateTime<Utc>>,
     pub(crate) last_tick_at: Option<DateTime<Utc>>,
     pub(crate) market_data_stale_since: Option<DateTime<Utc>>,
@@ -257,6 +259,9 @@ impl TrackRuntime {
             best_bid: None,
             best_ask: None,
             reference_price: None,
+            price_execution_gate: PriceExecutionGate::NoSubmit {
+                reason: crate::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
+            },
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,

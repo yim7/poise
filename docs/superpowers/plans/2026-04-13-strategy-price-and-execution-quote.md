@@ -407,7 +407,7 @@ git commit -m "refactor(runtime): replace reference price with strategy and mark
 - Test: `engine/src/price_gate.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住策略价推导和 price gate**
+- [x] **Step 1: 先写失败测试，锁住策略价推导和 price gate**
 
 增加至少这些测试：
 
@@ -447,7 +447,7 @@ fn observe_market_recomputes_desired_exposure_after_quote_recovers() {}
 - `desired_exposure(...)` 和 `band_status(...)` 已切到 `strategy_price`
 - 报价恢复后，manager 会重新计算新的 `desired_exposure`，而不是只把 gate 打开
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -463,7 +463,7 @@ Expected:
 - 当前 engine 还没有 `PriceExecutionGate`
 - 当前 reconcile 仍围绕旧 `reference_price`
 
-- [ ] **Step 3: 做最小实现，新增单一 price gate owner**
+- [x] **Step 3: 做最小实现，新增单一 price gate owner**
 
 在 `engine/src/price_gate.rs` 定义：
 
@@ -516,7 +516,7 @@ pub fn working_order_gate_action(
 ) -> WorkingOrderGateAction
 ```
 
-- [ ] **Step 4: 在 manager 中统一更新 `strategy_price` 和 gate**
+- [x] **Step 4: 在 manager 中统一更新 `strategy_price` 和 gate**
 
 `engine/src/manager.rs` 的 `observe_market(...)` 要改成：
 
@@ -558,7 +558,7 @@ strategy::desired_exposure(reference_price, &track.config)
 - 此时保留当前 `desired_exposure`，直到有效盘口恢复后再重新 reconcile
 - 当新的有效 quote 恢复后，`observe_market(...)` 必须在同一条 manager 路径里重新计算 `band_status / desired_exposure`，恢复普通自动执行入口
 
-- [ ] **Step 5: 跑 Task 3 回归**
+- [x] **Step 5: 跑 Task 3 回归**
 
 Run:
 
