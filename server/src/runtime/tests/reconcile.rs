@@ -125,6 +125,48 @@ async fn apply_user_data_event_persists_track_ledger_event_atomically() {
 }
 
 #[tokio::test]
+async fn apply_user_data_event_persists_track_ledger_adjustment_atomically() {
+    let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
+    let persistence = Arc::new(MemoryPersistence::default());
+    let state = test_state(
+        exchange.metadata_port(),
+        exchange.account_summary_port(),
+        persistence.clone(),
+        Some(test_snapshot()),
+        test_budget(),
+    )
+    .await;
+    let execution = exchange.execution_port();
+
+    super::apply_user_data_event(
+        &state,
+        execution.as_ref(),
+        "BTCUSDT",
+        UserDataEvent {
+            event_time: test_server_time() + chrono::Duration::milliseconds(1),
+            payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                    ledger_deltas: vec![
+                        LedgerDelta::GrossRealizedPnl(12.34),
+                        LedgerDelta::TradingFee(3.2),
+                    ],
+                    ledger_gaps: vec![],
+                    source: "bybit:execution".into(),
+                }),
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(persistence.save_transition_count.load(Ordering::SeqCst), 1);
+    let instance = current_instance(&state).await;
+    assert!((instance.ledger_state.gross_realized_pnl_cumulative - 12.34).abs() < f64::EPSILON);
+    assert!((instance.ledger_state.trading_fee_cumulative - 3.2).abs() < f64::EPSILON);
+}
+
+#[tokio::test]
 async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
     let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());

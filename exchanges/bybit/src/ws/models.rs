@@ -25,6 +25,29 @@ pub(crate) struct OrderTopicMessage {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ExecutionTopicMessage {
+    pub topic: String,
+    pub creation_time: i64,
+    pub data: Vec<ExecutionUpdate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExecutionUpdate {
+    #[serde(deserialize_with = "deserialize_string")]
+    pub symbol: String,
+    #[serde(deserialize_with = "deserialize_string")]
+    pub exec_id: String,
+    #[serde(deserialize_with = "deserialize_string")]
+    pub exec_pnl: String,
+    #[serde(deserialize_with = "deserialize_string")]
+    pub exec_fee: String,
+    #[serde(default)]
+    pub fee_currency: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OrderUpdate {
     #[serde(deserialize_with = "deserialize_string")]
     pub symbol: String,

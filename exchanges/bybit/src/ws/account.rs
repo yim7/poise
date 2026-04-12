@@ -9,16 +9,26 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
+use poise_engine::ledger::{
+    LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord, TrackLedgerEvent,
+};
+use poise_engine::ports::{
+    ExchangeOrder, Position, TrackLedgerUpdate, UserDataEvent, UserDataPayload,
+};
+use poise_engine::track::{Instrument, Venue};
 
 use super::{
     backoff_delay, connect_websocket,
-    models::{OrderTopicMessage, OrderUpdate, PositionTopicMessage, PositionUpdate},
+    models::{
+        ExecutionTopicMessage, ExecutionUpdate, OrderTopicMessage, OrderUpdate,
+        PositionTopicMessage, PositionUpdate,
+    },
 };
 use crate::mapper::{
     BybitActiveOrder, build_bybit_open_order, build_bybit_position, should_track_bybit_order,
 };
 
+const PRIVATE_EXECUTION_TOPIC: &str = "execution.linear";
 const PRIVATE_ORDER_TOPIC: &str = "order.linear";
 const PRIVATE_POSITION_TOPIC: &str = "position.linear";
 
@@ -100,7 +110,7 @@ async fn authenticate_and_subscribe(
         .send(Message::Text(
             serde_json::json!({
                 "op": "subscribe",
-                "args": [PRIVATE_ORDER_TOPIC, PRIVATE_POSITION_TOPIC]
+                "args": [PRIVATE_EXECUTION_TOPIC, PRIVATE_ORDER_TOPIC, PRIVATE_POSITION_TOPIC]
             })
             .to_string(),
         ))
@@ -133,10 +143,29 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent
     };
 
     match topic {
+        PRIVATE_EXECUTION_TOPIC => parse_execution_message(payload),
         PRIVATE_ORDER_TOPIC => parse_order_message(payload),
         PRIVATE_POSITION_TOPIC => parse_position_message(payload),
         _ => Ok(Vec::new()),
     }
+}
+
+fn parse_execution_message(payload: &str) -> Result<Vec<UserDataEvent>> {
+    let message: ExecutionTopicMessage = serde_json::from_str(payload)?;
+    if message.topic != PRIVATE_EXECUTION_TOPIC {
+        return Ok(Vec::new());
+    }
+    let event_time = Utc
+        .timestamp_millis_opt(message.creation_time)
+        .single()
+        .context("invalid execution event timestamp")?;
+
+    let mut events = Vec::with_capacity(message.data.len());
+    for execution in message.data {
+        events.push(parse_execution_update(event_time, execution)?);
+    }
+
+    Ok(events)
 }
 
 fn parse_order_message(payload: &str) -> Result<Vec<UserDataEvent>> {
@@ -211,6 +240,75 @@ fn parse_position_update(update: PositionUpdate) -> Result<Position> {
     )
 }
 
+fn parse_execution_update(
+    event_time: chrono::DateTime<Utc>,
+    update: ExecutionUpdate,
+) -> Result<UserDataEvent> {
+    let exec_pnl = parse_decimal("execPnl", &update.exec_pnl)?;
+    let exec_fee = parse_decimal("execFee", &update.exec_fee)?;
+    let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(exec_pnl)];
+    let mut ledger_gaps = Vec::new();
+
+    if exec_fee.abs() > f64::EPSILON {
+        let expected_asset = quote_asset_for_symbol(&update.symbol);
+        let fee_asset = normalized_fee_currency(update.fee_currency.as_deref()).or(expected_asset);
+
+        match (fee_asset, expected_asset) {
+            (Some(asset), Some(expected_asset)) if asset == expected_asset => {
+                ledger_deltas.push(LedgerDelta::TradingFee(exec_fee));
+            }
+            (Some(_), _) => ledger_gaps.push(LedgerGapRecord {
+                gap_key: format!(
+                    "bybit:execution:{}:{}:fee_currency",
+                    update.symbol.to_lowercase(),
+                    update.exec_id
+                ),
+                reason: LedgerGapReason::UnsupportedCommissionAsset,
+                observed_at: event_time,
+                source: "bybit:execution".into(),
+            }),
+            (None, _) => ledger_gaps.push(LedgerGapRecord {
+                gap_key: format!(
+                    "bybit:execution:{}:{}:missing_fee_currency",
+                    update.symbol.to_lowercase(),
+                    update.exec_id
+                ),
+                reason: LedgerGapReason::MissingCommissionAsset,
+                observed_at: event_time,
+                source: "bybit:execution".into(),
+            }),
+        }
+    }
+
+    Ok(UserDataEvent {
+        event_time,
+        payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+            instrument: Instrument::new(Venue::Bybit, update.symbol),
+            event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                ledger_deltas,
+                ledger_gaps,
+                source: "bybit:execution".into(),
+            }),
+        }),
+    })
+}
+
+fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
+    ["USDT", "USDC", "FDUSD", "BUSD"]
+        .into_iter()
+        .find(|asset| symbol.ends_with(asset))
+}
+
+fn normalized_fee_currency(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn parse_decimal(field: &str, value: &str) -> Result<f64> {
+    value
+        .parse::<f64>()
+        .with_context(|| format!("invalid decimal for {field}: {value}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -220,6 +318,8 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_core::types::Side;
+    use poise_engine::ledger::{LedgerAdjustmentEvent, LedgerDelta, TrackLedgerEvent};
+    use poise_engine::ports::TrackLedgerUpdate;
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
@@ -337,6 +437,76 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    #[test]
+    fn parses_execution_update_into_track_ledger_adjustment() {
+        let payload = r#"{
+            "topic": "execution.linear",
+            "creationTime": 1700000000000,
+            "data": [{
+                "symbol": "BTCUSDT",
+                "execId": "exec-1",
+                "execPnl": "12.34",
+                "execFee": "3.21",
+                "feeCurrency": "USDT"
+            }]
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            events,
+            vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                        ledger_deltas: vec![
+                            LedgerDelta::GrossRealizedPnl(12.34),
+                            LedgerDelta::TradingFee(3.21),
+                        ],
+                        ledger_gaps: vec![],
+                        source: "bybit:execution".into(),
+                    }),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_execution_update_with_empty_fee_currency_into_trading_fee() {
+        let payload = r#"{
+            "topic": "execution.linear",
+            "creationTime": 1700000000000,
+            "data": [{
+                "symbol": "BTCUSDT",
+                "execId": "exec-2",
+                "execPnl": "0.50",
+                "execFee": "1.25",
+                "feeCurrency": ""
+            }]
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            events,
+            vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                        ledger_deltas: vec![
+                            LedgerDelta::GrossRealizedPnl(0.50),
+                            LedgerDelta::TradingFee(1.25),
+                        ],
+                        ledger_gaps: vec![],
+                        source: "bybit:execution".into(),
+                    }),
+                }),
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn auth_and_subscribe_bridge_private_events() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -365,7 +535,7 @@ mod tests {
                                 .unwrap();
                             websocket
                                 .send(Message::Text(
-                                    r#"{"topic":"order.linear","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","orderId":"123","orderLinkId":"client-1","side":"Buy","price":"64000.10","qty":"0.010","orderStatus":"New","positionIdx":0}]}"#.to_string(),
+                                    r#"{"topic":"execution.linear","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","execId":"exec-bridge-1","execPnl":"12.34","execFee":"3.21","feeCurrency":"USDT"}]}"#.to_string(),
                                 ))
                                 .await
                                 .unwrap();
@@ -394,11 +564,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(event.event_time.timestamp_millis(), 1_700_000_000_000);
+        assert_eq!(
+            event,
+            UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
+                        ledger_deltas: vec![
+                            LedgerDelta::GrossRealizedPnl(12.34),
+                            LedgerDelta::TradingFee(3.21),
+                        ],
+                        ledger_gaps: vec![],
+                        source: "bybit:execution".into(),
+                    }),
+                }),
+            }
+        );
 
         let messages = messages.lock().unwrap();
         assert_eq!(messages.len(), 2);
         assert!(messages[0].contains("\"op\":\"auth\""));
         assert!(messages[1].contains("\"op\":\"subscribe\""));
+        assert!(messages[1].contains("execution.linear"));
         assert!(messages[1].contains("order.linear"));
         assert!(messages[1].contains("position.linear"));
     }

@@ -19,7 +19,9 @@ use poise_core::types::{ExchangeRules, Exposure, Side};
 use poise_engine::command::TrackCommand;
 use poise_engine::execution_plan::ExecutionAction;
 use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
-use poise_engine::ledger::{ExecutionLedgerUpdate, LedgerDelta, TrackLedgerEvent};
+use poise_engine::ledger::{
+    ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, TrackLedgerEvent,
+};
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::OrderObservation;
 use poise_engine::ports::{
