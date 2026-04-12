@@ -180,10 +180,7 @@ fn parse_order_message(payload: &str) -> Result<Vec<UserDataEvent>> {
 
     let mut events = Vec::with_capacity(message.data.len());
     for order in message.data {
-        if !should_track_bybit_order(
-            order.order_status.as_str(),
-            order.stop_order_type.as_deref(),
-        ) {
+        if !should_track_bybit_order(order.order_status, order.stop_order_type.as_deref()) {
             continue;
         }
         events.push(UserDataEvent {
@@ -232,10 +229,10 @@ fn parse_order_update(update: OrderUpdate) -> Result<ExchangeOrder> {
 fn parse_position_update(update: PositionUpdate) -> Result<Position> {
     build_bybit_position(
         update.symbol,
-        update.side.as_deref(),
-        &update.size,
-        &update.entry_price,
-        &update.unrealised_pnl,
+        update.side,
+        update.size,
+        update.entry_price,
+        update.unrealised_pnl,
         update.position_idx,
     )
 }
@@ -244,18 +241,16 @@ fn parse_execution_update(
     event_time: chrono::DateTime<Utc>,
     update: ExecutionUpdate,
 ) -> Result<UserDataEvent> {
-    let exec_pnl = parse_decimal("execPnl", &update.exec_pnl)?;
-    let exec_fee = parse_decimal("execFee", &update.exec_fee)?;
-    let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(exec_pnl)];
+    let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(update.exec_pnl)];
     let mut ledger_gaps = Vec::new();
 
-    if exec_fee.abs() > f64::EPSILON {
+    if update.exec_fee.abs() > f64::EPSILON {
         let expected_asset = quote_asset_for_symbol(&update.symbol);
         let fee_asset = normalized_fee_currency(update.fee_currency.as_deref()).or(expected_asset);
 
         match (fee_asset, expected_asset) {
             (Some(asset), Some(expected_asset)) if asset == expected_asset => {
-                ledger_deltas.push(LedgerDelta::TradingFee(exec_fee));
+                ledger_deltas.push(LedgerDelta::TradingFee(update.exec_fee));
             }
             (Some(_), _) => ledger_gaps.push(LedgerGapRecord {
                 gap_key: format!(
@@ -301,12 +296,6 @@ fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
 
 fn normalized_fee_currency(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn parse_decimal(field: &str, value: &str) -> Result<f64> {
-    value
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal for {field}: {value}"))
 }
 
 #[cfg(test)]

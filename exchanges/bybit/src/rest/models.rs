@@ -1,4 +1,10 @@
+use poise_core::types::Side;
 use serde::{Deserialize, Serialize};
+
+use crate::protocol::{
+    BybitOrderStatus, deserialize_f64, deserialize_i64, deserialize_optional_f64,
+    deserialize_optional_side, deserialize_order_status, deserialize_side,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct BybitResponse<T> {
@@ -25,18 +31,34 @@ pub(crate) struct LinearInstrumentInfo {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PriceFilter {
-    #[serde(rename = "tickSize")]
-    pub tick_size: Option<String>,
+    #[serde(
+        default,
+        rename = "tickSize",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub tick_size: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LotSizeFilter {
-    #[serde(rename = "qtyStep")]
-    pub qty_step: Option<String>,
-    #[serde(rename = "minOrderQty")]
-    pub min_order_qty: Option<String>,
-    #[serde(rename = "minNotionalValue")]
-    pub min_notional_value: Option<String>,
+    #[serde(
+        default,
+        rename = "qtyStep",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub qty_step: Option<f64>,
+    #[serde(
+        default,
+        rename = "minOrderQty",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub min_order_qty: Option<f64>,
+    #[serde(
+        default,
+        rename = "minNotionalValue",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub min_notional_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,12 +70,24 @@ pub(crate) struct WalletBalanceResult {
 pub(crate) struct UnifiedWalletBalance {
     #[serde(rename = "accountType")]
     pub account_type: Option<String>,
-    #[serde(rename = "totalEquity")]
-    pub total_equity: Option<String>,
-    #[serde(rename = "totalAvailableBalance")]
-    pub total_available_balance: Option<String>,
-    #[serde(rename = "totalPerpUPL")]
-    pub total_perp_upl: Option<String>,
+    #[serde(
+        default,
+        rename = "totalEquity",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub total_equity: Option<f64>,
+    #[serde(
+        default,
+        rename = "totalAvailableBalance",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub total_available_balance: Option<f64>,
+    #[serde(
+        default,
+        rename = "totalPerpUPL",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub total_perp_upl: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,14 +172,22 @@ pub(crate) struct PositionListResult {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PositionSnapshot {
     pub symbol: String,
-    #[serde(default)]
-    pub side: Option<String>,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub size: String,
-    #[serde(rename = "avgPrice", deserialize_with = "deserialize_string")]
-    pub avg_price: String,
-    #[serde(rename = "unrealisedPnl", deserialize_with = "deserialize_string")]
-    pub unrealised_pnl: String,
+    #[serde(default, deserialize_with = "deserialize_optional_side")]
+    pub side: Option<Side>,
+    #[serde(deserialize_with = "deserialize_f64")]
+    pub size: f64,
+    #[serde(
+        default,
+        rename = "avgPrice",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub avg_price: Option<f64>,
+    #[serde(
+        default,
+        rename = "unrealisedPnl",
+        deserialize_with = "deserialize_optional_f64"
+    )]
+    pub unrealised_pnl: Option<f64>,
     #[serde(rename = "positionIdx", deserialize_with = "deserialize_i64")]
     pub position_idx: i64,
 }
@@ -160,61 +202,29 @@ pub(crate) struct OpenOrderListResult {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenOrderSnapshot {
     pub symbol: String,
-    #[serde(rename = "orderId", deserialize_with = "deserialize_string")]
     pub order_id: String,
     #[serde(default, rename = "orderLinkId")]
     pub order_link_id: Option<String>,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub side: String,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub price: String,
-    #[serde(deserialize_with = "deserialize_string")]
-    pub qty: String,
-    #[serde(rename = "orderStatus", deserialize_with = "deserialize_string")]
-    pub order_status: String,
+    #[serde(deserialize_with = "deserialize_side")]
+    pub side: Side,
+    #[serde(deserialize_with = "deserialize_f64")]
+    pub price: f64,
+    #[serde(deserialize_with = "deserialize_f64")]
+    pub qty: f64,
+    #[serde(rename = "orderStatus", deserialize_with = "deserialize_order_status")]
+    pub order_status: BybitOrderStatus,
     #[serde(default, rename = "stopOrderType")]
     pub stop_order_type: Option<String>,
     #[serde(rename = "positionIdx", deserialize_with = "deserialize_i64")]
     pub position_idx: i64,
 }
 
-pub(crate) fn deserialize_string<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::String(value) => Ok(value),
-        serde_json::Value::Number(value) => Ok(value.to_string()),
-        other => Err(Error::custom(format!(
-            "expected string or number, got {other}"
-        ))),
-    }
-}
-
-pub(crate) fn deserialize_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Number(value) => value
-            .as_i64()
-            .ok_or_else(|| Error::custom("expected integer number")),
-        serde_json::Value::String(value) => value
-            .parse::<i64>()
-            .map_err(|error| Error::custom(format!("invalid integer `{value}`: {error}"))),
-        other => Err(Error::custom(format!("expected integer, got {other}"))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use poise_core::types::Side;
+
     use super::*;
+    use crate::protocol::BybitOrderStatus;
 
     #[test]
     fn deserializes_server_time_second_from_bybit_string_response() {
@@ -224,5 +234,66 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.result.time_second, 1_775_928_345);
+    }
+
+    #[test]
+    fn deserializes_position_snapshot_into_typed_fields() {
+        let response: BybitResponse<PositionListResult> = serde_json::from_str(
+            r#"{
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "list": [{
+                        "symbol": "BTCUSDT",
+                        "side": "",
+                        "size": "0",
+                        "avgPrice": "",
+                        "unrealisedPnl": "",
+                        "positionIdx": 0
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let snapshot = &response.result.list[0];
+        assert_eq!(snapshot.symbol, "BTCUSDT");
+        assert_eq!(snapshot.side, None);
+        assert_eq!(snapshot.size, 0.0);
+        assert_eq!(snapshot.avg_price, None);
+        assert_eq!(snapshot.unrealised_pnl, None);
+        assert_eq!(snapshot.position_idx, 0);
+    }
+
+    #[test]
+    fn deserializes_open_order_snapshot_into_typed_fields() {
+        let response: BybitResponse<OpenOrderListResult> = serde_json::from_str(
+            r#"{
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "list": [{
+                        "symbol": "BTCUSDT",
+                        "orderId": "12345",
+                        "orderLinkId": "client-1",
+                        "side": "Buy",
+                        "price": "65000.5",
+                        "qty": "0.25",
+                        "orderStatus": "PartiallyFilled",
+                        "positionIdx": 0
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let snapshot = &response.result.list[0];
+        assert_eq!(snapshot.symbol, "BTCUSDT");
+        assert_eq!(snapshot.order_id, "12345");
+        assert_eq!(snapshot.side, Side::Buy);
+        assert_eq!(snapshot.price, 65000.5);
+        assert_eq!(snapshot.qty, 0.25);
+        assert_eq!(snapshot.order_status, BybitOrderStatus::PartiallyFilled);
+        assert_eq!(snapshot.position_idx, 0);
     }
 }

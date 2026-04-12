@@ -115,9 +115,8 @@ impl TickerState {
             ));
         }
 
-        let mark_price = match message.data.mark_price.as_deref() {
-            Some(value) => {
-                let mark_price = parse_decimal("data.markPrice", value)?;
+        let mark_price = match message.data.mark_price {
+            Some(mark_price) => {
                 self.last_mark_price = Some(mark_price);
                 mark_price
             }
@@ -138,12 +137,6 @@ impl TickerState {
             timestamp,
         }))
     }
-}
-
-fn parse_decimal(field: &str, value: &str) -> Result<f64> {
-    value
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal for {field}: {value}"))
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use poise_engine::ports::{
 };
 use poise_engine::track::{Instrument, Venue};
 
+use crate::protocol::BybitOrderStatus;
 use crate::rest::models::{
     CreateOrderResult, InstrumentInfoResult, OpenOrderSnapshot, PositionSnapshot, ServerTimeResult,
     UnifiedWalletBalance, WalletBalanceResult,
@@ -16,10 +17,10 @@ pub(crate) struct BybitActiveOrder {
     pub symbol: String,
     pub order_id: String,
     pub client_order_id: Option<String>,
-    pub side: String,
-    pub price: String,
-    pub qty: String,
-    pub order_status: String,
+    pub side: poise_core::types::Side,
+    pub price: f64,
+    pub qty: f64,
+    pub order_status: BybitOrderStatus,
     pub position_idx: i64,
 }
 
@@ -27,10 +28,7 @@ pub(crate) fn build_account_capacity_snapshot(
     wallet_balance: &WalletBalanceResult,
 ) -> Result<AccountCapacitySnapshot> {
     let balance = first_wallet_balance(wallet_balance)?;
-    let available = required_decimal(
-        "totalAvailableBalance",
-        balance.total_available_balance.as_deref(),
-    )?;
+    let available = required_value("totalAvailableBalance", balance.total_available_balance)?;
     Ok(AccountCapacitySnapshot {
         max_increase_notional: available,
     })
@@ -48,21 +46,18 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
         Ok(Self {
             instrument: Instrument::new(Venue::Bybit, info.symbol),
             rules: poise_core::types::ExchangeRules {
-                price_tick: required_decimal(
-                    "priceFilter.tickSize",
-                    info.price_filter.tick_size.as_deref(),
-                )?,
-                quantity_step: required_decimal(
+                price_tick: required_value("priceFilter.tickSize", info.price_filter.tick_size)?,
+                quantity_step: required_value(
                     "lotSizeFilter.qtyStep",
-                    info.lot_size_filter.qty_step.as_deref(),
+                    info.lot_size_filter.qty_step,
                 )?,
-                min_qty: required_decimal(
+                min_qty: required_value(
                     "lotSizeFilter.minOrderQty",
-                    info.lot_size_filter.min_order_qty.as_deref(),
+                    info.lot_size_filter.min_order_qty,
                 )?,
-                min_notional: required_decimal(
+                min_notional: required_value(
                     "lotSizeFilter.minNotionalValue",
-                    info.lot_size_filter.min_notional_value.as_deref(),
+                    info.lot_size_filter.min_notional_value,
                 )?,
                 maker_fee_rate: 0.0002,
                 taker_fee_rate: 0.00055,
@@ -75,12 +70,9 @@ impl WalletBalanceResult {
     pub(crate) fn into_account_summary_snapshot(self) -> Result<AccountSummarySnapshot> {
         let balance = first_wallet_balance(&self)?;
         Ok(AccountSummarySnapshot {
-            equity: required_decimal("totalEquity", balance.total_equity.as_deref())?,
-            available: required_decimal(
-                "totalAvailableBalance",
-                balance.total_available_balance.as_deref(),
-            )?,
-            unrealized_pnl: required_decimal("totalPerpUPL", balance.total_perp_upl.as_deref())?,
+            equity: required_value("totalEquity", balance.total_equity)?,
+            available: required_value("totalAvailableBalance", balance.total_available_balance)?,
+            unrealized_pnl: required_value("totalPerpUPL", balance.total_perp_upl)?,
             observed_at: Utc::now(),
         })
     }
@@ -114,10 +106,10 @@ impl TryFrom<PositionSnapshot> for Position {
     fn try_from(value: PositionSnapshot) -> Result<Self, Self::Error> {
         build_bybit_position(
             value.symbol,
-            value.side.as_deref(),
-            &value.size,
-            &value.avg_price,
-            &value.unrealised_pnl,
+            value.side,
+            value.size,
+            value.avg_price,
+            value.unrealised_pnl,
             value.position_idx,
         )
     }
@@ -154,28 +146,8 @@ fn first_wallet_balance(wallet_balance: &WalletBalanceResult) -> Result<&Unified
     Ok(balance)
 }
 
-fn required_decimal(field: &str, value: Option<&str>) -> Result<f64> {
-    let value = value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("missing required {field}"))?;
-    value
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal for {field}: {value}"))
-}
-
-fn parse_decimal(field: &str, value: &str) -> Result<f64> {
-    value
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal for {field}: {value}"))
-}
-
-pub(crate) fn parse_side(value: &str) -> Result<poise_core::types::Side> {
-    match value {
-        "Buy" | "BUY" | "buy" => Ok(poise_core::types::Side::Buy),
-        "Sell" | "SELL" | "sell" => Ok(poise_core::types::Side::Sell),
-        other => Err(anyhow!("unsupported Bybit side: {other}")),
-    }
+fn required_value(field: &str, value: Option<f64>) -> Result<f64> {
+    value.ok_or_else(|| anyhow!("missing required {field}"))
 }
 
 pub(crate) fn side_to_bybit(side: poise_core::types::Side) -> &'static str {
@@ -185,19 +157,10 @@ pub(crate) fn side_to_bybit(side: poise_core::types::Side) -> &'static str {
     }
 }
 
-pub(crate) fn parse_order_status(value: &str) -> Result<OrderStatus> {
-    match value {
-        "New" | "NEW" => Ok(OrderStatus::New),
-        "PartiallyFilled" | "PARTIALLY_FILLED" => Ok(OrderStatus::PartiallyFilled),
-        "Filled" | "FILLED" => Ok(OrderStatus::Filled),
-        "Cancelled" | "CANCELED" => Ok(OrderStatus::Canceled),
-        "Rejected" | "REJECTED" => Ok(OrderStatus::Rejected),
-        "Expired" | "EXPIRED" => Ok(OrderStatus::Expired),
-        other => Err(anyhow!("unsupported Bybit order status: {other}")),
-    }
-}
-
-pub(crate) fn should_track_bybit_order(order_status: &str, stop_order_type: Option<&str>) -> bool {
+pub(crate) fn should_track_bybit_order(
+    order_status: BybitOrderStatus,
+    stop_order_type: Option<&str>,
+) -> bool {
     let stop_order_type = stop_order_type
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -206,18 +169,15 @@ pub(crate) fn should_track_bybit_order(order_status: &str, stop_order_type: Opti
         return false;
     }
 
-    !matches!(
-        order_status,
-        "Untriggered" | "UNTRIGGERED" | "Triggered" | "TRIGGERED" | "Deactivated" | "DEACTIVATED"
-    )
+    order_status.is_trackable()
 }
 
 pub(crate) fn build_bybit_position(
     symbol: String,
-    side: Option<&str>,
-    size: &str,
-    avg_price: &str,
-    unrealised_pnl: &str,
+    side: Option<poise_core::types::Side>,
+    size: f64,
+    avg_price: Option<f64>,
+    unrealised_pnl: Option<f64>,
     position_idx: i64,
 ) -> Result<Position> {
     if position_idx != 0 {
@@ -226,30 +186,23 @@ pub(crate) fn build_bybit_position(
         ));
     }
 
-    let qty = parse_decimal("size", size)?;
-    let normalized_side = side.map(str::trim).filter(|value| !value.is_empty());
-    let signed_qty = match normalized_side {
-        Some("Buy") | Some("BUY") | Some("buy") => qty,
-        Some("Sell") | Some("SELL") | Some("sell") => -qty,
-        None if qty == 0.0 => 0.0,
+    let signed_qty = match side {
+        Some(poise_core::types::Side::Buy) => size,
+        Some(poise_core::types::Side::Sell) => -size,
+        None if size == 0.0 => 0.0,
         None => {
             return Err(anyhow!(
-                "Bybit position side is empty for non-flat size {qty}"
+                "Bybit position side is empty for non-flat size {size}"
             ));
         }
-        Some(other) => return Err(anyhow!("unsupported Bybit side: {other}")),
     };
-    let allow_blank_numeric = qty == 0.0;
+    let allow_blank_numeric = size == 0.0;
 
     Ok(Position {
         instrument: Instrument::new(Venue::Bybit, symbol),
         qty: signed_qty,
-        avg_price: parse_decimal_or_zero("avgPrice", avg_price, allow_blank_numeric)?,
-        unrealized_pnl: parse_decimal_or_zero(
-            "unrealisedPnl",
-            unrealised_pnl,
-            allow_blank_numeric,
-        )?,
+        avg_price: value_or_zero("avgPrice", avg_price, allow_blank_numeric)?,
+        unrealized_pnl: value_or_zero("unrealisedPnl", unrealised_pnl, allow_blank_numeric)?,
     })
 }
 
@@ -275,25 +228,28 @@ pub(crate) fn build_bybit_open_order(order: BybitActiveOrder) -> Result<Exchange
         instrument: Instrument::new(Venue::Bybit, symbol),
         order_id,
         client_order_id: client_order_id.unwrap_or_default(),
-        side: parse_side(&side)?,
-        price: parse_decimal("price", &price)?,
-        qty: parse_decimal("qty", &qty)?,
+        side,
+        price,
+        qty,
         realized_pnl: 0.0,
-        status: parse_order_status(&order_status)?,
+        status: order_status
+            .into_order_status()
+            .ok_or_else(|| anyhow!("unsupported Bybit order status: {order_status:?}"))?,
     })
 }
 
-fn parse_decimal_or_zero(field: &str, value: &str, allow_blank_zero: bool) -> Result<f64> {
-    let value = value.trim();
-    if allow_blank_zero && value.is_empty() {
-        return Ok(0.0);
+fn value_or_zero(field: &str, value: Option<f64>, allow_blank_zero: bool) -> Result<f64> {
+    match (value, allow_blank_zero) {
+        (Some(value), _) => Ok(value),
+        (None, true) => Ok(0.0),
+        (None, false) => Err(anyhow!("missing required {field}")),
     }
-    parse_decimal(field, value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::BybitOrderStatus;
     use crate::rest::models::{
         CreateOrderResult, InstrumentInfoResult, LinearInstrumentInfo, LotSizeFilter,
         OpenOrderSnapshot, PositionSnapshot, PriceFilter, ServerTimeResult, UnifiedWalletBalance,
@@ -307,12 +263,12 @@ mod tests {
         let info = LinearInstrumentInfo {
             symbol: "BTCUSDT".to_string(),
             price_filter: PriceFilter {
-                tick_size: Some("0.10".to_string()),
+                tick_size: Some(0.10),
             },
             lot_size_filter: LotSizeFilter {
-                qty_step: Some("0.001".to_string()),
-                min_order_qty: Some("0.001".to_string()),
-                min_notional_value: Some("5".to_string()),
+                qty_step: Some(0.001),
+                min_order_qty: Some(0.001),
+                min_notional_value: Some(5.0),
             },
         };
 
@@ -341,9 +297,9 @@ mod tests {
         let balances = WalletBalanceResult {
             list: vec![UnifiedWalletBalance {
                 account_type: Some("UNIFIED".to_string()),
-                total_equity: Some("125.5".to_string()),
-                total_available_balance: Some("100.25".to_string()),
-                total_perp_upl: Some("-2.75".to_string()),
+                total_equity: Some(125.5),
+                total_available_balance: Some(100.25),
+                total_perp_upl: Some(-2.75),
             }],
         };
 
@@ -360,8 +316,8 @@ mod tests {
             list: vec![UnifiedWalletBalance {
                 account_type: Some("UNIFIED".to_string()),
                 total_equity: None,
-                total_available_balance: Some("100.25".to_string()),
-                total_perp_upl: Some("-2.75".to_string()),
+                total_available_balance: Some(100.25),
+                total_perp_upl: Some(-2.75),
             }],
         };
 
@@ -378,9 +334,9 @@ mod tests {
         let balances = WalletBalanceResult {
             list: vec![UnifiedWalletBalance {
                 account_type: Some("CONTRACT".to_string()),
-                total_equity: Some("125.5".to_string()),
-                total_available_balance: Some("100.25".to_string()),
-                total_perp_upl: Some("-2.75".to_string()),
+                total_equity: Some(125.5),
+                total_available_balance: Some(100.25),
+                total_perp_upl: Some(-2.75),
             }],
         };
 
@@ -397,9 +353,9 @@ mod tests {
         let balances = WalletBalanceResult {
             list: vec![UnifiedWalletBalance {
                 account_type: Some("UNIFIED".to_string()),
-                total_equity: Some("125.5".to_string()),
-                total_available_balance: Some("100.25".to_string()),
-                total_perp_upl: Some("-2.75".to_string()),
+                total_equity: Some(125.5),
+                total_available_balance: Some(100.25),
+                total_perp_upl: Some(-2.75),
             }],
         };
 
@@ -441,10 +397,10 @@ mod tests {
     fn converts_one_way_position_snapshot_into_position() {
         let position = Position::try_from(PositionSnapshot {
             symbol: "BTCUSDT".to_string(),
-            side: Some("Sell".to_string()),
-            size: "0.25".to_string(),
-            avg_price: "65000.5".to_string(),
-            unrealised_pnl: "-12.5".to_string(),
+            side: Some(Side::Sell),
+            size: 0.25,
+            avg_price: Some(65000.5),
+            unrealised_pnl: Some(-12.5),
             position_idx: 0,
         })
         .unwrap();
@@ -464,10 +420,10 @@ mod tests {
     fn converts_flat_position_snapshot_with_empty_side_into_zero_position() {
         let position = Position::try_from(PositionSnapshot {
             symbol: "BTCUSDT".to_string(),
-            side: Some(String::new()),
-            size: "0".to_string(),
-            avg_price: String::new(),
-            unrealised_pnl: String::new(),
+            side: None,
+            size: 0.0,
+            avg_price: None,
+            unrealised_pnl: None,
             position_idx: 0,
         })
         .unwrap();
@@ -487,10 +443,10 @@ mod tests {
     fn rejects_non_one_way_position_snapshot() {
         let error = Position::try_from(PositionSnapshot {
             symbol: "BTCUSDT".to_string(),
-            side: Some("Buy".to_string()),
-            size: "0.25".to_string(),
-            avg_price: "65000.5".to_string(),
-            unrealised_pnl: "-12.5".to_string(),
+            side: Some(Side::Buy),
+            size: 0.25,
+            avg_price: Some(65000.5),
+            unrealised_pnl: Some(-12.5),
             position_idx: 1,
         })
         .unwrap_err()
@@ -505,10 +461,10 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             order_id: "12345".to_string(),
             order_link_id: Some("client-1".to_string()),
-            side: "Buy".to_string(),
-            price: "65000.5".to_string(),
-            qty: "0.25".to_string(),
-            order_status: "PartiallyFilled".to_string(),
+            side: Side::Buy,
+            price: 65000.5,
+            qty: 0.25,
+            order_status: BybitOrderStatus::PartiallyFilled,
             stop_order_type: None,
             position_idx: 0,
         })
@@ -528,10 +484,10 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             order_id: "12345".to_string(),
             order_link_id: Some("client-1".to_string()),
-            side: "Buy".to_string(),
-            price: "65000.5".to_string(),
-            qty: "0.25".to_string(),
-            order_status: "New".to_string(),
+            side: Side::Buy,
+            price: 65000.5,
+            qty: 0.25,
+            order_status: BybitOrderStatus::New,
             stop_order_type: None,
             position_idx: 1,
         })
@@ -543,9 +499,18 @@ mod tests {
 
     #[test]
     fn ignores_conditional_order_kinds_and_statuses() {
-        assert!(!should_track_bybit_order("Untriggered", Some("Stop")));
-        assert!(!should_track_bybit_order("New", Some("Stop")));
-        assert!(should_track_bybit_order("New", Some("UNKNOWN")));
-        assert!(should_track_bybit_order("Filled", None));
+        assert!(!should_track_bybit_order(
+            BybitOrderStatus::Untriggered,
+            Some("Stop")
+        ));
+        assert!(!should_track_bybit_order(
+            BybitOrderStatus::New,
+            Some("Stop")
+        ));
+        assert!(should_track_bybit_order(
+            BybitOrderStatus::New,
+            Some("UNKNOWN")
+        ));
+        assert!(should_track_bybit_order(BybitOrderStatus::Filled, None));
     }
 }

@@ -221,7 +221,7 @@ impl BybitRestClient {
             .await?;
         match response.list.into_iter().next() {
             Some(position) => position.try_into(),
-            None => build_bybit_position(symbol.to_string(), None, "0", "0", "0", 0),
+            None => build_bybit_position(symbol.to_string(), None, 0.0, Some(0.0), Some(0.0), 0),
         }
     }
 
@@ -243,10 +243,7 @@ impl BybitRestClient {
             .list
             .into_iter()
             .filter_map(|order| {
-                if should_track_bybit_order(
-                    order.order_status.as_str(),
-                    order.stop_order_type.as_deref(),
-                ) {
+                if should_track_bybit_order(order.order_status, order.stop_order_type.as_deref()) {
                     Some(order.try_into())
                 } else {
                     None

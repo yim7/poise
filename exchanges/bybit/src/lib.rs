@@ -1,6 +1,7 @@
 mod config;
 mod connected;
 mod mapper;
+mod protocol;
 mod rest;
 mod ws;
 
