@@ -82,11 +82,17 @@ impl OrderStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionQuote {
+    pub best_bid: f64,
+    pub best_ask: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceTick {
     pub instrument: Instrument,
-    pub reference_price: f64,
     pub mark_price: f64,
+    pub execution_quote: Option<ExecutionQuote>,
     pub timestamp: DateTime<Utc>,
 }
 

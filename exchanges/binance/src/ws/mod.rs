@@ -56,14 +56,16 @@ impl BinanceWsClient {
     ) -> Result<mpsc::Receiver<PriceTick>> {
         let (sender, receiver) = mpsc::channel(128);
         let url = format!(
-            "{}/ws/{}@markPrice",
+            "{}/stream?streams={}@markPrice/{}@bookTicker",
             self.ws_base_url,
+            instrument.symbol.to_lowercase(),
             instrument.symbol.to_lowercase()
         );
+        let symbol = instrument.symbol.clone();
         let reconnect_delay = self.reconnect_delay;
 
         tokio::spawn(async move {
-            market::run_market_stream(url, sender, reconnect_delay).await;
+            market::run_market_stream(url, symbol, sender, reconnect_delay).await;
         });
 
         Ok(receiver)

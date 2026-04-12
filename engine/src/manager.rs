@@ -596,7 +596,7 @@ impl TrackManager {
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         track.last_tick_at = Some(now);
         track.market_data_stale_since = None;
-        self.reconcile_track(id, observation.reference_price)
+        self.reconcile_track(id, observation.mark_price)
     }
 
     fn observe_position(&mut self, id: &TrackId, observation: PositionObservation) -> Result<()> {

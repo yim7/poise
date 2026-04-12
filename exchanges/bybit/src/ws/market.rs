@@ -7,7 +7,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use poise_engine::ports::PriceTick;
+use poise_engine::ports::{ExecutionQuote, PriceTick};
 use poise_engine::track::{Instrument, Venue};
 
 use super::{backoff_delay, connect_websocket, models::PublicTickerMessage};
@@ -85,6 +85,7 @@ async fn subscribe(websocket: &mut super::WebSocket, symbol: &str) -> Result<()>
 struct TickerState {
     expected_symbol: String,
     last_mark_price: Option<f64>,
+    last_quote: Option<ExecutionQuote>,
 }
 
 impl TickerState {
@@ -92,6 +93,7 @@ impl TickerState {
         Self {
             expected_symbol: expected_symbol.into(),
             last_mark_price: None,
+            last_quote: None,
         }
     }
 
@@ -125,6 +127,18 @@ impl TickerState {
                 None => return Ok(None),
             },
         };
+        let execution_quote = match (message.data.bid1_price, message.data.ask1_price) {
+            (Some(best_bid), Some(best_ask)) => {
+                let quote = ExecutionQuote { best_bid, best_ask };
+                self.last_quote = Some(quote.clone());
+                Some(quote)
+            }
+            (None, None) => self.last_quote.clone(),
+            _ => {
+                self.last_quote = None;
+                None
+            }
+        };
         let timestamp = Utc
             .timestamp_millis_opt(message.ts)
             .single()
@@ -132,8 +146,8 @@ impl TickerState {
 
         Ok(Some(PriceTick {
             instrument: Instrument::new(Venue::Bybit, &self.expected_symbol),
-            reference_price: mark_price,
             mark_price,
+            execution_quote,
             timestamp,
         }))
     }
@@ -147,6 +161,7 @@ mod tests {
     use tokio::{net::TcpListener, time::timeout};
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+    use poise_engine::ports::ExecutionQuote;
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
@@ -157,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn ticker_state_parses_snapshot_into_price_tick() {
+    fn parses_bybit_ticker_mark_and_top_of_book_into_price_tick() {
         let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
@@ -165,7 +180,8 @@ mod tests {
             "data": {
                 "symbol": "BTCUSDT",
                 "markPrice": "64000.10",
-                "indexPrice": "63999.90"
+                "bid1Price": "63999.50",
+                "ask1Price": "64000.50"
             }
         }"#;
 
@@ -175,8 +191,11 @@ mod tests {
             tick,
             PriceTick {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                reference_price: 64000.10,
                 mark_price: 64000.10,
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 63999.50,
+                    best_ask: 64000.50,
+                }),
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             }
         );
@@ -232,6 +251,31 @@ mod tests {
     }
 
     #[test]
+    fn emits_bybit_tick_with_none_quote_when_bid_or_ask_is_missing() {
+        let mut state = btc_ticker_state();
+        let payload = r#"{
+            "topic": "tickers.BTCUSDT",
+            "ts": 1700000005000,
+            "data": {
+                "markPrice": "64010.20",
+                "bid1Price": "64009.80"
+            }
+        }"#;
+
+        let tick = state.parse_linear_ticker_message(payload).unwrap().unwrap();
+
+        assert_eq!(
+            tick,
+            PriceTick {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                mark_price: 64010.20,
+                execution_quote: None,
+                timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
+            }
+        );
+    }
+
+    #[test]
     fn ticker_state_parses_delta_mark_price_with_symbol_from_topic() {
         let mut state = btc_ticker_state();
         let payload = r#"{
@@ -249,8 +293,8 @@ mod tests {
             tick,
             PriceTick {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                reference_price: 64010.20,
                 mark_price: 64010.20,
+                execution_quote: None,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
             }
         );
@@ -287,8 +331,8 @@ mod tests {
             tick,
             PriceTick {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                reference_price: 64000.10,
                 mark_price: 64000.10,
+                execution_quote: None,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
             }
         );

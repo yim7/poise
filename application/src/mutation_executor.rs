@@ -259,12 +259,12 @@ impl MutationExecutor {
     pub(crate) async fn observe_market(
         &self,
         id: &str,
-        reference_price: f64,
+        observation: MarketObservation,
     ) -> Result<TrackTransition> {
         self.mutate_track(id, |manager| {
             manager.observe(
                 &TrackId::new(id),
-                TrackObservation::Market(MarketObservation { reference_price }),
+                TrackObservation::Market(observation.clone()),
             )
         })
         .await

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
-use poise_engine::observation::{OrderObservation, PositionObservation};
+use poise_engine::observation::{MarketObservation, OrderObservation, PositionObservation};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -33,9 +33,9 @@ impl TrackObservationService {
     pub async fn observe_market(
         &self,
         id: &str,
-        reference_price: f64,
+        observation: MarketObservation,
     ) -> Result<poise_engine::transition::TrackTransition> {
-        self.executor.observe_market(id, reference_price).await
+        self.executor.observe_market(id, observation).await
     }
 
     pub async fn refresh_market_data_health(
@@ -106,6 +106,8 @@ impl TrackObservationService {
 mod tests {
     use std::sync::Arc;
 
+    use poise_engine::observation::MarketObservation;
+    use poise_engine::ports::ExecutionQuote;
     use poise_engine::track::TrackId;
 
     use super::TrackObservationService;
@@ -115,12 +117,25 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn observation_service_applies_price_tick_and_persists_effects() {
+    async fn observation_service_persists_market_observation_with_mark_and_quote() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone());
         let mut receiver = service.1.subscribe();
 
-        let transition = service.0.observe_market("btc-core", 95.0).await.unwrap();
+        let transition = service
+            .0
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 95.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 94.5,
+                        best_ask: 95.5,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
 
         assert!(!transition.effects.is_empty());
         assert_eq!(

@@ -101,7 +101,7 @@
 - Test: `exchanges/bybit/src/ws/market.rs`
 - Test: `application/src/track_observation_service.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住新的 `PriceTick` 和 `MarketObservation` 入口**
+- [x] **Step 1: 先写失败测试，锁住新的 `PriceTick` 和 `MarketObservation` 入口**
 
 在 `exchanges/binance/src/ws/market.rs`、`exchanges/bybit/src/ws/market.rs`、`application/src/track_observation_service.rs` 增加至少这些测试：
 
@@ -129,7 +129,7 @@ async fn observation_service_persists_market_observation_with_mark_and_quote() {
 - `MarketObservation` 不再是 `reference_price: f64`
 - `TrackObservationService.observe_market(...)` 改为接收完整 `MarketObservation`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -143,7 +143,7 @@ Expected:
 - 当前 `MarketObservation` 仍只有 `reference_price`
 - observation service 仍然只接受 `f64`
 
-- [ ] **Step 3: 做最小实现，统一 `PriceTick` / `MarketObservation` 结构**
+- [x] **Step 3: 做最小实现，统一 `PriceTick` / `MarketObservation` 结构**
 
 先在 `engine/src/ports.rs` 和 `engine/src/observation.rs` 引入共享价格模型：
 
@@ -193,7 +193,7 @@ pub async fn observe_market(
 )
 ```
 
-- [ ] **Step 4: 实现 Binance / Bybit 适配层的完整价格输出**
+- [x] **Step 4: 实现 Binance / Bybit 适配层的完整价格输出**
 
 Binance：
 
@@ -224,7 +224,7 @@ pub(crate) struct PublicTickerData {
 
 - `exchanges/bybit/src/ws/market.rs` 在 ticker state 里同时缓存 `mark_price` 和 `ExecutionQuote`
 
-- [ ] **Step 5: 跑 Task 1 回归**
+- [x] **Step 5: 跑 Task 1 回归**
 
 Run:
 

@@ -20,6 +20,12 @@ pub(crate) struct PublicTickerData {
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_optional_f64")]
     pub mark_price: Option<f64>,
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_f64")]
+    pub bid1_price: Option<f64>,
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_f64")]
+    pub ask1_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

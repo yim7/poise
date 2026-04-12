@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ports::OrderStatus;
+use crate::ports::{ExecutionQuote, OrderStatus};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarketObservation {
-    pub reference_price: f64,
+    pub mark_price: f64,
+    pub execution_quote: Option<ExecutionQuote>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

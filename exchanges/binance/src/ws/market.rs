@@ -7,19 +7,23 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use poise_engine::ports::PriceTick;
+use poise_engine::ports::{ExecutionQuote, PriceTick};
 use poise_engine::track::{Instrument, Venue};
 
 use super::{
-    backoff_delay, connect_websocket, log_websocket_error, models::MarkPriceMessage, parse_decimal,
+    backoff_delay, connect_websocket, log_websocket_error,
+    models::{BookTickerMessage, MarkPriceMessage, MarketEvent, MarketStreamEnvelope},
+    parse_decimal,
 };
 
 pub(super) async fn run_market_stream(
     url: String,
+    symbol: String,
     sender: mpsc::Sender<PriceTick>,
     reconnect_delay: Duration,
 ) {
     let mut attempt = 0_u32;
+    let mut market_state = BinanceMarketState::new(symbol);
 
     loop {
         match connect_websocket(&url).await {
@@ -28,7 +32,7 @@ pub(super) async fn run_market_stream(
 
                 while let Some(message) = websocket.next().await {
                     match message {
-                        Ok(Message::Text(text)) => match parse_mark_price_message(&text) {
+                        Ok(Message::Text(text)) => match market_state.parse_message(&text) {
                             Ok(Some(tick)) => {
                                 if sender.send(tick).await.is_err() {
                                     return;
@@ -62,20 +66,90 @@ pub(super) async fn run_market_stream(
     }
 }
 
-pub(super) fn parse_mark_price_message(payload: &str) -> Result<Option<PriceTick>> {
-    let message: MarkPriceMessage = serde_json::from_str(payload)?;
-    let mark_price = parse_decimal("p", &message.mark_price)?;
-    let timestamp = Utc
-        .timestamp_millis_opt(message.event_time)
-        .single()
-        .context("invalid event timestamp")?;
+#[derive(Debug)]
+pub(super) struct BinanceMarketState {
+    expected_symbol: String,
+    last_mark_price: Option<f64>,
+    last_quote: Option<ExecutionQuote>,
+}
 
-    Ok(Some(PriceTick {
-        instrument: Instrument::new(Venue::Binance, message.symbol),
-        reference_price: mark_price,
-        mark_price,
-        timestamp,
-    }))
+impl BinanceMarketState {
+    pub(super) fn new(expected_symbol: impl Into<String>) -> Self {
+        Self {
+            expected_symbol: expected_symbol.into(),
+            last_mark_price: None,
+            last_quote: None,
+        }
+    }
+
+    pub(super) fn parse_message(&mut self, payload: &str) -> Result<Option<PriceTick>> {
+        let envelope: MarketStreamEnvelope = serde_json::from_str(payload)?;
+        let event = match envelope {
+            MarketStreamEnvelope::Combined { data } => data,
+            MarketStreamEnvelope::Plain(data) => data,
+        };
+
+        match event {
+            MarketEvent::MarkPrice(message) => self.parse_mark_price(message),
+            MarketEvent::BookTicker(message) => self.parse_book_ticker(message),
+        }
+    }
+
+    fn parse_mark_price(&mut self, message: MarkPriceMessage) -> Result<Option<PriceTick>> {
+        self.ensure_symbol(&message.symbol)?;
+        let mark_price = parse_decimal("p", &message.mark_price)?;
+        self.last_mark_price = Some(mark_price);
+
+        Ok(Some(PriceTick {
+            instrument: Instrument::new(Venue::Binance, &self.expected_symbol),
+            mark_price,
+            execution_quote: self.last_quote.clone(),
+            timestamp: parse_timestamp(message.event_time)?,
+        }))
+    }
+
+    fn parse_book_ticker(&mut self, message: BookTickerMessage) -> Result<Option<PriceTick>> {
+        self.ensure_symbol(&message.symbol)?;
+        let quote = match (message.best_bid.as_deref(), message.best_ask.as_deref()) {
+            (Some(best_bid), Some(best_ask)) => {
+                let quote = ExecutionQuote {
+                    best_bid: parse_decimal("b", best_bid)?,
+                    best_ask: parse_decimal("a", best_ask)?,
+                };
+                self.last_quote = Some(quote.clone());
+                quote
+            }
+            _ => return Ok(None),
+        };
+        let Some(mark_price) = self.last_mark_price else {
+            return Ok(None);
+        };
+
+        Ok(Some(PriceTick {
+            instrument: Instrument::new(Venue::Binance, &self.expected_symbol),
+            mark_price,
+            execution_quote: Some(quote),
+            timestamp: parse_timestamp(message.event_time)?,
+        }))
+    }
+
+    fn ensure_symbol(&self, actual_symbol: &str) -> Result<()> {
+        if actual_symbol == self.expected_symbol {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "unexpected market symbol: expected {}, got {}",
+                self.expected_symbol,
+                actual_symbol
+            ))
+        }
+    }
+}
+
+fn parse_timestamp(timestamp_millis: i64) -> Result<chrono::DateTime<Utc>> {
+    Utc.timestamp_millis_opt(timestamp_millis)
+        .single()
+        .context("invalid event timestamp")
 }
 
 #[cfg(test)]
@@ -90,30 +164,70 @@ mod tests {
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
+    use poise_engine::ports::ExecutionQuote;
     use crate::rest::BinanceRestClient;
     use crate::ws::BinanceWsClient;
 
     #[test]
-    fn parses_mark_price_stream_message() {
-        let payload = r#"{
+    fn parses_binance_mark_and_book_into_price_tick() {
+        let mark_payload = r#"{
             "e": "markPriceUpdate",
             "E": 1700000000000,
             "s": "BTCUSDT",
             "p": "64000.10",
             "i": "63999.90"
         }"#;
+        let book_payload = r#"{
+            "e": "bookTicker",
+            "E": 1700000000000,
+            "s": "BTCUSDT",
+            "b": "63999.50",
+            "B": "2.000",
+            "a": "64000.50",
+            "A": "3.000"
+        }"#;
+        let mut state = BinanceMarketState::new("BTCUSDT");
 
-        let tick = parse_mark_price_message(payload).unwrap().unwrap();
+        let first = state.parse_message(mark_payload).unwrap().unwrap();
+        let second = state.parse_message(book_payload).unwrap().unwrap();
 
         assert_eq!(
-            tick,
+            first,
             PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                reference_price: 64000.10,
                 mark_price: 64000.10,
+                execution_quote: None,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             }
         );
+        assert_eq!(
+            second,
+            PriceTick {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                mark_price: 64000.10,
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 63999.50,
+                    best_ask: 64000.50,
+                }),
+                timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_binance_book_update_until_bid_and_ask_are_both_present() {
+        let payload = r#"{
+            "e": "bookTicker",
+            "E": 1700000000000,
+            "s": "BTCUSDT",
+            "b": "63999.50",
+            "B": "2.000"
+        }"#;
+        let mut state = BinanceMarketState::new("BTCUSDT");
+
+        let tick = state.parse_message(payload).unwrap();
+
+        assert!(tick.is_none());
     }
 
     #[tokio::test]

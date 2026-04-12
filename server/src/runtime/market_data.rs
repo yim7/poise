@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use poise_engine::observation::MarketObservation;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -51,7 +52,13 @@ pub(super) fn spawn_market_task(
                                     match state
                                         .reconcile
                                         .observation_service
-                                        .observe_market(&track.id, tick.reference_price)
+                                        .observe_market(
+                                            &track.id,
+                                            MarketObservation {
+                                                mark_price: tick.mark_price,
+                                                execution_quote: tick.execution_quote,
+                                            },
+                                        )
                                         .await
                                     {
                                         Ok(_) => {}

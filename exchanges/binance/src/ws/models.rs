@@ -1,6 +1,22 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum MarketStreamEnvelope {
+    Combined { data: MarketEvent },
+    Plain(MarketEvent),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "e")]
+pub(super) enum MarketEvent {
+    #[serde(rename = "markPriceUpdate")]
+    MarkPrice(MarkPriceMessage),
+    #[serde(rename = "bookTicker")]
+    BookTicker(BookTickerMessage),
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct MarkPriceMessage {
     #[serde(rename = "E")]
     pub(super) event_time: i64,
@@ -8,6 +24,18 @@ pub(super) struct MarkPriceMessage {
     pub(super) symbol: String,
     #[serde(rename = "p")]
     pub(super) mark_price: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct BookTickerMessage {
+    #[serde(rename = "E")]
+    pub(super) event_time: i64,
+    #[serde(rename = "s")]
+    pub(super) symbol: String,
+    #[serde(rename = "b")]
+    pub(super) best_bid: Option<String>,
+    #[serde(rename = "a")]
+    pub(super) best_ask: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
