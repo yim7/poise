@@ -387,12 +387,14 @@ Expected:
 - 历史 `reference_price` 已迁移成显式 `stale/null` 价格状态
 - 旧 `reference_price` 已从这些层删除
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs storage/src/schema.rs storage/src/sqlite.rs application/src/track_read_source.rs application/src/read_model.rs
 git commit -m "refactor(runtime): replace reference price with strategy and market fields"
 ```
+
+实现提交：`816eb81`
 
 ### Task 3: 在 engine 内实现 `strategy_price` 推导、stale 语义和 `PriceExecutionGate`
 
