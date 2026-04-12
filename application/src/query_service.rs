@@ -383,6 +383,11 @@ mod tests {
                 ..RiskState::default()
             },
             observed: ObservedState {
+                strategy_price: Some(101.25),
+                strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
+                mark_price: Some(101.5),
+                best_bid: Some(101.0),
+                best_ask: Some(101.5),
                 reference_price: Some(101.25),
                 out_of_band_since: None,
                 last_tick_at: None,

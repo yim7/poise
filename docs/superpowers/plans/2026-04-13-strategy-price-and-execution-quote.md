@@ -261,7 +261,7 @@ git commit -m "feat(market): carry mark price and execution quote through observ
 - Test: `storage/src/sqlite.rs`
 - Test: `application/src/read_model.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 observed state 和持久化字段**
+- [x] **Step 1: 先写失败测试，锁住 observed state 和持久化字段**
 
 增加至少这些测试：
 
@@ -282,7 +282,7 @@ fn read_model_exposes_strategy_price_status_and_best_bid_ask() {}
 - storage 会持久化 `strategy_price / strategy_price_status / mark_price / best_bid / best_ask`
 - read model 不再暴露 `reference_price`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -294,7 +294,7 @@ Expected:
 
 - 当前 snapshot / sqlite / read model 仍只有 `reference_price`
 
-- [ ] **Step 3: 做最小实现，替换 runtime 观测字段**
+- [x] **Step 3: 做最小实现，替换 runtime 观测字段**
 
 在 `engine/src/runtime.rs`、`engine/src/snapshot.rs` 中把 `reference_price` 改成下面这组字段。`TrackRuntime` 至少要新增或替换：
 
@@ -327,7 +327,7 @@ pub struct ObservedState {
 }
 ```
 
-- [ ] **Step 4: 重建 `track_snapshots` 价格列，并迁移旧数据**
+- [x] **Step 4: 重建 `track_snapshots` 价格列，并迁移旧数据**
 
 在 `storage/src/schema.rs` 和 `storage/src/sqlite.rs` 中重建 `track_snapshots` 表，删除旧 `reference_price` 列，引入新列：
 
@@ -355,7 +355,7 @@ best_ask = NULL
 - 历史 snapshot 不伪装成 live `strategy_price` 或 live `mark_price`
 - SQLite 读写层与 `PersistedRuntimeCodec` 都只认新字段
 
-- [ ] **Step 5: 更新 read source / read model 命名**
+- [x] **Step 5: 更新 read source / read model 命名**
 
 `application/src/track_read_source.rs` 和 `application/src/read_model.rs` 至少改成。`TrackRuntimeReadState` 需要包含：
 
@@ -373,7 +373,7 @@ pub best_ask: Option<f64>,
 pub reference_price: Option<f64>,
 ```
 
-- [ ] **Step 6: 跑 Task 2 回归**
+- [x] **Step 6: 跑 Task 2 回归**
 
 Run:
 

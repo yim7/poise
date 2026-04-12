@@ -9,7 +9,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::ledger::TrackLedgerState;
-use crate::runtime::{AccountCapacityConstraint, ExecutorState, RiskState, TrackStatus};
+use crate::runtime::{
+    AccountCapacityConstraint, ExecutorState, RiskState, StrategyPriceStatus, TrackStatus,
+};
 use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
 
@@ -63,7 +65,11 @@ pub struct PersistedRuntimeRow {
     pub replacement_gate_reason_json: Option<String>,
     pub ledger_state_json: Option<String>,
     pub unrealized_pnl: f64,
-    pub reference_price: Option<f64>,
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: String,
+    pub mark_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
     pub out_of_band_since: Option<String>,
     pub last_tick_at: Option<String>,
     pub market_data_stale_since: Option<String>,
@@ -116,6 +122,11 @@ impl PersistedRuntimeCodec {
             .as_deref()
             .map(Self::parse_timestamp)
             .transpose()?;
+        let strategy_price_status = serde_json::from_str::<StrategyPriceStatus>(&format!(
+            "\"{}\"",
+            row.strategy_price_status
+        ))
+        .context("failed to deserialize strategy price status")?;
 
         let restore_revision = row
             .restore_revision
@@ -139,7 +150,12 @@ impl PersistedRuntimeCodec {
                 account_capacity_constraint: AccountCapacityConstraint::default(),
             },
             observed: crate::snapshot::ObservedState {
-                reference_price: row.reference_price,
+                strategy_price: row.strategy_price,
+                strategy_price_status,
+                mark_price: row.mark_price,
+                best_bid: row.best_bid,
+                best_ask: row.best_ask,
+                reference_price: row.strategy_price,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
@@ -362,7 +378,11 @@ mod tests {
             replacement_gate_reason_json: None,
             ledger_state_json: None,
             unrealized_pnl: -3.0,
-            reference_price: Some(95.0),
+            strategy_price: Some(95.0),
+            strategy_price_status: "live".into(),
+            mark_price: Some(95.2),
+            best_bid: Some(94.9),
+            best_ask: Some(95.1),
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,
@@ -412,7 +432,11 @@ mod tests {
             replacement_gate_reason_json: None,
             ledger_state_json: None,
             unrealized_pnl: -3.0,
-            reference_price: Some(95.0),
+            strategy_price: Some(95.0),
+            strategy_price_status: "live".into(),
+            mark_price: Some(95.2),
+            best_bid: Some(94.9),
+            best_ask: Some(95.1),
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,

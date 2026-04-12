@@ -3,28 +3,54 @@ use rusqlite::{Connection, OptionalExtension};
 
 const ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT: &str =
     "account_monitor_state_snapshot_completeness";
+const TRACK_SNAPSHOTS_CREATE_SQL: &str = "CREATE TABLE IF NOT EXISTS track_snapshots (
+    track_id TEXT PRIMARY KEY,
+    restore_revision TEXT,
+    status TEXT NOT NULL,
+    current_exposure REAL NOT NULL,
+    desired_exposure REAL,
+    manual_target_override REAL,
+    executor_state_json TEXT,
+    replacement_gate_reason_json TEXT,
+    ledger_state_json TEXT,
+    unrealized_pnl REAL NOT NULL DEFAULT 0,
+    strategy_price REAL,
+    strategy_price_status TEXT NOT NULL,
+    mark_price REAL,
+    best_bid REAL,
+    best_ask REAL,
+    out_of_band_since TEXT,
+    last_tick_at TEXT,
+    market_data_stale_since TEXT,
+    updated_at TEXT NOT NULL
+);";
+const TRACK_SNAPSHOTS_REQUIRED_COLUMNS: &[&str] = &[
+    "track_id",
+    "restore_revision",
+    "status",
+    "current_exposure",
+    "desired_exposure",
+    "manual_target_override",
+    "executor_state_json",
+    "replacement_gate_reason_json",
+    "ledger_state_json",
+    "unrealized_pnl",
+    "strategy_price",
+    "strategy_price_status",
+    "mark_price",
+    "best_bid",
+    "best_ask",
+    "out_of_band_since",
+    "last_tick_at",
+    "market_data_stale_since",
+    "updated_at",
+];
 
 pub fn initialize(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS track_snapshots (
-            track_id TEXT PRIMARY KEY,
-            restore_revision TEXT,
-            status TEXT NOT NULL,
-            current_exposure REAL NOT NULL,
-            desired_exposure REAL,
-            manual_target_override REAL,
-            executor_state_json TEXT,
-            replacement_gate_reason_json TEXT,
-            ledger_state_json TEXT,
-            unrealized_pnl REAL NOT NULL DEFAULT 0,
-            reference_price REAL,
-            out_of_band_since TEXT,
-            last_tick_at TEXT,
-            market_data_stale_since TEXT,
-            updated_at TEXT NOT NULL
-        );
+    initialize_track_snapshots(conn)?;
 
-        CREATE TABLE IF NOT EXISTS persisted_track_presence (
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS persisted_track_presence (
             track_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -77,27 +103,8 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    ensure_columns_present(
-        conn,
-        "track_snapshots",
-        &[
-            "track_id",
-            "restore_revision",
-            "status",
-            "current_exposure",
-            "desired_exposure",
-            "manual_target_override",
-            "executor_state_json",
-            "replacement_gate_reason_json",
-            "ledger_state_json",
-            "unrealized_pnl",
-            "reference_price",
-            "out_of_band_since",
-            "last_tick_at",
-            "market_data_stale_since",
-            "updated_at",
-        ],
-    )?;
+    ensure_columns_present(conn, "track_snapshots", TRACK_SNAPSHOTS_REQUIRED_COLUMNS)?;
+    ensure_columns_absent(conn, "track_snapshots", &["reference_price"])?;
     ensure_columns_present(conn, "track_events", &["track_id"])?;
     ensure_columns_present(
         conn,
@@ -164,6 +171,78 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn initialize_track_snapshots(conn: &Connection) -> Result<()> {
+    if table_sql(conn, "track_snapshots")?.is_none() {
+        conn.execute_batch(TRACK_SNAPSHOTS_CREATE_SQL)?;
+        return Ok(());
+    }
+
+    let columns = table_columns(conn, "track_snapshots")?;
+    let needs_migration = columns.iter().any(|column| column == "reference_price")
+        || TRACK_SNAPSHOTS_REQUIRED_COLUMNS
+            .iter()
+            .any(|required| !columns.iter().any(|existing| existing == required));
+
+    if needs_migration {
+        migrate_track_snapshots(conn)?;
+    }
+
+    Ok(())
+}
+
+fn migrate_track_snapshots(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE track_snapshots RENAME TO track_snapshots_legacy;",
+    )?;
+    conn.execute_batch(TRACK_SNAPSHOTS_CREATE_SQL)?;
+    conn.execute_batch(
+        "INSERT INTO track_snapshots (
+            track_id,
+            restore_revision,
+            status,
+            current_exposure,
+            desired_exposure,
+            manual_target_override,
+            executor_state_json,
+            replacement_gate_reason_json,
+            ledger_state_json,
+            unrealized_pnl,
+            strategy_price,
+            strategy_price_status,
+            mark_price,
+            best_bid,
+            best_ask,
+            out_of_band_since,
+            last_tick_at,
+            market_data_stale_since,
+            updated_at
+        )
+        SELECT
+            track_id,
+            restore_revision,
+            status,
+            current_exposure,
+            desired_exposure,
+            manual_target_override,
+            executor_state_json,
+            replacement_gate_reason_json,
+            ledger_state_json,
+            unrealized_pnl,
+            NULL,
+            'stale',
+            NULL,
+            NULL,
+            NULL,
+            out_of_band_since,
+            last_tick_at,
+            market_data_stale_since,
+            updated_at
+        FROM track_snapshots_legacy;
+        DROP TABLE track_snapshots_legacy;",
+    )?;
+    Ok(())
+}
+
 fn ensure_account_monitor_state_snapshot_completeness_constraint(conn: &Connection) -> Result<()> {
     let table_sql = table_sql(conn, "account_monitor_state")?.unwrap_or_default();
     ensure!(
@@ -186,7 +265,20 @@ fn ensure_columns_present(conn: &Connection, table: &str, required: &[&str]) -> 
     Ok(())
 }
 
-fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+fn ensure_columns_absent(conn: &Connection, table: &str, forbidden: &[&str]) -> Result<()> {
+    let columns = table_columns(conn, table)?;
+
+    for column in forbidden {
+        ensure!(
+            columns.iter().all(|existing| existing != column),
+            "sqlite schema for `{table}` still contains removed column `{column}`"
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     let pragma = format!("PRAGMA table_info({table})");
     let mut stmt = conn.prepare(&pragma)?;
     let columns = stmt

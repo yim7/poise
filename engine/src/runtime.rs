@@ -30,6 +30,14 @@ pub enum TrackStatus {
     Paused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyPriceStatus {
+    Live,
+    #[default]
+    Stale,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AccountCapacityConstraint {
     pub increase_blocked: bool,
@@ -176,6 +184,12 @@ pub struct TrackRuntime {
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
     pub(crate) ledger_state: TrackLedgerState,
     pub(crate) risk_state: RiskState,
+    pub(crate) strategy_price: Option<f64>,
+    pub(crate) strategy_price_status: StrategyPriceStatus,
+    pub(crate) mark_price: Option<f64>,
+    pub(crate) best_bid: Option<f64>,
+    pub(crate) best_ask: Option<f64>,
+    // Legacy compatibility field while manager/executor still migrate to strategy_price.
     pub(crate) reference_price: Option<f64>,
     pub(crate) out_of_band_since: Option<DateTime<Utc>>,
     pub(crate) last_tick_at: Option<DateTime<Utc>>,
@@ -237,6 +251,11 @@ impl TrackRuntime {
             replacement_gate_reason: None,
             ledger_state: TrackLedgerState::default(),
             risk_state: RiskState::default(),
+            strategy_price: None,
+            strategy_price_status: StrategyPriceStatus::Stale,
+            mark_price: None,
+            best_bid: None,
+            best_ask: None,
             reference_price: None,
             out_of_band_since: None,
             last_tick_at: None,
@@ -297,6 +316,8 @@ impl TrackRuntime {
     }
 
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
+        let strategy_price = self.reference_price.or(self.strategy_price);
+
         TrackRuntimeSnapshot {
             track_id: self.id.clone(),
             restore_revision: TrackRestoreRevision::for_track(&self.instrument, &self.config),
@@ -309,6 +330,15 @@ impl TrackRuntime {
             ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
+                strategy_price,
+                strategy_price_status: if strategy_price.is_some() {
+                    self.strategy_price_status
+                } else {
+                    StrategyPriceStatus::Stale
+                },
+                mark_price: self.mark_price,
+                best_bid: self.best_bid,
+                best_ask: self.best_ask,
                 reference_price: self.reference_price,
                 out_of_band_since: self.out_of_band_since,
                 last_tick_at: self.last_tick_at,
@@ -341,6 +371,16 @@ impl TrackRuntime {
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.ledger_state = snapshot.ledger_state.clone();
         self.risk_state = snapshot.risk.clone();
+        let strategy_price = snapshot.observed.reference_price.or(snapshot.observed.strategy_price);
+        self.strategy_price = strategy_price;
+        self.strategy_price_status = if strategy_price.is_some() {
+            snapshot.observed.strategy_price_status
+        } else {
+            StrategyPriceStatus::Stale
+        };
+        self.mark_price = snapshot.observed.mark_price;
+        self.best_bid = snapshot.observed.best_bid;
+        self.best_ask = snapshot.observed.best_ask;
         self.reference_price = snapshot.observed.reference_price;
         self.out_of_band_since = snapshot.observed.out_of_band_since;
         self.last_tick_at = snapshot.observed.last_tick_at;

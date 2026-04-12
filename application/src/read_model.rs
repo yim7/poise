@@ -5,7 +5,7 @@ use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
 use poise_engine::ledger::TrackLedgerState;
-use poise_engine::runtime::{SlotState, TrackStatus};
+use poise_engine::runtime::{SlotState, StrategyPriceStatus, TrackStatus};
 
 use crate::TrackReadSource;
 use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent};
@@ -26,7 +26,11 @@ pub struct TrackReadModel {
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: OutOfBandPolicy,
     pub budget: CapacityBudget,
-    pub reference_price: Option<f64>,
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatus,
+    pub mark_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
     pub ledger_state: TrackLedgerState,
@@ -63,7 +67,11 @@ impl TrackReadModel {
         let definition = source.definition;
         let runtime = source.runtime;
         let status = runtime.status;
-        let reference_price = runtime.reference_price;
+        let strategy_price = runtime.strategy_price;
+        let strategy_price_status = runtime.strategy_price_status;
+        let mark_price = runtime.mark_price;
+        let best_bid = runtime.best_bid;
+        let best_ask = runtime.best_ask;
         let current_exposure = runtime.current_exposure;
         let desired_exposure = runtime.desired_exposure;
         let manual_target_override = runtime.manual_target_override;
@@ -106,7 +114,11 @@ impl TrackReadModel {
             shape_family: definition.track_config.shape_family,
             out_of_band_policy: definition.track_config.out_of_band_policy,
             budget: definition.budget,
-            reference_price,
+            strategy_price,
+            strategy_price_status,
+            mark_price,
+            best_bid,
+            best_ask,
             current_exposure: current_exposure.0,
             desired_exposure: desired_exposure.map(|value| value.0),
             ledger_state,
@@ -148,8 +160,8 @@ mod tests {
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
-        WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, StrategyPriceStatus,
+        TrackStatus, WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -237,6 +249,11 @@ mod tests {
                     ..RiskState::default()
                 },
                 observed: ObservedState {
+                    strategy_price: Some(101.25),
+                    strategy_price_status: StrategyPriceStatus::Live,
+                    mark_price: Some(101.5),
+                    best_bid: Some(101.0),
+                    best_ask: Some(101.5),
                     reference_price: Some(101.25),
                     out_of_band_since: None,
                     last_tick_at: None,
@@ -280,5 +297,60 @@ mod tests {
         assert_eq!(read_model.track_id, "btc-core");
         assert_eq!(read_model.symbol, "BTCUSDT");
         assert_eq!(read_model.recent_effects.len(), 1);
+    }
+
+    #[test]
+    fn read_model_exposes_strategy_price_status_and_best_bid_ask() {
+        let read_model = TrackReadModel::from_source(TrackReadSource {
+            definition: TrackReadDefinition {
+                track_id: TrackId::new("btc-core"),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                track_config: test_track_config(),
+                budget: CapacityBudget {
+                    max_notional: 3000.0,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
+                },
+            },
+            runtime: TrackRuntimeReadState {
+                status: TrackStatus::Active,
+                current_exposure: Exposure(1.0),
+                desired_exposure: Some(Exposure(2.0)),
+                manual_target_override: None,
+                executor_state: ExecutorState {
+                    active_round: None,
+                    diagnostics: poise_engine::runtime::ExecutorDiagnostics::empty(),
+                    slots: Vec::new(),
+                    recent_terminal_orders: Vec::new(),
+                    stats: ExecutionStats {
+                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                        max_inventory_gap_abs: Exposure(0.0),
+                        max_gap_age_ms: 0,
+                    },
+                },
+                replacement_gate_reason: None,
+                ledger_state: Default::default(),
+                unrealized_pnl: 0.0,
+                has_account_margin_guard: false,
+                strategy_price: Some(101.25),
+                strategy_price_status: StrategyPriceStatus::Stale,
+                mark_price: Some(101.5),
+                best_bid: Some(101.0),
+                best_ask: Some(101.5),
+                market_data_stale_since: None,
+            },
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            recent_track_events: Vec::new(),
+            recent_effects: Vec::new(),
+        });
+
+        assert_eq!(read_model.strategy_price, Some(101.25));
+        assert_eq!(
+            read_model.strategy_price_status,
+            StrategyPriceStatus::Stale
+        );
+        assert_eq!(read_model.mark_price, Some(101.5));
+        assert_eq!(read_model.best_bid, Some(101.0));
+        assert_eq!(read_model.best_ask, Some(101.5));
     }
 }

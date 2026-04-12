@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 use poise_engine::ledger::TrackLedgerState;
-use poise_engine::runtime::{ExecutorState, TrackStatus};
+use poise_engine::runtime::{ExecutorState, StrategyPriceStatus, TrackStatus};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 
 use crate::track_definition::TrackReadDefinition;
@@ -19,7 +19,11 @@ pub struct TrackRuntimeReadState {
     pub ledger_state: TrackLedgerState,
     pub unrealized_pnl: f64,
     pub has_account_margin_guard: bool,
-    pub reference_price: Option<f64>,
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatus,
+    pub mark_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
     pub market_data_stale_since: Option<DateTime<Utc>>,
 }
 
@@ -48,7 +52,11 @@ impl TrackRuntimeReadState {
             ledger_state,
             unrealized_pnl: risk.unrealized_pnl,
             has_account_margin_guard: risk.account_capacity_constraint.increase_blocked,
-            reference_price: observed.reference_price,
+            strategy_price: observed.reference_price.or(observed.strategy_price),
+            strategy_price_status: observed.strategy_price_status,
+            mark_price: observed.mark_price,
+            best_bid: observed.best_bid,
+            best_ask: observed.best_ask,
             market_data_stale_since: observed.market_data_stale_since,
         }
     }

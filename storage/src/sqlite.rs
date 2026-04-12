@@ -369,12 +369,16 @@ impl SqliteStorage {
                 replacement_gate_reason_json,
                 ledger_state_json,
                 unrealized_pnl,
-                reference_price,
+                strategy_price,
+                strategy_price_status,
+                mark_price,
+                best_bid,
+                best_ask,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 id,
                 state.restore_revision.as_str(),
@@ -389,7 +393,14 @@ impl SqliteStorage {
                 replacement_gate_reason_json,
                 ledger_state_json,
                 state.risk.unrealized_pnl,
-                state.observed.reference_price,
+                state.observed.reference_price.or(state.observed.strategy_price),
+                match state.observed.strategy_price_status {
+                    poise_engine::runtime::StrategyPriceStatus::Live => "live",
+                    poise_engine::runtime::StrategyPriceStatus::Stale => "stale",
+                },
+                state.observed.mark_price,
+                state.observed.best_bid,
+                state.observed.best_ask,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
@@ -515,7 +526,8 @@ impl SqliteStorage {
                         restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
-                        unrealized_pnl, reference_price, out_of_band_since, last_tick_at, market_data_stale_since
+                        unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
+                        out_of_band_since, last_tick_at, market_data_stale_since
                  FROM track_snapshots
                  WHERE track_id = ?1",
                 params![id],
@@ -538,7 +550,8 @@ impl SqliteStorage {
                         restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
-                        unrealized_pnl, reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
+                        unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
+                        out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
                  WHERE track_id = ?1",
                 params![id],
@@ -562,10 +575,14 @@ impl SqliteStorage {
             replacement_gate_reason_json: row.get(7)?,
             ledger_state_json: row.get(8)?,
             unrealized_pnl: row.get(9)?,
-            reference_price: row.get(10)?,
-            out_of_band_since: row.get(11)?,
-            last_tick_at: row.get(12)?,
-            market_data_stale_since: row.get(13)?,
+            strategy_price: row.get(10)?,
+            strategy_price_status: row.get(11)?,
+            mark_price: row.get(12)?,
+            best_bid: row.get(13)?,
+            best_ask: row.get(14)?,
+            out_of_band_since: row.get(15)?,
+            last_tick_at: row.get(16)?,
+            market_data_stale_since: row.get(17)?,
         })
         .map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -584,11 +601,11 @@ impl SqliteStorage {
     fn stored_track_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredTrackSnapshot> {
-        let updated_at: String = row.get(14)?;
+        let updated_at: String = row.get(18)?;
 
         Ok(StoredTrackSnapshot {
             snapshot: Self::track_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 17)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 18)?,
         })
     }
 
@@ -602,7 +619,8 @@ impl SqliteStorage {
                         restore_revision,
                         manual_target_override,
                         executor_state_json, replacement_gate_reason_json, ledger_state_json,
-                        unrealized_pnl, reference_price, out_of_band_since, last_tick_at, market_data_stale_since, updated_at
+                        unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
+                        out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
                  ORDER BY track_id ASC",
             )
@@ -1305,6 +1323,11 @@ mod tests {
                 },
             },
             observed: ObservedState {
+                strategy_price: Some(95.0),
+                strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
+                mark_price: Some(95.2),
+                best_bid: Some(94.9),
+                best_ask: Some(95.1),
                 reference_price: Some(95.0),
                 out_of_band_since: Some(
                     DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
@@ -2487,6 +2510,85 @@ mod tests {
 
         assert_eq!(loaded.track_id.as_str(), "test-1");
         assert_eq!(loaded.restore_revision.as_str().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrates_legacy_reference_price_into_stale_price_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_snapshots (
+                track_id TEXT PRIMARY KEY,
+                restore_revision TEXT,
+                status TEXT NOT NULL,
+                current_exposure REAL NOT NULL,
+                desired_exposure REAL,
+                manual_target_override REAL,
+                executor_state_json TEXT,
+                replacement_gate_reason_json TEXT,
+                ledger_state_json TEXT,
+                unrealized_pnl REAL NOT NULL DEFAULT 0,
+                reference_price REAL,
+                out_of_band_since TEXT,
+                last_tick_at TEXT,
+                market_data_stale_since TEXT,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_snapshots (
+                track_id,
+                restore_revision,
+                status,
+                current_exposure,
+                desired_exposure,
+                manual_target_override,
+                executor_state_json,
+                replacement_gate_reason_json,
+                ledger_state_json,
+                unrealized_pnl,
+                reference_price,
+                out_of_band_since,
+                last_tick_at,
+                market_data_stale_since,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, 0, ?7, NULL, NULL, NULL, ?8)",
+            params![
+                "test-1",
+                TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
+                    .as_str(),
+                "\"active\"",
+                1.0,
+                serde_json::to_string(&ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
+                ))
+                .unwrap(),
+                serde_json::to_string(&TrackLedgerState::default()).unwrap(),
+                95.0,
+                "2026-03-25T00:00:00Z"
+            ],
+        )
+        .unwrap();
+
+        let storage = SqliteStorage::from_connection(conn).unwrap();
+        let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
+        let conn = storage.conn.lock().unwrap();
+        let columns = schema::table_columns(&conn, "track_snapshots").unwrap();
+
+        assert!(!columns.iter().any(|column| column == "reference_price"));
+        assert!(columns.iter().any(|column| column == "strategy_price"));
+        assert!(columns.iter().any(|column| column == "strategy_price_status"));
+        assert!(columns.iter().any(|column| column == "mark_price"));
+        assert!(columns.iter().any(|column| column == "best_bid"));
+        assert!(columns.iter().any(|column| column == "best_ask"));
+        assert_eq!(loaded.observed.strategy_price, None);
+        assert_eq!(
+            loaded.observed.strategy_price_status,
+            poise_engine::runtime::StrategyPriceStatus::Stale
+        );
+        assert_eq!(loaded.observed.mark_price, None);
+        assert_eq!(loaded.observed.best_bid, None);
+        assert_eq!(loaded.observed.best_ask, None);
     }
 
     #[tokio::test]
