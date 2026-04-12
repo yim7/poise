@@ -238,12 +238,14 @@ Expected:
 - observation service 已切到新 `MarketObservation`
 - 当前还没有引入 `strategy_price` 和 gate，但市场数据入口已经统一
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add engine/src/ports.rs engine/src/observation.rs application/src/track_observation_service.rs application/src/mutation_executor.rs server/src/runtime/market_data.rs exchanges/binance/src/ws/mod.rs exchanges/binance/src/ws/market.rs exchanges/binance/src/ws/models.rs exchanges/bybit/src/ws/market.rs exchanges/bybit/src/ws/models.rs
 git commit -m "feat(market): carry mark price and execution quote through observation pipeline"
 ```
+
+实现提交：`bb07e33`
 
 ### Task 2: 把 runtime / snapshot / storage / read model 改成 `strategy_price` 语义
 
