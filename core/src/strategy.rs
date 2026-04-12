@@ -98,16 +98,21 @@ fn signed_band_position(price: f64, config: &TrackConfig) -> f64 {
 }
 
 fn mirrored_shape_value(position: f64, shape_family: ShapeFamily) -> f64 {
-    let magnitude = match shape_family {
-        ShapeFamily::Linear => position.abs(),
-        ShapeFamily::Inertial => position.abs().powf(0.65),
-        ShapeFamily::Responsive => position.abs().powf(1.6),
-    };
+    let exponent = shape_family_exponent(shape_family);
+    let magnitude = position.abs().powf(exponent);
 
     if position >= 0.0 {
         -magnitude
     } else {
         magnitude
+    }
+}
+
+fn shape_family_exponent(shape_family: ShapeFamily) -> f64 {
+    match shape_family {
+        ShapeFamily::Linear => 1.0,
+        ShapeFamily::Inertial => 0.65,
+        ShapeFamily::Responsive => 1.6,
     }
 }
 
@@ -147,6 +152,14 @@ impl TrackConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct ShapeFamilyExponentFile {
+        linear: f64,
+        inertial: f64,
+        responsive: f64,
+    }
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
@@ -344,6 +357,19 @@ mod tests {
         assert_close(responsive.0, 2.64);
         assert!(inertial.0 > linear.0);
         assert!(linear.0 > responsive.0);
+    }
+
+    #[test]
+    fn shape_family_exponent_file_matches_strategy() {
+        let parameters: ShapeFamilyExponentFile =
+            serde_json::from_str(include_str!("../shape_family_exponents.json")).unwrap();
+
+        assert_close(parameters.linear, shape_family_exponent(ShapeFamily::Linear));
+        assert_close(parameters.inertial, shape_family_exponent(ShapeFamily::Inertial));
+        assert_close(
+            parameters.responsive,
+            shape_family_exponent(ShapeFamily::Responsive),
+        );
     }
 
     #[test]
