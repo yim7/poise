@@ -878,3 +878,67 @@ Expected:
 git add protocol/src/lib.rs server/src/projector.rs tui/src/views/instance.rs tui/tests/fixtures/track_detail_view.json tui/tests/fixtures/track_list_response.json tui/tests/fixtures/ws_track_detail_changed.json tui/tests/fixtures/ws_track_list_item_changed.json README.md docs/superpowers/specs/2026-04-13-mark-and-book-price-separation-design.md docs/superpowers/plans/2026-04-13-strategy-price-and-execution-quote.md
 git commit -m "feat(ui): expose strategy price and execution quote semantics"
 ```
+
+### Review 后修正：恢复兼容与 gate 迁移保真
+
+实现提交：`49bf7fd`
+
+**Files:**
+- Modify: `engine/src/price_gate.rs`
+- Modify: `engine/src/runtime.rs`
+- Modify: `storage/src/schema.rs`
+- Modify: `storage/src/sqlite.rs`
+- Test: `engine/src/runtime.rs`
+- Test: `storage/src/sqlite.rs`
+
+- [x] **Step 1: 先写失败测试，锁住 review 指出的两个兼容场景**
+
+增加并跑红至少这些测试：
+
+```rust
+#[test]
+fn restore_from_legacy_snapshot_recomputes_divergence_gate_from_observed_prices() {}
+
+#[test]
+fn restore_from_legacy_snapshot_recomputes_missing_quote_gate_when_observed_quote_is_absent() {}
+
+#[tokio::test]
+async fn sqlite_migration_preserves_existing_price_execution_block_reason() {}
+```
+
+覆盖点：
+
+- 旧 runtime snapshot 缺少 `price_execution_block_reason` 时，不能把 gate 错误恢复成 `Open`
+- 半升级 SQLite 表已经有 `price_execution_block_reason` 时，迁移不能把它覆盖成重新推导的值
+
+- [x] **Step 2: 做最小实现，只修 restore / migration 边界**
+
+要求：
+
+- `engine/src/runtime.rs` 的 restore 路径在 `price_execution_block_reason` 缺失时，改为根据 `mark_price / best_bid / best_ask` 推导 gate
+- 这条兼容逻辑集中放在 `engine/src/price_gate.rs`
+- `storage/src/schema.rs` 迁移 `track_snapshots` 时，如果历史表已经有 `price_execution_block_reason`，优先原样搬运
+- 不重新引入 `reference_price`
+- 不让 projector 或 read model 重新解释 gate
+
+- [x] **Step 3: 跑最终回归**
+
+Run:
+
+- `cargo test -p poise-engine runtime::tests::restore_from_legacy_snapshot_recomputes_divergence_gate_from_observed_prices -- --exact --nocapture`
+- `cargo test -p poise-engine runtime::tests::restore_from_legacy_snapshot_recomputes_missing_quote_gate_when_observed_quote_is_absent -- --exact --nocapture`
+- `cargo test -p poise-storage sqlite::tests::sqlite_migration_preserves_existing_price_execution_block_reason -- --exact --nocapture`
+- `cargo test --workspace`
+
+Expected:
+
+- 旧 snapshot 缺少 gate reason 时，恢复后的 gate 仍与 observed 价格一致
+- 迁移已有 `price_execution_block_reason` 的历史表时，不覆盖已有值
+- 全 workspace 通过
+
+- [x] **Step 4: Commit**
+
+```bash
+git add application/src engine/src server/src storage/src
+git commit -m "fix(runtime): preserve price gate semantics across restore"
+```

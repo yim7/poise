@@ -294,8 +294,15 @@ enum PriceExecutionBlockReason {
 - 不把旧 `reference_price` 直接伪装成 live `mark_price`
 - 迁移后的 `strategy_price` 视为不可用并标记 `stale`
 - 迁移后的 `mark_price / best_bid / best_ask` 置空
+- 如果历史表里已经有 `price_execution_block_reason`，迁移时原样保留，不重新推导新的 gate reason
 
 直到新的市场观测进入后，轨道才重新获得 live 价格语义。
+
+对运行时快照还需要额外兼容一条旧格式恢复规则：
+
+- 如果旧快照缺少 `price_execution_block_reason`，恢复时根据 `mark_price / best_bid / best_ask` 做一次 gate 推导
+- 如果连盘口都没有，则恢复成 `MissingExecutionQuote`
+- 这条兼容只存在于 restore 边界，不重新引入 `reference_price`
 
 ### 恢复规则
 
