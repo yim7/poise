@@ -31,6 +31,11 @@
 - `mark_price` 只用于风控和价格保护，不参与目标仓位计算
 - 执行定价统一使用盘口一档：`Buy -> best_ask`，`Sell -> best_bid`
 - 缺少盘口或 `mark_price` 与盘口偏离过大时，自动执行会进入 `attention_required`
+- 策略层带外策略稳定值是 `freeze / hold / flatten / terminate`
+- `freeze` 回带内后自动恢复正常策略
+- `hold` 回带内后继续保持 `holding`，只能人工 `resume`
+- 自动带外 `flatten` 会把目标压到 `0` 并进入 `flattening`，回带内后自动恢复
+- 手动 `Flatten` 会进入 `manual_flattening`，只能由 `Resume` 清除人工目标覆盖
 
 ## 快速开始
 
@@ -97,6 +102,8 @@ tick_timeout_secs = 30
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
 - `shape_family` 当前支持 `linear`、`inertial`、`responsive`
+- `out_of_band_policy` 当前支持 `freeze`、`hold`、`flatten`、`terminate`
+- `flatten` 是自动带外平仓语义，不再接受旧的 `reduce_only`
 - 三者都按“围绕价格带中点对称”的控仓曲线解释
 - `inertial` 更恋边，从上下两侧往中间收仓都更慢
 - `responsive` 更恋中，从上下两侧往中间收仓都更快

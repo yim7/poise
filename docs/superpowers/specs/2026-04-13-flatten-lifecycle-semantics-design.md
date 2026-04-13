@@ -283,3 +283,8 @@ manual_target_override: Option<Exposure>
 9. 对外协议和 TUI 不再出现策略层 `reducing_only / reduce_only`
 10. 交易所订单层 `OrderRequest.reduce_only` 及相关测试保持不变
 11. `Resume` 的对外可用性只依赖 `TrackStatus`，不依赖 `manual_target_override`
+
+## 实现记录
+
+- Task 1: `a056cbb` `refactor: align flatten lifecycle semantics across runtime and UI`
+- Task 2: `bb3f9f8` `fix: preserve hold as manual recovery lifecycle`

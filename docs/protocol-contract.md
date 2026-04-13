@@ -71,7 +71,8 @@
         "status": "active",
         "updated_at": "2026-03-26T10:00:00+00:00"
       },
-      "reference_price": 101.25,
+      "strategy_price": 101.25,
+      "strategy_price_status": "live",
       "exposure": {
         "current": 3.5,
         "target": 4.0
@@ -81,8 +82,9 @@
         "execution_status": "normal",
         "active_slot_count": 1
       },
-      "pnl": {
-        "total_pnl": 1245.3
+      "ledger": {
+        "total_pnl": 1245.3,
+        "has_unresolved_gaps": false
       }
     }
   ]
@@ -94,9 +96,11 @@
 - `id`：轨道稳定标识，例如 `btc-core`。
 - `instrument`：交易市场身份，当前包含 `venue` 和 `symbol`。
 - `lifecycle`：轨道生命周期状态与最近更新时间。
-- `reference_price`：当前策略参考价；当前 Binance 适配层使用 mark price 作为参考价输入。
+- `strategy_price`：当前策略价格，定义为盘口中间价 `book_mid = (best_bid + best_ask) / 2`。
+- `strategy_price_status`：当前策略价格是否为 `live / stale`。
 - `exposure`：当前和目标敞口摘要。
-- `pnl.total_pnl`：列表视图只暴露累计总盈亏摘要，不携带详情页里的拆分口径。
+- `ledger.total_pnl`：列表视图只暴露累计总盈亏摘要，不携带详情页里的拆分口径。
+- `ledger.has_unresolved_gaps`：当前累计账本里是否还有未解决 gap。
 - `execution.state`：执行面是否处于 `open / paused / closed`。
 - `execution.execution_status`：执行是否需要人工关注。当前稳定值为 `normal` 和 `attention_required`。
 - `execution.active_slot_count`：当前执行器中有多少个活跃槽位。它表达的是槽位工作集数量，不等于交易所原始 open orders 数量。
@@ -108,9 +112,10 @@
 - `identity`
 - `status`
 - `strategy`
+- `budget`
 - `market`
 - `position`
-- `pnl`
+- `ledger`
 - `execution_stats`
 - `execution`
 - `activity`
@@ -118,7 +123,12 @@
 
 其中：
 
-- `pnl` 提供累计盈亏读模型，当前包含 `total_pnl`、`realized_pnl` 和 `unrealized_pnl`。
+- `status` 提供生命周期和策略价格摘要，当前包含 `lifecycle`、`strategy_price` 和 `strategy_price_status`。
+- `strategy` 提供配置后的价格带、仓位单位、形状族和 `out_of_band_policy`。
+- `strategy.out_of_band_policy` 当前稳定值为 `freeze`、`hold`、`flatten`、`terminate`。
+- `budget` 提供当前轨道风险预算。
+- `market` 提供 `mark_price`、`best_bid` 和 `best_ask`。
+- `ledger` 提供累计盈亏读模型，当前包含 `gross_realized_pnl`、`net_realized_pnl`、`unrealized_pnl`、`total_pnl`、费用累计和未解决 ledger gaps。
 - `execution_stats` 提供执行统计窗口读模型，当前包含 `max_inventory_gap_abs`、`max_gap_age_ms` 和 `stats_started_at`。
 - `execution` 提供执行摘要，当前包含：
   - `state`
@@ -170,6 +180,18 @@
 - `resume`
 - `terminate`
 - `flatten`
+
+`resume` 的语义：
+
+- 在 `paused`、`holding` 或 `manual_flattening` 时可执行
+- 从 `holding` 或 `manual_flattening` 恢复正常策略控制
+- 如果当前没有 live `strategy_price`，恢复到 `waiting_market_data`
+
+`flatten` 的语义：
+
+- 写入人工目标覆盖 `manual_target_override = 0`
+- 生命周期进入 `manual_flattening`
+- 回带内后不会自动恢复，必须执行 `resume`
 
 `terminate` 的语义：
 
