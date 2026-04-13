@@ -387,6 +387,8 @@ impl TrackManager {
 
             track.manual_target_override = Some(Exposure(0.0));
             track.status = TrackStatus::ManualFlattening;
+            track.desired_exposure = Some(Exposure(0.0));
+            track.replacement_gate_reason = None;
             Self::live_strategy_price_for(track)
         };
 
@@ -2504,6 +2506,29 @@ mod tests {
         );
         assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(0.0)));
         assert_eq!(transition.snapshot.status, TrackStatus::ManualFlattening);
+    }
+
+    #[test]
+    fn flatten_without_live_strategy_price_still_sets_zero_target() {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+        let track_id = TrackId::new("btc1");
+
+        let track = manager.tracks.get_mut(&track_id).unwrap();
+        track.status = TrackStatus::Active;
+        track.desired_exposure = Some(Exposure(4.0));
+        track.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
+        track.strategy_price = Some(95.0);
+        track.strategy_price_status = StrategyPriceStatus::Stale;
+
+        let transition = manager.command(&track_id, TrackCommand::Flatten).unwrap();
+
+        let track = manager.get_track("btc1").unwrap();
+        assert_eq!(track.status, TrackStatus::ManualFlattening);
+        assert_eq!(track.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(track.desired_exposure, Some(Exposure(0.0)));
+        assert!(track.replacement_gate_reason.is_none());
+        assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(0.0)));
     }
 
     #[test]

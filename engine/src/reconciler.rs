@@ -50,7 +50,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     let band = strategy::band_status(strategy_price, &track.config);
 
     let (target, new_status) = match &band {
-        BandStatus::InBand { target } => (target.clone(), resolve_in_band_status(track)),
+        BandStatus::InBand { target } => (resolve_in_band_target(track, target), resolve_in_band_status(track)),
         BandStatus::OutOfBand { policy, .. } => apply_out_of_band(track, *policy),
     };
 
@@ -143,6 +143,17 @@ fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
         TrackStatus::Frozen => Some(TrackStatus::Active),
         TrackStatus::Holding => None,
         _ => None,
+    }
+}
+
+fn resolve_in_band_target(track: &TrackRuntime, target: &Exposure) -> Exposure {
+    if matches!(track.status, TrackStatus::Holding) {
+        track
+            .desired_exposure
+            .clone()
+            .unwrap_or_else(|| track.current_exposure.clone())
+    } else {
+        target.clone()
     }
 }
 
@@ -334,10 +345,12 @@ mod tests {
         let mut track = test_runtime();
         track.status = TrackStatus::Holding;
         track.current_exposure = Exposure(8.0);
+        track.desired_exposure = Some(Exposure(3.0));
 
         let result = reconcile_target(&track, 100.0);
 
         assert_eq!(result.new_status, None);
+        assert_eq!(result.desired_exposure, Exposure(3.0));
     }
 
     #[test]

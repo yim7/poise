@@ -365,6 +365,7 @@ impl TrackRuntime {
                 self.id.as_str()
             );
         }
+        validate_snapshot_invariants(snapshot)?;
 
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
@@ -443,6 +444,16 @@ impl TrackRuntime {
             self.desired_exposure = Some(Exposure(0.0));
         }
     }
+}
+
+fn validate_snapshot_invariants(snapshot: &TrackRuntimeSnapshot) -> Result<()> {
+    if matches!(snapshot.status, TrackStatus::ManualFlattening)
+        && snapshot.manual_target_override != Some(Exposure(0.0))
+    {
+        anyhow::bail!("manual_flattening requires manual_target_override = 0");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -805,6 +816,25 @@ mod tests {
         fresh.restore_from_snapshot(&snapshot).unwrap();
 
         assert_eq!(fresh.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn restore_from_snapshot_rejects_manual_flattening_without_zero_override() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::ManualFlattening;
+        runtime.desired_exposure = Some(Exposure(0.0));
+        runtime.manual_target_override = None;
+
+        let snapshot = runtime.snapshot();
+        let mut fresh = test_runtime();
+        let error = fresh.restore_from_snapshot(&snapshot).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("manual_flattening requires manual_target_override = 0"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
