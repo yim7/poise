@@ -262,13 +262,31 @@ impl TrackManager {
             bail!("cannot resume terminated track `{id}`");
         }
 
-        if track.manual_target_override.is_some() {
+        if matches!(track.status, TrackStatus::ManualFlattening) {
             let strategy_price = {
                 let track = self
                     .tracks
                     .get_mut(&track_id)
                     .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
                 track.manual_target_override = None;
+                track.status = TrackStatus::WaitingMarketData;
+                track.desired_exposure = None;
+                track.replacement_gate_reason = None;
+                Self::live_strategy_price_for(track)
+            };
+
+            return match strategy_price {
+                Some(strategy_price) => self.reconcile_track(&track_id, strategy_price),
+                None => Ok((vec![], vec![])),
+            };
+        }
+
+        if matches!(track.status, TrackStatus::Holding) {
+            let strategy_price = {
+                let track = self
+                    .tracks
+                    .get_mut(&track_id)
+                    .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
                 track.status = TrackStatus::WaitingMarketData;
                 track.desired_exposure = None;
                 track.replacement_gate_reason = None;
@@ -2499,6 +2517,24 @@ mod tests {
         let track = manager.get_track("btc-core").unwrap();
         assert!(track.manual_target_override.is_none());
         assert_ne!(track.status, TrackStatus::ManualFlattening);
+    }
+
+    #[test]
+    fn resume_clears_holding_and_reconciles_normally() {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        track.status = TrackStatus::Holding;
+        track.current_exposure = Exposure(8.0);
+        track.strategy_price = Some(100.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
+
+        manager.resume_track("btc1").unwrap();
+
+        let track = manager.get_track("btc1").unwrap();
+        assert_eq!(track.status, TrackStatus::Active);
+        assert_eq!(track.desired_exposure, Some(Exposure(0.0)));
     }
 
     #[test]

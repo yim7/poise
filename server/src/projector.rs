@@ -362,11 +362,16 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
         },
         TrackCommandView {
             command: TrackCommandType::Resume,
-            enabled: matches!(status, EngineTrackStatus::Paused)
-                || source.manual_target_override.is_some(),
+            enabled: matches!(
+                status,
+                EngineTrackStatus::Paused
+                    | EngineTrackStatus::Holding
+                    | EngineTrackStatus::ManualFlattening
+            ),
             disabled_reason: match status {
                 EngineTrackStatus::Paused => None,
-                _ if source.manual_target_override.is_some() => None,
+                EngineTrackStatus::Holding => None,
+                EngineTrackStatus::ManualFlattening => None,
                 EngineTrackStatus::Terminated => Some("terminated track cannot be resumed".into()),
                 _ => Some("track is not paused".into()),
             },
@@ -620,6 +625,40 @@ mod tests {
 
         assert!(resume.enabled);
         assert_eq!(resume.disabled_reason, None);
+    }
+
+    #[test]
+    fn resume_is_enabled_when_holding_is_active() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.status = TrackStatus::Holding;
+        source.manual_target_override = None;
+
+        let detail = TrackProjector::new().project_detail(&source);
+        let resume = detail
+            .available_commands
+            .iter()
+            .find(|command| command.command == TrackCommandType::Resume)
+            .expect("resume command should be present");
+
+        assert!(resume.enabled);
+        assert_eq!(resume.disabled_reason, None);
+    }
+
+    #[test]
+    fn resume_availability_depends_on_status_not_override() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.status = TrackStatus::Active;
+        source.manual_target_override = Some(0.0);
+
+        let detail = TrackProjector::new().project_detail(&source);
+        let resume = detail
+            .available_commands
+            .iter()
+            .find(|command| command.command == TrackCommandType::Resume)
+            .expect("resume command should be present");
+
+        assert!(!resume.enabled);
+        assert_eq!(resume.disabled_reason, Some("track is not paused".to_string()));
     }
 
     #[test]

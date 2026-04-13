@@ -140,7 +140,8 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
 fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
     match track.status {
         TrackStatus::WaitingMarketData | TrackStatus::Flattening => Some(TrackStatus::Active),
-        TrackStatus::Frozen | TrackStatus::Holding => Some(TrackStatus::Active),
+        TrackStatus::Frozen => Some(TrackStatus::Active),
+        TrackStatus::Holding => None,
         _ => None,
     }
 }
@@ -315,6 +316,28 @@ mod tests {
 
         assert_eq!(result.new_status, Some(TrackStatus::Active));
         assert!(!result.suppress_execution);
+    }
+
+    #[test]
+    fn frozen_recovers_to_active_when_price_returns_in_band() {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Frozen;
+        track.current_exposure = Exposure(8.0);
+
+        let result = reconcile_target(&track, 100.0);
+
+        assert_eq!(result.new_status, Some(TrackStatus::Active));
+    }
+
+    #[test]
+    fn holding_stays_holding_when_price_returns_in_band() {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Holding;
+        track.current_exposure = Exposure(8.0);
+
+        let result = reconcile_target(&track, 100.0);
+
+        assert_eq!(result.new_status, None);
     }
 
     #[test]
