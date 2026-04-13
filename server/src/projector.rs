@@ -1,20 +1,17 @@
 use poise_engine::executor::{OrderRole, RecoveryAnomaly};
 use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
-use poise_engine::ports::ExecutionQuote;
-use poise_engine::price_gate::{
-    PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
-};
+use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::TrackStatus as EngineTrackStatus;
 use poise_protocol::{
     ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
     ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
     InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
-    StrategyPriceStatusView,
-    TrackBudgetView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionStatsView,
-    TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView,
-    TrackLedgerView, TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView,
-    TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
+    TrackActivityItemView, TrackBudgetView, TrackCommandType, TrackCommandView, TrackDetailView,
+    TrackExecutionStatsView, TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView,
+    TrackLedgerGapView, TrackLedgerView, TrackLifecycleView, TrackListItemView,
+    TrackListLedgerView, TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
+    TrackStatusPanelView, TrackStrategyView,
 };
 
 use crate::event_presentation::project_activity_events;
@@ -297,19 +294,8 @@ fn project_attention_reasons(source: &TrackReadModel) -> Vec<String> {
         reasons.push("insufficient account margin".to_string());
     }
 
-    match evaluate_price_execution_gate(
-        PriceExecutionGate::Open,
-        source.mark_price,
-        match (source.best_bid, source.best_ask) {
-            (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
-            _ => None,
-        },
-    ) {
-        PriceExecutionGate::Open => {}
-        PriceExecutionGate::ManualRiskReductionOnly { reason }
-        | PriceExecutionGate::NoSubmit { reason } => {
-            reasons.push(project_price_execution_block_reason(reason).to_string());
-        }
+    if let Some(reason) = source.price_execution_block_reason {
+        reasons.push(project_price_execution_block_reason(reason).to_string());
     }
 
     reasons
@@ -654,9 +640,8 @@ mod tests {
     #[test]
     fn projector_maps_price_gate_to_attention_required_reason() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.mark_price = Some(100.0);
-        source.best_bid = Some(95.0);
-        source.best_ask = Some(95.0);
+        source.price_execution_block_reason =
+            Some(poise_engine::price_gate::PriceExecutionBlockReason::MarkBookDivergence);
 
         let detail = TrackProjector::new().project_detail(&source);
 
@@ -679,6 +664,8 @@ mod tests {
         source.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Stale;
         source.best_bid = None;
         source.best_ask = None;
+        source.price_execution_block_reason =
+            Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote);
 
         let detail = TrackProjector::new().project_detail(&source);
 
@@ -688,6 +675,29 @@ mod tests {
         );
         assert_eq!(detail.market.best_bid, None);
         assert_eq!(detail.market.best_ask, None);
+        assert!(
+            detail
+                .execution
+                .attention_reasons
+                .contains(&"missing execution quote".to_string())
+        );
+    }
+
+    #[test]
+    fn projector_uses_read_model_price_execution_block_reason_without_recomputing_gate() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.price_execution_block_reason =
+            Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote);
+        source.mark_price = Some(100.0);
+        source.best_bid = Some(100.0);
+        source.best_ask = Some(100.0);
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
         assert!(
             detail
                 .execution
@@ -950,6 +960,7 @@ mod tests {
             has_recovery_anomaly: false,
             has_account_margin_guard: false,
             has_stale_market_data: false,
+            price_execution_block_reason: None,
             replacement_gate_reason: None,
             slots: vec![ReadModelSlot {
                 label: "inventory".into(),

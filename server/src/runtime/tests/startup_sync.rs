@@ -160,7 +160,6 @@ async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
     snapshot.observed.mark_price = Some(92.5);
     snapshot.observed.best_bid = Some(92.5);
     snapshot.observed.best_ask = Some(92.5);
-    snapshot.observed.reference_price = Some(92.5);
     set_executor_state(
         &mut snapshot,
         working_order(

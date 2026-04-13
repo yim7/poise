@@ -91,6 +91,44 @@ pub fn allows_auto_replace(gate: PriceExecutionGate) -> bool {
     matches!(gate, PriceExecutionGate::Open)
 }
 
+pub fn gate_block_reason(gate: PriceExecutionGate) -> Option<PriceExecutionBlockReason> {
+    match gate {
+        PriceExecutionGate::Open => None,
+        PriceExecutionGate::ManualRiskReductionOnly { reason }
+        | PriceExecutionGate::NoSubmit { reason } => Some(reason),
+    }
+}
+
+pub fn gate_from_block_reason(reason: Option<PriceExecutionBlockReason>) -> PriceExecutionGate {
+    match reason {
+        None => PriceExecutionGate::Open,
+        Some(PriceExecutionBlockReason::MissingExecutionQuote) => PriceExecutionGate::NoSubmit {
+            reason: PriceExecutionBlockReason::MissingExecutionQuote,
+        },
+        Some(PriceExecutionBlockReason::MarkBookDivergence) => {
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: PriceExecutionBlockReason::MarkBookDivergence,
+            }
+        }
+    }
+}
+
+pub fn restore_gate_from_snapshot(
+    reason: Option<PriceExecutionBlockReason>,
+    mark_price: Option<f64>,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+) -> PriceExecutionGate {
+    match reason {
+        Some(reason) => gate_from_block_reason(Some(reason)),
+        None => evaluate_price_execution_gate(
+            PriceExecutionGate::Open,
+            mark_price,
+            execution_quote(best_bid, best_ask),
+        ),
+    }
+}
+
 pub fn working_order_gate_action(
     gate: PriceExecutionGate,
     role: OrderRole,
@@ -117,6 +155,13 @@ fn divergence_bps(mark_price: Option<f64>, quote: ExecutionQuote) -> Option<f64>
     }
 
     Some(((mark_price - book_mid).abs() / mark_price) * 10_000.0)
+}
+
+fn execution_quote(best_bid: Option<f64>, best_ask: Option<f64>) -> Option<ExecutionQuote> {
+    Some(ExecutionQuote {
+        best_bid: best_bid?,
+        best_ask: best_ask?,
+    })
 }
 
 #[cfg(test)]
@@ -163,8 +208,7 @@ mod tests {
 
         let still_blocked =
             evaluate_price_execution_gate(blocked, Some(100.0), Some(quote(97.0, 97.0)));
-        let reopened =
-            evaluate_price_execution_gate(blocked, Some(100.0), Some(quote(99.0, 99.0)));
+        let reopened = evaluate_price_execution_gate(blocked, Some(100.0), Some(quote(99.0, 99.0)));
 
         assert_eq!(still_blocked, blocked);
         assert_eq!(reopened, PriceExecutionGate::Open);

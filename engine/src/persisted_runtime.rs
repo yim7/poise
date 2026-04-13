@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::ledger::TrackLedgerState;
+use crate::price_gate::PriceExecutionBlockReason;
 use crate::runtime::{
     AccountCapacityConstraint, ExecutorState, RiskState, StrategyPriceStatus, TrackStatus,
 };
@@ -63,6 +64,7 @@ pub struct PersistedRuntimeRow {
     pub manual_target_override: Option<f64>,
     pub executor_state_json: Option<String>,
     pub replacement_gate_reason_json: Option<String>,
+    pub price_execution_block_reason: Option<String>,
     pub ledger_state_json: Option<String>,
     pub unrealized_pnl: f64,
     pub strategy_price: Option<f64>,
@@ -101,6 +103,14 @@ impl PersistedRuntimeCodec {
             .map(serde_json::from_str::<ReplacementGateReason>)
             .transpose()
             .context("failed to deserialize replacement gate reason")?;
+        let price_execution_block_reason = row
+            .price_execution_block_reason
+            .as_deref()
+            .map(|reason| {
+                serde_json::from_str::<PriceExecutionBlockReason>(&format!("\"{reason}\""))
+            })
+            .transpose()
+            .context("failed to deserialize price execution block reason")?;
         let ledger_state = row
             .ledger_state_json
             .as_deref()
@@ -144,6 +154,7 @@ impl PersistedRuntimeCodec {
             manual_target_override: row.manual_target_override.map(Exposure),
             executor_state,
             replacement_gate_reason,
+            price_execution_block_reason,
             ledger_state: ledger_state.unwrap_or_default(),
             risk: RiskState {
                 unrealized_pnl: row.unrealized_pnl,
@@ -155,7 +166,6 @@ impl PersistedRuntimeCodec {
                 mark_price: row.mark_price,
                 best_bid: row.best_bid,
                 best_ask: row.best_ask,
-                reference_price: row.strategy_price,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
@@ -309,7 +319,8 @@ mod tests {
                 }
             },
             "observed": {
-                "reference_price": 95.0,
+                "strategy_price": 95.0,
+                "strategy_price_status": "live",
                 "out_of_band_since": null,
                 "last_tick_at": null,
                 "market_data_stale_since": null
@@ -376,6 +387,7 @@ mod tests {
                 .to_string(),
             ),
             replacement_gate_reason_json: None,
+            price_execution_block_reason: None,
             ledger_state_json: None,
             unrealized_pnl: -3.0,
             strategy_price: Some(95.0),
@@ -430,6 +442,7 @@ mod tests {
                 .to_string(),
             ),
             replacement_gate_reason_json: None,
+            price_execution_block_reason: None,
             ledger_state_json: None,
             unrealized_pnl: -3.0,
             strategy_price: Some(95.0),

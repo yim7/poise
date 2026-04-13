@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 use poise_engine::ledger::TrackLedgerState;
+use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{ExecutorState, StrategyPriceStatus, TrackStatus};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 
@@ -19,6 +20,7 @@ pub struct TrackRuntimeReadState {
     pub ledger_state: TrackLedgerState,
     pub unrealized_pnl: f64,
     pub has_account_margin_guard: bool,
+    pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
     pub strategy_price: Option<f64>,
     pub strategy_price_status: StrategyPriceStatus,
     pub mark_price: Option<f64>,
@@ -36,6 +38,7 @@ impl TrackRuntimeReadState {
             manual_target_override,
             executor_state,
             replacement_gate_reason,
+            price_execution_block_reason,
             ledger_state,
             risk,
             observed,
@@ -52,7 +55,8 @@ impl TrackRuntimeReadState {
             ledger_state,
             unrealized_pnl: risk.unrealized_pnl,
             has_account_margin_guard: risk.account_capacity_constraint.increase_blocked,
-            strategy_price: observed.reference_price.or(observed.strategy_price),
+            price_execution_block_reason,
+            strategy_price: observed.strategy_price,
             strategy_price_status: observed.strategy_price_status,
             mark_price: observed.mark_price,
             best_bid: observed.best_bid,

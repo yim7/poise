@@ -300,6 +300,7 @@ mod tests {
                 },
             },
             replacement_gate_reason: None,
+            price_execution_block_reason: None,
             ledger_state: Default::default(),
             risk: RiskState {
                 unrealized_pnl: 0.0,
@@ -311,7 +312,6 @@ mod tests {
                 mark_price: Some(101.5),
                 best_bid: Some(101.0),
                 best_ask: Some(101.5),
-                reference_price: Some(101.25),
                 out_of_band_since: None,
                 last_tick_at: None,
                 market_data_stale_since: None,

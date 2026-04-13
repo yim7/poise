@@ -97,7 +97,8 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(4.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
-    snapshot.observed.reference_price = Some(95.0);
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
     manager.restore_track_state(&snapshot).unwrap();
     persistence
         .save_transition("BTCUSDT", &snapshot, &[], &[])
@@ -174,7 +175,8 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(4.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
-    snapshot.observed.reference_price = Some(95.0);
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
 
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
@@ -270,7 +272,6 @@ async fn position_update_broadcasts_snapshot_updated_when_reconcile_emits_no_dom
     snapshot.observed.mark_price = Some(100.0);
     snapshot.observed.best_bid = Some(100.0);
     snapshot.observed.best_ask = Some(100.0);
-    snapshot.observed.reference_price = Some(100.0);
     snapshot.risk.unrealized_pnl = 0.0;
 
     let fixture = runtime_fixture(
@@ -405,6 +406,7 @@ async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_
         manual_target_override: None,
         executor_state: ExecutorState::empty(test_server_time()),
         replacement_gate_reason: None,
+        price_execution_block_reason: None,
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: poise_engine::snapshot::ObservedState {
@@ -413,7 +415,6 @@ async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_
             mark_price: Some(100.0),
             best_bid: Some(100.0),
             best_ask: Some(100.0),
-            reference_price: Some(100.0),
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,

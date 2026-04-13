@@ -97,6 +97,7 @@ pub(crate) fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
             },
         },
         replacement_gate_reason: None,
+        price_execution_block_reason: None,
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: ObservedState {
@@ -105,7 +106,6 @@ pub(crate) fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
             mark_price: Some(95.0),
             best_bid: Some(95.0),
             best_ask: Some(95.0),
-            reference_price: Some(95.0),
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,
@@ -157,6 +157,7 @@ pub(crate) fn snapshot_with_working_order() -> TrackRuntimeSnapshot {
             },
         },
         replacement_gate_reason: None,
+        price_execution_block_reason: None,
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: ObservedState {
@@ -165,7 +166,6 @@ pub(crate) fn snapshot_with_working_order() -> TrackRuntimeSnapshot {
             mark_price: Some(95.0),
             best_bid: Some(95.0),
             best_ask: Some(95.0),
-            reference_price: Some(95.0),
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,
@@ -217,6 +217,7 @@ pub(crate) fn snapshot_with_submit_pending_order(
             },
         },
         replacement_gate_reason: None,
+        price_execution_block_reason: None,
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: ObservedState {
@@ -225,7 +226,6 @@ pub(crate) fn snapshot_with_submit_pending_order(
             mark_price: Some(reference_price),
             best_bid: Some(reference_price),
             best_ask: Some(reference_price),
-            reference_price: Some(reference_price),
             out_of_band_since: None,
             last_tick_at: None,
             market_data_stale_since: None,

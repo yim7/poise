@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::persisted_runtime::TrackRestoreRevision;
+use crate::price_gate::PriceExecutionBlockReason;
 use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 
@@ -17,8 +18,6 @@ pub struct ObservedState {
     pub mark_price: Option<f64>,
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
-    #[serde(skip_serializing, skip_deserializing, default)]
-    pub reference_price: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_tick_at: Option<DateTime<Utc>>,
@@ -38,6 +37,8 @@ pub struct TrackRuntimeSnapshot {
     pub executor_state: ExecutorState,
     #[serde(default)]
     pub replacement_gate_reason: Option<ReplacementGateReason>,
+    #[serde(default)]
+    pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
     pub ledger_state: TrackLedgerState,
     pub risk: RiskState,
     pub observed: ObservedState,
@@ -97,10 +98,7 @@ mod tests {
         assert!(value.get("restore_revision").is_some());
         assert_eq!(value["current_exposure"], serde_json::json!(0.0));
         assert_eq!(value["desired_exposure"], serde_json::Value::Null);
-        assert_eq!(
-            value["observed"]["strategy_price"],
-            serde_json::Value::Null
-        );
+        assert_eq!(value["observed"]["strategy_price"], serde_json::Value::Null);
         assert_eq!(
             value["observed"]["strategy_price_status"],
             serde_json::json!("stale")

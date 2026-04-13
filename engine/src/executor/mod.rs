@@ -56,9 +56,7 @@ mod tests {
     use crate::execution_plan::ExecutionAction;
     use crate::observation::OrderObservation;
     use crate::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
-    use crate::price_gate::{
-        PriceExecutionBlockReason, PriceExecutionGate, SubmitPurpose,
-    };
+    use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate, SubmitPurpose};
     use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
     use crate::track::{Instrument, TrackId, Venue};
     use crate::transition::TrackEffect;

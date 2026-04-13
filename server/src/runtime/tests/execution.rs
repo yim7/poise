@@ -853,7 +853,6 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
     snapshot.observed.mark_price = Some(95.0);
     snapshot.observed.best_bid = Some(95.0);
     snapshot.observed.best_ask = Some(95.0);
-    snapshot.observed.reference_price = Some(95.0);
     set_executor_state(
         &mut snapshot,
         working_order(
@@ -964,7 +963,6 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
     snapshot.observed.mark_price = Some(95.0);
     snapshot.observed.best_bid = Some(95.0);
     snapshot.observed.best_ask = Some(95.0);
-    snapshot.observed.reference_price = Some(95.0);
     set_executor_state(
         &mut snapshot,
         working_order(
@@ -1469,7 +1467,6 @@ async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_rev
     snapshot.observed.mark_price = Some(95.0);
     snapshot.observed.best_bid = Some(95.0);
     snapshot.observed.best_ask = Some(95.0);
-    snapshot.observed.reference_price = Some(95.0);
     let (_state, worker_state) = test_launch_contexts_with_config(
         exchange.metadata_port(),
         exchange.account_summary_port(),
@@ -1618,7 +1615,6 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
     snapshot.observed.mark_price = Some(95.0);
     snapshot.observed.best_bid = Some(95.0);
     snapshot.observed.best_ask = Some(95.0);
-    snapshot.observed.reference_price = Some(95.0);
     set_executor_state(
         &mut snapshot,
         working_order(
@@ -1828,7 +1824,6 @@ async fn effect_worker_supersedes_submit_when_target_is_reached_without_receipt_
     snapshot.observed.mark_price = Some(92.5);
     snapshot.observed.best_bid = Some(92.5);
     snapshot.observed.best_ask = Some(92.5);
-    snapshot.observed.reference_price = Some(92.5);
     let (_state, worker_state) = test_launch_contexts(
         exchange.metadata_port(),
         exchange.account_summary_port(),
@@ -1966,7 +1961,6 @@ async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_
     snapshot.observed.mark_price = Some(105.0);
     snapshot.observed.best_bid = Some(105.0);
     snapshot.observed.best_ask = Some(105.0);
-    snapshot.observed.reference_price = Some(105.0);
     set_executor_state(
         &mut snapshot,
         WorkingOrder {

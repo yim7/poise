@@ -153,12 +153,12 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let current_plan_submit = current_plan_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.submit_hint.as_ref());
-    let current_plan_allows_submit = input
-        .current_plan
-        .as_ref()
-        .is_some_and(|current_plan| {
-            allows_submit(current_plan.price_execution_gate, current_plan.submit_purpose)
-        });
+    let current_plan_allows_submit = input.current_plan.as_ref().is_some_and(|current_plan| {
+        allows_submit(
+            current_plan.price_execution_gate,
+            current_plan.submit_purpose,
+        )
+    });
     let stale_effect_round_submit = input.current_plan.as_ref().and_then(|current_plan| {
         let active_round = input.previous_state.active_round.as_ref()?;
         if active_round.desired_exposure == *input.desired_exposure {
@@ -178,10 +178,9 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         .pending_submit_for_request(&input.request.client_order_id)
         .is_some_and(|slot| {
             current_plan_allows_submit
-                &&
-            current_plan_evaluation
-                .as_ref()
-                .is_some_and(|evaluation| evaluation.lifecycle == RoundLifecycleDecision::Continue)
+                && current_plan_evaluation.as_ref().is_some_and(|evaluation| {
+                    evaluation.lifecycle == RoundLifecycleDecision::Continue
+                })
                 && input
                     .previous_state
                     .active_round

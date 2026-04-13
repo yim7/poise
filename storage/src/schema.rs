@@ -12,6 +12,7 @@ const TRACK_SNAPSHOTS_CREATE_SQL: &str = "CREATE TABLE IF NOT EXISTS track_snaps
     manual_target_override REAL,
     executor_state_json TEXT,
     replacement_gate_reason_json TEXT,
+    price_execution_block_reason TEXT,
     ledger_state_json TEXT,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
     strategy_price REAL,
@@ -33,6 +34,7 @@ const TRACK_SNAPSHOTS_REQUIRED_COLUMNS: &[&str] = &[
     "manual_target_override",
     "executor_state_json",
     "replacement_gate_reason_json",
+    "price_execution_block_reason",
     "ledger_state_json",
     "unrealized_pnl",
     "strategy_price",
@@ -184,18 +186,72 @@ fn initialize_track_snapshots(conn: &Connection) -> Result<()> {
             .any(|required| !columns.iter().any(|existing| existing == required));
 
     if needs_migration {
-        migrate_track_snapshots(conn)?;
+        migrate_track_snapshots(conn, &columns)?;
     }
 
     Ok(())
 }
 
-fn migrate_track_snapshots(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "ALTER TABLE track_snapshots RENAME TO track_snapshots_legacy;",
-    )?;
+fn migrate_track_snapshots(conn: &Connection, legacy_columns: &[String]) -> Result<()> {
+    let has_column = |name: &str| {
+        legacy_columns
+            .iter()
+            .any(|existing| existing.as_str() == name)
+    };
+    let strategy_price_expr = if has_column("strategy_price") {
+        "strategy_price"
+    } else {
+        "NULL"
+    };
+    let strategy_price_status_expr = if has_column("strategy_price_status") {
+        "strategy_price_status"
+    } else {
+        "'stale'"
+    };
+    let mark_price_expr = if has_column("mark_price") {
+        "mark_price"
+    } else {
+        "NULL"
+    };
+    let best_bid_expr = if has_column("best_bid") {
+        "best_bid"
+    } else {
+        "NULL"
+    };
+    let best_ask_expr = if has_column("best_ask") {
+        "best_ask"
+    } else {
+        "NULL"
+    };
+    let price_execution_block_reason_expr = if has_column("price_execution_block_reason") {
+        "price_execution_block_reason".to_string()
+    } else {
+        match (has_column("mark_price"), has_column("best_bid"), has_column("best_ask")) {
+            (_, false, _) | (_, _, false) => "'missing_execution_quote'".to_string(),
+            (false, true, true) => {
+                "CASE
+                    WHEN best_bid IS NULL OR best_ask IS NULL THEN 'missing_execution_quote'
+                    ELSE NULL
+                END"
+                .to_string()
+            }
+            (true, true, true) => {
+                "CASE
+                    WHEN best_bid IS NULL OR best_ask IS NULL THEN 'missing_execution_quote'
+                    WHEN mark_price IS NOT NULL
+                        AND mark_price > 0
+                        AND ((abs(mark_price - ((best_bid + best_ask) / 2.0)) / mark_price) * 10000.0) >= 300.0
+                        THEN 'mark_book_divergence'
+                    ELSE NULL
+                END"
+                .to_string()
+            }
+        }
+    };
+
+    conn.execute_batch("ALTER TABLE track_snapshots RENAME TO track_snapshots_legacy;")?;
     conn.execute_batch(TRACK_SNAPSHOTS_CREATE_SQL)?;
-    conn.execute_batch(
+    let migration_sql = format!(
         "INSERT INTO track_snapshots (
             track_id,
             restore_revision,
@@ -205,6 +261,7 @@ fn migrate_track_snapshots(conn: &Connection) -> Result<()> {
             manual_target_override,
             executor_state_json,
             replacement_gate_reason_json,
+            price_execution_block_reason,
             ledger_state_json,
             unrealized_pnl,
             strategy_price,
@@ -226,20 +283,22 @@ fn migrate_track_snapshots(conn: &Connection) -> Result<()> {
             manual_target_override,
             executor_state_json,
             replacement_gate_reason_json,
+            {price_execution_block_reason_expr},
             ledger_state_json,
             unrealized_pnl,
-            NULL,
-            'stale',
-            NULL,
-            NULL,
-            NULL,
+            {strategy_price_expr},
+            {strategy_price_status_expr},
+            {mark_price_expr},
+            {best_bid_expr},
+            {best_ask_expr},
             out_of_band_since,
             last_tick_at,
             market_data_stale_since,
             updated_at
         FROM track_snapshots_legacy;
         DROP TABLE track_snapshots_legacy;",
-    )?;
+    );
+    conn.execute_batch(&migration_sql)?;
     Ok(())
 }
 

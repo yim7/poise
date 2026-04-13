@@ -125,8 +125,8 @@ impl TrackManager {
             TrackObservation::Market(observation) => self.observe_market(id, observation)?,
             TrackObservation::Position(observation) => {
                 self.observe_position(id, observation)?;
-                match self.cached_reference_price(id)? {
-                    Some(reference_price) => self.reconcile_track(id, reference_price)?,
+                match self.live_strategy_price(id)? {
+                    Some(strategy_price) => self.reconcile_track(id, strategy_price)?,
                     None => (vec![], vec![]),
                 }
             }
@@ -143,8 +143,8 @@ impl TrackManager {
     ) -> Result<(TrackTransition, executor::OrderUpdateAbsorbResult)> {
         let should_reconcile = observation.status.should_reconcile_after_order_update();
         let absorb_result = self.observe_order(id, observation)?;
-        let (events, effects) = match (should_reconcile, self.cached_reference_price(id)?) {
-            (true, Some(reference_price)) => self.reconcile_track(id, reference_price)?,
+        let (events, effects) = match (should_reconcile, self.live_strategy_price(id)?) {
+            (true, Some(strategy_price)) => self.reconcile_track(id, strategy_price)?,
             _ => (vec![], vec![]),
         };
 
@@ -221,15 +221,10 @@ impl TrackManager {
             }
             TrackCommand::Resume => self.resume_track(id.as_str())?,
             TrackCommand::Reconcile => {
-                let Some(reference_price) = self
-                    .tracks
-                    .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-                    .reference_price
-                else {
+                let Some(strategy_price) = self.live_strategy_price(id)? else {
                     return self.transition_for(id, vec![], vec![]);
                 };
-                self.reconcile_track(id, reference_price)?
+                self.reconcile_track(id, strategy_price)?
             }
             TrackCommand::Terminate => self.terminate_track(id)?,
             TrackCommand::Flatten => self.flatten_track(id)?,
@@ -268,7 +263,7 @@ impl TrackManager {
         }
 
         if track.manual_target_override.is_some() {
-            let reference_price = {
+            let strategy_price = {
                 let track = self
                     .tracks
                     .get_mut(&track_id)
@@ -277,11 +272,11 @@ impl TrackManager {
                 track.status = TrackStatus::WaitingMarketData;
                 track.desired_exposure = None;
                 track.replacement_gate_reason = None;
-                track.reference_price
+                Self::live_strategy_price_for(track)
             };
 
-            return match reference_price {
-                Some(reference_price) => self.reconcile_track(&track_id, reference_price),
+            return match strategy_price {
+                Some(strategy_price) => self.reconcile_track(&track_id, strategy_price),
                 None => Ok((vec![], vec![])),
             };
         }
@@ -297,11 +292,11 @@ impl TrackManager {
                 bail!("cannot resume track `{id}` from status {:?}", track.status);
             }
 
-            if let Some(reference_price) = track.reference_price {
+            if let Some(strategy_price) = Self::live_strategy_price_for(track) {
                 let mut resumed = track.clone();
                 resumed.status = TrackStatus::WaitingMarketData;
                 resumed.executor_state = track.executor_state.reset_for_activation(resumed_at);
-                let result = self.plan_inventory_execution_for_track(&resumed, reference_price)?;
+                let result = self.plan_inventory_execution_for_track(&resumed, strategy_price)?;
                 (
                     result.new_status.unwrap_or(TrackStatus::Active),
                     Some(result.desired_exposure.clone()),
@@ -338,7 +333,7 @@ impl TrackManager {
     }
 
     fn terminate_track(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
-        let reference_price = {
+        let strategy_price = {
             let track = self
                 .tracks
                 .get_mut(id)
@@ -352,17 +347,17 @@ impl TrackManager {
             track.status = TrackStatus::Terminated;
             track.desired_exposure = Some(Exposure(0.0));
             track.replacement_gate_reason = None;
-            track.reference_price
+            Self::live_strategy_price_for(track)
         };
 
-        match reference_price {
-            Some(reference_price) => self.reconcile_track(id, reference_price),
+        match strategy_price {
+            Some(strategy_price) => self.reconcile_track(id, strategy_price),
             None => Ok((vec![], vec![])),
         }
     }
 
     fn flatten_track(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
-        let reference_price = {
+        let strategy_price = {
             let track = self
                 .tracks
                 .get_mut(id)
@@ -374,11 +369,11 @@ impl TrackManager {
 
             track.manual_target_override = Some(Exposure(0.0));
             track.status = TrackStatus::ReducingOnly;
-            track.reference_price
+            Self::live_strategy_price_for(track)
         };
 
-        match reference_price {
-            Some(reference_price) => self.reconcile_track(id, reference_price),
+        match strategy_price {
+            Some(strategy_price) => self.reconcile_track(id, strategy_price),
             None => Ok((vec![], vec![])),
         }
     }
@@ -577,21 +572,19 @@ impl TrackManager {
         })
     }
 
-    fn cached_reference_price(&self, id: &TrackId) -> Result<Option<f64>> {
+    fn live_strategy_price(&self, id: &TrackId) -> Result<Option<f64>> {
         let track = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
 
-        if track.strategy_price.is_none() && track.reference_price.is_some() {
-            return Ok(track.reference_price);
-        }
+        Ok(Self::live_strategy_price_for(track))
+    }
 
-        if matches!(track.strategy_price_status, StrategyPriceStatus::Live) {
-            return Ok(track.reference_price.or(track.strategy_price));
-        }
-
-        Ok(None)
+    fn live_strategy_price_for(track: &TrackRuntime) -> Option<f64> {
+        matches!(track.strategy_price_status, StrategyPriceStatus::Live)
+            .then_some(track.strategy_price)
+            .flatten()
     }
 
     fn execution_quote_for_track(track: &TrackRuntime) -> Option<ExecutionQuote> {
@@ -644,7 +637,6 @@ impl TrackManager {
         match strategy_price {
             Some(strategy_price) => {
                 track.strategy_price = Some(strategy_price);
-                track.reference_price = Some(strategy_price);
                 track.strategy_price_status = StrategyPriceStatus::Live;
                 self.reconcile_track(id, strategy_price)
             }
@@ -750,7 +742,7 @@ impl TrackManager {
                     return Ok((vec![], vec![]));
                 }
 
-                let Some(reference_price) = planned_track.reference_price else {
+                let Some(strategy_price) = Self::live_strategy_price_for(&planned_track) else {
                     let track = self
                         .tracks
                         .get_mut(id)
@@ -781,7 +773,7 @@ impl TrackManager {
                 }
 
                 let planned =
-                    self.plan_inventory_execution_for_track(&planned_track, reference_price)?;
+                    self.plan_inventory_execution_for_track(&planned_track, strategy_price)?;
                 let effects = planned
                     .effects
                     .iter()
@@ -807,7 +799,6 @@ impl TrackManager {
                     track.status = new_status;
                 }
                 track.desired_exposure = Some(planned.desired_exposure);
-                track.reference_price = Some(reference_price);
                 track.replacement_gate_reason = planned.replacement_gate_reason;
                 track.executor_state = planned.executor_state;
                 Ok((planned.events, effects))
@@ -818,7 +809,7 @@ impl TrackManager {
     fn reconcile_track(
         &mut self,
         id: &TrackId,
-        reference_price: f64,
+        strategy_price: f64,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         if self.guard_market_data_freshness(id)? {
             return Ok((vec![], vec![]));
@@ -826,7 +817,6 @@ impl TrackManager {
 
         if matches!(self.tracks[id].status, TrackStatus::Paused) {
             let track = self.tracks.get_mut(id).unwrap();
-            track.reference_price = Some(reference_price);
             track.desired_exposure = None;
             track.replacement_gate_reason = None;
             return Ok((vec![], vec![]));
@@ -843,7 +833,7 @@ impl TrackManager {
             new_status,
             replacement_gate_reason,
             executor_state,
-        } = self.plan_inventory_execution_for_track(track, reference_price)?;
+        } = self.plan_inventory_execution_for_track(track, strategy_price)?;
         let effects = planned_effects;
 
         let track = self.tracks.get_mut(id).unwrap();
@@ -855,7 +845,6 @@ impl TrackManager {
             track.status = new_status;
         }
         track.desired_exposure = Some(desired_exposure);
-        track.reference_price = Some(reference_price);
         track.replacement_gate_reason = replacement_gate_reason;
         track.executor_state = executor_state;
 
@@ -898,18 +887,12 @@ impl TrackManager {
         track: &'a TrackRuntime,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<executor::SubmitIntentInput<'a>> {
-        let reference_price = if track.strategy_price.is_none() && track.reference_price.is_some() {
-            track.reference_price
-        } else if matches!(track.strategy_price_status, StrategyPriceStatus::Live) {
-            track.strategy_price.or(track.reference_price)
-        } else {
-            None
-        }?;
+        let strategy_price = Self::live_strategy_price_for(track)?;
         if matches!(track.status, TrackStatus::Paused) {
             return None;
         }
 
-        let target = reconciler::reconcile_target(track, reference_price);
+        let target = reconciler::reconcile_target(track, strategy_price);
         (!target.suppress_execution).then_some(self.submit_intent_input(
             track,
             target.desired_exposure,
@@ -942,9 +925,9 @@ impl TrackManager {
     fn plan_inventory_execution_for_track(
         &self,
         track: &TrackRuntime,
-        reference_price: f64,
+        strategy_price: f64,
     ) -> Result<PlannedInventoryExecution> {
-        let target = reconciler::reconcile_target(track, reference_price);
+        let target = reconciler::reconcile_target(track, strategy_price);
         if track.executor_state.diagnostics.recovery_anomaly.is_some() {
             return Ok(PlannedInventoryExecution {
                 events: target.events,
@@ -974,7 +957,8 @@ impl TrackManager {
             });
         }
         let executor_state = Some(&track.executor_state);
-        let submit_intent = self.submit_intent_input(track, target.desired_exposure.clone(), observed_at);
+        let submit_intent =
+            self.submit_intent_input(track, target.desired_exposure.clone(), observed_at);
         let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
 
         Ok(PlannedInventoryExecution {
@@ -1018,8 +1002,8 @@ mod tests {
     use crate::ports::*;
     use crate::price_gate::PriceExecutionGate;
     use crate::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState,
-        StrategyPriceStatus, TrackStatus, WorkingOrder,
+        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, StrategyPriceStatus,
+        TrackStatus, WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
@@ -1307,7 +1291,8 @@ mod tests {
             unrealized_pnl: -3.0,
             ..RiskState::default()
         };
-        track.reference_price = Some(95.0);
+        track.strategy_price = Some(95.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
         track.out_of_band_since = Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap());
         track
     }
@@ -1355,21 +1340,23 @@ mod tests {
         manager
     }
 
-    fn test_manager_with_cached_price(reference_price: f64) -> TrackManager {
+    fn test_manager_with_cached_strategy_price(strategy_price: f64) -> TrackManager {
         let mut manager = test_manager_with_active_track();
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         let execution_quote = ExecutionQuote {
-            best_bid: reference_price,
-            best_ask: reference_price,
+            best_bid: strategy_price,
+            best_ask: strategy_price,
         };
-        track.strategy_price = Some(reference_price);
+        track.strategy_price = Some(strategy_price);
         track.strategy_price_status = StrategyPriceStatus::Live;
-        track.reference_price = Some(reference_price);
-        track.mark_price = Some(reference_price);
+        track.mark_price = Some(strategy_price);
         track.best_bid = Some(execution_quote.best_bid);
         track.best_ask = Some(execution_quote.best_ask);
-        track.price_execution_gate =
-            evaluate_price_execution_gate(PriceExecutionGate::Open, Some(reference_price), Some(execution_quote));
+        track.price_execution_gate = evaluate_price_execution_gate(
+            PriceExecutionGate::Open,
+            Some(strategy_price),
+            Some(execution_quote),
+        );
         manager
     }
 
@@ -1609,7 +1596,8 @@ mod tests {
             );
             runtime.status = TrackStatus::Active;
             runtime.current_exposure = poise_core::types::Exposure(0.0);
-            runtime.reference_price = Some(90.0);
+            runtime.strategy_price = Some(90.0);
+            runtime.strategy_price_status = StrategyPriceStatus::Live;
             runtime.snapshot()
         };
 
@@ -1638,7 +1626,8 @@ mod tests {
             );
             runtime.status = TrackStatus::Active;
             runtime.current_exposure = poise_core::types::Exposure(0.0);
-            runtime.reference_price = Some(90.0);
+            runtime.strategy_price = Some(90.0);
+            runtime.strategy_price_status = StrategyPriceStatus::Live;
             runtime.snapshot()
         };
 
@@ -1662,7 +1651,8 @@ mod tests {
         );
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = poise_core::types::Exposure(0.0);
-        runtime.reference_price = Some(90.0);
+        runtime.strategy_price = Some(90.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
 
         let snapshot = {
             let mut source = TrackRuntime::new(
@@ -1675,7 +1665,8 @@ mod tests {
             );
             source.status = TrackStatus::Active;
             source.current_exposure = poise_core::types::Exposure(0.0);
-            source.reference_price = Some(90.0);
+            source.strategy_price = Some(90.0);
+            source.strategy_price_status = StrategyPriceStatus::Live;
             source.snapshot()
         };
 
@@ -1692,14 +1683,12 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc-core"),
-                crate::observation::TrackObservation::Market(
-                    quoted_market_observation(95.0),
-                ),
+                crate::observation::TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
         assert!(!transition.effects.is_empty());
-        assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
+        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
         assert!(!transition.events.is_empty());
     }
 
@@ -1709,9 +1698,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc-core"),
-                crate::observation::TrackObservation::Market(
-                    quoted_market_observation(95.0),
-                ),
+                crate::observation::TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1739,9 +1726,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc-core"),
-                crate::observation::TrackObservation::Market(
-                    quoted_market_observation(95.0),
-                ),
+                crate::observation::TrackObservation::Market(quoted_market_observation(95.0)),
             )
             .unwrap();
 
@@ -1755,8 +1740,8 @@ mod tests {
     }
 
     #[test]
-    fn command_reconcile_uses_cached_reference_price() {
-        let mut manager = test_manager_with_cached_price(95.0);
+    fn command_reconcile_uses_cached_strategy_price() {
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         {
             let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
             track.budget = CapacityBudget {
@@ -1771,7 +1756,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
+        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
         assert_eq!(
             transition
                 .snapshot
@@ -1798,7 +1783,7 @@ mod tests {
 
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(track.status, TrackStatus::Active);
-        assert_eq!(track.reference_price, Some(95.0));
+        assert_eq!(track.strategy_price, Some(95.0));
         assert_eq!(track.current_exposure.0, 0.0);
         assert!(track.desired_exposure.as_ref().unwrap().0 > 0.0); // should be long below center
     }
@@ -1848,7 +1833,10 @@ mod tests {
             StrategyPriceStatus::Stale
         );
         assert_eq!(second.snapshot.observed.mark_price, Some(120.0));
-        assert_eq!(second.snapshot.desired_exposure, first.snapshot.desired_exposure);
+        assert_eq!(
+            second.snapshot.desired_exposure,
+            first.snapshot.desired_exposure
+        );
         assert!(second.effects.is_empty());
     }
 
@@ -1865,10 +1853,7 @@ mod tests {
 
         assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
         assert_eq!(transition.snapshot.observed.mark_price, Some(120.0));
-        assert_eq!(
-            transition.snapshot.desired_exposure,
-            Some(Exposure(4.0)),
-        );
+        assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(4.0)),);
     }
 
     #[test]
@@ -1888,7 +1873,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(second.snapshot.desired_exposure, first.snapshot.desired_exposure);
+        assert_eq!(
+            second.snapshot.desired_exposure,
+            first.snapshot.desired_exposure
+        );
         assert_eq!(second.snapshot.observed.strategy_price, Some(95.0));
         assert_eq!(
             second.snapshot.observed.strategy_price_status,
@@ -1921,10 +1909,7 @@ mod tests {
 
         assert_eq!(initial.snapshot.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(stale.snapshot.desired_exposure, Some(Exposure(4.0)));
-        assert_eq!(
-            recovered.snapshot.desired_exposure,
-            Some(Exposure(-4.0)),
-        );
+        assert_eq!(recovered.snapshot.desired_exposure, Some(Exposure(-4.0)),);
         assert_eq!(
             recovered.snapshot.observed.strategy_price_status,
             StrategyPriceStatus::Live
@@ -1967,7 +1952,7 @@ mod tests {
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(track.current_exposure.0, 2.0);
         assert_eq!(track.desired_exposure.as_ref().unwrap().0, 4.0);
-        assert_eq!(track.reference_price, Some(95.0));
+        assert_eq!(track.strategy_price, Some(95.0));
     }
 
     #[test]
@@ -2022,7 +2007,7 @@ mod tests {
         assert_eq!(track.status, TrackStatus::Paused);
         assert_eq!(track.current_exposure.0, 2.0);
         assert_eq!(track.desired_exposure, None);
-        assert_eq!(track.reference_price, Some(95.0));
+        assert_eq!(track.strategy_price, Some(95.0));
     }
 
     #[test]
@@ -2058,7 +2043,7 @@ mod tests {
             transition.snapshot.desired_exposure,
             Some(poise_core::types::Exposure(4.0))
         );
-        assert_eq!(transition.snapshot.observed.reference_price, Some(95.0));
+        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
         assert_eq!(
             inventory_core_order_from_snapshot(&transition.snapshot),
             Some(&working_order(
@@ -2452,7 +2437,7 @@ mod tests {
 
     #[test]
     fn flatten_persists_manual_target_override_and_targets_zero() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track_id = TrackId::new("btc-core");
 
         let transition = manager.command(&track_id, TrackCommand::Flatten).unwrap();
@@ -2469,7 +2454,7 @@ mod tests {
 
     #[test]
     fn flatten_keeps_zero_target_even_when_price_is_in_band() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track_id = TrackId::new("btc-core");
 
         manager.command(&track_id, TrackCommand::Flatten).unwrap();
@@ -2490,7 +2475,7 @@ mod tests {
 
     #[test]
     fn resume_clears_manual_target_override_after_flatten() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track_id = TrackId::new("btc-core");
 
         manager.command(&track_id, TrackCommand::Flatten).unwrap();
@@ -2509,7 +2494,8 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Paused;
         track.current_exposure = poise_core::types::Exposure(8.0);
-        track.reference_price = Some(85.0);
+        track.strategy_price = Some(85.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
         track.budget = CapacityBudget {
             max_notional: 1500.0,
             ..test_budget()
@@ -2535,7 +2521,8 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Paused;
         track.current_exposure = poise_core::types::Exposure(2.0);
-        track.reference_price = Some(99.95);
+        track.strategy_price = Some(99.95);
+        track.strategy_price_status = StrategyPriceStatus::Live;
         track.exchange_rules = poise_core::types::ExchangeRules {
             price_tick: 0.1,
             quantity_step: 0.5,
@@ -2574,7 +2561,8 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Paused;
         track.current_exposure = Exposure(2.0);
-        track.reference_price = Some(95.0);
+        track.strategy_price = Some(95.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
         seed_executor_slot(
             track,
             working_order(
@@ -2616,7 +2604,8 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Paused;
         track.current_exposure = Exposure(0.0);
-        track.reference_price = Some(95.0);
+        track.strategy_price = Some(95.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
 
         manager.resume_track("btc1").unwrap();
 
@@ -2808,7 +2797,7 @@ mod tests {
 
     #[test]
     fn recover_submit_effect_supersedes_without_receipt_evidence_when_target_is_reached() {
-        let mut manager = test_manager_with_cached_price(92.5);
+        let mut manager = test_manager_with_cached_strategy_price(92.5);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(6.0);
         track.desired_exposure = Some(poise_core::types::Exposure(6.0));
@@ -2839,7 +2828,7 @@ mod tests {
 
     #[test]
     fn recover_submit_effect_supersede_plan_is_executor_owned() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
         track.desired_exposure = Some(poise_core::types::Exposure(6.0));
@@ -2920,7 +2909,7 @@ mod tests {
 
     #[test]
     fn recover_submit_effect_supersedes_when_reduce_only_semantics_change() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
@@ -3013,7 +3002,7 @@ mod tests {
     #[test]
     fn recover_submit_effect_proceeds_when_current_plan_keeps_same_rounded_order_request_within_anchor_threshold()
      {
-        let mut manager = test_manager_with_cached_price(94.99);
+        let mut manager = test_manager_with_cached_strategy_price(94.99);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(0.0);
         track.config.notional_per_unit = 100.0;
@@ -3092,7 +3081,7 @@ mod tests {
     #[test]
     fn recover_submit_effect_proceeds_with_pending_submit_when_latest_target_drift_is_within_min_rebalance_units_of_anchor()
      {
-        let mut manager = test_manager_with_cached_price(96.125);
+        let mut manager = test_manager_with_cached_strategy_price(96.125);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.current_exposure = poise_core::types::Exposure(2.0);
         track.config.notional_per_unit = 100.0;
@@ -3165,7 +3154,7 @@ mod tests {
     #[test]
     fn recover_submit_effect_supersedes_pending_submit_when_track_is_paused_and_has_no_current_plan()
      {
-        let mut manager = test_manager_with_cached_price(96.125);
+        let mut manager = test_manager_with_cached_strategy_price(96.125);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.status = TrackStatus::Paused;
         track.current_exposure = poise_core::types::Exposure(2.0);
@@ -3229,8 +3218,8 @@ mod tests {
     }
 
     #[test]
-    fn observe_position_with_cached_reference_price_reconciles_immediately() {
-        let mut manager = test_manager_with_cached_price(95.0);
+    fn observe_position_with_cached_strategy_price_reconciles_immediately() {
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
 
         let transition = manager
             .observe(
@@ -3484,7 +3473,8 @@ mod tests {
         let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
         track.status = TrackStatus::Paused;
         track.desired_exposure = None;
-        track.reference_price = Some(95.0);
+        track.strategy_price = Some(95.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
 
         let transition = manager
             .sync_exchange_state(
@@ -3504,7 +3494,7 @@ mod tests {
         let track = manager.get_track("btc1").unwrap();
         assert_eq!(track.status, TrackStatus::Paused);
         assert_eq!(track.desired_exposure, None);
-        assert_eq!(track.reference_price, Some(95.0));
+        assert_eq!(track.strategy_price, Some(95.0));
     }
 
     #[test]
@@ -3515,7 +3505,8 @@ mod tests {
         track.status = TrackStatus::Active;
         track.current_exposure = poise_core::types::Exposure(2.0);
         track.desired_exposure = Some(poise_core::types::Exposure(6.0));
-        track.reference_price = Some(95.0);
+        track.strategy_price = Some(95.0);
+        track.strategy_price_status = StrategyPriceStatus::Live;
         seed_executor_slot(
             track,
             working_order(
@@ -3908,7 +3899,7 @@ mod tests {
 
     #[test]
     fn canceled_order_keeps_attention_required_while_recovery_anomaly_is_active() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         track.executor_state = ExecutorState {
@@ -4014,8 +4005,8 @@ mod tests {
     }
 
     #[test]
-    fn observe_canceled_order_with_cached_reference_price_reconciles_immediately() {
-        let mut manager = test_manager_with_cached_price(95.0);
+    fn observe_canceled_order_with_cached_strategy_price_reconciles_immediately() {
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(
@@ -4068,7 +4059,7 @@ mod tests {
 
     #[test]
     fn observe_filled_order_does_not_reconcile_before_position_update() {
-        let mut manager = test_manager_with_cached_price(95.0);
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.desired_exposure = Some(poise_core::types::Exposure(4.0));
         seed_executor_slot(

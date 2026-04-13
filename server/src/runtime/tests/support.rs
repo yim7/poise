@@ -622,6 +622,7 @@ pub(crate) fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnap
         manual_target_override: None,
         executor_state: ExecutorState::empty(test_server_time()),
         replacement_gate_reason: None,
+        price_execution_block_reason: None,
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: poise_engine::snapshot::ObservedState {
@@ -630,7 +631,6 @@ pub(crate) fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnap
             mark_price: Some(95.0),
             best_bid: Some(95.0),
             best_ask: Some(95.0),
-            reference_price: Some(95.0),
             out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
             last_tick_at: None,
             market_data_stale_since: None,

@@ -7,8 +7,8 @@ use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::{
-    PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_auto_replace,
-    allows_submit, working_order_gate_action,
+    PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_auto_replace, allows_submit,
+    working_order_gate_action,
 };
 use crate::runtime::{
     ExecutionRound, ExecutionSlot, ExecutorDiagnostics, ExecutorState, SlotState, WorkingOrder,
@@ -356,8 +356,12 @@ fn desired_inventory_order_for_preserved_round(
 
     match current_slot.state {
         SlotState::SubmitPending => {
-            if !pending_order_should_be_replaced(mode, current_order, &desired_order, input.exchange_rules)
-            {
+            if !pending_order_should_be_replaced(
+                mode,
+                current_order,
+                &desired_order,
+                input.exchange_rules,
+            ) {
                 return None;
             }
             Some(desired_order)
@@ -467,7 +471,11 @@ fn diff_desired_orders(
             }
             let request = desired_order_to_request(input, desired_order);
             (
-                vec![submit_action(input, &request, desired_order.desired_exposure.clone())],
+                vec![submit_action(
+                    input,
+                    &request,
+                    desired_order.desired_exposure.clone(),
+                )],
                 slots::with_inventory_core_slot(
                     sibling_slots,
                     recording::submit_pending_slot(desired_order, &request),
@@ -639,8 +647,7 @@ fn pending_order_should_be_replaced(
         return false;
     }
 
-    replacement_gate_reason_for_pending_order(mode, current_order, desired_order, rules)
-    .is_none()
+    replacement_gate_reason_for_pending_order(mode, current_order, desired_order, rules).is_none()
 }
 
 fn replacement_improvement_ratio(

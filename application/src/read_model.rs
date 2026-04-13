@@ -5,6 +5,7 @@ use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
 use poise_engine::ledger::TrackLedgerState;
+use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{SlotState, StrategyPriceStatus, TrackStatus};
 
 use crate::TrackReadSource;
@@ -45,6 +46,7 @@ pub struct TrackReadModel {
     pub has_recovery_anomaly: bool,
     pub has_account_margin_guard: bool,
     pub has_stale_market_data: bool,
+    pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
     pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub slots: Vec<ReadModelSlot>,
     pub manual_target_override: Option<f64>,
@@ -80,6 +82,7 @@ impl TrackReadModel {
         let unrealized_pnl = runtime.unrealized_pnl;
         let has_account_margin_guard = runtime.has_account_margin_guard;
         let has_stale_market_data = runtime.market_data_stale_since.is_some();
+        let price_execution_block_reason = runtime.price_execution_block_reason;
         let executor_state = runtime.executor_state;
 
         let slots = executor_state
@@ -133,6 +136,7 @@ impl TrackReadModel {
             has_recovery_anomaly: executor_state.diagnostics.recovery_anomaly.is_some(),
             has_account_margin_guard,
             has_stale_market_data,
+            price_execution_block_reason,
             replacement_gate_reason,
             slots,
             manual_target_override: manual_target_override.map(|value| value.0),
@@ -244,6 +248,7 @@ mod tests {
                 },
                 ledger_state: Default::default(),
                 replacement_gate_reason: None,
+                price_execution_block_reason: None,
                 risk: RiskState {
                     unrealized_pnl: 0.0,
                     ..RiskState::default()
@@ -254,7 +259,6 @@ mod tests {
                     mark_price: Some(101.5),
                     best_bid: Some(101.0),
                     best_ask: Some(101.5),
-                    reference_price: Some(101.25),
                     out_of_band_since: None,
                     last_tick_at: None,
                     market_data_stale_since: None,
@@ -333,6 +337,9 @@ mod tests {
                 ledger_state: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
+                price_execution_block_reason: Some(
+                    poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
+                ),
                 strategy_price: Some(101.25),
                 strategy_price_status: StrategyPriceStatus::Stale,
                 mark_price: Some(101.5),
@@ -346,12 +353,13 @@ mod tests {
         });
 
         assert_eq!(read_model.strategy_price, Some(101.25));
-        assert_eq!(
-            read_model.strategy_price_status,
-            StrategyPriceStatus::Stale
-        );
+        assert_eq!(read_model.strategy_price_status, StrategyPriceStatus::Stale);
         assert_eq!(read_model.mark_price, Some(101.5));
         assert_eq!(read_model.best_bid, Some(101.0));
         assert_eq!(read_model.best_ask, Some(101.5));
+        assert_eq!(
+            read_model.price_execution_block_reason,
+            Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote)
+        );
     }
 }

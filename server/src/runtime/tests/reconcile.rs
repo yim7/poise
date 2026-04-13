@@ -63,7 +63,8 @@ async fn apply_user_data_event_persists_track_ledger_event_atomically() {
     let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
     let mut snapshot = test_snapshot();
-    snapshot.observed.reference_price = Some(95.0);
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
     set_executor_state(
         &mut snapshot,
         working_order(
@@ -173,7 +174,8 @@ async fn filled_order_update_marks_track_stale_without_immediate_reconcile() {
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(2.0);
     snapshot.desired_exposure = Some(Exposure(4.0));
-    snapshot.observed.reference_price = Some(95.0);
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
     set_executor_state(
         &mut snapshot,
         working_order(
