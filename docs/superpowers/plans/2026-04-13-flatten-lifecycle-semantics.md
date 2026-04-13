@@ -342,7 +342,7 @@ Task 2 implementation commit: `bb3f9f8`
 - Modify: `docs/superpowers/specs/2026-04-13-flatten-lifecycle-semantics-design.md`
 - Modify: `docs/superpowers/plans/2026-04-13-flatten-lifecycle-semantics.md`
 
-- [ ] **Step 1: 写一个文档回归清单**
+- [x] **Step 1: 写一个文档回归清单**
 
 把下面这些稳定文档语义逐条检查并改成最终版本：
 
@@ -350,7 +350,7 @@ Task 2 implementation commit: `bb3f9f8`
 - `docs/protocol-contract.md` 中对 `flatten`、`terminate`、`resume` 的说明
 - 本 spec 和本 plan 中的实际实现结果与 commit SHA
 
-- [ ] **Step 2: 更新稳定文档**
+- [x] **Step 2: 更新稳定文档**
 
 至少写清楚：
 
@@ -362,7 +362,7 @@ Task 2 implementation commit: `bb3f9f8`
 - 订单层 `reduce_only` 仍保留
 - 不支持旧 `reduce_only` 策略别名
 
-- [ ] **Step 3: 跑最终回归**
+- [x] **Step 3: 跑最终回归**
 
 Run:
 
@@ -380,12 +380,14 @@ Expected:
 - `hold` 的恢复语义和文档一致
 - 订单层 `reduce_only` 相关测试继续通过
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md docs/protocol-contract.md docs/superpowers/specs/2026-04-13-flatten-lifecycle-semantics-design.md docs/superpowers/plans/2026-04-13-flatten-lifecycle-semantics.md
 git commit -m "docs: align flatten and hold lifecycle semantics"
 ```
+
+Task 3 implementation commit: `324467a`
 
 ## Self-Review
 

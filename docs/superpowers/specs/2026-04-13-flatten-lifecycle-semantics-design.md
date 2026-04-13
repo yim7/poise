@@ -288,3 +288,4 @@ manual_target_override: Option<Exposure>
 
 - Task 1: `a056cbb` `refactor: align flatten lifecycle semantics across runtime and UI`
 - Task 2: `bb3f9f8` `fix: preserve hold as manual recovery lifecycle`
+- Task 3: `324467a` `docs: align flatten and hold lifecycle semantics`
