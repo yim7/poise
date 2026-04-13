@@ -66,7 +66,7 @@
 - Test: `tui/src/views/dashboard.rs`
 - Test: `tui/src/views/instance.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住端到端的新语义**
+- [x] **Step 1: 先写失败测试，锁住端到端的新语义**
 
 至少补这些测试：
 
@@ -112,7 +112,7 @@ fn project_track_status_uses_manual_flattening() {}
 - projector / TUI 不再投影旧名字
 - 订单层 `OrderRequest.reduce_only` 不在这个任务里改动
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -128,7 +128,7 @@ Expected:
 - 当前实现失败，因为 `OutOfBandPolicy::ReduceOnly` 和 `TrackStatus::ReducingOnly` 仍然存在
 - projector 和 UI 仍在输出旧名字
 
-- [ ] **Step 3: 做最小实现，端到端切换到新名字**
+- [x] **Step 3: 做最小实现，端到端切换到新名字**
 
 `core/src/strategy.rs`：
 
@@ -191,7 +191,7 @@ Self::Flatten => "flatten",
 
 并同步修改 `application/src/read_model.rs`、`application/src/track_read_source.rs`、`server/src/projector.rs`、`tui/src/views/dashboard.rs`、`tui/src/views/instance.rs` 的状态映射和展示名字。
 
-- [ ] **Step 4: 跑 Task 1 回归**
+- [x] **Step 4: 跑 Task 1 回归**
 
 Run:
 
@@ -207,12 +207,14 @@ Expected:
 - `core -> engine -> protocol -> projector -> TUI` 都只输出新的策略语义
 - 订单层 `reduce_only` 测试不受影响
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/src/strategy.rs engine/src/runtime.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs engine/src/reconciler.rs engine/src/manager.rs protocol/src/lib.rs application/src/read_model.rs application/src/track_read_source.rs server/src/projector.rs tui/src/views/dashboard.rs tui/src/theme.rs tui/src/views/instance.rs
 git commit -m "refactor: align flatten lifecycle semantics across runtime and UI"
 ```
+
+Task 1 implementation commit: `a056cbb`
 
 ### Task 2: 修正 `freeze / hold / resume` 的恢复语义
 
