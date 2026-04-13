@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
-use crate::ports::OrderRequest;
+use crate::ports::{ExecutionQuote, OrderRequest};
+use crate::price_gate::{
+    PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_auto_replace,
+    allows_submit, working_order_gate_action,
+};
 use crate::runtime::{
     ExecutionRound, ExecutionSlot, ExecutorDiagnostics, ExecutorState, SlotState, WorkingOrder,
 };
@@ -58,7 +62,9 @@ pub struct SubmitIntentInput<'a> {
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
     pub desired_exposure: Exposure,
-    pub reference_price: f64,
+    pub execution_quote: Option<ExecutionQuote>,
+    pub price_execution_gate: PriceExecutionGate,
+    pub submit_purpose: SubmitPurpose,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -74,6 +80,7 @@ pub struct ExecutorPlan {
 pub struct PendingSubmitHint {
     pub request: OrderRequest,
     pub desired_exposure: Exposure,
+    pub submit_purpose: SubmitPurpose,
 }
 
 #[derive(Debug, Clone)]
@@ -176,16 +183,20 @@ pub(super) fn evaluate_submit_intent_with_active_lifecycle(
         input.observed_at,
         Some(active_lifecycle),
     ));
-    let submit_hint =
+    let submit_hint = if allows_submit(input.price_execution_gate, input.submit_purpose) {
         desired_inventory_order_for_submit_intent(&input, executor_state, &round_decision).map(
             |desired_order| {
                 let request = desired_order_to_request(&input, &desired_order);
                 PendingSubmitHint {
                     request,
                     desired_exposure: desired_order.desired_exposure,
+                    submit_purpose: input.submit_purpose,
                 }
             },
-        );
+        )
+    } else {
+        None
+    };
 
     SubmitIntentEvaluation {
         lifecycle: round_decision.lifecycle,
@@ -299,7 +310,14 @@ fn desired_inventory_order_for_target(
 ) -> Option<DesiredOrder> {
     let inventory_gap = input.current_exposure.delta(desired_exposure);
     let side = Side::from_exposure(&inventory_gap)?;
-    let price = round_to_step(input.reference_price, input.exchange_rules.price_tick);
+    let execution_quote = input.execution_quote?;
+    let price = round_to_step(
+        match side {
+            Side::Buy => execution_quote.best_ask,
+            Side::Sell => execution_quote.best_bid,
+        },
+        input.exchange_rules.price_tick,
+    );
     let quantity = round_to_step(
         inventory_gap.0.abs() * input.base_qty_per_unit,
         input.exchange_rules.quantity_step,
@@ -338,13 +356,8 @@ fn desired_inventory_order_for_preserved_round(
 
     match current_slot.state {
         SlotState::SubmitPending => {
-            if !pending_order_should_be_replaced(
-                mode,
-                current_order,
-                &desired_order,
-                input.reference_price,
-                input.exchange_rules,
-            ) {
+            if !pending_order_should_be_replaced(mode, current_order, &desired_order, input.exchange_rules)
+            {
                 return None;
             }
             Some(desired_order)
@@ -380,9 +393,28 @@ fn diff_desired_orders(
 ) {
     let (current_slot, sibling_slots) = slots::split_inventory_core_slot(executor_state);
     let desired_order = desired_orders.first();
+    let gate_action = current_slot
+        .working_order
+        .as_ref()
+        .map(|order| working_order_gate_action(input.price_execution_gate, order.role.clone()));
 
     match desired_order {
         None => {
+            if matches!(gate_action, Some(WorkingOrderGateAction::Cancel))
+                && let Some(order_id) = current_slot
+                    .working_order
+                    .as_ref()
+                    .and_then(|order| order.order_id.clone())
+            {
+                return (
+                    vec![ExecutionAction::CancelOrder {
+                        instrument: input.instrument.clone(),
+                        order_id,
+                    }],
+                    slots::with_inventory_core_slot(sibling_slots, current_slot),
+                    None,
+                );
+            }
             if matches!(lifecycle, RoundLifecycleDecision::Continue)
                 && matches!(
                     current_slot.state,
@@ -423,12 +455,19 @@ fn diff_desired_orders(
             )
         }
         Some(desired_order) if current_slot.state == SlotState::Empty => {
+            if !allows_submit(input.price_execution_gate, input.submit_purpose) {
+                return (
+                    vec![ExecutionAction::NoOp],
+                    slots::with_inventory_core_slot(
+                        sibling_slots,
+                        slots::empty_inventory_core_slot(),
+                    ),
+                    None,
+                );
+            }
             let request = desired_order_to_request(input, desired_order);
             (
-                vec![ExecutionAction::SubmitOrder {
-                    request: request.clone(),
-                    desired_exposure: desired_order.desired_exposure.clone(),
-                }],
+                vec![submit_action(input, &request, desired_order.desired_exposure.clone())],
                 slots::with_inventory_core_slot(
                     sibling_slots,
                     recording::submit_pending_slot(desired_order, &request),
@@ -439,6 +478,32 @@ fn diff_desired_orders(
         Some(desired_order) => {
             let current_order = current_slot.working_order.as_ref();
             if let Some(current_order) = current_order {
+                if matches!(gate_action, Some(WorkingOrderGateAction::Cancel)) {
+                    if let Some(order_id) = current_order.order_id.clone() {
+                        return (
+                            vec![ExecutionAction::CancelOrder {
+                                instrument: input.instrument.clone(),
+                                order_id,
+                            }],
+                            slots::with_inventory_core_slot(sibling_slots, current_slot),
+                            None,
+                        );
+                    }
+                    return (
+                        vec![ExecutionAction::NoOp],
+                        slots::with_inventory_core_slot(sibling_slots, current_slot),
+                        None,
+                    );
+                }
+
+                if !allows_auto_replace(input.price_execution_gate) {
+                    return (
+                        vec![ExecutionAction::NoOp],
+                        slots::with_inventory_core_slot(sibling_slots, current_slot),
+                        None,
+                    );
+                }
+
                 if desired_matches_working_order(desired_order, current_order, input.exchange_rules)
                 {
                     return (
@@ -452,7 +517,6 @@ fn diff_desired_orders(
                     mode,
                     current_order,
                     desired_order,
-                    input.reference_price,
                     input.exchange_rules,
                 ) {
                     return (
@@ -470,10 +534,7 @@ fn diff_desired_orders(
                                 instrument: input.instrument.clone(),
                                 order_id,
                             },
-                            ExecutionAction::SubmitOrder {
-                                request: request.clone(),
-                                desired_exposure: desired_order.desired_exposure.clone(),
-                            },
+                            submit_action(input, &request, desired_order.desired_exposure.clone()),
                         ],
                         slots::with_inventory_core_slot(sibling_slots, current_slot),
                         None,
@@ -487,6 +548,18 @@ fn diff_desired_orders(
                 None,
             )
         }
+    }
+}
+
+fn submit_action(
+    input: &SubmitIntentInput<'_>,
+    request: &OrderRequest,
+    desired_exposure: Exposure,
+) -> ExecutionAction {
+    ExecutionAction::SubmitOrder {
+        request: request.clone(),
+        desired_exposure,
+        submit_purpose: input.submit_purpose,
     }
 }
 
@@ -527,32 +600,23 @@ fn replacement_gate_reason_for_working_order(
     mode: &ExecutionMode,
     current_order: &WorkingOrder,
     desired_order: &DesiredOrder,
-    reference_price: f64,
     rules: &ExchangeRules,
 ) -> Option<ReplacementGateReason> {
     current_order.order_id.as_ref()?;
-    replacement_gate_reason_for_pending_order(
-        mode,
-        current_order,
-        desired_order,
-        reference_price,
-        rules,
-    )
+    replacement_gate_reason_for_pending_order(mode, current_order, desired_order, rules)
 }
 
 fn replacement_gate_reason_for_pending_order(
     mode: &ExecutionMode,
     current_order: &WorkingOrder,
     desired_order: &DesiredOrder,
-    reference_price: f64,
     rules: &ExchangeRules,
 ) -> Option<ReplacementGateReason> {
     if current_order.side != desired_order.side {
         return None;
     }
 
-    let improvement_ratio =
-        replacement_improvement_ratio(current_order, desired_order, reference_price)?;
+    let improvement_ratio = replacement_improvement_ratio(current_order, desired_order)?;
     let threshold_rate = (rules.maker_fee_rate + rules.taker_fee_rate)
         + (replacement_safety_buffer_bps(mode) / BPS_DENOMINATOR);
     (improvement_ratio < threshold_rate).then(|| ReplacementGateReason::ImprovementBelowThreshold {
@@ -565,7 +629,6 @@ fn pending_order_should_be_replaced(
     mode: &ExecutionMode,
     current_order: &WorkingOrder,
     desired_order: &DesiredOrder,
-    reference_price: f64,
     rules: &ExchangeRules,
 ) -> bool {
     if matches!(mode, ExecutionMode::Passive) {
@@ -576,25 +639,19 @@ fn pending_order_should_be_replaced(
         return false;
     }
 
-    replacement_gate_reason_for_pending_order(
-        mode,
-        current_order,
-        desired_order,
-        reference_price,
-        rules,
-    )
+    replacement_gate_reason_for_pending_order(mode, current_order, desired_order, rules)
     .is_none()
 }
 
 fn replacement_improvement_ratio(
     current_order: &WorkingOrder,
     desired_order: &DesiredOrder,
-    reference_price: f64,
 ) -> Option<f64> {
     let price_improvement = match desired_order.side {
         Side::Buy => current_order.price - desired_order.price,
         Side::Sell => desired_order.price - current_order.price,
     };
+    let reference_price = desired_order.price;
     if price_improvement <= 0.0 || reference_price <= f64::EPSILON {
         return None;
     }

@@ -55,7 +55,10 @@ mod tests {
     use super::*;
     use crate::execution_plan::ExecutionAction;
     use crate::observation::OrderObservation;
-    use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
+    use crate::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
+    use crate::price_gate::{
+        PriceExecutionBlockReason, PriceExecutionGate, SubmitPurpose,
+    };
     use crate::runtime::{ExecutionSlot, ExecutionStats, ExecutorState, SlotState, WorkingOrder};
     use crate::track::{Instrument, TrackId, Venue};
     use crate::transition::TrackEffect;
@@ -79,6 +82,10 @@ mod tests {
         }
     }
 
+    fn execution_quote(best_bid: f64, best_ask: f64) -> ExecutionQuote {
+        ExecutionQuote { best_bid, best_ask }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn submit_intent_input<'a>(
         track_id: &'a TrackId,
@@ -99,7 +106,9 @@ mod tests {
             min_rebalance_units,
             current_exposure,
             desired_exposure,
-            reference_price,
+            execution_quote: Some(execution_quote(reference_price, reference_price)),
+            price_execution_gate: PriceExecutionGate::Open,
+            submit_purpose: SubmitPurpose::AutoReconcile,
             observed_at,
         }
     }
@@ -127,6 +136,68 @@ mod tests {
                 current_exposure,
                 desired_exposure,
                 reference_price,
+                observed_at,
+            ),
+            executor_state,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn quoted_submit_intent_input<'a>(
+        track_id: &'a TrackId,
+        instrument: &'a Instrument,
+        exchange_rules: &'a ExchangeRules,
+        base_qty_per_unit: f64,
+        min_rebalance_units: f64,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+        execution_quote: Option<ExecutionQuote>,
+        price_execution_gate: PriceExecutionGate,
+        submit_purpose: SubmitPurpose,
+        observed_at: DateTime<Utc>,
+    ) -> SubmitIntentInput<'a> {
+        SubmitIntentInput {
+            track_id,
+            instrument,
+            exchange_rules,
+            base_qty_per_unit,
+            min_rebalance_units,
+            current_exposure,
+            desired_exposure,
+            execution_quote,
+            price_execution_gate,
+            submit_purpose,
+            observed_at,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn quoted_executor_input<'a>(
+        track_id: &'a TrackId,
+        instrument: &'a Instrument,
+        exchange_rules: &'a ExchangeRules,
+        base_qty_per_unit: f64,
+        min_rebalance_units: f64,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+        execution_quote: Option<ExecutionQuote>,
+        price_execution_gate: PriceExecutionGate,
+        submit_purpose: SubmitPurpose,
+        executor_state: Option<&'a ExecutorState>,
+        observed_at: DateTime<Utc>,
+    ) -> ExecutorInput<'a> {
+        ExecutorInput::new(
+            quoted_submit_intent_input(
+                track_id,
+                instrument,
+                exchange_rules,
+                base_qty_per_unit,
+                min_rebalance_units,
+                current_exposure,
+                desired_exposure,
+                execution_quote,
+                price_execution_gate,
+                submit_purpose,
                 observed_at,
             ),
             executor_state,
@@ -841,6 +912,7 @@ mod tests {
                 ExecutionAction::SubmitOrder {
                     request,
                     desired_exposure,
+                    ..
                 }
             ] if order_id == "order-1"
                 && request.side == Side::Sell
@@ -955,6 +1027,7 @@ mod tests {
             [ExecutionAction::SubmitOrder {
                 request,
                 desired_exposure,
+                ..
             }] if request.quantity > 0.0
                 && *desired_exposure == Exposure(near_equal_gap)
         ));
@@ -1977,6 +2050,7 @@ mod tests {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(4.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
             }]
         );
         assert_eq!(
@@ -2541,6 +2615,7 @@ mod tests {
             [TrackEffect::SubmitOrder {
                 request,
                 desired_exposure,
+                ..
             }] if request.side == Side::Sell
                 && request.reduce_only
                 && (request.quantity - 1.2).abs() < 1e-9
@@ -2787,6 +2862,7 @@ mod tests {
         let pending_submit_hints = vec![PendingSubmitHint {
             request: request.clone(),
             desired_exposure: Exposure(4.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
         }];
 
         let recovery = recover_working_orders(RecoveryInput {
@@ -2806,5 +2882,297 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn buy_order_uses_best_ask() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            Some(execution_quote(94.0, 95.0)),
+            PriceExecutionGate::Open,
+            SubmitPurpose::AutoReconcile,
+            None,
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::SubmitOrder { request, .. }]
+                if request.side == Side::Buy && (request.price - 95.0).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn sell_order_uses_best_bid() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(6.0),
+            Exposure(2.0),
+            Some(execution_quote(94.0, 95.0)),
+            PriceExecutionGate::Open,
+            SubmitPurpose::AutoReconcile,
+            None,
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::SubmitOrder { request, .. }]
+                if request.side == Side::Sell && (request.price - 94.0).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn auto_reconcile_submit_is_blocked_when_gate_is_no_submit() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            None,
+            PriceExecutionGate::NoSubmit {
+                reason: PriceExecutionBlockReason::MissingExecutionQuote,
+            },
+            SubmitPurpose::AutoReconcile,
+            None,
+            now,
+        ));
+
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.state.slots, vec![slots::empty_inventory_core_slot()]);
+    }
+
+    #[test]
+    fn manual_risk_reduction_submit_is_allowed_when_gate_is_manual_risk_reduction_only() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(6.0),
+            Exposure(0.0),
+            Some(execution_quote(94.0, 95.0)),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            SubmitPurpose::ManualRiskReduction,
+            None,
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::SubmitOrder {
+                request,
+                desired_exposure,
+                submit_purpose,
+            }]
+                if request.side == Side::Sell
+                    && request.reduce_only
+                    && *desired_exposure == Exposure(0.0)
+                    && *submit_purpose == SubmitPurpose::ManualRiskReduction
+        ));
+    }
+
+    #[test]
+    fn gate_cancels_existing_increase_inventory_working_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = inventory_core_state(
+            now,
+            Exposure(4.0),
+            Exposure(6.0),
+            Side::Buy,
+            15.0,
+            OrderStatus::New,
+            OrderRole::IncreaseInventory,
+        );
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(6.0),
+            Some(execution_quote(94.0, 95.0)),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            SubmitPurpose::AutoReconcile,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert!(matches!(
+            plan.effects.as_slice(),
+            [ExecutionAction::CancelOrder { order_id, .. }] if order_id == "order-1"
+        ));
+    }
+
+    #[test]
+    fn gate_keeps_existing_decrease_inventory_working_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let existing_state = inventory_core_state(
+            now,
+            Exposure(-4.0),
+            Exposure(0.0),
+            Side::Buy,
+            15.0,
+            OrderStatus::New,
+            OrderRole::DecreaseInventory,
+        );
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(-4.0),
+            Exposure(0.0),
+            Some(execution_quote(94.0, 95.0)),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            SubmitPurpose::ManualRiskReduction,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.state.slots, existing_state.slots);
+    }
+
+    #[test]
+    fn gate_closed_stops_automatic_replacement_for_kept_working_order() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = test_track_id();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let mut existing_state = inventory_core_state(
+            now,
+            Exposure(-4.0),
+            Exposure(0.0),
+            Side::Buy,
+            15.0,
+            OrderStatus::New,
+            OrderRole::DecreaseInventory,
+        );
+        existing_state.diagnostics.last_reprice_at = Some(now - Duration::seconds(300));
+
+        let plan = plan(quoted_executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(-4.0),
+            Exposure(0.0),
+            Some(execution_quote(88.0, 89.0)),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            SubmitPurpose::ManualRiskReduction,
+            Some(&existing_state),
+            now,
+        ));
+
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.state.slots, existing_state.slots);
+        assert_eq!(plan.replacement_gate_reason, None);
+    }
+
+    #[test]
+    fn gate_blocked_pending_submit_is_superseded_by_recovery() {
+        let rules = test_exchange_rules();
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+        let track_id = TrackId::new("track-1");
+        let instrument = test_instrument();
+        let request = OrderRequest {
+            instrument: instrument.clone(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            client_order_id: "track-1-reconcile".into(),
+            reduce_only: false,
+        };
+        let previous_state =
+            record_submit_request(&ExecutorState::empty(now), &request, Exposure(4.0));
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            request: &request,
+            desired_exposure: &Exposure(4.0),
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+            current_plan: Some(quoted_submit_intent_input(
+                &track_id,
+                &instrument,
+                &rules,
+                3.75,
+                0.0,
+                Exposure(0.0),
+                Exposure(4.0),
+                Some(execution_quote(94.0, 95.0)),
+                PriceExecutionGate::NoSubmit {
+                    reason: PriceExecutionBlockReason::MissingExecutionQuote,
+                },
+                SubmitPurpose::AutoReconcile,
+                now,
+            )),
+        });
+
+        let SubmitRecoveryPlan {
+            resolution: SubmitRecoveryResolution::Superseded { state },
+            effects,
+        } = recovery
+        else {
+            panic!("gate-blocked pending submit should be superseded by recovery");
+        };
+
+        assert!(effects.is_empty());
+        assert_eq!(state.slots, vec![slots::empty_inventory_core_slot()]);
     }
 }

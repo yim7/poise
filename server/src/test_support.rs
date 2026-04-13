@@ -10,7 +10,8 @@ use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::OrderUpdateAbsorbResult;
 use poise_engine::manager::TrackManager;
-use poise_engine::observation::{OrderObservation, PositionObservation};
+use poise_engine::observation::{MarketObservation, OrderObservation, PositionObservation};
+use poise_engine::ports::ExecutionQuote;
 use poise_engine::track::{TrackId, Venue};
 use poise_engine::transition::TrackTransition;
 use tokio::sync::RwLock;
@@ -64,7 +65,16 @@ impl RuntimeTestContext {
         reference_price: f64,
     ) -> Result<TrackTransition, anyhow::Error> {
         self.observation_service
-            .observe_market(id, reference_price)
+            .observe_market(
+                id,
+                MarketObservation {
+                    mark_price: reference_price,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: reference_price,
+                        best_ask: reference_price,
+                    }),
+                },
+            )
             .await
     }
 
@@ -117,7 +127,16 @@ impl EffectWorkerTestContext {
         reference_price: f64,
     ) -> Result<TrackTransition, anyhow::Error> {
         self.observation_service
-            .observe_market(id, reference_price)
+            .observe_market(
+                id,
+                MarketObservation {
+                    mark_price: reference_price,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: reference_price,
+                        best_ask: reference_price,
+                    }),
+                },
+            )
             .await
     }
 

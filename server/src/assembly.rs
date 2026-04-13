@@ -1047,8 +1047,11 @@ total_loss_limit = 600.0
         btc_sender
             .send(PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                reference_price: 95.0,
                 mark_price: 95.0,
+                execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                    best_bid: 95.0,
+                    best_ask: 95.0,
+                }),
                 timestamp: chrono::Utc::now(),
             })
             .await
@@ -1178,14 +1181,18 @@ total_loss_limit = 600.0
             let mut manager = manager_handle.write().await;
             let tick = PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                reference_price: 95.0,
                 mark_price: 95.0,
+                execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                    best_bid: 95.0,
+                    best_ask: 95.0,
+                }),
                 timestamp: chrono::Utc::now(),
             };
             let _ = manager.observe(
                 &TrackId::new("btc-core"),
                 TrackObservation::Market(MarketObservation {
-                    reference_price: tick.reference_price,
+                    mark_price: tick.mark_price,
+                    execution_quote: tick.execution_quote,
                 }),
             );
             manager.pause_track("btc-core").unwrap();
@@ -1213,12 +1220,15 @@ total_loss_limit = 600.0
         let tick_request = tokio::spawn(async move {
             let tick = PriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                reference_price: 85.0,
                 mark_price: 85.0,
+                execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                    best_bid: 85.0,
+                    best_ask: 85.0,
+                }),
                 timestamp: chrono::Utc::now(),
             };
             tick_state
-                .observe_market("btc-core", tick.reference_price)
+                .observe_market("btc-core", tick.mark_price)
                 .await
                 .map(|_| ())
         });

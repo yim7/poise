@@ -113,6 +113,7 @@ async fn startup_preflight_marks_all_pending_submit_effects_not_only_dispatchabl
                         reduce_only: false,
                     },
                     desired_exposure: Exposure(4.0),
+                    submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
                 },
             ],
         )
@@ -326,6 +327,7 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
             ExecutionAction::SubmitOrder {
                 request,
                 desired_exposure,
+                ..
             },
         ] => (request.clone(), desired_exposure.clone()),
         other => panic!("expected one submit effect, got {other:?}"),
@@ -846,6 +848,11 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(6.0));
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(95.0);
+    snapshot.observed.best_bid = Some(95.0);
+    snapshot.observed.best_ask = Some(95.0);
     snapshot.observed.reference_price = Some(95.0);
     set_executor_state(
         &mut snapshot,
@@ -895,6 +902,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -951,6 +959,11 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(6.0));
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(95.0);
+    snapshot.observed.best_bid = Some(95.0);
+    snapshot.observed.best_ask = Some(95.0);
     snapshot.observed.reference_price = Some(95.0);
     set_executor_state(
         &mut snapshot,
@@ -1000,6 +1013,7 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1379,6 +1393,7 @@ async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(4.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1431,6 +1446,7 @@ async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
         ExecutionAction::SubmitOrder {
             request,
             desired_exposure,
+            ..
         } if request.side == Side::Buy
             && (request.price - 95.0).abs() < f64::EPSILON
             && (request.quantity - test_config().base_qty_per_unit() * 2.0).abs() < f64::EPSILON
@@ -1448,6 +1464,11 @@ async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_rev
     snapshot.current_exposure = Exposure(2.0);
     snapshot.desired_exposure = Some(Exposure(3.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(95.0);
+    snapshot.observed.best_bid = Some(95.0);
+    snapshot.observed.best_ask = Some(95.0);
     snapshot.observed.reference_price = Some(95.0);
     let (_state, worker_state) = test_launch_contexts_with_config(
         exchange.metadata_port(),
@@ -1478,6 +1499,7 @@ async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_rev
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(3.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1552,6 +1574,7 @@ async fn effect_worker_waits_for_exchange_state_when_receipt_snapshot_has_no_liv
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1590,6 +1613,11 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(6.0));
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(95.0);
+    snapshot.observed.best_bid = Some(95.0);
+    snapshot.observed.best_ask = Some(95.0);
     snapshot.observed.reference_price = Some(95.0);
     set_executor_state(
         &mut snapshot,
@@ -1646,6 +1674,7 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1698,6 +1727,7 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
         ExecutionAction::SubmitOrder {
             request,
             desired_exposure,
+            ..
         } if request.side == Side::Buy
             && (request.price - 95.0).abs() < f64::EPSILON
             && (request.quantity - test_config().base_qty_per_unit() * 4.0).abs() < f64::EPSILON
@@ -1746,6 +1776,7 @@ async fn effect_worker_keeps_receipt_backed_submit_pending_when_attention_requir
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1792,6 +1823,11 @@ async fn effect_worker_supersedes_submit_when_target_is_reached_without_receipt_
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     snapshot.current_exposure = Exposure(6.0);
     snapshot.desired_exposure = Some(Exposure(6.0));
+    snapshot.observed.strategy_price = Some(92.5);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(92.5);
+    snapshot.observed.best_bid = Some(92.5);
+    snapshot.observed.best_ask = Some(92.5);
     snapshot.observed.reference_price = Some(92.5);
     let (_state, worker_state) = test_launch_contexts(
         exchange.metadata_port(),
@@ -1821,6 +1857,7 @@ async fn effect_worker_supersedes_submit_when_target_is_reached_without_receipt_
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -1924,6 +1961,11 @@ async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(-6.0);
     snapshot.desired_exposure = Some(Exposure(-10.0));
+    snapshot.observed.strategy_price = Some(105.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(105.0);
+    snapshot.observed.best_bid = Some(105.0);
+    snapshot.observed.best_ask = Some(105.0);
     snapshot.observed.reference_price = Some(105.0);
     set_executor_state(
         &mut snapshot,
@@ -2118,6 +2160,7 @@ async fn recovered_submit_emits_effect_state_changed_notification() {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,

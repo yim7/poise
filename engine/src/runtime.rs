@@ -15,7 +15,8 @@ use crate::executor::{
 use crate::ledger::TrackLedgerState;
 use crate::persisted_runtime::{PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed};
 use crate::price_gate::PriceExecutionGate;
-use crate::ports::OrderStatus;
+use crate::ports::{ExecutionQuote, OrderStatus};
+use crate::price_gate::evaluate_price_execution_gate;
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
 
@@ -387,6 +388,14 @@ impl TrackRuntime {
         self.best_bid = snapshot.observed.best_bid;
         self.best_ask = snapshot.observed.best_ask;
         self.reference_price = snapshot.observed.reference_price;
+        self.price_execution_gate = evaluate_price_execution_gate(
+            PriceExecutionGate::Open,
+            self.mark_price,
+            match (self.best_bid, self.best_ask) {
+                (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
+                _ => None,
+            },
+        );
         self.out_of_band_since = snapshot.observed.out_of_band_since;
         self.last_tick_at = snapshot.observed.last_tick_at;
         self.market_data_stale_since = snapshot.observed.market_data_stale_since;
@@ -457,9 +466,10 @@ mod tests {
 
     use super::{
         AccountCapacityConstraint, ExecutionRound, ExecutionSlot, ExecutionStats,
-        ExecutorDiagnostics, ExecutorState, RiskState, SlotState, TrackRuntime, TrackStatus,
-        WorkingOrder,
+        ExecutorDiagnostics, ExecutorState, RiskState, SlotState, StrategyPriceStatus,
+        TrackRuntime, TrackStatus, WorkingOrder,
     };
+    use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate};
 
     pub(crate) fn test_runtime() -> TrackRuntime {
         TrackRuntime::new(
@@ -793,6 +803,46 @@ mod tests {
         fresh.restore_from_snapshot(&snapshot).unwrap();
 
         assert_eq!(fresh.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn restore_from_snapshot_recomputes_price_execution_gate_from_observed_prices() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::Active;
+        runtime.strategy_price = Some(95.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(95.0);
+        runtime.best_bid = Some(95.0);
+        runtime.best_ask = Some(95.0);
+        runtime.price_execution_gate = PriceExecutionGate::Open;
+
+        let snapshot = runtime.snapshot();
+        let mut fresh = test_runtime();
+        fresh.restore_from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(fresh.price_execution_gate, PriceExecutionGate::Open);
+    }
+
+    #[test]
+    fn restore_from_snapshot_keeps_missing_quote_gate_when_observed_quote_is_absent() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::Active;
+        runtime.strategy_price = Some(95.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Stale;
+        runtime.mark_price = Some(95.0);
+        runtime.best_bid = None;
+        runtime.best_ask = None;
+
+        let snapshot = runtime.snapshot();
+        let mut fresh = test_runtime();
+        fresh.restore_from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(
+            fresh.price_execution_gate,
+            PriceExecutionGate::NoSubmit {
+                reason: PriceExecutionBlockReason::MissingExecutionQuote,
+            }
+        );
     }
 
     #[test]

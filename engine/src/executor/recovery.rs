@@ -3,6 +3,7 @@ use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::observation::OrderObservation;
 use crate::ports::OrderRequest;
+use crate::price_gate::allows_submit;
 use crate::runtime::{ExecutorState, SlotState};
 use crate::transition::TrackEffect;
 
@@ -152,6 +153,12 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let current_plan_submit = current_plan_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.submit_hint.as_ref());
+    let current_plan_allows_submit = input
+        .current_plan
+        .as_ref()
+        .is_some_and(|current_plan| {
+            allows_submit(current_plan.price_execution_gate, current_plan.submit_purpose)
+        });
     let stale_effect_round_submit = input.current_plan.as_ref().and_then(|current_plan| {
         let active_round = input.previous_state.active_round.as_ref()?;
         if active_round.desired_exposure == *input.desired_exposure {
@@ -170,6 +177,8 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let matching_pending_submit_can_proceed = active_lifecycle
         .pending_submit_for_request(&input.request.client_order_id)
         .is_some_and(|slot| {
+            current_plan_allows_submit
+                &&
             current_plan_evaluation
                 .as_ref()
                 .is_some_and(|evaluation| evaluation.lifecycle == RoundLifecycleDecision::Continue)
@@ -217,6 +226,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
                 effects: vec![TrackEffect::SubmitOrder {
                     request: next_submit.request.clone(),
                     desired_exposure: next_submit.desired_exposure.clone(),
+                    submit_purpose: next_submit.submit_purpose,
                 }],
             };
         }

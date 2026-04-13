@@ -41,7 +41,7 @@ impl TrackProjector {
                 status: project_track_status(&source.status),
                 updated_at: source.updated_at.to_rfc3339(),
             },
-            reference_price: source.reference_price,
+            reference_price: source.strategy_price,
             exposure: ExposureSummaryView {
                 current: source.current_exposure,
                 target: source.desired_exposure,
@@ -71,7 +71,7 @@ impl TrackProjector {
                     status: project_track_status(&source.status),
                     updated_at: source.updated_at.to_rfc3339(),
                 },
-                reference_price: source.reference_price,
+                reference_price: source.strategy_price,
             },
             strategy: TrackStrategyView {
                 lower_price: source.lower_price,
@@ -89,8 +89,8 @@ impl TrackProjector {
                 total_loss_limit: source.budget.total_loss_limit,
             },
             market: TrackMarketView {
-                mark_price: source.reference_price,
-                index_price: source.reference_price,
+                mark_price: source.mark_price,
+                index_price: source.mark_price,
             },
             position: TrackPositionView {
                 current_exposure: source.current_exposure,
@@ -823,7 +823,11 @@ mod tests {
                 daily_loss_limit: 100.0,
                 total_loss_limit: 300.0,
             },
-            reference_price: Some(101.25),
+            strategy_price: Some(101.25),
+            strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
+            mark_price: Some(101.5),
+            best_bid: Some(101.0),
+            best_ask: Some(101.5),
             current_exposure: 3.5,
             desired_exposure: Some(4.0),
             ledger_state: TrackLedgerState {
@@ -912,6 +916,7 @@ mod tests {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(4.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status,
             attempt_count: u32::from(matches!(status, EffectStatus::Failed)),

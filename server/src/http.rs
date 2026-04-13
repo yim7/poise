@@ -485,7 +485,11 @@ mod tests {
                 &TrackId::new("btc-core"),
                 poise_engine::observation::TrackObservation::Market(
                     poise_engine::observation::MarketObservation {
-                        reference_price: 95.0,
+                        mark_price: 95.0,
+                        execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                            best_bid: 95.0,
+                            best_ask: 95.0,
+                        }),
                     },
                 ),
             )

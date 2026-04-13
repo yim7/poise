@@ -411,9 +411,11 @@ impl MutationExecutor {
                 TrackEffect::SubmitOrder {
                     request,
                     desired_exposure,
+                    submit_purpose,
                 } => Some(poise_engine::executor::PendingSubmitHint {
                     request,
                     desired_exposure,
+                    submit_purpose,
                 }),
                 _ => None,
             })
@@ -1034,6 +1036,7 @@ fn restore_ready_pending_submit_effect(
     let TrackEffect::SubmitOrder {
         request,
         desired_exposure,
+        ..
     } = &replacement_submit.effect
     else {
         return Err(anyhow!(
@@ -1139,6 +1142,7 @@ pub(crate) mod test_support {
                         reduce_only: false,
                     },
                     desired_exposure: Exposure(4.0),
+                    submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,

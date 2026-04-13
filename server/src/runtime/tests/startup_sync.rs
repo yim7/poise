@@ -62,7 +62,11 @@ async fn startup_sync_restores_claimed_live_order_before_replanning() {
     assert!(effects.iter().any(|effect| {
         matches!(
             &effect.effect,
-            ExecutionAction::SubmitOrder { request, desired_exposure }
+            ExecutionAction::SubmitOrder {
+                request,
+                desired_exposure,
+                ..
+            }
                 if request.client_order_id.starts_with("BTCUSDT-")
                     && (request.price - 95.0).abs() < f64::EPSILON
                     && (request.quantity - 7.5).abs() < f64::EPSILON
@@ -111,6 +115,7 @@ async fn startup_sync_replans_even_when_pending_submit_effect_is_present() {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -132,7 +137,11 @@ async fn startup_sync_replans_even_when_pending_submit_effect_is_present() {
     assert!(effects.iter().any(|effect| {
         matches!(
             &effect.effect,
-            ExecutionAction::SubmitOrder { request, desired_exposure }
+            ExecutionAction::SubmitOrder {
+                request,
+                desired_exposure,
+                ..
+            }
                 if request.client_order_id.starts_with("BTCUSDT-")
                     && (request.price - 95.0).abs() < f64::EPSILON
                     && (request.quantity - 15.0).abs() < f64::EPSILON
@@ -184,6 +193,7 @@ async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -208,6 +218,7 @@ async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
                 ExecutionAction::SubmitOrder {
                     request,
                     desired_exposure,
+                    ..
                 },
             ..
         }] if request.client_order_id == "BTCUSDT-reconcile"
@@ -321,6 +332,7 @@ async fn startup_sync_rebuilds_submit_pending_slot_to_current_plan_before_follow
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -392,6 +404,7 @@ async fn startup_sync_marks_attention_required_when_receipt_backed_submit_has_no
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -858,6 +871,7 @@ async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_eff
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,

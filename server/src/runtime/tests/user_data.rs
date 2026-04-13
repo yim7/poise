@@ -403,6 +403,11 @@ async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: poise_engine::snapshot::ObservedState {
+            strategy_price: Some(100.0),
+            strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
+            mark_price: Some(100.0),
+            best_bid: Some(100.0),
+            best_ask: Some(100.0),
             reference_price: Some(100.0),
             out_of_band_since: None,
             last_tick_at: None,

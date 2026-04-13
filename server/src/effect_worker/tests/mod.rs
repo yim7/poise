@@ -20,6 +20,7 @@ use poise_engine::ports::{
     AccountPort, ClockPort, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest, OrderStatus,
     Position,
 };
+use poise_engine::price_gate::SubmitPurpose;
 use poise_engine::runtime::{
     ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,
 };

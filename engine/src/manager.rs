@@ -14,8 +14,8 @@ use crate::ledger::{LedgerDelta, LedgerGapRecord};
 use crate::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
-use crate::ports::{ClockPort, ExchangeOrder, OrderReceipt, OrderRequest};
-use crate::price_gate::evaluate_price_execution_gate;
+use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
+use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
 use crate::runtime::{ExecutorState, StrategyPriceStatus, TrackRuntime, TrackStatus};
 use crate::snapshot::TrackRuntimeSnapshot;
@@ -594,6 +594,28 @@ impl TrackManager {
         Ok(None)
     }
 
+    fn execution_quote_for_track(track: &TrackRuntime) -> Option<ExecutionQuote> {
+        Some(ExecutionQuote {
+            best_bid: track.best_bid?,
+            best_ask: track.best_ask?,
+        })
+    }
+
+    fn submit_purpose_for_track(
+        &self,
+        track: &TrackRuntime,
+        desired_exposure: &Exposure,
+    ) -> SubmitPurpose {
+        if desired_exposure.0.abs() <= f64::EPSILON
+            && (track.manual_target_override == Some(Exposure(0.0))
+                || matches!(track.status, TrackStatus::Terminated))
+        {
+            return SubmitPurpose::ManualRiskReduction;
+        }
+
+        SubmitPurpose::AutoReconcile
+    }
+
     fn observe_market(
         &mut self,
         id: &TrackId,
@@ -876,7 +898,13 @@ impl TrackManager {
         track: &'a TrackRuntime,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<executor::SubmitIntentInput<'a>> {
-        let reference_price = track.reference_price?;
+        let reference_price = if track.strategy_price.is_none() && track.reference_price.is_some() {
+            track.reference_price
+        } else if matches!(track.strategy_price_status, StrategyPriceStatus::Live) {
+            track.strategy_price.or(track.reference_price)
+        } else {
+            None
+        }?;
         if matches!(track.status, TrackStatus::Paused) {
             return None;
         }
@@ -885,7 +913,6 @@ impl TrackManager {
         (!target.suppress_execution).then_some(self.submit_intent_input(
             track,
             target.desired_exposure,
-            reference_price,
             observed_at,
         ))
     }
@@ -894,9 +921,9 @@ impl TrackManager {
         &self,
         track: &'a TrackRuntime,
         desired_exposure: poise_core::types::Exposure,
-        reference_price: f64,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
+        let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
         executor::SubmitIntentInput {
             track_id: &track.id,
             instrument: &track.instrument,
@@ -905,7 +932,9 @@ impl TrackManager {
             min_rebalance_units: track.config.min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             desired_exposure,
-            reference_price,
+            execution_quote: Self::execution_quote_for_track(track),
+            price_execution_gate: track.price_execution_gate,
+            submit_purpose,
             observed_at,
         }
     }
@@ -945,12 +974,7 @@ impl TrackManager {
             });
         }
         let executor_state = Some(&track.executor_state);
-        let submit_intent = self.submit_intent_input(
-            track,
-            target.desired_exposure.clone(),
-            reference_price,
-            observed_at,
-        );
+        let submit_intent = self.submit_intent_input(track, target.desired_exposure.clone(), observed_at);
         let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
 
         Ok(PlannedInventoryExecution {
@@ -2208,6 +2232,7 @@ mod tests {
                 TrackEffect::SubmitOrder {
                     request,
                     desired_exposure,
+                    ..
                 },
             ] => (request, desired_exposure),
             other => panic!("expected one submit effect, got {other:?}"),
@@ -2846,6 +2871,7 @@ mod tests {
             [TrackEffect::SubmitOrder {
                 request,
                 desired_exposure,
+                ..
             }] if request.side == poise_core::types::Side::Buy
                 && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
                 && rounded_values_match(
@@ -2860,6 +2886,7 @@ mod tests {
                 TrackEffect::SubmitOrder {
                     request,
                     desired_exposure,
+                    ..
                 },
             ] => Some(working_order_from_submit_request(
                 request,
@@ -2930,6 +2957,7 @@ mod tests {
             [TrackEffect::SubmitOrder {
                 request,
                 desired_exposure,
+                ..
             }] if request.side == poise_core::types::Side::Buy
                 && rounded_values_match(request.price, 95.0, test_exchange_rules().price_tick)
                 && rounded_values_match(
@@ -2945,6 +2973,7 @@ mod tests {
                 TrackEffect::SubmitOrder {
                     request,
                     desired_exposure: _,
+                    ..
                 },
             ] => Some(WorkingOrder {
                 order_id: None,
@@ -3509,6 +3538,7 @@ mod tests {
                         reduce_only: false,
                     },
                     desired_exposure: poise_core::types::Exposure(6.0),
+                    submit_purpose: crate::price_gate::SubmitPurpose::AutoReconcile,
                 }],
             )
             .unwrap();
@@ -4012,6 +4042,7 @@ mod tests {
                 TrackEffect::SubmitOrder {
                     request,
                     desired_exposure,
+                    ..
                 },
             ] => (request, desired_exposure),
             other => panic!("expected one submit effect, got {other:?}"),

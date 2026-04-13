@@ -25,6 +25,7 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,
@@ -57,6 +58,75 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
         .next()
         .expect("submit effect should remain pending");
     assert_eq!(effect.status, EffectStatus::Pending);
+}
+
+#[tokio::test]
+async fn effect_worker_does_not_dispatch_pending_auto_submit_when_price_gate_is_closed() {
+    let repository = Arc::new(MemoryRepository::default());
+    let exchange = Arc::new(FakeExchange::default());
+    let state = test_state(repository.clone()).await;
+    let snapshot = snapshot_with_submit_pending_order(
+        95.0,
+        test_config(),
+        WorkingOrder {
+            order_id: None,
+            client_order_id: "BTCUSDT-reconcile".into(),
+            side: Side::Buy,
+            price: 95.0,
+            quantity: 15.0,
+            status: OrderStatus::Submitting,
+            role: poise_engine::executor::OrderRole::IncreaseInventory,
+        },
+    );
+
+    repository.seed_snapshot("btc-core", snapshot.clone()).await;
+    {
+        let manager_handle = state.manager();
+        let mut manager = manager_handle.write().await;
+        manager.restore_track_state(&snapshot).unwrap();
+    }
+    repository
+        .seed_effect(PersistedTrackEffect {
+            effect_id: "btc-core:batch:0".into(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "batch".into(),
+            sequence: 0,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: btc_instrument(),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 15.0,
+                    client_order_id: "BTCUSDT-reconcile".into(),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(6.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await;
+
+    let worker = EffectWorker::new(
+        state.clone(),
+        exchange.execution_port(),
+        exchange.account_port(),
+        Duration::from_secs(60),
+    );
+    worker.run_once().await.unwrap();
+
+    assert!(exchange.effects.lock().await.is_empty());
+    let effect = repository
+        .list_all_effects()
+        .await
+        .into_iter()
+        .next()
+        .expect("submit effect should remain persisted");
+    assert_eq!(effect.status, EffectStatus::Superseded);
 }
 
 #[tokio::test]

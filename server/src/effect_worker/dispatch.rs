@@ -43,6 +43,7 @@ pub(super) async fn process_effect(
         TrackEffect::SubmitOrder {
             ref request,
             ref desired_exposure,
+            ..
         } => {
             worker
                 .execute_submit(&persisted, request.clone(), desired_exposure.clone())

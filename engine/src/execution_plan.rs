@@ -4,6 +4,7 @@ use poise_core::events::DomainEvent;
 use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::ports::OrderRequest;
+use crate::price_gate::SubmitPurpose;
 use crate::track::Instrument;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub enum ExecutionAction {
     SubmitOrder {
         request: OrderRequest,
         desired_exposure: Exposure,
+        submit_purpose: SubmitPurpose,
     },
     CancelOrder {
         instrument: Instrument,

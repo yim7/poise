@@ -481,8 +481,11 @@ pub(crate) fn btc_position(qty: f64, unrealized_pnl: f64) -> Position {
 pub(crate) fn btc_tick(reference_price: f64) -> PriceTick {
     PriceTick {
         instrument: btc_instrument(),
-        reference_price,
         mark_price: reference_price,
+        execution_quote: Some(poise_engine::ports::ExecutionQuote {
+            best_bid: reference_price,
+            best_ask: reference_price,
+        }),
         timestamp: Utc::now(),
     }
 }
@@ -622,6 +625,11 @@ pub(crate) fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnap
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: poise_engine::snapshot::ObservedState {
+            strategy_price: Some(95.0),
+            strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
+            mark_price: Some(95.0),
+            best_bid: Some(95.0),
+            best_ask: Some(95.0),
             reference_price: Some(95.0),
             out_of_band_since: Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap()),
             last_tick_at: None,

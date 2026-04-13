@@ -259,6 +259,7 @@ async fn mark_submit_started_happens_only_after_prepare_returns_some() {
                     reduce_only: false,
                 },
                 desired_exposure: Exposure(6.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
             },
             status: EffectStatus::Pending,
             attempt_count: 0,

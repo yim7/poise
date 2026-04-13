@@ -274,6 +274,7 @@ mod tests {
                                 reduce_only: false,
                             },
                             desired_exposure: Exposure(4.0),
+                            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
                         },
                         status: EffectStatus::Executing,
                         attempt_count: 1,
