@@ -603,7 +603,7 @@ git commit -m "feat(engine): derive strategy price from book mid and gate price 
 - Test: `server/src/effect_worker/tests/execute.rs`
 - Test: `server/src/runtime/tests/execution.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 bid/ask 定价和 gate 权限矩阵**
+- [x] **Step 1: 先写失败测试，锁住 bid/ask 定价和 gate 权限矩阵**
 
 增加至少这些测试：
 
@@ -645,7 +645,7 @@ async fn effect_worker_does_not_dispatch_pending_auto_submit_when_price_gate_is_
 - 被 gate 挡住的 pending submit 由 recovery 单点判定为 supersede，并等待恢复后的新 reconcile
 - effect worker 不再自己判断 gate 下的 pending submit 生命周期
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -663,7 +663,7 @@ Expected:
 - 当前自动 replacement 还不会受价格 gate 控制
 - 当前 recovery 还没有统一拥有 gate-blocked pending submit 的 lifecycle
 
-- [ ] **Step 3: 做最小实现，给 submit action 加 `submit_purpose`**
+- [x] **Step 3: 做最小实现，给 submit action 加 `submit_purpose`**
 
 在 `engine/src/execution_plan.rs` 把 submit action 改成：
 
@@ -682,7 +682,7 @@ pub enum ExecutionAction {
 - 普通 reconcile 一律写 `SubmitPurpose::AutoReconcile`
 - 手动 `Flatten` / `Terminate` 走 `SubmitPurpose::ManualRiskReduction`
 
-- [ ] **Step 4: 切换 executor 定价和 recovery / dispatch gate**
+- [x] **Step 4: 切换 executor 定价和 recovery / dispatch gate**
 
 `engine/src/executor/planning.rs` 至少改成：
 
@@ -715,7 +715,7 @@ let price = match side {
   - 返回 `None` 时直接停止本次执行
   - pending submit 的 supersede 语义全部由 recovery 侧完成
 
-- [ ] **Step 5: 跑 Task 4 回归**
+- [x] **Step 5: 跑 Task 4 回归**
 
 Run:
 
@@ -732,12 +732,14 @@ Expected:
 - 被 gate 挡住的 pending submit 会被 supersede，等待恢复后的新 reconcile
 - 手动 `Flatten` / `Terminate` 只在 `ManualRiskReductionOnly` 下继续发减风险单
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add engine/src/execution_plan.rs engine/src/executor/planning.rs engine/src/executor/slots.rs engine/src/executor/recovery.rs engine/src/executor/mod.rs engine/src/manager.rs application/src/mutation_executor.rs application/src/track_effect_service.rs server/src/effect_worker/dispatch.rs server/src/effect_worker/execute.rs
 git commit -m "feat(execution): route submit purpose through price gate and top-of-book pricing"
 ```
+
+实现提交：`26d0199`
 
 ### Task 5: 更新 protocol / projector / TUI / README，并完成全链路回归
 
