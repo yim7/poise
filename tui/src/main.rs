@@ -583,7 +583,8 @@ mod tests {
         let mut eth = response.items[0].clone();
         eth.id = ETH_GRID_ID.into();
         eth.instrument.symbol = ETH_SYMBOL.into();
-        eth.reference_price = Some(2200.0);
+        eth.strategy_price = Some(2200.0);
+        eth.strategy_price_status = crate::protocol::StrategyPriceStatusView::Live;
         response.items.push(eth);
         response
     }
@@ -593,7 +594,8 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/track_detail_view.json")).unwrap();
         detail.identity.id = track_id.into();
         detail.identity.instrument.symbol = symbol.into();
-        detail.status.reference_price = Some(if symbol == ETH_SYMBOL { 2200.0 } else { 100.0 });
+        detail.status.strategy_price = Some(if symbol == ETH_SYMBOL { 2200.0 } else { 100.0 });
+        detail.status.strategy_price_status = crate::protocol::StrategyPriceStatusView::Live;
         detail.position.current_exposure = if symbol == ETH_SYMBOL { -1.0 } else { 2.0 };
         detail.execution.state = if symbol == ETH_SYMBOL {
             ExecutionStateView::Paused
@@ -830,7 +832,8 @@ mod tests {
             id: detail.identity.id.clone(),
             instrument: detail.identity.instrument.clone(),
             lifecycle: detail.status.lifecycle.clone(),
-            reference_price: detail.status.reference_price,
+            strategy_price: detail.status.strategy_price,
+            strategy_price_status: detail.status.strategy_price_status,
             exposure: crate::protocol::ExposureSummaryView {
                 current: detail.position.current_exposure,
                 target: detail.position.desired_exposure,
@@ -1407,7 +1410,7 @@ mod tests {
         handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
         assert_eq!(
-            app.current_track.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.strategy_price,
             Some(101.5)
         );
         assert_eq!(app.current_track_diagnostics().unwrap().items.len(), 1);
@@ -1429,9 +1432,9 @@ mod tests {
         handle_ws_event(&client, &mut app, track_list_item_changed_event()).await;
         handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
-        assert_eq!(app.tracks[0].reference_price, Some(101.4));
+        assert_eq!(app.tracks[0].strategy_price, Some(101.4));
         assert_eq!(
-            app.current_track.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.strategy_price,
             Some(101.5)
         );
         assert!(matches!(
@@ -1485,9 +1488,9 @@ mod tests {
 
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut first = detail_view(BTC_GRID_ID, BTC_SYMBOL);
-        first.status.reference_price = Some(101.0);
+        first.status.strategy_price = Some(101.0);
         let mut second = detail_view(BTC_GRID_ID, BTC_SYMBOL);
-        second.status.reference_price = Some(102.0);
+        second.status.strategy_price = Some(102.0);
         second.position.current_exposure = 3.0;
 
         sender
@@ -1509,7 +1512,7 @@ mod tests {
         process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
 
         assert_eq!(
-            app.current_track.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.strategy_price,
             Some(102.0)
         );
         assert_eq!(
@@ -1538,7 +1541,7 @@ mod tests {
         handle_ws_event(&client, &mut app, track_detail_changed_event()).await;
 
         assert_eq!(
-            app.current_track.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.strategy_price,
             Some(101.5)
         );
         assert!((app.current_track.as_ref().unwrap().ledger.total_pnl - 1229.0).abs() < 1e-9);
@@ -1660,7 +1663,7 @@ mod tests {
             if app
                 .current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price)
+                .and_then(|detail| detail.status.strategy_price)
                 == Some(101.5)
             {
                 break;
@@ -1669,7 +1672,7 @@ mod tests {
         }
 
         assert_eq!(
-            app.current_track.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.strategy_price,
             Some(101.5)
         );
 
@@ -1690,12 +1693,12 @@ mod tests {
         assert_eq!(
             app.current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price),
+                .and_then(|detail| detail.status.strategy_price),
             Some(100.0)
         );
 
         let mut updated = detail_view(BTC_GRID_ID, BTC_SYMBOL);
-        updated.status.reference_price = Some(111.5);
+        updated.status.strategy_price = Some(111.5);
         updated.position.current_exposure = 4.5;
         replace_track_detail(&state, updated).await;
 
@@ -1706,7 +1709,7 @@ mod tests {
             if app
                 .current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price)
+                .and_then(|detail| detail.status.strategy_price)
                 == Some(111.5)
             {
                 break;
@@ -1718,10 +1721,10 @@ mod tests {
         assert_eq!(
             app.current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price),
+                .and_then(|detail| detail.status.strategy_price),
             Some(111.5)
         );
-        assert_eq!(app.tracks[0].reference_price, Some(111.5));
+        assert_eq!(app.tracks[0].strategy_price, Some(111.5));
 
         ws_server.abort();
         let _ = ws_server.await;
@@ -1772,7 +1775,7 @@ mod tests {
             if app
                 .current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price)
+                .and_then(|detail| detail.status.strategy_price)
                 == Some(101.5)
             {
                 break;
@@ -1781,7 +1784,7 @@ mod tests {
         }
 
         assert_eq!(
-            app.current_track.as_ref().unwrap().status.reference_price,
+            app.current_track.as_ref().unwrap().status.strategy_price,
             Some(101.5)
         );
 
@@ -2052,7 +2055,7 @@ mod tests {
     async fn wait_for_detail_price(client: &ApiClient, id: &str) {
         for _ in 0..50 {
             let detail = client.get_track_detail(id).await.unwrap();
-            if detail.status.reference_price.is_some() {
+            if detail.status.strategy_price.is_some() {
                 return;
             }
             sleep(Duration::from_millis(100)).await;
@@ -2141,7 +2144,7 @@ out_of_band_policy = "hold"
         assert!(
             app.tracks
                 .iter()
-                .all(|track| track.reference_price.is_some())
+                .all(|track| track.strategy_price.is_some())
         );
 
         let action = crate::input::handle_key_event(
@@ -2162,12 +2165,12 @@ out_of_band_policy = "hold"
             let before = app
                 .current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price);
+                .and_then(|detail| detail.status.strategy_price);
             process_ws_event(&client, &ws_url, &mut app, &mut ws_receiver).await;
             if app
                 .current_track
                 .as_ref()
-                .and_then(|detail| detail.status.reference_price)
+                .and_then(|detail| detail.status.strategy_price)
                 != before
             {
                 break;
@@ -2180,7 +2183,7 @@ out_of_band_policy = "hold"
                 .as_ref()
                 .unwrap()
                 .status
-                .reference_price
+                .strategy_price
                 .is_some()
         );
 

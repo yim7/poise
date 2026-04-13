@@ -11,7 +11,8 @@
       "status": "active",
       "updated_at": "2026-03-26T10:02:00Z"
     },
-    "reference_price": 101.4,
+    "strategy_price": 101.4,
+    "strategy_price_status": "live",
     "exposure": {
       "current": 3.6,
       "target": 4.0

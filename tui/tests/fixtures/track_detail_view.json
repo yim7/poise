@@ -11,7 +11,8 @@
       "status": "active",
       "updated_at": "2026-03-26T10:00:00Z"
     },
-    "reference_price": 101.25
+    "strategy_price": 101.25,
+    "strategy_price_status": "live"
   },
   "strategy": {
     "lower_price": 90.0,
@@ -25,7 +26,8 @@
   },
   "market": {
     "mark_price": 101.3,
-    "index_price": 101.2
+    "best_bid": 101.2,
+    "best_ask": 101.4
   },
   "position": {
     "current_exposure": 3.5,

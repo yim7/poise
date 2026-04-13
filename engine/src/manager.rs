@@ -1016,6 +1016,7 @@ mod tests {
     use super::*;
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
     use crate::ports::*;
+    use crate::price_gate::PriceExecutionGate;
     use crate::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState,
         StrategyPriceStatus, TrackStatus, WorkingOrder,
@@ -1357,9 +1358,18 @@ mod tests {
     fn test_manager_with_cached_price(reference_price: f64) -> TrackManager {
         let mut manager = test_manager_with_active_track();
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
+        let execution_quote = ExecutionQuote {
+            best_bid: reference_price,
+            best_ask: reference_price,
+        };
         track.strategy_price = Some(reference_price);
         track.strategy_price_status = StrategyPriceStatus::Live;
         track.reference_price = Some(reference_price);
+        track.mark_price = Some(reference_price);
+        track.best_bid = Some(execution_quote.best_bid);
+        track.best_ask = Some(execution_quote.best_ask);
+        track.price_execution_gate =
+            evaluate_price_execution_gate(PriceExecutionGate::Open, Some(reference_price), Some(execution_quote));
         manager
     }
 
@@ -2279,7 +2289,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(quoted_market_observation(99.95)),
+                TrackObservation::Market(market_observation(99.95, 99.95, 99.95)),
             )
             .unwrap();
 
@@ -2328,13 +2338,13 @@ mod tests {
         let first = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(quoted_market_observation(99.95)),
+                TrackObservation::Market(market_observation(99.95, 99.95, 99.95)),
             )
             .unwrap();
         let second = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(quoted_market_observation(99.95)),
+                TrackObservation::Market(market_observation(99.95, 99.95, 99.95)),
             )
             .unwrap();
 
@@ -2384,7 +2394,7 @@ mod tests {
         let transition = manager
             .observe(
                 &TrackId::new("btc1"),
-                TrackObservation::Market(quoted_market_observation(99.95)),
+                TrackObservation::Market(market_observation(99.95, 99.95, 99.95)),
             )
             .unwrap();
 

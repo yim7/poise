@@ -25,7 +25,8 @@ pub struct TrackListItemView {
     pub id: String,
     pub instrument: InstrumentView,
     pub lifecycle: TrackLifecycleView,
-    pub reference_price: Option<f64>,
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatusView,
     pub exposure: ExposureSummaryView,
     pub execution: ExecutionBadgeView,
     pub ledger: TrackListLedgerView,
@@ -91,7 +92,8 @@ pub struct TrackIdentityView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackStatusPanelView {
     pub lifecycle: TrackLifecycleView,
-    pub reference_price: Option<f64>,
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatusView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,7 +118,15 @@ pub struct TrackBudgetView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackMarketView {
     pub mark_price: Option<f64>,
-    pub index_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyPriceStatusView {
+    Live,
+    Stale,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -400,6 +410,17 @@ impl fmt::Display for TrackStatus {
     }
 }
 
+impl fmt::Display for StrategyPriceStatusView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Live => "live",
+            Self::Stale => "stale",
+        };
+
+        f.write_str(value)
+    }
+}
+
 impl fmt::Display for ShapeFamily {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
@@ -441,7 +462,7 @@ mod tests {
     use super::{
         AccountSummaryView, RiskSignalView, ShapeFamily, StreamEvent, TrackCommandAccepted,
         TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackLedgerGapReasonView, TrackListResponse,
+        TrackLedgerGapReasonView, TrackListResponse, StrategyPriceStatusView,
     };
 
     #[test]
@@ -466,7 +487,8 @@ mod tests {
                         "id":"btc-core",
                         "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
                         "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
-                        "reference_price":64123.4,
+                        "strategy_price":64123.4,
+                        "strategy_price_status":"live",
                         "exposure":{"current":0.5,"target":0.75},
                         "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
                         "ledger":{"total_pnl":1229.0,"has_unresolved_gaps":false}
@@ -498,7 +520,8 @@ mod tests {
                         "id":"btc-core",
                         "instrument":{"venue":"binance_futures","symbol":"BTCUSDT"},
                         "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
-                        "reference_price":64123.4,
+                        "strategy_price":64123.4,
+                        "strategy_price_status":"live",
                         "exposure":{"current":0.5,"target":0.75},
                         "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
                         "ledger":{"total_pnl":1229.0,"has_unresolved_gaps":false}
@@ -513,6 +536,41 @@ mod tests {
             serialized["items"][0]["ledger"]["total_pnl"].as_f64(),
             Some(1229.0)
         );
+    }
+
+    #[test]
+    fn detail_view_serializes_strategy_price_and_quote_fields() {
+        let detail: TrackDetailView = serde_json::from_str(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{
+                    "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                    "strategy_price":64000.0,
+                    "strategy_price_status":"live"
+                },
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "budget":{"max_notional":3000.0,"daily_loss_limit":100.0,"total_loss_limit":300.0},
+                "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
+                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
+                "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
+                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
+            }"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_value(&detail).unwrap();
+
+        assert_eq!(detail.status.strategy_price_status, StrategyPriceStatusView::Live);
+        assert!(json["status"].get("reference_price").is_none());
+        assert!(json["market"].get("index_price").is_none());
+        assert_eq!(json["status"]["strategy_price"].as_f64(), Some(64000.0));
+        assert_eq!(json["status"]["strategy_price_status"].as_str(), Some("live"));
+        assert_eq!(json["market"]["mark_price"].as_f64(), Some(64123.4));
+        assert_eq!(json["market"]["best_bid"].as_f64(), Some(64120.1));
+        assert_eq!(json["market"]["best_ask"].as_f64(), Some(64124.5));
     }
 
     #[test]
@@ -534,9 +592,9 @@ mod tests {
                 "track_id":"btc-core",
                 "detail":{
                     "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
-                    "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                    "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
                     "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                    "market":{"mark_price":64123.4,"index_price":64120.1},
+                    "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                     "position":{"current_exposure":0.5,"desired_exposure":0.75},
                     "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
                     "execution_stats":{"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
@@ -587,9 +645,9 @@ mod tests {
         let detail: TrackDetailView = serde_json::from_str(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
-                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"unsupported_commission_asset","observed_at":"2026-03-31T11:11:11Z"}]},
                 "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
@@ -620,9 +678,9 @@ mod tests {
         let detail: TrackDetailView = serde_json::from_str(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
-                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"reference_price":64000.0},
+                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                "market":{"mark_price":64123.4,"index_price":64120.1},
+                "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"future_gap_reason","observed_at":"2026-03-31T11:11:11Z"}]},
                 "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},

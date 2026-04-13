@@ -27,7 +27,10 @@
 - `track_id` 是显式配置的稳定标识，不由 `symbol` 派生
 - HTTP / WebSocket 以 `track_id` 作为一等标识
 - SQLite 默认路径是 `<instance-dir>/.data/poise-server.sqlite`
-- Binance 适配层当前用 `mark price` 作为策略 `reference_price`
+- `strategy_price` 当前定义为盘口中间价 `book_mid = (best_bid + best_ask) / 2`
+- `mark_price` 只用于风控和价格保护，不参与目标仓位计算
+- 执行定价统一使用盘口一档：`Buy -> best_ask`，`Sell -> best_bid`
+- 缺少盘口或 `mark_price` 与盘口偏离过大时，自动执行会进入 `attention_required`
 
 ## 快速开始
 

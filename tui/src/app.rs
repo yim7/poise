@@ -259,7 +259,8 @@ mod tests {
         let mut eth = response.items[0].clone();
         eth.id = "eth-core".into();
         eth.instrument.symbol = "ETHUSDT".into();
-        eth.reference_price = Some(2200.0);
+        eth.strategy_price = Some(2200.0);
+        eth.strategy_price_status = crate::protocol::StrategyPriceStatusView::Live;
         response.items.push(eth);
         response.items
     }
@@ -305,12 +306,13 @@ mod tests {
     fn apply_track_list_item_updates_dashboard_item() {
         let mut app = App::new(track_list_items());
         let mut updated = app.tracks[0].clone();
-        updated.reference_price = Some(102.5);
+        updated.strategy_price = Some(102.5);
+        updated.strategy_price_status = crate::protocol::StrategyPriceStatusView::Live;
         updated.execution.state = ExecutionStateView::Paused;
 
         app.apply_track_list_item(updated);
 
-        assert_eq!(app.tracks[0].reference_price, Some(102.5));
+        assert_eq!(app.tracks[0].strategy_price, Some(102.5));
         assert_eq!(app.tracks[0].execution.state, ExecutionStateView::Paused);
     }
 
@@ -359,7 +361,7 @@ mod tests {
         app.apply_track_detail(*detail);
 
         assert_eq!(
-            app.current_track_detail().unwrap().status.reference_price,
+            app.current_track_detail().unwrap().status.strategy_price,
             Some(101.5)
         );
     }

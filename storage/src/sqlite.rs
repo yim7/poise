@@ -1426,6 +1426,7 @@ mod tests {
         let submit_effect = TrackEffect::SubmitOrder {
             request: test_order_request(),
             desired_exposure: Exposure(6.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
         };
 
         let first_btc = storage
@@ -1494,6 +1495,7 @@ mod tests {
                 &[TrackEffect::SubmitOrder {
                     request: test_order_request(),
                     desired_exposure: Exposure(6.0),
+                    submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
                 }],
             )
             .await
@@ -1844,6 +1846,7 @@ mod tests {
         let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
             desired_exposure: Exposure(6.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
         }];
 
         let persisted = storage
@@ -1873,6 +1876,7 @@ mod tests {
         let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
             desired_exposure: Exposure(6.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
         }];
 
         let persisted = storage
@@ -1926,6 +1930,7 @@ mod tests {
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
         ];
 
@@ -1961,6 +1966,7 @@ mod tests {
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
         ];
 
@@ -1992,6 +1998,7 @@ mod tests {
             TrackEffect::SubmitOrder {
                 request: test_order_request(),
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
         ];
 
@@ -2029,11 +2036,13 @@ mod tests {
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
         ];
         let eth_effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request_for_symbol("ETHUSDT"),
             desired_exposure: Exposure(3.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
         }];
 
         let btc_persisted = storage
@@ -2083,6 +2092,7 @@ mod tests {
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
         ];
 
@@ -2111,6 +2121,7 @@ mod tests {
             TrackEffect::SubmitOrder {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 desired_exposure: Exposure(4.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             },
         ];
         let unrelated_effects = vec![TrackEffect::SubmitOrder {
@@ -2119,6 +2130,7 @@ mod tests {
                 ..test_order_request_for_symbol("BTCUSDT")
             },
             desired_exposure: Exposure(2.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
         }];
 
         let replacement_persisted = storage

@@ -152,7 +152,7 @@ fn market_lines(
 ) -> Vec<Line<'static>> {
     if matches!(mode, DetailLayoutMode::Minimal) {
         return vec![format_exposure_line(
-            detail.status.reference_price,
+            detail.status.strategy_price,
             detail.position.current_exposure,
             detail.position.desired_exposure,
         )];
@@ -160,13 +160,15 @@ fn market_lines(
 
     vec![
         Line::from(format!(
-            "prices: ref {} | mark {} | index {}",
-            format_optional_price(detail.status.reference_price),
+            "prices: strategy {} ({}) | mark {} | bid {} | ask {}",
+            format_optional_price(detail.status.strategy_price),
+            detail.status.strategy_price_status,
             format_optional_price(detail.market.mark_price),
-            format_optional_price(detail.market.index_price)
+            format_optional_price(detail.market.best_bid),
+            format_optional_price(detail.market.best_ask)
         )),
         format_exposure_line(
-            detail.status.reference_price,
+            detail.status.strategy_price,
             detail.position.current_exposure,
             detail.position.desired_exposure,
         ),
@@ -539,7 +541,7 @@ fn format_optional_price(value: Option<f64>) -> String {
 }
 
 fn format_exposure_line(
-    _reference_price: Option<f64>,
+    _strategy_price: Option<f64>,
     current: f64,
     target: Option<f64>,
 ) -> Line<'static> {
@@ -897,7 +899,9 @@ mod tests {
         assert!(text.contains(&format!(
             "execution stats since: {expected_stats_started_at}"
         )));
-        assert!(text.contains("prices: ref 101.2500 | mark 101.3000 | index 101.2000"));
+        assert!(text.contains(
+            "prices: strategy 101.2500 (live) | mark 101.3000 | bid 101.2000 | ask 101.4000"
+        ));
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
         assert!(text.contains("units 8.0000/8.0000 | notional 375.0000"));
@@ -906,6 +910,19 @@ mod tests {
         assert!(text.contains("9.0 bps < 13.0 bps"));
         assert!(!text.contains("Diagnostics"));
         assert!(!text.contains("client-1"));
+    }
+
+    #[test]
+    fn renders_market_block_with_strategy_mark_and_top_of_book_prices() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+
+        let text = render_text_with_size(detail, 180, 36);
+
+        assert!(text.contains(
+            "prices: strategy 101.2500 (live) | mark 101.3000 | bid 101.2000 | ask 101.4000"
+        ));
     }
 
     #[test]

@@ -265,6 +265,11 @@ async fn position_update_broadcasts_snapshot_updated_when_reconcile_emits_no_dom
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(0.0));
     snapshot.executor_state = ExecutorState::empty(test_server_time());
+    snapshot.observed.strategy_price = Some(100.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(100.0);
+    snapshot.observed.best_bid = Some(100.0);
+    snapshot.observed.best_ask = Some(100.0);
     snapshot.observed.reference_price = Some(100.0);
     snapshot.risk.unrealized_pnl = 0.0;
 

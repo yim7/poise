@@ -155,6 +155,11 @@ async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(6.0));
+    snapshot.observed.strategy_price = Some(92.5);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(92.5);
+    snapshot.observed.best_bid = Some(92.5);
+    snapshot.observed.best_ask = Some(92.5);
     snapshot.observed.reference_price = Some(92.5);
     set_executor_state(
         &mut snapshot,

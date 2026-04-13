@@ -1,11 +1,16 @@
 use poise_engine::executor::{OrderRole, RecoveryAnomaly};
 use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
+use poise_engine::ports::ExecutionQuote;
+use poise_engine::price_gate::{
+    PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
+};
 use poise_engine::runtime::TrackStatus as EngineTrackStatus;
 use poise_protocol::{
     ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
     ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
     InstrumentView, OutOfBandPolicy as ProtocolPolicy, ReplacementGateView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, TrackActivityItemView,
+    StrategyPriceStatusView,
     TrackBudgetView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionStatsView,
     TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView,
     TrackLedgerView, TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView,
@@ -41,7 +46,8 @@ impl TrackProjector {
                 status: project_track_status(&source.status),
                 updated_at: source.updated_at.to_rfc3339(),
             },
-            reference_price: source.strategy_price,
+            strategy_price: source.strategy_price,
+            strategy_price_status: project_strategy_price_status(source.strategy_price_status),
             exposure: ExposureSummaryView {
                 current: source.current_exposure,
                 target: source.desired_exposure,
@@ -71,7 +77,8 @@ impl TrackProjector {
                     status: project_track_status(&source.status),
                     updated_at: source.updated_at.to_rfc3339(),
                 },
-                reference_price: source.strategy_price,
+                strategy_price: source.strategy_price,
+                strategy_price_status: project_strategy_price_status(source.strategy_price_status),
             },
             strategy: TrackStrategyView {
                 lower_price: source.lower_price,
@@ -90,7 +97,8 @@ impl TrackProjector {
             },
             market: TrackMarketView {
                 mark_price: source.mark_price,
-                index_price: source.mark_price,
+                best_bid: source.best_bid,
+                best_ask: source.best_ask,
             },
             position: TrackPositionView {
                 current_exposure: source.current_exposure,
@@ -202,6 +210,15 @@ fn project_track_status(value: &EngineTrackStatus) -> ProtocolTrackStatus {
     }
 }
 
+fn project_strategy_price_status(
+    value: poise_engine::runtime::StrategyPriceStatus,
+) -> StrategyPriceStatusView {
+    match value {
+        poise_engine::runtime::StrategyPriceStatus::Live => StrategyPriceStatusView::Live,
+        poise_engine::runtime::StrategyPriceStatus::Stale => StrategyPriceStatusView::Stale,
+    }
+}
+
 fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolShapeFamily {
     match value {
         poise_core::strategy::ShapeFamily::Linear => ProtocolShapeFamily::Linear,
@@ -280,7 +297,29 @@ fn project_attention_reasons(source: &TrackReadModel) -> Vec<String> {
         reasons.push("insufficient account margin".to_string());
     }
 
+    match evaluate_price_execution_gate(
+        PriceExecutionGate::Open,
+        source.mark_price,
+        match (source.best_bid, source.best_ask) {
+            (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
+            _ => None,
+        },
+    ) {
+        PriceExecutionGate::Open => {}
+        PriceExecutionGate::ManualRiskReductionOnly { reason }
+        | PriceExecutionGate::NoSubmit { reason } => {
+            reasons.push(project_price_execution_block_reason(reason).to_string());
+        }
+    }
+
     reasons
+}
+
+fn project_price_execution_block_reason(reason: PriceExecutionBlockReason) -> &'static str {
+    match reason {
+        PriceExecutionBlockReason::MissingExecutionQuote => "missing execution quote",
+        PriceExecutionBlockReason::MarkBookDivergence => "mark/book divergence",
+    }
 }
 
 fn project_recovery_anomaly(anomaly: &RecoveryAnomaly) -> &'static str {
@@ -609,6 +648,51 @@ mod tests {
         assert_eq!(
             detail.execution.attention_reasons,
             vec!["market data stale".to_string()]
+        );
+    }
+
+    #[test]
+    fn projector_maps_price_gate_to_attention_required_reason() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.mark_price = Some(100.0);
+        source.best_bid = Some(95.0);
+        source.best_ask = Some(95.0);
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert!(
+            detail
+                .execution
+                .attention_reasons
+                .contains(&"mark/book divergence".to_string())
+        );
+    }
+
+    #[test]
+    fn projector_marks_strategy_price_status_stale_when_quote_is_missing() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.strategy_price = Some(101.25);
+        source.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Stale;
+        source.best_bid = None;
+        source.best_ask = None;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.status.strategy_price_status,
+            poise_protocol::StrategyPriceStatusView::Stale
+        );
+        assert_eq!(detail.market.best_bid, None);
+        assert_eq!(detail.market.best_ask, None);
+        assert!(
+            detail
+                .execution
+                .attention_reasons
+                .contains(&"missing execution quote".to_string())
         );
     }
 

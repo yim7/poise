@@ -5,7 +5,7 @@ pub use poise_protocol::{
     TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackCommandView, TrackDetailView,
     TrackDiagnosticsView, TrackExecutionStatsView, TrackExecutionView, TrackLedgerGapReasonView,
     TrackLedgerGapView, TrackLedgerView, TrackListItemView, TrackListLedgerView, TrackListResponse,
-    TrackStatus,
+    TrackStatus, StrategyPriceStatusView,
 };
 
 #[cfg(test)]

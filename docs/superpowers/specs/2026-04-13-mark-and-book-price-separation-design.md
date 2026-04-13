@@ -364,6 +364,9 @@ enum PriceExecutionBlockReason {
 
 - `PriceExecutionGate != Open` 时，`execution.execution_status = attention_required`
 - detail 必须暴露明确 attention reason
+- 第一版 attention reason 文案固定为：
+  - `MissingExecutionQuote -> "missing execution quote"`
+  - `MarkBookDivergence -> "mark/book divergence"`
 - 当 `status.strategy_price_status = stale` 时，reason 必须能说明当前策略价不可重新计算
 
 ## 非目标

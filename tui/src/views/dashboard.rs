@@ -238,7 +238,8 @@ mod tests {
                         "id": "btc-core",
                         "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"},
                         "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
-                        "reference_price": 101.25,
+                        "strategy_price": 101.25,
+                        "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
                         "ledger": {"total_pnl": -245.3, "has_unresolved_gaps": false}
