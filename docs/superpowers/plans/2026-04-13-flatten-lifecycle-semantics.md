@@ -228,7 +228,7 @@ Task 1 implementation commit: `a056cbb`
 - Test: `engine/src/manager.rs`
 - Test: `server/src/projector.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 `hold` 的人工恢复语义**
+- [x] **Step 1: 先写失败测试，锁住 `hold` 的人工恢复语义**
 
 至少补这些测试：
 
@@ -251,7 +251,7 @@ fn resume_availability_depends_on_status_not_override() {}
 
 如果当前 `Resume` 在缺少 live `strategy_price` 时已经有测试，补一个 `Holding` 分支共用同样的等待市场数据结果断言。
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -265,7 +265,7 @@ Expected:
 - 当前实现失败，因为 `Holding` 仍会在回带内自动恢复
 - `Resume` 也还没有把 `Holding` 当作人工恢复状态
 
-- [ ] **Step 3: 做最小实现，修正 `hold` 的恢复规则**
+- [x] **Step 3: 做最小实现，修正 `hold` 的恢复规则**
 
 `engine/src/reconciler.rs`：
 
@@ -282,11 +282,13 @@ match track.status {
 
 ```rust
 if matches!(track.status, TrackStatus::Holding) {
+    track.status = TrackStatus::WaitingMarketData;
+    track.desired_exposure = None;
+    track.replacement_gate_reason = None;
+
     return match Self::live_strategy_price_for(track) {
         Some(strategy_price) => self.reconcile_track(id, strategy_price),
         None => {
-            track.status = TrackStatus::WaitingMarketData;
-            track.desired_exposure = None;
             Ok((vec![], vec![]))
         }
     };
@@ -308,7 +310,7 @@ enabled: matches!(
 
 `tui` 只同步展示和按钮语义，不增加额外兼容文案。
 
-- [ ] **Step 4: 跑 Task 2 回归**
+- [x] **Step 4: 跑 Task 2 回归**
 
 Run:
 
@@ -323,12 +325,14 @@ Expected:
 - `Resume` 可以从 `Holding` 恢复
 - UI 命令语义与状态来源一致
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/reconciler.rs engine/src/manager.rs server/src/projector.rs tui/src/views/dashboard.rs tui/src/views/instance.rs
 git commit -m "fix: preserve hold as manual recovery lifecycle"
 ```
+
+Task 2 implementation commit: `bb3f9f8`
 
 ### Task 3: 更新稳定文档并删除旧策略语义残留
 
