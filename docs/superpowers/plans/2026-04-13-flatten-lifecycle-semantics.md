@@ -389,6 +389,20 @@ git commit -m "docs: align flatten and hold lifecycle semantics"
 
 Task 3 implementation commit: `324467a`
 
+### Post-Review Fixes
+
+在严格代码评审后，补了 3 个实现偏差：
+
+- `Holding` 回带内后继续保持冻结 target，不再切回带内曲线目标
+- 手动 `Flatten` 在没有 live `strategy_price` 时，也会立即把 `desired_exposure` 置为 `0` 并清掉 `replacement_gate_reason`
+- restore 路径新增不变量校验：`ManualFlattening` 必须配对 `manual_target_override = Some(Exposure(0.0))`
+
+验证命令：
+
+- `cargo test -p poise-engine -p poise-server`
+
+Post-review fix commit: `a7a8e4e`
+
 ## Self-Review
 
 - spec 覆盖检查：
