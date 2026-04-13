@@ -29,9 +29,9 @@ pub enum ShapeFamily {
 #[serde(rename_all = "snake_case")]
 pub enum OutOfBandPolicy {
     Freeze,
-    ReduceOnly,
-    Terminate,
     Hold,
+    Flatten,
+    Terminate,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,6 +216,13 @@ mod tests {
             ..neutral_config()
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn out_of_band_policy_serializes_flatten() {
+        let policy: OutOfBandPolicy = serde_json::from_str("\"flatten\"").unwrap();
+
+        assert_eq!(serde_json::to_string(&policy).unwrap(), "\"flatten\"");
     }
 
     #[test]

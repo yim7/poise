@@ -42,7 +42,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 .into_iter()
                 .collect(),
             desired_exposure: target_override,
-            new_status: Some(TrackStatus::ReducingOnly),
+            new_status: Some(TrackStatus::ManualFlattening),
             suppress_execution: delta.is_zero(),
         };
     }
@@ -139,7 +139,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
 
 fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
     match track.status {
-        TrackStatus::WaitingMarketData => Some(TrackStatus::Active),
+        TrackStatus::WaitingMarketData | TrackStatus::Flattening => Some(TrackStatus::Active),
         TrackStatus::Frozen | TrackStatus::Holding => Some(TrackStatus::Active),
         _ => None,
     }
@@ -157,7 +157,7 @@ fn apply_out_of_band(
     match policy {
         OutOfBandPolicy::Freeze => (frozen_target, Some(TrackStatus::Frozen)),
         OutOfBandPolicy::Hold => (frozen_target, Some(TrackStatus::Holding)),
-        OutOfBandPolicy::ReduceOnly => (Exposure(0.0), Some(TrackStatus::ReducingOnly)),
+        OutOfBandPolicy::Flatten => (Exposure(0.0), Some(TrackStatus::Flattening)),
         OutOfBandPolicy::Terminate => (Exposure(0.0), Some(TrackStatus::Terminated)),
     }
 }
@@ -318,15 +318,31 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_target_reduce_only_targets_zero() {
+    fn reconcile_target_flatten_policy_enters_flattening() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = OutOfBandPolicy::ReduceOnly;
+        track.config.out_of_band_policy = serde_json::from_str("\"flatten\"").unwrap();
         track.status = TrackStatus::Active;
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 85.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::ReducingOnly));
+        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert_eq!(
+            serde_json::to_string(&result.new_status.unwrap()).unwrap(),
+            "\"flattening\""
+        );
+    }
+
+    #[test]
+    fn reconcile_target_flatten_targets_zero() {
+        let mut track = test_runtime();
+        track.config.out_of_band_policy = OutOfBandPolicy::Flatten;
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(8.0);
+
+        let result = reconcile_target(&track, 85.0);
+
+        assert_eq!(result.new_status, Some(TrackStatus::Flattening));
         assert!(result.desired_exposure.0.abs() < 0.001);
     }
 

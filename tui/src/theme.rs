@@ -58,7 +58,7 @@ impl Theme {
             TrackStatus::WaitingMarketData => Color::DarkGray,
             TrackStatus::Active => Color::Green,
             TrackStatus::Frozen | TrackStatus::Holding => Color::Yellow,
-            TrackStatus::ReducingOnly => Color::LightYellow,
+            TrackStatus::Flattening | TrackStatus::ManualFlattening => Color::LightYellow,
             TrackStatus::Terminated | TrackStatus::Paused => Color::Red,
         };
 

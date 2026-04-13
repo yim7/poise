@@ -27,8 +27,9 @@ pub enum TrackStatus {
     WaitingMarketData,
     Active,
     Frozen,
-    ReducingOnly,
     Holding,
+    Flattening,
+    ManualFlattening,
     Terminated,
     Paused,
 }

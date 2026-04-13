@@ -926,6 +926,20 @@ mod tests {
     }
 
     #[test]
+    fn renders_flatten_out_of_band_policy_name() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.strategy.out_of_band_policy = serde_json::from_str("\"flatten\"").unwrap();
+        detail.status.lifecycle.status = serde_json::from_str("\"manual_flattening\"").unwrap();
+
+        let text = render_text_with_size(detail, 180, 36);
+
+        assert!(text.contains("manual_flattening"));
+        assert!(text.contains("out of band flatten"));
+    }
+
+    #[test]
     fn diagnostics_panel_is_hidden_by_default_and_visible_in_debug_view() {
         let detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))

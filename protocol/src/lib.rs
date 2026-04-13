@@ -8,8 +8,9 @@ pub enum TrackStatus {
     WaitingMarketData,
     Active,
     Frozen,
-    ReducingOnly,
     Holding,
+    Flattening,
+    ManualFlattening,
     Terminated,
     Paused,
 }
@@ -382,9 +383,9 @@ pub enum ShapeFamily {
 #[serde(rename_all = "snake_case")]
 pub enum OutOfBandPolicy {
     Freeze,
-    ReduceOnly,
-    Terminate,
     Hold,
+    Flatten,
+    Terminate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,8 +401,9 @@ impl fmt::Display for TrackStatus {
             Self::WaitingMarketData => "waiting",
             Self::Active => "active",
             Self::Frozen => "frozen",
-            Self::ReducingOnly => "reducing_only",
             Self::Holding => "holding",
+            Self::Flattening => "flattening",
+            Self::ManualFlattening => "manual_flattening",
             Self::Terminated => "terminated",
             Self::Paused => "paused",
         };
@@ -437,9 +439,9 @@ impl fmt::Display for OutOfBandPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Freeze => "freeze",
-            Self::ReduceOnly => "reduce_only",
-            Self::Terminate => "terminate",
             Self::Hold => "hold",
+            Self::Flatten => "flatten",
+            Self::Terminate => "terminate",
         };
 
         f.write_str(value)
@@ -462,7 +464,7 @@ mod tests {
     use super::{
         AccountSummaryView, RiskSignalView, ShapeFamily, StreamEvent, TrackCommandAccepted,
         TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackLedgerGapReasonView, TrackListResponse, StrategyPriceStatusView,
+        TrackLedgerGapReasonView, TrackListResponse, StrategyPriceStatusView, TrackStatus,
     };
 
     #[test]
@@ -476,6 +478,13 @@ mod tests {
     fn shape_family_rejects_legacy_geometry_names() {
         assert!(serde_json::from_str::<ShapeFamily>("\"concave\"").is_err());
         assert!(serde_json::from_str::<ShapeFamily>("\"convex\"").is_err());
+    }
+
+    #[test]
+    fn track_status_displays_manual_flattening() {
+        let status: TrackStatus = serde_json::from_str("\"manual_flattening\"").unwrap();
+
+        assert_eq!(status.to_string(), "manual_flattening");
     }
 
     #[test]

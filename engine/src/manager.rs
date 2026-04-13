@@ -368,7 +368,7 @@ impl TrackManager {
             }
 
             track.manual_target_override = Some(Exposure(0.0));
-            track.status = TrackStatus::ReducingOnly;
+            track.status = TrackStatus::ManualFlattening;
             Self::live_strategy_price_for(track)
         };
 
@@ -2444,12 +2444,27 @@ mod tests {
 
         let track = manager.get_track("btc-core").unwrap();
         assert_eq!(track.manual_target_override, Some(Exposure(0.0)));
-        assert_eq!(track.status, TrackStatus::ReducingOnly);
+        assert_eq!(track.status, TrackStatus::ManualFlattening);
         assert_eq!(
             transition.snapshot.manual_target_override,
             Some(Exposure(0.0))
         );
         assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(0.0)));
+    }
+
+    #[test]
+    fn manual_flatten_sets_manual_flattening_and_override() {
+        let mut manager = test_manager_with_cached_strategy_price(95.0);
+        let track_id = TrackId::new("btc-core");
+
+        manager.command(&track_id, TrackCommand::Flatten).unwrap();
+
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(
+            serde_json::to_string(&track.status).unwrap(),
+            "\"manual_flattening\""
+        );
     }
 
     #[test]
@@ -2470,7 +2485,7 @@ mod tests {
             Some(Exposure(0.0))
         );
         assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(0.0)));
-        assert_eq!(transition.snapshot.status, TrackStatus::ReducingOnly);
+        assert_eq!(transition.snapshot.status, TrackStatus::ManualFlattening);
     }
 
     #[test]
@@ -2483,7 +2498,7 @@ mod tests {
 
         let track = manager.get_track("btc-core").unwrap();
         assert!(track.manual_target_override.is_none());
-        assert_ne!(track.status, TrackStatus::ReducingOnly);
+        assert_ne!(track.status, TrackStatus::ManualFlattening);
     }
 
     #[test]

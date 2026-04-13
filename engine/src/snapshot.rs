@@ -57,7 +57,7 @@ mod tests {
     use crate::track::{Instrument, TrackId, Venue};
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::ExchangeRules;
+    use poise_core::types::{ExchangeRules, Exposure};
 
     #[test]
     fn persisted_runtime_codec_encodes_runtime_only_snapshot() {
@@ -180,5 +180,50 @@ mod tests {
         assert_eq!(restored.observed.mark_price, Some(95.2));
         assert_eq!(restored.observed.best_bid, Some(94.9));
         assert_eq!(restored.observed.best_ask, Some(95.1));
+    }
+
+    #[test]
+    fn snapshot_round_trips_manual_flattening_status() {
+        let mut runtime = TrackRuntime::with_tick_timeout_secs(
+            TrackId::new("track-1"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: OutOfBandPolicy::Freeze,
+            },
+            CapacityBudget {
+                max_notional: 6_000.0,
+                daily_loss_limit: 500.0,
+                total_loss_limit: 1_000.0,
+            },
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.01,
+                min_qty: 0.01,
+                min_notional: 5.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+            chrono::Utc::now(),
+            45,
+        );
+        runtime.status = serde_json::from_str("\"manual_flattening\"").unwrap();
+        runtime.manual_target_override = Some(Exposure(0.0));
+
+        let snapshot = runtime.snapshot();
+        let json = PersistedRuntimeCodec::encode_snapshot(&snapshot).unwrap();
+        let restored = PersistedRuntimeCodec::decode(json).unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&restored.status).unwrap(),
+            "\"manual_flattening\""
+        );
+        assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
     }
 }

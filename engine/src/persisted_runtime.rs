@@ -408,6 +408,77 @@ mod tests {
     }
 
     #[test]
+    fn persisted_runtime_restores_flattening_status() {
+        let snapshot = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
+            track_id: TrackId::new("btc-core"),
+            restore_revision: Some(
+                TrackRestoreRevision::for_track(
+                    &Instrument::new(Venue::Binance, "BTCUSDT"),
+                    &TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: OutOfBandPolicy::Freeze,
+                    },
+                )
+                .as_str()
+                .to_string(),
+            ),
+            status_json: "\"flattening\"".into(),
+            current_exposure: 0.0,
+            desired_exposure: Some(0.0),
+            manual_target_override: None,
+            executor_state_json: Some(
+                json!({
+                    "active_round": null,
+                    "diagnostics": {
+                        "mode": "passive",
+                        "inventory_gap": 0.0,
+                        "gap_started_at": null,
+                        "last_reprice_at": null,
+                        "last_execution_reason": null,
+                        "recovery_anomaly": null
+                    },
+                    "slots": [{
+                        "slot": "inventory_core",
+                        "state": "empty",
+                        "working_order": null
+                    }],
+                    "recent_terminal_orders": [],
+                    "stats": {
+                        "started_at": "2026-03-29T09:00:00Z",
+                        "max_inventory_gap_abs": 0.0,
+                        "max_gap_age_ms": 0
+                    }
+                })
+                .to_string(),
+            ),
+            replacement_gate_reason_json: None,
+            price_execution_block_reason: None,
+            ledger_state_json: None,
+            unrealized_pnl: 0.0,
+            strategy_price: Some(95.0),
+            strategy_price_status: "live".into(),
+            mark_price: Some(95.2),
+            best_bid: Some(94.9),
+            best_ask: Some(95.1),
+            out_of_band_since: None,
+            last_tick_at: None,
+            market_data_stale_since: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&snapshot.status).unwrap(),
+            "\"flattening\""
+        );
+    }
+
+    #[test]
     fn persisted_runtime_codec_rejects_runtime_only_row_without_restore_revision() {
         let error = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
             track_id: TrackId::new("btc-core"),

@@ -52,17 +52,17 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(8),
+            Constraint::Length(4),
             Constraint::Length(7),
-            Constraint::Length(8),
+            Constraint::Length(18),
             Constraint::Length(15),
             Constraint::Length(13),
-            Constraint::Length(22),
+            Constraint::Length(23),
             Constraint::Length(11),
         ],
     )
     .header(header)
-    .column_spacing(2)
+    .column_spacing(1)
     .row_highlight_style(Theme::highlight())
     .highlight_symbol(">")
     .block(Block::default().title("Dashboard").borders(Borders::ALL));
@@ -83,9 +83,10 @@ fn format_lifecycle_label(status: &TrackStatus) -> &'static str {
         TrackStatus::WaitingMarketData => "waiting",
         TrackStatus::Active => "active",
         TrackStatus::Frozen => "frozen",
-        TrackStatus::ReducingOnly => "reduce",
         TrackStatus::Holding => "holding",
-        TrackStatus::Terminated => "ended",
+        TrackStatus::Flattening => "flattening",
+        TrackStatus::ManualFlattening => "manual_flattening",
+        TrackStatus::Terminated => "terminated",
         TrackStatus::Paused => "paused",
     }
 }
@@ -332,6 +333,25 @@ mod tests {
                 .iter()
                 .all(|fg| *fg == Color::DarkGray)
         );
+    }
+
+    #[test]
+    fn renders_manual_flattening_lifecycle_label() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        response.items[0].lifecycle.status = serde_json::from_str("\"manual_flattening\"").unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("manual_flattening"));
     }
 
     #[test]

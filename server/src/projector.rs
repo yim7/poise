@@ -200,8 +200,9 @@ fn project_track_status(value: &EngineTrackStatus) -> ProtocolTrackStatus {
         EngineTrackStatus::WaitingMarketData => ProtocolTrackStatus::WaitingMarketData,
         EngineTrackStatus::Active => ProtocolTrackStatus::Active,
         EngineTrackStatus::Frozen => ProtocolTrackStatus::Frozen,
-        EngineTrackStatus::ReducingOnly => ProtocolTrackStatus::ReducingOnly,
         EngineTrackStatus::Holding => ProtocolTrackStatus::Holding,
+        EngineTrackStatus::Flattening => ProtocolTrackStatus::Flattening,
+        EngineTrackStatus::ManualFlattening => ProtocolTrackStatus::ManualFlattening,
         EngineTrackStatus::Terminated => ProtocolTrackStatus::Terminated,
         EngineTrackStatus::Paused => ProtocolTrackStatus::Paused,
     }
@@ -227,9 +228,9 @@ fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolSha
 fn project_out_of_band_policy(value: poise_core::strategy::OutOfBandPolicy) -> ProtocolPolicy {
     match value {
         poise_core::strategy::OutOfBandPolicy::Freeze => ProtocolPolicy::Freeze,
-        poise_core::strategy::OutOfBandPolicy::ReduceOnly => ProtocolPolicy::ReduceOnly,
-        poise_core::strategy::OutOfBandPolicy::Terminate => ProtocolPolicy::Terminate,
         poise_core::strategy::OutOfBandPolicy::Hold => ProtocolPolicy::Hold,
+        poise_core::strategy::OutOfBandPolicy::Flatten => ProtocolPolicy::Flatten,
+        poise_core::strategy::OutOfBandPolicy::Terminate => ProtocolPolicy::Terminate,
     }
 }
 
@@ -607,7 +608,7 @@ mod tests {
     #[test]
     fn project_detail_enables_resume_when_manual_flatten_is_active() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackStatus::ReducingOnly;
+        source.status = TrackStatus::ManualFlattening;
         source.manual_target_override = Some(0.0);
 
         let detail = TrackProjector::new().project_detail(&source);
@@ -619,6 +620,29 @@ mod tests {
 
         assert!(resume.enabled);
         assert_eq!(resume.disabled_reason, None);
+    }
+
+    #[test]
+    fn project_out_of_band_policy_uses_flatten() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.out_of_band_policy = serde_json::from_str("\"flatten\"").unwrap();
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(detail.strategy.out_of_band_policy.to_string(), "flatten");
+    }
+
+    #[test]
+    fn project_track_status_uses_manual_flattening() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.status = serde_json::from_str("\"manual_flattening\"").unwrap();
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.status.lifecycle.status.to_string(),
+            "manual_flattening"
+        );
     }
 
     #[test]
