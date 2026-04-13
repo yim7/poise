@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::app::App;
 use crate::exposure_presentation::dashboard_exposure_summary;
-use crate::protocol::{ExecutionStateView, ExecutionStatusView};
+use crate::protocol::{ExecutionStateView, ExecutionStatusView, StrategyPriceStatusView, TrackStatus};
 use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
 use crate::theme::Theme;
 use crate::views::account_panel;
@@ -17,7 +17,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     account_panel::render(frame, sections[0], app.account_summary());
 
-    let header = Row::new(["ID", "Symbol", "Lifecycle", "Execution", "Exposure", "PnL"])
+    let header = Row::new([
+        "ID",
+        "Symbol",
+        "Lifecycle",
+        "Execution",
+        "Price",
+        "Exposure",
+        "PnL",
+    ])
         .style(Theme::table_header());
     let rows = app.tracks.iter().map(|item| {
         let execution = format_execution_badge(
@@ -25,15 +33,17 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.execution.execution_status,
             item.execution.active_slot_count,
         );
+        let price = format_price_summary(item.strategy_price, item.strategy_price_status.clone());
         let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
         let total_pnl = pnl_signal(item.ledger.total_pnl);
 
         Row::new(vec![
             Cell::from(item.id.clone()),
             Cell::from(item.instrument.symbol.clone()),
-            Cell::from(item.lifecycle.status.to_string())
+            Cell::from(format_lifecycle_label(&item.lifecycle.status))
                 .style(Theme::status(&item.lifecycle.status)),
             Cell::from(execution.text).style(execution.style),
+            Cell::from(price.text).style(price.style),
             Cell::from(exposure.text).style(exposure.style),
             Cell::from(total_pnl.text).style(total_pnl.style),
         ])
@@ -42,18 +52,19 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let table = Table::new(
         rows,
         [
+            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(15),
             Constraint::Length(13),
-            Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(14),
             Constraint::Length(22),
-            Constraint::Length(14),
+            Constraint::Length(11),
         ],
     )
     .header(header)
     .column_spacing(2)
     .row_highlight_style(Theme::highlight())
-    .highlight_symbol(">> ")
+    .highlight_symbol(">")
     .block(Block::default().title("Dashboard").borders(Borders::ALL));
 
     let mut state = TableState::default();
@@ -65,6 +76,39 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn format_exposure_summary(current: f64, target: Option<f64>) -> SignalDisplay {
     dashboard_exposure_summary(current, exposure_signal(current, target))
+}
+
+fn format_lifecycle_label(status: &TrackStatus) -> &'static str {
+    match status {
+        TrackStatus::WaitingMarketData => "waiting",
+        TrackStatus::Active => "active",
+        TrackStatus::Frozen => "frozen",
+        TrackStatus::ReducingOnly => "reduce",
+        TrackStatus::Holding => "holding",
+        TrackStatus::Terminated => "ended",
+        TrackStatus::Paused => "paused",
+    }
+}
+
+fn format_price_summary(
+    strategy_price: Option<f64>,
+    strategy_price_status: StrategyPriceStatusView,
+) -> SignalDisplay {
+    match strategy_price {
+        Some(price) => {
+            let text = format!("{price:.4} {strategy_price_status}");
+            let style = match strategy_price_status {
+                StrategyPriceStatusView::Live => Theme::status_neutral(),
+                StrategyPriceStatusView::Stale => Theme::signal_neutral(),
+            };
+
+            SignalDisplay { text, style }
+        }
+        None => SignalDisplay {
+            text: "-- stale".to_string(),
+            style: Theme::signal_neutral(),
+        },
+    }
 }
 
 fn format_execution_badge(
@@ -105,7 +149,7 @@ mod tests {
     use ratatui::style::Color;
 
     use crate::app::App;
-    use crate::protocol::{AccountSummaryView, ExecutionStatusView};
+    use crate::protocol::{AccountSummaryView, ExecutionStatusView, StrategyPriceStatusView};
 
     use super::render;
 
@@ -167,6 +211,36 @@ mod tests {
         Vec::new()
     }
 
+    fn foreground_colors_for_substring(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Color> {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        let needle_chars: Vec<char> = needle.chars().collect();
+
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let start = y as usize * width + x as usize;
+                if x as usize + needle_chars.len() > width {
+                    continue;
+                }
+
+                let matches = needle_chars.iter().enumerate().all(|(offset, expected)| {
+                    buffer.content()[start + offset]
+                        .symbol()
+                        .starts_with(*expected)
+                });
+                if matches {
+                    return needle_chars
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, _)| buffer.content()[start + offset].fg)
+                        .collect();
+                }
+            }
+        }
+
+        Vec::new()
+    }
+
     fn account_summary_view() -> AccountSummaryView {
         serde_json::from_str(include_str!(
             "../../tests/fixtures/account_summary_view.json"
@@ -199,6 +273,68 @@ mod tests {
     }
 
     #[test]
+    fn renders_price_column_with_strategy_price_status() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("Price"));
+        assert!(text.contains("101.2500 live"));
+    }
+
+    #[test]
+    fn renders_missing_strategy_price_as_stale_placeholder() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(
+            r#"{
+                "items": [
+                    {
+                        "id": "btc-core",
+                        "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"},
+                        "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
+                        "strategy_price": null,
+                        "strategy_price_status": "live",
+                        "exposure": {"current": 3.5, "target": 3.0},
+                        "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
+                        "ledger": {"total_pnl": 12.3, "has_unresolved_gaps": false}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut extra = response.items[0].clone();
+        extra.id = "eth-core".to_string();
+        extra.instrument.symbol = "ETHUSDT".to_string();
+        extra.strategy_price = Some(101.25);
+        extra.strategy_price_status = StrategyPriceStatusView::Live;
+        response.items.push(extra);
+        let mut app = App::new(response.items);
+        app.select_next();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("-- stale"));
+        assert!(
+            foreground_colors_for_substring(&terminal, "-- stale")
+                .iter()
+                .all(|fg| *fg == Color::DarkGray)
+        );
+    }
+
+    #[test]
     fn renders_attention_badge_for_anomalous_track() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -225,6 +361,38 @@ mod tests {
                 .iter()
                 .any(|bg| *bg != Color::Reset)
         );
+    }
+
+    #[test]
+    fn keeps_execution_and_pnl_visible_with_price_column() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(
+            r#"{
+                "items": [
+                    {
+                        "id": "btc-core",
+                        "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"},
+                        "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
+                        "strategy_price": 101.25,
+                        "strategy_price_status": "live",
+                        "exposure": {"current": 3.5, "target": 3.0},
+                        "execution": {"state": "open", "execution_status": "attention_required", "active_slot_count": 1},
+                        "ledger": {"total_pnl": 12345.67, "has_unresolved_gaps": false}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("! ATTN open (1)"));
+        assert!(text.contains("↑ +12345.67"));
     }
 
     #[test]
