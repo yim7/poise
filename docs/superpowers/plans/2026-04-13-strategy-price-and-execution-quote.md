@@ -743,6 +743,8 @@ git commit -m "feat(execution): route submit purpose through price gate and top-
 
 ### Task 5: 更新 protocol / projector / TUI / README，并完成全链路回归
 
+实现提交：`f59bc44`
+
 **Files:**
 - Modify: `protocol/src/lib.rs`
 - Modify: `server/src/projector.rs`
@@ -757,7 +759,7 @@ git commit -m "feat(execution): route submit purpose through price gate and top-
 - Test: `server/src/projector.rs`
 - Test: `tui/src/views/instance.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住对外字段和 TUI 展示**
+- [x] **Step 1: 先写失败测试，锁住对外字段和 TUI 展示**
 
 增加至少这些测试：
 
@@ -783,7 +785,7 @@ fn renders_market_block_with_strategy_mark_and_top_of_book_prices() {}
 - detail 展示 `best_bid / best_ask`
 - stale 策略价和 price gate reason 对外可见
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -796,7 +798,7 @@ Expected:
 - 当前协议和 projector 仍然输出 `reference_price` / `index_price`
 - TUI 仍然展示 `ref / mark / index`
 
-- [ ] **Step 3: 做最小实现，统一对外命名和展示**
+- [x] **Step 3: 做最小实现，统一对外命名和展示**
 
 `protocol/src/lib.rs` 至少改成：
 
@@ -839,7 +841,7 @@ pub struct TrackMarketView {
 "prices: strategy {} ({}) | mark {} | bid {} | ask {}"
 ```
 
-- [ ] **Step 4: 更新 README 和 spec**
+- [x] **Step 4: 更新 README 和 spec**
 
 README 至少明确：
 
@@ -851,7 +853,7 @@ README 至少明确：
 
 spec 只回写实现中真正落地的字段名和 gate 常量 owner，不再保留实现前表述。
 
-- [ ] **Step 5: 跑最终回归**
+- [x] **Step 5: 跑最终回归**
 
 Run:
 
@@ -870,7 +872,7 @@ Expected:
 - `reference_price` 不再出现在核心运行时、协议和 TUI
 - `strategy_price / mark_price / best_bid / best_ask / strategy_price_status` 全链路打通
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add protocol/src/lib.rs server/src/projector.rs tui/src/views/instance.rs tui/tests/fixtures/track_detail_view.json tui/tests/fixtures/track_list_response.json tui/tests/fixtures/ws_track_detail_changed.json tui/tests/fixtures/ws_track_list_item_changed.json README.md docs/superpowers/specs/2026-04-13-mark-and-book-price-separation-design.md docs/superpowers/plans/2026-04-13-strategy-price-and-execution-quote.md
