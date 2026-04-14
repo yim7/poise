@@ -44,6 +44,7 @@ impl RecoveryDirtyState {
         self.notify.notify_one();
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_reseed_required(&self) {
         self.workset.lock().unwrap().reseed_required = true;
         self.notify.notify_one();
