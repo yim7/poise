@@ -993,6 +993,57 @@ async fn background_health_check_marks_market_data_stale_without_follow_up_event
 }
 
 #[tokio::test]
+async fn fresh_tick_resets_market_data_health_deadline_before_timeout() {
+    let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
+    let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
+    let mut snapshot = test_snapshot();
+    snapshot.status = TrackStatus::Paused;
+    snapshot.desired_exposure = None;
+    snapshot.executor_state = ExecutorState::empty(test_server_time());
+    let fixture = runtime_fixture_with_options(
+        Some(snapshot),
+        btc_position(0.0, 0.0),
+        vec![],
+        test_budget(),
+        RuntimeFixtureOptions {
+            recovery_retry_interval: Duration::from_millis(50),
+            audit_interval: Duration::from_secs(5),
+            account_refresh_interval: Duration::from_secs(5),
+            clock: clock.clone() as Arc<dyn ClockPort>,
+        },
+    )
+    .await;
+
+    let handles = fixture.runtime.start().await.unwrap();
+    fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
+
+    wait_until_instance(&fixture.state, |instance| {
+        instance.observed.last_tick_at == Some(started_at)
+    })
+    .await;
+
+    let second_tick_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 29).unwrap();
+    clock.set(second_tick_at);
+    fixture.price_sender.send(btc_tick(96.0)).await.unwrap();
+
+    wait_until_instance(&fixture.state, |instance| {
+        instance.observed.last_tick_at == Some(second_tick_at)
+    })
+    .await;
+
+    clock.set(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 31).unwrap());
+    sleep(Duration::from_millis(120)).await;
+
+    let instance = current_instance(&fixture.state).await;
+    assert!(
+        instance.observed.market_data_stale_since.is_none(),
+        "fresh tick should push market data health deadline forward"
+    );
+
+    shutdown(handles).await;
+}
+
+#[tokio::test]
 async fn startup_sync_replays_buffered_user_event_before_first_tick() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
     fixture
