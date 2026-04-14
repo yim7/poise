@@ -432,7 +432,7 @@ git commit -m "feat(runtime): reschedule market data health on successful ticks"
 - Modify: `docs/superpowers/specs/2026-04-15-market-data-health-scheduling-design.md`
 - Modify: `docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md`
 
-- [ ] **Step 1: 校对实现后的接口名并回写设计文稿**
+- [x] **Step 1: 校对实现后的接口名并回写设计文稿**
 
 把设计文稿中的对应段落同步成最终边界：
 
@@ -446,13 +446,16 @@ git commit -m "feat(runtime): reschedule market data health on successful ticks"
 - 不改变设计的 owner 结论
 - 只把接口形状改成实现后的真实版本
 
-- [ ] **Step 2: 跑完整回归**
+- [x] **Step 2: 跑完整回归**
 
 Run:
 
-- `cargo test -p poise-engine -- --nocapture`
-- `cargo test -p poise-application -- --nocapture`
-- `cargo test -p poise-server -- --nocapture`
+- `cargo test -p poise-engine --no-run`
+- `./target/debug/deps/poise_engine-237eca218a85b938 --nocapture`
+- `cargo test -p poise-application --no-run`
+- `./target/debug/deps/poise_application-7b2594c1d9b16a6d --nocapture`
+- `cargo test -p poise-server --no-run`
+- `./target/debug/deps/poise_server-cded5ca7f4175f44 --nocapture`
 
 Expected:
 
