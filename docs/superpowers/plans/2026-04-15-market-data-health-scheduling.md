@@ -463,7 +463,7 @@ Expected:
 - `background_health_check_marks_market_data_stale_without_follow_up_events` 继续通过
 - 不再存在 recovery 负责 market data health 的测试假设
 
-- [ ] **Step 3: 更新计划勾选和提交记录**
+- [x] **Step 3: 更新计划勾选和提交记录**
 
 把本 plan 中各 task 的：
 
@@ -472,14 +472,14 @@ Expected:
 
 回写成真实状态。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-15-market-data-health-scheduling-design.md docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md
 git commit -m "docs(runtime): sync market data health scheduling design and plan"
 ```
 
-实现提交：`<填写 commit SHA>`
+实现提交：`04a56f8`
 
 ## Plan Self-Review
 
