@@ -319,6 +319,14 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
+    pub(crate) async fn market_data_health_deadline(
+        &self,
+        id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        let manager = self.manager.read().await;
+        manager.market_data_health_deadline(&TrackId::new(id))
+    }
+
     pub async fn observe_position(
         &self,
         id: &str,
@@ -1584,5 +1592,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(observer.recorded(), vec![("btc-core".to_string(), false)]);
+    }
+
+    #[tokio::test]
+    async fn mutation_executor_exposes_market_data_health_deadline() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+
+        assert_eq!(
+            executor
+                .market_data_health_deadline("btc-core")
+                .await
+                .unwrap(),
+            None
+        );
     }
 }

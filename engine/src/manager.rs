@@ -238,6 +238,28 @@ impl TrackManager {
         self.transition_for(id, vec![], vec![])
     }
 
+    pub fn market_data_health_deadline(
+        &self,
+        id: &TrackId,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+
+        if track.market_data_stale_since.is_some() {
+            return Ok(None);
+        }
+
+        let Some(last_tick_at) = track.last_tick_at else {
+            return Ok(None);
+        };
+
+        let timeout_secs = i64::try_from(track.tick_timeout_secs)
+            .unwrap_or(i64::try_from(DEFAULT_TICK_TIMEOUT_SECS).unwrap_or(30));
+        Ok(Some(last_tick_at + chrono::Duration::seconds(timeout_secs)))
+    }
+
     pub fn pause_track(&mut self, id: &str) -> Result<()> {
         let track = self
             .tracks
@@ -3404,6 +3426,66 @@ mod tests {
                 .observed
                 .market_data_stale_since
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn market_data_health_deadline_returns_none_without_tick() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock));
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        assert_eq!(
+            manager
+                .market_data_health_deadline(&TrackId::new("btc1"))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn market_data_health_deadline_returns_timeout_after_last_tick() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock));
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+        let track_id = TrackId::new("btc1");
+
+        manager
+            .observe(
+                &track_id,
+                TrackObservation::Market(quoted_market_observation(95.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager.market_data_health_deadline(&track_id).unwrap(),
+            Some(started_at + chrono::Duration::seconds(30))
+        );
+    }
+
+    #[test]
+    fn market_data_health_deadline_returns_none_when_track_is_already_stale() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock.clone()));
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+        let track_id = TrackId::new("btc1");
+
+        manager
+            .observe(
+                &track_id,
+                TrackObservation::Market(quoted_market_observation(95.0)),
+            )
+            .unwrap();
+
+        clock.set(Utc.with_ymd_and_hms(2026, 3, 29, 8, 1, 0).unwrap());
+        manager.refresh_market_data_health(&track_id).unwrap();
+
+        assert_eq!(
+            manager.market_data_health_deadline(&track_id).unwrap(),
+            None
         );
     }
 

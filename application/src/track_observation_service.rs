@@ -45,6 +45,13 @@ impl TrackObservationService {
         self.executor.refresh_market_data_health(id).await
     }
 
+    pub async fn market_data_health_deadline(
+        &self,
+        id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        self.executor.market_data_health_deadline(id).await
+    }
+
     pub async fn observe_position(
         &self,
         id: &str,
