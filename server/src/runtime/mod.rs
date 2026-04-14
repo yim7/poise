@@ -13,7 +13,7 @@ use poise_application::TrackMutationError;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    AccountCapacitySnapshot, AccountPort, ExchangeOrder, ExecutionPort, MarketDataPort,
+    AccountCapacitySnapshot, AccountPort, ClockPort, ExchangeOrder, ExecutionPort, MarketDataPort,
     MetadataPort, Position, UserDataEvent,
 };
 use poise_engine::track::Instrument;
@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 mod account_refresh;
 mod guards;
 mod market_data;
+mod market_data_health;
 mod reconcile;
 mod startup_sync;
 mod submit_preflight;
@@ -39,9 +40,12 @@ pub struct ServerRuntime {
     market_data: Arc<dyn MarketDataPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
+    clock: Arc<dyn ClockPort>,
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     account_refresh_interval: Duration,
+    market_data_health_state: Arc<market_data_health::MarketDataHealthState>,
+    market_data_health_max_sleep_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -51,6 +55,7 @@ pub(crate) struct RuntimePorts {
     market_data: Arc<dyn MarketDataPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
+    clock: Arc<dyn ClockPort>,
 }
 
 impl RuntimePorts {
@@ -59,12 +64,14 @@ impl RuntimePorts {
         market_data: Arc<dyn MarketDataPort>,
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
+        clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
             execution,
             market_data,
             account,
             metadata,
+            clock,
         }
     }
 }
@@ -74,6 +81,7 @@ struct RuntimeIntervals {
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     account_refresh_interval: Duration,
+    market_data_health_max_sleep_interval: Duration,
 }
 
 impl RuntimeIntervals {
@@ -81,11 +89,13 @@ impl RuntimeIntervals {
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
+        market_data_health_max_sleep_interval: Duration,
     ) -> Self {
         Self {
             recovery_retry_interval,
             audit_interval,
             account_refresh_interval,
+            market_data_health_max_sleep_interval,
         }
     }
 }
@@ -94,6 +104,8 @@ impl RuntimeIntervals {
 pub struct RuntimeHandles {
     #[cfg_attr(not(test), allow(dead_code))]
     pub market_task: JoinHandle<()>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub market_data_health_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub user_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -128,6 +140,7 @@ impl ServerRuntime {
                 Duration::from_secs(1),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
+                Duration::from_millis(50),
             ),
         )
     }
@@ -148,6 +161,7 @@ impl ServerRuntime {
                 recovery_retry_interval,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
+                Duration::from_secs(1),
             ),
         )
     }
@@ -169,6 +183,7 @@ impl ServerRuntime {
                 recovery_retry_interval,
                 audit_interval,
                 Duration::from_secs(5),
+                Duration::from_millis(50),
             ),
         )
     }
@@ -191,6 +206,7 @@ impl ServerRuntime {
                 recovery_retry_interval,
                 audit_interval,
                 account_refresh_interval,
+                Duration::from_millis(50),
             ),
         )
     }
@@ -213,9 +229,12 @@ impl ServerRuntime {
             market_data: ports.market_data,
             account: ports.account,
             metadata: ports.metadata,
+            clock: ports.clock,
             recovery_retry_interval: intervals.recovery_retry_interval,
             audit_interval: intervals.audit_interval,
             account_refresh_interval: intervals.account_refresh_interval,
+            market_data_health_state: Arc::new(market_data_health::MarketDataHealthState::default()),
+            market_data_health_max_sleep_interval: intervals.market_data_health_max_sleep_interval,
             shutdown_tx,
         }
     }
@@ -244,6 +263,8 @@ impl ServerRuntime {
             .await;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
+        let market_data_health_task =
+            self.spawn_market_data_health_task(self.shutdown_tx.subscribe());
         let submit_preflight_task = self.spawn_submit_preflight_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task =
@@ -252,6 +273,7 @@ impl ServerRuntime {
 
         Ok(RuntimeHandles {
             market_task,
+            market_data_health_task,
             user_task,
             effect_task,
             recovery_task,
@@ -307,11 +329,13 @@ impl ServerRuntime {
         }
 
         handles.market_task.abort();
+        handles.market_data_health_task.abort();
         handles.user_task.abort();
         handles.recovery_task.abort();
         handles.submit_preflight_task.abort();
         handles.account_task.abort();
         let _ = handles.market_task.await;
+        let _ = handles.market_data_health_task.await;
         let _ = handles.user_task.await;
         let _ = handles.recovery_task.await;
         let _ = handles.submit_preflight_task.await;
@@ -334,6 +358,10 @@ impl ServerRuntime {
 
     fn spawn_market_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         market_data::spawn_market_task(self, shutdown_rx)
+    }
+
+    fn spawn_market_data_health_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        market_data_health::spawn_market_data_health_task(self, shutdown_rx)
     }
 
     fn spawn_effect_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {

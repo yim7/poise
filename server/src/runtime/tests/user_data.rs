@@ -129,6 +129,7 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 
@@ -226,6 +227,7 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 

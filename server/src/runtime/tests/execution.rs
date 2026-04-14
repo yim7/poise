@@ -161,6 +161,7 @@ async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -642,6 +643,7 @@ async fn effect_worker_restores_pending_effect_after_restart() {
             Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
             fixture.exchange.account_port(),
             fixture.exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 
@@ -750,6 +752,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -809,6 +812,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
         Duration::from_secs(1),
         Duration::from_secs(5),
@@ -927,6 +931,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
             Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 
@@ -1033,6 +1038,7 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
             Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 
@@ -1174,6 +1180,7 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 
@@ -1237,6 +1244,7 @@ async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 
@@ -1299,6 +1307,7 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
             market_data as Arc<dyn MarketDataPort>,
             exchange.account_port(),
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
     );
 

@@ -99,6 +99,46 @@ async fn recovery_task_does_not_subscribe_to_application_notifications() {
 }
 
 #[tokio::test]
+async fn recovery_task_does_not_refresh_market_data_health() {
+    let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
+    let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
+    let mut snapshot = test_snapshot();
+    snapshot.status = TrackStatus::Paused;
+    snapshot.desired_exposure = None;
+    snapshot.executor_state = ExecutorState::empty(test_server_time());
+    snapshot.observed.last_tick_at = Some(started_at);
+    snapshot.observed.market_data_stale_since = None;
+    let fixture = runtime_fixture_with_options(
+        Some(snapshot),
+        btc_position(0.0, 0.0),
+        vec![],
+        test_budget(),
+        RuntimeFixtureOptions {
+            recovery_retry_interval: Duration::from_millis(50),
+            audit_interval: Duration::from_secs(5),
+            account_refresh_interval: Duration::from_secs(5),
+            clock: clock.clone() as Arc<dyn ClockPort>,
+        },
+    )
+    .await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = fixture.runtime.spawn_recovery_task(shutdown_rx);
+
+    clock.set(Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 31).unwrap());
+    sleep(Duration::from_millis(120)).await;
+
+    let instance = current_instance(&fixture.state).await;
+    assert!(
+        instance.observed.market_data_stale_since.is_none(),
+        "recovery task should not own market data health refresh"
+    );
+
+    let _ = shutdown_tx.send(true);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn apply_user_data_event_persists_track_ledger_event_atomically() {
     let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
@@ -704,6 +744,7 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
             market_data as Arc<dyn MarketDataPort>,
             account as Arc<dyn AccountPort>,
             exchange.metadata_port(),
+            Arc::new(FixedClock(test_server_time())),
         ),
         HashMap::new(),
         Duration::from_secs(1),

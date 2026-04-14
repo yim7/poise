@@ -12,6 +12,7 @@ pub(super) fn spawn_market_task(
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
     let market_data = Arc::clone(&runtime.market_data);
+    let market_data_health_state = Arc::clone(&runtime.market_data_health_state);
 
     tokio::spawn(async move {
         let tracks = state
@@ -30,6 +31,7 @@ pub(super) fn spawn_market_task(
             match market_data.subscribe_prices(&instrument).await {
                 Ok(mut receiver) => {
                     let state = state.clone();
+                    let market_data_health_state = Arc::clone(&market_data_health_state);
                     let mut worker_shutdown_rx = shutdown_rx.clone();
                     workers.spawn(async move {
                         loop {
@@ -61,7 +63,9 @@ pub(super) fn spawn_market_task(
                                         )
                                         .await
                                     {
-                                        Ok(_) => {}
+                                        Ok(_) => {
+                                            market_data_health_state.mark_dirty(&track.id);
+                                        }
                                         Err(error) => {
                                             tracing::warn!(
                                                 "failed to apply market data update for {}: {}",

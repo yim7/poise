@@ -138,7 +138,8 @@ pub(crate) async fn runtime_fixture_with_options(
     let (price_sender, price_receiver) = mpsc::channel(8);
     let market_data = Arc::new(FakeMarketData::new(price_receiver));
 
-    let mut manager = TrackManager::new(options.clock);
+    let clock = options.clock.clone();
+    let mut manager = TrackManager::new(clock.clone());
     manager
         .add_track(
             TrackId::new("BTCUSDT"),
@@ -184,6 +185,7 @@ pub(crate) async fn runtime_fixture_with_options(
                 market_data as Arc<dyn MarketDataPort>,
                 account,
                 metadata,
+                clock,
             ),
             options.recovery_retry_interval,
             options.audit_interval,
@@ -1835,7 +1837,13 @@ pub(crate) async fn build_test_runtime_with_ports(
         runtime: ServerRuntime::with_account_capacity_snapshots(
             state.runtime_state(),
             worker_state.effect_worker_state,
-            RuntimePorts::new(execution, market_data, account.clone(), metadata),
+            RuntimePorts::new(
+                execution,
+                market_data,
+                account.clone(),
+                metadata,
+                Arc::new(FixedClock(test_server_time())),
+            ),
             HashMap::new(),
             Duration::from_secs(1),
         ),

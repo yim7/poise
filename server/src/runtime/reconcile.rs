@@ -130,21 +130,6 @@ pub(super) fn spawn_recovery_task(
                     }
                 }
                 _ = ticker.tick() => {
-                    for track in &instruments {
-                        if let Err(error) = state
-                            .reconcile
-                            .observation_service
-                            .refresh_market_data_health(&track.id)
-                            .await
-                        {
-                            tracing::warn!(
-                                "failed to refresh market data health for {}: {}",
-                                track.instrument.symbol,
-                                error
-                            );
-                        }
-                    }
-
                     let now = Instant::now();
                     let due_anomaly_tracks: Vec<(String, poise_engine::track::Instrument)> = tracked
                         .iter()

@@ -652,6 +652,7 @@ async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data(
 
     let RuntimeHandles {
         market_task,
+        market_data_health_task,
         user_task,
         effect_task,
         recovery_task,
@@ -660,6 +661,8 @@ async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data(
     } = fixture.runtime.start().await.unwrap();
     market_task.abort();
     let _ = market_task.await;
+    market_data_health_task.abort();
+    let _ = market_data_health_task.await;
     effect_task.abort();
     let _ = effect_task.await;
 
@@ -767,6 +770,7 @@ async fn recovery_task_cancels_unknown_live_orders_automatically() {
 
     let RuntimeHandles {
         market_task,
+        market_data_health_task,
         user_task,
         effect_task,
         recovery_task,
@@ -775,6 +779,8 @@ async fn recovery_task_cancels_unknown_live_orders_automatically() {
     } = fixture.runtime.start().await.unwrap();
     market_task.abort();
     let _ = market_task.await;
+    market_data_health_task.abort();
+    let _ = market_data_health_task.await;
     effect_task.abort();
     let _ = effect_task.await;
 
@@ -844,6 +850,7 @@ async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_eff
 
     let RuntimeHandles {
         market_task,
+        market_data_health_task,
         user_task,
         effect_task,
         recovery_task,
@@ -852,6 +859,8 @@ async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_eff
     } = fixture.runtime.start().await.unwrap();
     market_task.abort();
     let _ = market_task.await;
+    market_data_health_task.abort();
+    let _ = market_data_health_task.await;
     effect_task.abort();
     let _ = effect_task.await;
 
@@ -1044,7 +1053,7 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
         Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
     ));
 
-    let mut manager = TrackManager::new(clock);
+    let mut manager = TrackManager::new(clock.clone());
     manager
         .add_track(
             TrackId::new("BTCUSDT"),
@@ -1079,6 +1088,7 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
             market_data as Arc<dyn MarketDataPort>,
             account as Arc<dyn AccountPort>,
             exchange.metadata_port(),
+            clock.clone() as Arc<dyn ClockPort>,
         ),
         HashMap::new(),
         Duration::from_secs(1),

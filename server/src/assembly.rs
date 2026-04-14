@@ -203,7 +203,7 @@ async fn assemble_with_state_store(
             .map(|track| track.track_id().clone()),
     )?;
 
-    let mut manager = TrackManager::new(clock);
+    let mut manager = TrackManager::new(clock.clone());
     let mut account_capacity_snapshots = HashMap::new();
     for track in prepared_registry.iter() {
         let track_id = track.track_id().clone();
@@ -347,6 +347,7 @@ async fn assemble_with_state_store(
                 exchange.market_data_port(),
                 exchange.account_port(),
                 exchange.metadata_port(),
+                clock,
             ),
             account_capacity_snapshots,
             Duration::from_secs(1),
@@ -1419,6 +1420,7 @@ total_loss_limit = 600.0
                         market_data,
                         exchange.clone(),
                         exchange,
+                        Arc::new(SystemClock),
                     ),
                 ),
             },
