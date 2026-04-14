@@ -4,7 +4,9 @@ use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::app::App;
 use crate::exposure_presentation::dashboard_exposure_summary;
-use crate::protocol::{ExecutionStateView, ExecutionStatusView, StrategyPriceStatusView, TrackStatus};
+use crate::protocol::{
+    ExecutionStateView, ExecutionStatusView, StrategyPriceStatusView, TrackStatus,
+};
 use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
 use crate::theme::Theme;
 use crate::views::account_panel;
@@ -26,7 +28,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         "Exposure",
         "PnL",
     ])
-        .style(Theme::table_header());
+    .style(Theme::table_header());
     let rows = app.tracks.iter().map(|item| {
         let execution = format_execution_badge(
             item.execution.state,
@@ -96,18 +98,19 @@ fn format_price_summary(
     strategy_price_status: StrategyPriceStatusView,
 ) -> SignalDisplay {
     match strategy_price {
-        Some(price) => {
-            let text = format!("{price:.4} {strategy_price_status}");
-            let style = match strategy_price_status {
-                StrategyPriceStatusView::Live => Theme::status_neutral(),
-                StrategyPriceStatusView::Stale => Theme::signal_neutral(),
-            };
-
-            SignalDisplay { text, style }
-        }
+        Some(price) => match strategy_price_status {
+            StrategyPriceStatusView::Live => SignalDisplay {
+                text: format!("{price:.4}"),
+                style: Theme::price_fresh(),
+            },
+            StrategyPriceStatusView::Stale => SignalDisplay {
+                text: format!("{price:.4}?"),
+                style: Theme::price_stale(),
+            },
+        },
         None => SignalDisplay {
-            text: "-- stale".to_string(),
-            style: Theme::signal_neutral(),
+            text: "--".to_string(),
+            style: Theme::price_stale(),
         },
     }
 }
@@ -212,7 +215,10 @@ mod tests {
         Vec::new()
     }
 
-    fn foreground_colors_for_substring(terminal: &Terminal<TestBackend>, needle: &str) -> Vec<Color> {
+    fn foreground_colors_for_substring(
+        terminal: &Terminal<TestBackend>,
+        needle: &str,
+    ) -> Vec<Color> {
         let buffer = terminal.backend().buffer();
         let width = buffer.area.width as usize;
         let needle_chars: Vec<char> = needle.chars().collect();
@@ -277,11 +283,17 @@ mod tests {
     fn renders_price_column_with_strategy_price_status() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
             "../../tests/fixtures/track_list_response.json"
         ))
         .unwrap();
-        let app = App::new(response.items);
+        let mut extra = response.items[0].clone();
+        extra.id = "eth-core".to_string();
+        extra.instrument.symbol = "ETHUSDT".to_string();
+        extra.strategy_price = Some(88.88);
+        response.items.push(extra);
+        let mut app = App::new(response.items);
+        app.select_next();
 
         terminal
             .draw(|frame| render(frame, frame.area(), &app))
@@ -289,7 +301,45 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("Price"));
-        assert!(text.contains("101.2500 live"));
+        assert!(text.contains("101.2500"));
+        assert!(!text.contains("101.2500 live"));
+        assert!(
+            foreground_colors_for_substring(&terminal, "101.2500")
+                .iter()
+                .all(|fg| *fg == Color::Green)
+        );
+    }
+
+    #[test]
+    fn renders_stale_strategy_price_with_short_marker_and_stale_color() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        response.items[0].strategy_price = Some(101.25);
+        response.items[0].strategy_price_status = StrategyPriceStatusView::Stale;
+        let mut extra = response.items[0].clone();
+        extra.id = "eth-core".to_string();
+        extra.instrument.symbol = "ETHUSDT".to_string();
+        extra.strategy_price = Some(88.88);
+        extra.strategy_price_status = StrategyPriceStatusView::Live;
+        response.items.push(extra);
+        let mut app = App::new(response.items);
+        app.select_next();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("101.2500?"));
+        assert!(
+            foreground_colors_for_substring(&terminal, "101.2500?")
+                .iter()
+                .all(|fg| *fg == Color::Yellow)
+        );
     }
 
     #[test]
@@ -327,11 +377,11 @@ mod tests {
             .unwrap();
         let text = buffer_text(&terminal);
 
-        assert!(text.contains("-- stale"));
+        assert!(text.contains("--"));
         assert!(
-            foreground_colors_for_substring(&terminal, "-- stale")
+            foreground_colors_for_substring(&terminal, "--")
                 .iter()
-                .all(|fg| *fg == Color::DarkGray)
+                .all(|fg| *fg == Color::Yellow)
         );
     }
 

@@ -76,6 +76,18 @@ impl Theme {
         Style::default().fg(Color::White)
     }
 
+    pub fn price_fresh() -> Style {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn price_stale() -> Style {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn signal_positive(kind: SignalKind) -> Style {
         match kind {
             SignalKind::Exposure => Style::default()
