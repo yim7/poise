@@ -175,11 +175,13 @@ git commit -m "feat(runtime): expose market data health deadline queries"
 **Files:**
 - Create: `server/src/runtime/market_data_health.rs`
 - Modify: `server/src/runtime/mod.rs`
+- Modify: `server/src/runtime/market_data.rs`
+- Modify: `server/src/runtime/reconcile.rs`
 - Test: `server/src/runtime/market_data_health.rs`
 - Test: `server/src/runtime/tests/startup_sync.rs`
 - Test: `server/src/runtime/tests/reconcile.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住独立调度与 recovery 解耦**
+- [x] **Step 1: 先写失败测试，锁住独立调度与 recovery 解耦**
 
 新增或改写至少这些测试：
 
@@ -199,7 +201,7 @@ async fn recovery_task_does_not_refresh_market_data_health() {}
 - 保留现有 `background_health_check_marks_market_data_stale_without_follow_up_events`
 - 新增一个只跑 recovery task 的测试，确认把时钟推进到超时后，不会因为 recovery 自己而把 `market_data_stale_since` 写出来
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -211,7 +213,7 @@ Expected:
 - 第一个测试当前仍然通过，作为行为基线
 - 第二个新测试失败，因为 recovery 现在还在做 market data health refresh
 
-- [ ] **Step 3: 新建私有 `MarketDataHealthState` 与 task 模块**
+- [x] **Step 3: 新建私有 `MarketDataHealthState` 与 task 模块**
 
 在 `server/src/runtime/market_data_health.rs` 实现：
 
@@ -256,7 +258,7 @@ pub(super) fn spawn_market_data_health_task(
 - 共享 `MarketDataHealthState` 中的 dirty tracks
 - bounded sleep
 
-- [ ] **Step 4: 实现 bounded sleep 调度循环**
+- [x] **Step 4: 实现 bounded sleep 调度循环**
 
 主循环按这个顺序工作：
 
@@ -296,7 +298,7 @@ loop {
 - `refresh_due_tracks(...)` 只对 due tracks 调 `refresh_market_data_health(track_id)`
 - refresh 后必须重新查询该 track 的 deadline
 
-- [ ] **Step 5: 在 `ServerRuntime` 里注册新任务、`ClockPort` 和配置**
+- [x] **Step 5: 在 `ServerRuntime` 里注册新任务、`ClockPort` 和配置**
 
 修改 `server/src/runtime/mod.rs`：
 
@@ -322,6 +324,8 @@ market_data_health_max_sleep_interval: Duration,
 
 - `server/src/assembly.rs` 的 runtime 构造
 - `server/src/runtime/tests/support.rs` 的测试夹具注入
+- `server/src/runtime/market_data.rs` 成功写入 tick 后标记 dirty
+- `server/src/runtime/reconcile.rs` 删除旧的 `refresh_market_data_health()` sweep
 
 测试默认值：
 
@@ -330,7 +334,7 @@ market_data_health_max_sleep_interval: Duration,
 
 并在 `start()` / `shutdown()` 中加入 spawn / abort / await。
 
-- [ ] **Step 6: 跑 Task 2 回归**
+- [x] **Step 6: 跑 Task 2 回归**
 
 Run:
 
@@ -344,24 +348,23 @@ Expected:
 - recovery task 不再负责 market data health
 - 新 task 的 dirty / sleep / due 行为有单测覆盖
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
-git add server/src/runtime/market_data_health.rs server/src/runtime/mod.rs server/src/runtime/tests/startup_sync.rs server/src/runtime/tests/reconcile.rs docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md
+git add server/src/runtime/market_data_health.rs server/src/runtime/mod.rs server/src/runtime/market_data.rs server/src/runtime/reconcile.rs server/src/runtime/tests/startup_sync.rs server/src/runtime/tests/reconcile.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs server/src/runtime/tests/execution.rs server/src/assembly.rs docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md
 git commit -m "refactor(runtime): split market data health scheduling from recovery"
 ```
 
-实现提交：`<填写 commit SHA>`
+实现提交：`3220f4d`
 
-### Task 3: 把 market tick 成功写入接到 dirty 重算，并删除 recovery 里的 health sweep
+### Task 3: 补齐 fresh tick 重置 deadline 的回归覆盖
 
 **Files:**
-- Modify: `server/src/runtime/market_data.rs`
-- Modify: `server/src/runtime/reconcile.rs`
 - Modify: `server/src/runtime/tests/startup_sync.rs`
-- Modify: `server/src/runtime/tests/reconcile.rs`
+- Modify: `server/src/runtime/market_data.rs`
+- Modify: `server/src/runtime/market_data_health.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 tick 成功后会重算 deadline**
+- [ ] **Step 1: 先写回归测试，锁住 tick 成功后会重算 deadline**
 
 新增至少这条测试：
 
@@ -378,7 +381,7 @@ async fn fresh_tick_resets_market_data_health_deadline_before_timeout() {}
 4. 再推进到“旧 deadline 已过、但新 deadline 未过”的时间
 5. 断言 `market_data_stale_since` 仍然是 `None`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [ ] **Step 2: 运行定向测试，确认当前行为**
 
 Run:
 
@@ -386,74 +389,38 @@ Run:
 
 Expected:
 
-- 当前实现失败，因为还没有 dirty 驱动的 deadline 重算
+- 如果测试失败，说明 dirty hook 或 deadline 重算还有缺口
+- 如果测试直接通过，说明 Task 2 中提前落下的 dirty hook 已满足这条行为，Task 3 主要作为覆盖补齐
 
-- [ ] **Step 3: 在 market worker 成功写入后标记 dirty**
+- [ ] **Step 3: 仅在需要时补最小实现**
 
-修改 `server/src/runtime/market_data.rs` 成功分支：
-
-```rust
-match state
-    .reconcile
-    .observation_service
-    .observe_market(&track.id, observation)
-    .await
-{
-    Ok(_) => {
-        market_data_health_state.mark_dirty(&track.id);
-    }
-    Err(error) => {
-        tracing::warn!(...);
-    }
-}
-```
-
-要求：
-
-- 只有 `observe_market(...)` 成功后才标 dirty
-- 不在错误分支标 dirty
-
-- [ ] **Step 4: 从 recovery 主循环中删除 health sweep**
-
-在 `server/src/runtime/reconcile.rs` 删除这段：
+如果 Step 2 已经通过：
 
 ```rust
-for track in &instruments {
-    if let Err(error) = state
-        .reconcile
-        .observation_service
-        .refresh_market_data_health(&track.id)
-        .await
-    {
-        tracing::warn!(...);
-    }
-}
+// 无需额外生产代码修改
 ```
 
-保留：
+如果 Step 2 失败，只在以下位置补最小修复：
 
-- anomaly retry
-- audit 对账
-- recovery dirty state 消费
+- `server/src/runtime/market_data.rs`
+- `server/src/runtime/market_data_health.rs`
 
-- [ ] **Step 5: 跑 Task 3 回归**
+- [ ] **Step 4: 跑 Task 3 回归**
 
 Run:
 
 - `cargo test -p poise-server runtime::tests::startup_sync::fresh_tick_resets_market_data_health_deadline_before_timeout -- --exact --nocapture`
 - `cargo test -p poise-server runtime::tests::startup_sync::background_health_check_marks_market_data_stale_without_follow_up_events -- --exact --nocapture`
-- `cargo test -p poise-server runtime::tests::reconcile::recovery_task_does_not_refresh_market_data_health -- --exact --nocapture`
 
 Expected:
 
 - 新 tick 会重置 stale deadline
-- recovery 不再承担 health sweep
 - 无 follow-up tick 仍能按时标 stale
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add server/src/runtime/market_data.rs server/src/runtime/reconcile.rs server/src/runtime/tests/startup_sync.rs server/src/runtime/tests/reconcile.rs docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md
+git add server/src/runtime/tests/startup_sync.rs server/src/runtime/market_data.rs server/src/runtime/market_data_health.rs docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md
 git commit -m "feat(runtime): reschedule market data health on successful ticks"
 ```
 
