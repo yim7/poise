@@ -364,7 +364,7 @@ git commit -m "refactor(runtime): split market data health scheduling from recov
 - Modify: `server/src/runtime/market_data.rs`
 - Modify: `server/src/runtime/market_data_health.rs`
 
-- [ ] **Step 1: 先写回归测试，锁住 tick 成功后会重算 deadline**
+- [x] **Step 1: 先写回归测试，锁住 tick 成功后会重算 deadline**
 
 新增至少这条测试：
 
@@ -381,7 +381,7 @@ async fn fresh_tick_resets_market_data_health_deadline_before_timeout() {}
 4. 再推进到“旧 deadline 已过、但新 deadline 未过”的时间
 5. 断言 `market_data_stale_since` 仍然是 `None`
 
-- [ ] **Step 2: 运行定向测试，确认当前行为**
+- [x] **Step 2: 运行定向测试，确认当前行为**
 
 Run:
 
@@ -392,7 +392,7 @@ Expected:
 - 如果测试失败，说明 dirty hook 或 deadline 重算还有缺口
 - 如果测试直接通过，说明 Task 2 中提前落下的 dirty hook 已满足这条行为，Task 3 主要作为覆盖补齐
 
-- [ ] **Step 3: 仅在需要时补最小实现**
+- [x] **Step 3: 仅在需要时补最小实现**
 
 如果 Step 2 已经通过：
 
@@ -405,7 +405,7 @@ Expected:
 - `server/src/runtime/market_data.rs`
 - `server/src/runtime/market_data_health.rs`
 
-- [ ] **Step 4: 跑 Task 3 回归**
+- [x] **Step 4: 跑 Task 3 回归**
 
 Run:
 
@@ -417,14 +417,14 @@ Expected:
 - 新 tick 会重置 stale deadline
 - 无 follow-up tick 仍能按时标 stale
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/src/runtime/tests/startup_sync.rs server/src/runtime/market_data.rs server/src/runtime/market_data_health.rs docs/superpowers/plans/2026-04-15-market-data-health-scheduling.md
 git commit -m "feat(runtime): reschedule market data health on successful ticks"
 ```
 
-实现提交：`<填写 commit SHA>`
+实现提交：`6ec1848`
 
 ### Task 4: 全量验收并同步设计文稿
 
