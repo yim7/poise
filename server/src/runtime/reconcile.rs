@@ -1,12 +1,12 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use poise_application::{ApplicationNotification, TrackInstrument, TrackMutationError};
+use poise_application::{RecoveryAnomalyObserver, TrackInstrument, TrackMutationError};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{ExchangeOrder, ExecutionPort};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -22,6 +22,60 @@ use super::{
 struct RecoveryTrackedTrack {
     instrument: poise_engine::track::Instrument,
     next_retry_at: Instant,
+}
+
+#[derive(Default)]
+pub(crate) struct RecoveryDirtyState {
+    workset: Mutex<RecoveryWorkset>,
+    notify: Notify,
+}
+
+impl RecoveryDirtyState {
+    pub(crate) fn mark_recovery_anomaly(
+        &self,
+        track_id: &poise_engine::track::TrackId,
+        active: bool,
+    ) {
+        self.workset
+            .lock()
+            .unwrap()
+            .anomaly_updates
+            .insert(track_id.as_str().to_string(), active);
+        self.notify.notify_one();
+    }
+
+    pub(crate) fn mark_reseed_required(&self) {
+        self.workset.lock().unwrap().reseed_required = true;
+        self.notify.notify_one();
+    }
+
+    fn take(&self) -> RecoveryWorkset {
+        std::mem::take(&mut *self.workset.lock().unwrap())
+    }
+
+    async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+pub(crate) struct RecoveryAnomalyDirtyObserver {
+    dirty_state: Arc<RecoveryDirtyState>,
+}
+
+impl RecoveryAnomalyDirtyObserver {
+    pub(crate) fn new(dirty_state: Arc<RecoveryDirtyState>) -> Self {
+        Self { dirty_state }
+    }
+}
+
+impl RecoveryAnomalyObserver for RecoveryAnomalyDirtyObserver {
+    fn observe_recovery_anomaly_change(
+        &self,
+        track_id: &poise_engine::track::TrackId,
+        active: bool,
+    ) {
+        self.dirty_state.mark_recovery_anomaly(track_id, active);
+    }
 }
 
 pub(super) fn spawn_recovery_task(
@@ -45,7 +99,6 @@ pub(super) fn spawn_recovery_task(
             .iter()
             .map(|track| (track.id.clone(), Instant::now() + audit_interval))
             .collect::<HashMap<_, _>>();
-        let mut notifications = state.notifications.subscribe();
         let mut pending_workset = RecoveryWorkset::default();
         let mut ticker = tokio::time::interval(Duration::from_millis(50));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -54,6 +107,8 @@ pub(super) fn spawn_recovery_task(
             if *shutdown_rx.borrow() {
                 break;
             }
+
+            pending_workset.merge(state.reconcile.recovery_dirty_state.take());
 
             if !pending_workset.is_empty() {
                 apply_recovery_workset(
@@ -132,11 +187,8 @@ pub(super) fn spawn_recovery_task(
                         }
                     }
                 }
-                notification = notifications.recv() => {
-                    if !record_recovery_notification(&mut pending_workset, notification) {
-                        break;
-                    }
-                    drain_recovery_notifications(&mut notifications, &mut pending_workset);
+                _ = state.reconcile.recovery_dirty_state.wait() => {
+                    pending_workset.merge(state.reconcile.recovery_dirty_state.take());
                 }
             }
         }
@@ -303,25 +355,6 @@ async fn seed_recovery_tracking(
     tracked
 }
 
-async fn load_recovery_anomaly_active(state: &ReconcileState, track_id: &str) -> Option<bool> {
-    match state.mutation_store.load_track_state(track_id).await {
-        Ok(Some(snapshot)) => Some(
-            snapshot
-                .executor_state
-                .diagnostics
-                .recovery_anomaly
-                .is_some(),
-        ),
-        Ok(None) => Some(false),
-        Err(error) => {
-            tracing::warn!(
-                "failed to load runtime snapshot for recovery tracking on `{track_id}`: {error}"
-            );
-            None
-        }
-    }
-}
-
 async fn apply_recovery_workset(
     state: &ReconcileState,
     instruments: &[TrackInstrument],
@@ -332,79 +365,35 @@ async fn apply_recovery_workset(
     let workset = std::mem::take(workset);
 
     if workset.reseed_required {
-        tracing::warn!(
-            "recovery notification stream lagged by {} messages; reseeding recovery tracking",
-            workset.skipped_messages
-        );
         *tracked = seed_recovery_tracking(state, instruments, retry_interval).await;
         return;
     }
 
-    for track_id in &workset.changed_track_ids {
-        if let Some(recovery_anomaly_active) =
-            load_recovery_anomaly_active(state, track_id.as_str()).await
-        {
-            update_recovery_tracking(
-                tracked,
-                instruments,
-                track_id.as_str(),
-                recovery_anomaly_active,
-                retry_interval,
-            );
-        }
-    }
-}
-
-fn record_recovery_notification(
-    workset: &mut RecoveryWorkset,
-    notification: Result<ApplicationNotification, tokio::sync::broadcast::error::RecvError>,
-) -> bool {
-    match notification {
-        Ok(ApplicationNotification::TrackChanged { track_id }) => {
-            workset
-                .changed_track_ids
-                .insert(track_id.as_str().to_string());
-            true
-        }
-        Ok(ApplicationNotification::AccountChanged) => true,
-        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-            workset.reseed_required = true;
-            workset.skipped_messages += skipped;
-            true
-        }
-        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
-    }
-}
-
-fn drain_recovery_notifications(
-    notifications: &mut tokio::sync::broadcast::Receiver<ApplicationNotification>,
-    workset: &mut RecoveryWorkset,
-) {
-    loop {
-        match notifications.try_recv() {
-            Ok(notification) => {
-                let _ = record_recovery_notification(workset, Ok(notification));
-            }
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                workset.reseed_required = true;
-                workset.skipped_messages += skipped;
-            }
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
-        }
+    for (track_id, recovery_anomaly_active) in &workset.anomaly_updates {
+        update_recovery_tracking(
+            tracked,
+            instruments,
+            track_id.as_str(),
+            *recovery_anomaly_active,
+            retry_interval,
+        );
     }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RecoveryWorkset {
-    changed_track_ids: HashSet<String>,
+    anomaly_updates: HashMap<String, bool>,
     reseed_required: bool,
-    skipped_messages: u64,
 }
 
 impl RecoveryWorkset {
     fn is_empty(&self) -> bool {
-        self.changed_track_ids.is_empty() && !self.reseed_required && self.skipped_messages == 0
+        self.anomaly_updates.is_empty() && !self.reseed_required
+    }
+
+    fn merge(&mut self, other: RecoveryWorkset) {
+        self.anomaly_updates.extend(other.anomaly_updates);
+        self.reseed_required |= other.reseed_required;
     }
 }
 
@@ -415,32 +404,24 @@ mod tests {
     #[test]
     fn recovery_workset_coalesces_track_marks() {
         let mut workset = RecoveryWorkset::default();
+        workset.anomaly_updates.insert("BTCUSDT".to_string(), true);
 
-        assert!(record_recovery_notification(
-            &mut workset,
-            Ok(ApplicationNotification::TrackChanged {
-                track_id: poise_engine::track::TrackId::new("BTCUSDT"),
-            }),
-        ));
-        assert!(record_recovery_notification(
-            &mut workset,
-            Ok(ApplicationNotification::TrackChanged {
-                track_id: poise_engine::track::TrackId::new("BTCUSDT"),
-            }),
-        ));
-        assert!(record_recovery_notification(
-            &mut workset,
-            Ok(ApplicationNotification::TrackChanged {
-                track_id: poise_engine::track::TrackId::new("ETHUSDT"),
-            }),
-        ));
+        workset.merge(RecoveryWorkset {
+            anomaly_updates: HashMap::from([
+                ("BTCUSDT".to_string(), false),
+                ("ETHUSDT".to_string(), true),
+            ]),
+            reseed_required: false,
+        });
 
         assert_eq!(
             workset,
             RecoveryWorkset {
-                changed_track_ids: HashSet::from(["BTCUSDT".to_string(), "ETHUSDT".to_string()]),
+                anomaly_updates: HashMap::from([
+                    ("BTCUSDT".to_string(), false),
+                    ("ETHUSDT".to_string(), true),
+                ]),
                 reseed_required: false,
-                skipped_messages: 0,
             }
         );
     }
@@ -448,27 +429,32 @@ mod tests {
     #[test]
     fn recovery_workset_coalesces_reseed_requests() {
         let mut workset = RecoveryWorkset::default();
-        assert!(record_recovery_notification(
-            &mut workset,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(1)),
-        ));
-        assert!(record_recovery_notification(
-            &mut workset,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(2)),
-        ));
-        assert!(record_recovery_notification(
-            &mut workset,
-            Ok(ApplicationNotification::TrackChanged {
-                track_id: poise_engine::track::TrackId::new("SOLUSDT"),
-            }),
-        ));
+        workset.reseed_required = true;
+        workset.merge(RecoveryWorkset {
+            anomaly_updates: HashMap::from([("SOLUSDT".to_string(), true)]),
+            reseed_required: true,
+        });
 
         assert_eq!(
             workset,
             RecoveryWorkset {
-                changed_track_ids: HashSet::from(["SOLUSDT".to_string()]),
+                anomaly_updates: HashMap::from([("SOLUSDT".to_string(), true)]),
                 reseed_required: true,
-                skipped_messages: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_dirty_state_marks_reseed_requests() {
+        let dirty_state = RecoveryDirtyState::default();
+
+        dirty_state.mark_reseed_required();
+
+        assert_eq!(
+            dirty_state.take(),
+            RecoveryWorkset {
+                anomaly_updates: HashMap::new(),
+                reseed_required: true,
             }
         );
     }

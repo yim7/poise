@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use crate::account_projector::AccountProjector;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
-use crate::runtime::{AccountMarginGuardStore, TrackReconcileGuards};
+use crate::runtime::{AccountMarginGuardStore, RecoveryDirtyState, TrackReconcileGuards};
 use crate::submit_preflight::SubmitPreflight;
 
 #[derive(Clone)]
@@ -41,6 +41,7 @@ pub struct ReconcileState {
     pub exchange_freshness: Arc<ExchangeFreshness>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,
     pub submit_preflight: Arc<SubmitPreflight>,
+    pub recovery_dirty_state: Arc<RecoveryDirtyState>,
 }
 
 #[derive(Clone)]

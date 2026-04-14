@@ -1222,11 +1222,6 @@ impl MemoryPersistence {
         self.save_transition_count.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn fail_next_load_track_state_requests(&self, count: usize) {
-        self.fail_next_load_track_state_requests
-            .store(count, Ordering::SeqCst);
-    }
-
     pub(crate) fn fail_next_pending_submit_effect_queries(&self, count: usize) {
         self.fail_next_pending_submit_effect_queries
             .store(count, Ordering::SeqCst);

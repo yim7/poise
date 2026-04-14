@@ -31,7 +31,8 @@ use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::runtime::{
-    AccountMarginGuardStore, RuntimeHandles, RuntimePorts, ServerRuntime, TrackReconcileGuards,
+    AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
+    RuntimePorts, ServerRuntime, TrackReconcileGuards,
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
@@ -237,12 +238,16 @@ async fn assemble_with_state_store(
     let query_store = repositories.query_store();
     let effect_store = repositories.effect_store();
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    let write_services = TrackServiceSet::new(
+    let recovery_dirty_state = Arc::new(RecoveryDirtyState::default());
+    let write_services = TrackServiceSet::new_with_recovery_anomaly_observer(
         manager,
         mutation_store.clone(),
         effect_store.clone(),
         notifications.clone(),
         account_margin_guard.clone(),
+        Arc::new(RecoveryAnomalyDirtyObserver::new(
+            recovery_dirty_state.clone(),
+        )),
     );
     let command_service = Arc::new(write_services.command);
     let observation_service = Arc::new(write_services.observation);
@@ -283,6 +288,7 @@ async fn assemble_with_state_store(
         exchange_freshness.clone(),
         reconcile_guards.clone(),
         submit_preflight.clone(),
+        recovery_dirty_state.clone(),
     );
     let http_state = build_http_state(
         command_service.clone(),
@@ -499,6 +505,7 @@ pub(crate) fn build_reconcile_state(
     exchange_freshness: Arc<ExchangeFreshness>,
     reconcile_guards: Arc<TrackReconcileGuards>,
     submit_preflight: Arc<SubmitPreflight>,
+    recovery_dirty_state: Arc<RecoveryDirtyState>,
 ) -> ReconcileState {
     ReconcileState {
         observation_service,
@@ -507,6 +514,7 @@ pub(crate) fn build_reconcile_state(
         exchange_freshness,
         reconcile_guards,
         submit_preflight,
+        recovery_dirty_state,
     }
 }
 

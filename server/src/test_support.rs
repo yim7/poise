@@ -20,8 +20,9 @@ use tokio::sync::broadcast;
 
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
-use crate::runtime::AccountMarginGuardStore;
-use crate::runtime::TrackReconcileGuards;
+use crate::runtime::{
+    AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, TrackReconcileGuards,
+};
 use crate::server_context::{EffectWorkerState, RuntimeState};
 use crate::submit_preflight::SubmitPreflight;
 
@@ -33,6 +34,7 @@ pub(crate) struct TestApplicationServices {
     pub(crate) submit_effect_service: Arc<SubmitEffectService>,
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
+    pub(crate) recovery_dirty_state: Arc<RecoveryDirtyState>,
 }
 
 #[derive(Clone)]
@@ -42,6 +44,7 @@ pub(crate) struct RuntimeTestContext {
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) exchange_freshness: Arc<ExchangeFreshness>,
     pub(crate) submit_preflight: Arc<SubmitPreflight>,
+    pub(crate) recovery_dirty_state: Arc<RecoveryDirtyState>,
     pub(crate) effect_service: Arc<TrackEffectService>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
     pub(crate) projector: Arc<TrackProjector>,
@@ -167,12 +170,34 @@ pub(crate) fn build_test_application_services(
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
 ) -> TestApplicationServices {
-    let services = TrackServiceSet::new(
+    let recovery_dirty_state = Arc::new(RecoveryDirtyState::default());
+    build_test_application_services_with_recovery_dirty_state(
+        manager,
+        mutation_store,
+        effect_store,
+        notifications,
+        account_margin_guard,
+        recovery_dirty_state,
+    )
+}
+
+pub(crate) fn build_test_application_services_with_recovery_dirty_state(
+    manager: TrackManager,
+    mutation_store: Arc<dyn TrackMutationStore>,
+    effect_store: Arc<dyn TrackEffectStore>,
+    notifications: broadcast::Sender<ApplicationNotification>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
+    recovery_dirty_state: Arc<RecoveryDirtyState>,
+) -> TestApplicationServices {
+    let services = TrackServiceSet::new_with_recovery_anomaly_observer(
         manager,
         mutation_store,
         effect_store,
         notifications.clone(),
         account_margin_guard.clone() as Arc<dyn AccountCapacityGuard>,
+        Arc::new(RecoveryAnomalyDirtyObserver::new(
+            recovery_dirty_state.clone(),
+        )),
     );
     TestApplicationServices {
         command_service: Arc::new(services.command),
@@ -181,6 +206,7 @@ pub(crate) fn build_test_application_services(
         submit_effect_service: Arc::new(services.submit_effect),
         notifications,
         account_margin_guard,
+        recovery_dirty_state,
     }
 }
 
@@ -311,6 +337,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         exchange_freshness.clone(),
         reconcile_guards,
         submit_preflight.clone(),
+        Arc::clone(&services.recovery_dirty_state),
     );
     let runtime_state = crate::assembly::build_runtime_state(
         reconcile.clone(),
@@ -357,6 +384,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
 
     let exchange_freshness = Arc::clone(&runtime_state.reconcile.exchange_freshness);
     let submit_preflight = Arc::clone(&runtime_state.reconcile.submit_preflight);
+    let recovery_dirty_state = Arc::clone(&runtime_state.reconcile.recovery_dirty_state);
     let account_margin_guard = Arc::clone(&runtime_state.account_margin_guard);
 
     (
@@ -366,6 +394,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
             notifications,
             exchange_freshness: Arc::clone(&exchange_freshness),
             submit_preflight: Arc::clone(&submit_preflight),
+            recovery_dirty_state: Arc::clone(&recovery_dirty_state),
             effect_service,
             account_margin_guard,
             projector,
@@ -396,6 +425,7 @@ pub(crate) fn build_effect_worker_test_context(
         exchange_freshness.clone(),
         Arc::new(TrackReconcileGuards::default()),
         submit_preflight.clone(),
+        Arc::clone(&services.recovery_dirty_state),
     );
     EffectWorkerTestContext {
         effect_worker_state: crate::assembly::build_effect_worker_state(

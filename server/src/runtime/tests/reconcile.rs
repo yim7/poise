@@ -78,6 +78,27 @@ async fn shutdown_releases_recovery_notification_subscription() {
 }
 
 #[tokio::test]
+async fn recovery_task_does_not_subscribe_to_application_notifications() {
+    let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    assert_eq!(fixture.state.notifications.receiver_count(), 0);
+
+    let task = fixture.runtime.spawn_recovery_task(shutdown_rx);
+    sleep(Duration::from_millis(20)).await;
+
+    assert_eq!(
+        fixture.state.notifications.receiver_count(),
+        0,
+        "recovery should consume dedicated dirty state instead of application notifications"
+    );
+
+    let _ = shutdown_tx.send(true);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn apply_user_data_event_persists_track_ledger_event_atomically() {
     let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
@@ -602,17 +623,9 @@ async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_wi
 }
 
 #[tokio::test]
-async fn transient_load_failure_does_not_drop_recovery_retry_tracking() {
-    let mut snapshot = test_snapshot();
-    snapshot.executor_state.diagnostics.recovery_anomaly =
-        Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
-    snapshot.executor_state.slots = vec![ExecutionSlot {
-        slot: OrderSlot::new("inventory_core"),
-        state: SlotState::Empty,
-        working_order: None,
-    }];
+async fn recovery_task_processes_recovery_dirty_state_without_notification_subscription() {
     let fixture = runtime_fixture_with_intervals(
-        Some(snapshot),
+        None,
         btc_position(15.0, 0.0),
         vec![],
         test_budget(),
@@ -623,15 +636,11 @@ async fn transient_load_failure_does_not_drop_recovery_retry_tracking() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let task = fixture.runtime.spawn_recovery_task(shutdown_rx);
 
-    wait_until(|| fixture.state.notifications.receiver_count() > 0).await;
-    fixture.persistence.fail_next_load_track_state_requests(1);
+    assert_eq!(fixture.state.notifications.receiver_count(), 0);
     fixture
         .state
-        .notifications
-        .send(poise_application::ApplicationNotification::TrackChanged {
-            track_id: TrackId::new("BTCUSDT"),
-        })
-        .unwrap();
+        .recovery_dirty_state
+        .mark_recovery_anomaly(&TrackId::new("BTCUSDT"), true);
 
     wait_until(|| fixture.exchange.get_position_calls.load(Ordering::SeqCst) > 0).await;
     assert_eq!(

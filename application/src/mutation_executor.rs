@@ -35,6 +35,16 @@ pub trait AccountCapacityGuard: Send + Sync {
     fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint;
 }
 
+pub trait RecoveryAnomalyObserver: Send + Sync {
+    fn observe_recovery_anomaly_change(&self, track_id: &TrackId, active: bool);
+}
+
+struct NoopRecoveryAnomalyObserver;
+
+impl RecoveryAnomalyObserver for NoopRecoveryAnomalyObserver {
+    fn observe_recovery_anomaly_change(&self, _track_id: &TrackId, _active: bool) {}
+}
+
 type SharedManager = Arc<RwLock<TrackManager>>;
 
 #[derive(Default)]
@@ -65,6 +75,7 @@ pub(crate) struct MutationExecutor {
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<dyn AccountCapacityGuard>,
+    recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +196,7 @@ impl MutationExecutor {
         effect_store: Arc<dyn TrackEffectStore>,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
+        recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
     ) -> Self {
         Self {
             manager: Arc::new(RwLock::new(manager)),
@@ -193,6 +205,7 @@ impl MutationExecutor {
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
             account_margin_guard,
+            recovery_anomaly_observer,
         }
     }
 
@@ -238,12 +251,31 @@ impl TrackServiceSet {
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
     ) -> Self {
+        Self::new_with_recovery_anomaly_observer(
+            manager,
+            mutation_store,
+            effect_store,
+            notifications,
+            account_margin_guard,
+            Arc::new(NoopRecoveryAnomalyObserver),
+        )
+    }
+
+    pub fn new_with_recovery_anomaly_observer(
+        manager: TrackManager,
+        mutation_store: Arc<dyn TrackMutationStore>,
+        effect_store: Arc<dyn TrackEffectStore>,
+        notifications: broadcast::Sender<ApplicationNotification>,
+        account_margin_guard: Arc<dyn AccountCapacityGuard>,
+        recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
+    ) -> Self {
         let executor = Arc::new(MutationExecutor::new(
             manager,
             mutation_store,
             effect_store,
             notifications,
             account_margin_guard,
+            recovery_anomaly_observer,
         ));
         Self {
             command: crate::TrackCommandService::from_executor(executor.clone()),
@@ -1011,6 +1043,21 @@ impl MutationExecutor {
             return Err(TrackMutationError::Persistence(error));
         }
 
+        let previous_recovery_anomaly_active = previous_snapshot
+            .executor_state
+            .diagnostics
+            .recovery_anomaly
+            .is_some();
+        let next_recovery_anomaly_active = next_snapshot
+            .executor_state
+            .diagnostics
+            .recovery_anomaly
+            .is_some();
+        if previous_recovery_anomaly_active != next_recovery_anomaly_active {
+            self.recovery_anomaly_observer
+                .observe_recovery_anomaly_change(&TrackId::new(id), next_recovery_anomaly_active);
+        }
+
         if has_track_write || has_effect_status_update {
             self.emit_internal_notification(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new(id),
@@ -1417,5 +1464,125 @@ pub(crate) mod test_support {
             )
             .unwrap();
         manager
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use poise_engine::executor::RecoveryAnomaly;
+    use poise_engine::snapshot::TrackRuntimeSnapshot;
+    use poise_engine::track::TrackId;
+    use tokio::sync::broadcast;
+
+    use super::test_support::{MemoryRepository, NoopGuard, seeded_manager};
+    use super::{MutationExecutor, RecoveryAnomalyObserver};
+
+    #[derive(Default)]
+    struct RecordingRecoveryAnomalyObserver {
+        updates: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl RecordingRecoveryAnomalyObserver {
+        fn recorded(&self) -> Vec<(String, bool)> {
+            self.updates.lock().unwrap().clone()
+        }
+    }
+
+    impl RecoveryAnomalyObserver for RecordingRecoveryAnomalyObserver {
+        fn observe_recovery_anomaly_change(&self, track_id: &TrackId, active: bool) {
+            self.updates
+                .lock()
+                .unwrap()
+                .push((track_id.as_str().to_string(), active));
+        }
+    }
+
+    fn test_executor(
+        repository: Arc<MemoryRepository>,
+        observer: Arc<RecordingRecoveryAnomalyObserver>,
+    ) -> MutationExecutor {
+        let (notifications, _) = broadcast::channel(16);
+        MutationExecutor::new(
+            seeded_manager(),
+            repository.clone(),
+            repository,
+            notifications,
+            Arc::new(NoopGuard),
+            observer,
+        )
+    }
+
+    fn snapshot_with_recovery_anomaly(active: bool) -> TrackRuntimeSnapshot {
+        let manager = seeded_manager();
+        let mut snapshot = manager.get_track("btc-core").unwrap().snapshot();
+        snapshot.executor_state.diagnostics.recovery_anomaly =
+            active.then_some(RecoveryAnomaly::UnknownLiveOrder);
+        snapshot
+    }
+
+    #[tokio::test]
+    async fn commit_track_mutation_notifies_recovery_anomaly_activation_edges_only() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer.clone());
+
+        let previous_snapshot = snapshot_with_recovery_anomaly(false);
+        let mut next_snapshot = previous_snapshot.clone();
+        next_snapshot.current_exposure = poise_core::types::Exposure(1.0);
+
+        executor
+            .commit_track_mutation(
+                "btc-core",
+                &previous_snapshot,
+                &next_snapshot,
+                &(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(observer.recorded().is_empty());
+
+        let next_snapshot = snapshot_with_recovery_anomaly(true);
+        executor
+            .commit_track_mutation(
+                "btc-core",
+                &previous_snapshot,
+                &next_snapshot,
+                &(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(observer.recorded(), vec![("btc-core".to_string(), true)]);
+    }
+
+    #[tokio::test]
+    async fn commit_track_mutation_notifies_recovery_anomaly_clear_edges_only() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer.clone());
+
+        let previous_snapshot = snapshot_with_recovery_anomaly(true);
+        let next_snapshot = snapshot_with_recovery_anomaly(false);
+
+        executor
+            .commit_track_mutation(
+                "btc-core",
+                &previous_snapshot,
+                &next_snapshot,
+                &(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(observer.recorded(), vec![("btc-core".to_string(), false)]);
     }
 }

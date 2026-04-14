@@ -1,83 +1,139 @@
-# Recovery 与 Submit Preflight 解耦设计
+# Recovery 协调与读侧广播分离设计
+
+> 更新：market data stale 的后台调度问题已在 [Market Data Health 调度设计](2026-04-15-market-data-health-scheduling-design.md) 单独处理；本文继续只覆盖 recovery 与读侧广播的边界，不再同时承载 `refresh_market_data_health()` 的调度设计。
 
 ## 背景
 
-最近运行时暴露出两类问题：
+当前线上仍然持续出现：
 
-- `recovery notification stream lagged` 频繁出现，说明 `recovery` 任务跟不上内部通知流。
-- `SubmitPreflight` 的 pending submit 重算被挂在 `recovery` 的通知批处理后面，导致两条本来不同的职责被绑在一起。
+- `recovery notification stream lagged by N messages; reseeding recovery tracking`
 
-当前实现里：
+这说明 `recovery` 任务即使已经做过 batch 合并，仍然跟不上内部通知流。
 
-- `recovery` 订阅 `ApplicationNotification` 广播流，消费 `TrackChanged` / `AccountChanged`，再自己推导“哪些 track 需要更新恢复跟踪”“是否要 reseed”“是否要顺手重算 submit preflight”。
-- `SubmitPreflight` 自己只拥有决策状态，但它的 pending submit 集合删除和重算不由它自己驱动，而是通过 `recovery` 通知批处理间接触发。
+根因不是 batch 大小，而是抽象本身不对：
 
-这让系统出现两个结构性问题：
+- `application` 写边界在每次持久化后发送 `ApplicationNotification::TrackChanged`
+- `websocket`、测试和部分应用服务都订阅这条广播
+- `recovery` 也订阅同一条广播，再自己回库判断 `recovery_anomaly` 是否存在
 
-1. `recovery` 关心的是“当前哪些 track 的恢复状态变脏了”，但实现却建立在“我有没有漏掉某条通知”之上。
-2. `SubmitPreflight` 关心的是“当前哪些 submit effect 仍然处于 pending”，但它的维护时机被混进了 `recovery` 的职责里。
+这让 `recovery` 被迫消费它并不关心的大量写通知。只要市场数据写入频率高，`recovery` 就会和 websocket/UI 一起竞争同一条广播流，最终触发 `Lagged`。
+
+本次设计的目标，是把 `recovery` 从通用读侧广播里拿出来，让它只消费“恢复跟踪状态发生边沿变化”这一类真正相关的事实。
+
+## 已确认事实
+
+### `recovery` 真正关心的输入很少
+
+`recovery` 任务只需要两类输入：
+
+- 某个 `track_id` 的 `recovery_anomaly` 是否从无变有，或从有变无
+- 是否需要做一次启动或异常后的全量 reseed
+
+它不需要知道：
+
+- 这个 track 最近一共写了多少次库
+- 最近是不是有普通价格更新、仓位更新、UI 需要的投影更新
+
+### 给 `ApplicationNotification` 加新枚举没有解决根因
+
+即使把现有通知扩展成：
+
+- `TrackChanged`
+- `RecoveryTrackingChanged`
+
+也没有从模型上解决问题，因为 `recovery` 仍然必须先从同一个 `broadcast::Receiver` 把每条消息读出来。只要同一根广播里还有大量 `TrackChanged`，`recovery` 依然会 lag。
+
+### 这个信号不应该暴露给 UI
+
+`recovery_anomaly` 是否存在，本来就会通过 read model 投影成 UI 可见状态，例如：
+
+- `has_recovery_anomaly`
+- `recovery_anomaly`
+
+但“恢复跟踪需要更新”是后台运行时协调知识，不应该进入 websocket 协议，也不应该塞进 `ApplicationNotification` 这种读侧广播接口里。
+
+## 问题定义
+
+本次真正的设计决策是：
+
+> `recovery` worker 应该通过什么接口得知“哪些 track 的恢复跟踪状态发生了变化”？
+
+这个接口需要满足四个要求：
+
+1. 不再依赖高频 `TrackChanged` 广播
+2. 不把 runtime 协调知识暴露给 UI
+3. 不让 `application` 直接知道 `server` 里存在某个 recovery worker
+4. 让“`recovery_anomaly` 边沿变化”这份知识只保留在尽可能少的地方
 
 ## 目标
 
-- 让 `recovery` 不再按广播消息条数工作，而是按最新脏状态工作。
-- 让 `SubmitPreflight` 的 pending submit bookkeeping 脱离 `recovery`，成为独立的运行时职责。
-- 保留现有 `websocket` / UI 对广播事件流的消费方式，不把所有消费者都改成同一种模型。
-- 让后续优化 `recovery` 或 `submit preflight` 时只改各自 owner，不再同时理解另一侧实现。
+- `recovery` 不再订阅 `ApplicationNotification`
+- websocket / UI 继续沿用现有 `ApplicationNotification`
+- `recovery` 普通路径不再回库读取 snapshot 来判断 anomaly 是否变化
+- `recovery` 的输入从“消息流”改成“最新事实”
+- 保持 `submit preflight` 与这次改造解耦，不再把两个问题混在同一轮重构里
 
 ## 非目标
 
-- 不重写 `engine` 的恢复语义。
-- 不修改 `ExchangeFreshness` 的门控规则。
-- 不引入新的持久化表。
-- 不在本次设计里重做 `ApplicationNotification` 的对外协议。
+- 不修改 websocket 对外协议
+- 不重做 `SubmitPreflight` 的现有边界
+- 不在本次设计里解决 `recovery` 的 50ms 全量 `refresh_market_data_health()` 轮询
+- 不改变 `engine` 内部如何计算 `recovery_anomaly`
 
-## 当前问题
+## 现状中的设计问题
 
-### 1. `recovery` 被迫消费它不需要的历史
+### 1. `ApplicationNotification` 同时承担了读侧失效和运行时协调
 
-`recovery` 任务真正需要的输入只有两类：
+现在的 `ApplicationNotification` 更适合表达：
 
-- 哪些 `track_id` 的恢复状态需要重新判断
-- 是否必须 reseed 整个恢复跟踪集合
+- 读侧数据可能变了
+- websocket 可以重新投影
 
-但当前接口给它的是广播流。它只能：
+但 `recovery` 使用它时，实际上是在拿“读侧失效信号”做“运行时调度输入”。
 
-- 收到一条 `TrackChanged`
-- 再去读一次 snapshot 判断 `recovery_anomaly`
-- 顺手再决定要不要做全局 `submit preflight` 重算
+这会带来两个复杂度问题：
 
-这让实现被“通知条数”牵着走，而不是被“当前状态”牵着走。
+- `recovery` 必须理解大量与自己无关的写入来源
+- 任何 `TrackChanged` 语义调整，都可能意外影响 `recovery`
 
-### 2. `SubmitPreflight` 的 owner 不完整
+### 2. `recovery` 在消费端重新推导写边界已经知道的事实
 
-`SubmitPreflight` 已经拥有：
+`MutationExecutor::commit_track_mutation(...)` 同时拿到：
 
-- `startup_pending_submit_effects`
-- `attempted_submit_effects`
-- `decide(...)`
+- `previous_snapshot`
+- `next_snapshot`
 
-但它不拥有“何时重算 pending submit 集合”这份运行时知识。当前这份知识停留在 `recovery` 任务里。
+所以“`recovery_anomaly` 是否从无变有，或从有变无”这件事，在写边界最容易、也最准确判断。
 
-结果是：
+当前实现却把这个事实丢掉，然后让 `recovery` 在广播消费者一侧：
 
-- 修改 `recovery` 的通知策略，会连带影响 `SubmitPreflight`
-- 修改 `SubmitPreflight` 的删除/保留语义，也要回头碰 `recovery`
+1. 收到 `TrackChanged`
+2. 再回库读取 snapshot
+3. 再自己判断 anomaly 是否存在
 
-### 3. `ApplicationNotification` 对这两个消费者都太粗
+这是明显的重复知识和重复工作。
 
-`ApplicationNotification` 当前只有：
+### 3. 现有问题不是通知条数优化问题，而是边界问题
 
-- `TrackChanged`
-- `AccountChanged`
+继续优化以下策略都只是战术补丁：
 
-它适合 `websocket` 这类“需要知道有事发生了”的消费者，但不适合 `recovery` 和 `submit preflight` 这种只关心最新合并状态的后台维护任务。
+- 扩大广播容量
+- 延长 drain 时间
+- 增加批大小
+- 放慢 `recovery` 处理频率
+
+它们都没有改变最核心的问题：
+
+> `recovery` 仍然在消费错误的抽象。
 
 ## 备选方案
 
-### 方案 A：继续优化 `recovery` 的 batch drain
+### 方案 A：继续优化通用广播消费
 
-- 给 batch 增加条数上限或时间上限
-- 继续沿用广播消费模型
+做法：
+
+- 保留 `recovery` 对 `ApplicationNotification` 的订阅
+- 继续调 batch、容量、间隔
 
 优点：
 
@@ -85,257 +141,333 @@
 
 缺点：
 
-- `recovery` 仍然建立在广播流之上
-- `SubmitPreflight` 仍然被绑在 `recovery`
-- 复杂度只是从“每条通知”变成“每批通知”
+- 只是缓解，不是修正边界
+- `recovery` 仍然依赖高频读侧广播
+- 后续每次通知量上涨，都可能再次出现 lag
 
-### 方案 B：只把 `SubmitPreflight` 从 `recovery` 拆出去
+结论：
 
-- `SubmitPreflight` 改成独立脏标记/消费者
-- `recovery` 继续消费广播流
+- 不采用
 
-优点：
+### 方案 B：给 `ApplicationNotification` 增加 recovery 专用枚举
 
-- 可以先切掉最明显的职责耦合
+做法：
 
-缺点：
-
-- `recovery` 的核心问题仍在
-- 后续还得继续改第二次
-
-### 方案 C：`recovery` 与 `SubmitPreflight` 都改成脏状态消费者
-
-- `SubmitPreflight` 独立维护自己的 dirty flag
-- `recovery` 独立维护自己的 dirty tracks 与 reseed 标记
-- 广播流保留给真正需要事件流语义的消费者
+- 在现有广播里增加类似 `RecoveryTrackingChanged`
 
 优点：
 
-- 边界最清楚
-- `recovery` 不再追消息
-- `SubmitPreflight` 不再依附在 `recovery`
+- 比纯 `TrackChanged` 更有语义
 
 缺点：
 
-- 需要引入两个明确的运行时协调对象
+- `recovery` 仍然必须消费同一个高频广播
+- runtime 协调知识被混入 UI/读侧通知接口
+- 读侧和后台运行时职责继续共用一套消息模型
 
-## 结论
+结论：
 
-采用 **方案 C：`recovery` 与 `SubmitPreflight` 都改成脏状态消费者**。
+- 不采用
 
-## 2026-04-14 实现更新
+### 方案 C：新增 server 内部 recovery 通道，直接发送 `RecoveryTrackingChanged`
 
-本次实现比最初设计再往前推了一步，重点是把 `SubmitPreflight` 的失效知识从
-`effect_worker` 控制流里拿掉：
+做法：
 
-- `application` 新增 `submit_effect_service` 模块，专门承载 submit effect 生命周期相关接口。
-- `TrackEffectService` 只保留通用 effect 写接口，不再暴露 submit-specific 协议。
-- `SubmitEffectService` 现在对外只暴露一次 `recover_or_dispatch(...)`，返回 `SubmitAttempt::{Dispatch, Finished}`。
-- 真正继续执行 submit 时，`application` 层仍返回 `SubmitDispatch` 这个持久化写回 handle；它本身已经是 one-shot，终态写回方法会消费 handle，不再允许同一个 dispatch 被重复结束。
-- `server` 侧新增 `SubmitCoordinator` / `SubmitFlight` / `SubmitCompletion`：`SubmitCoordinator::prepare(...)` 统一负责 preflight 判定、必要的 live-order lookup、`recover_or_dispatch(...)` 以及 `mark_submit_started(...)`；`SubmitFlight` 只负责拆出 `OrderRequest` 和一次性的 `SubmitCompletion`，后者再负责 submit 结果写回和 pending-submit dirty 转发。
+- `application` 写边界直接往一条新通道发送：
+  - `track_id`
+  - `active`
 
-因此，当前边界应理解为：
+优点：
 
-- `SubmitEffectService` 拥有“单次 submit 尝试如何从恢复判断进入 dispatch，以及后续写回会不会让 pending submit 集合失效”这份知识。
-- `SubmitPreflight` 拥有 pending submit 集合的运行时缓存与重算调度。
-- `SubmitCoordinator` 拥有“什么时候进入 in-flight submit 语义、什么时候需要把写回结果转成 preflight bookkeeping”这份 server 运行时知识。
-- `SubmitCompletion` 把“一次 started submit 只能结束一次”这条约束收进 server 接口，不再让调用方保留一个可重复调用的终态 handle。
-- `effect_worker` 只负责执行 submit 流程和处理交易所结果，不再自己拼接 preflight 判定、started 标记和 dirty 转发的时序。
+- `recovery` 不再依赖通用广播
 
-## 设计
+缺点：
 
-### 模块边界
+- `application` 需要直接知道 server 里的 recovery 概念
+- `RecoveryTrackingChanged` 是 server 运行时命名，不是写边界中性事实
+- 这会把 `server` 术语反灌进 `application`
 
-#### `SubmitPreflight`
+结论：
 
-`SubmitPreflight` 继续拥有：
+- 不采用
 
-- 哪些 effect 属于启动恢复 pending submit
-- 哪些 effect 在当前进程里已经尝试过 submit
-- 每次 submit 前是否需要查交易所 live order
+### 方案 D：`application` 输出中性写事实，`server` 自己落到 `RecoveryDirtyState`
 
-同时，它新增对“pending submit 集合需要重算”这份事实的 owner 身份。
+做法：
 
-也就是说：
+- `application` 在 commit 成功后判断 `recovery_anomaly.is_some()` 是否发生边沿变化
+- 如果发生变化，就通过专用 observer 回调：
+  - `track_id`
+  - `active`
+- `server` 提供内部 observer 实现，把这次变化写进自己的 `RecoveryDirtyState`
+- `recovery` worker 只消费 `RecoveryDirtyState`
 
-- `SubmitPreflight` 不只拥有决策状态
-- 还拥有自己的 maintenance trigger
+优点：
 
-#### `Recovery`
+- `application` 只表达“这次写入后哪些事实变化了”，不表达 server 调度动作
+- `server` 只表达“我如何利用这些事实驱动 recovery”
+- 没有 runtime 消息队列，因此不会因为无关高频流产生 lag
+- `recovery` 普通路径不需要回库重读 snapshot
 
-`Recovery` 只拥有：
+缺点：
 
-- 哪些 `track_id` 的恢复跟踪需要重算
-- 是否需要 reseed 当前 `tracked` 集合
-- 周期性 anomaly retry / audit 调度
+- 需要新增一条 application-owned 的写边界 observer 接口
 
-它不再拥有：
+结论：
 
-- `SubmitPreflight` 的全局 pending submit bookkeeping
+- 采用
 
-#### `ApplicationNotification`
+## 最终设计
 
-`ApplicationNotification` 继续保留给：
+采用 **方案 D：中性写事实 + server 内部脏状态**。
 
-- `websocket`
-- 其他只需要“有事发生了”的广播消费者
+### 核心原则
 
-它不再是 `recovery` 和 `submit preflight` 这两类后台维护任务的主抽象。
+- `ApplicationNotification` 继续只做读侧广播
+- `application` 只输出中性写事实，不输出 recovery 命令
+- `server` 自己把写事实转换成 recovery 脏状态
+- `recovery` 只消费最新脏状态，不消费历史消息流
 
-### 新的协调对象
+## 模块边界
 
-#### `SubmitPreflightDirtyState`
+### `application`
 
-建议新增一个共享协调对象，内部至少包含：
+`application` 负责：
 
-- `dirty: bool`
-- `notify: Notify`
+- 在 commit 成功后判断 `recovery_anomaly` 是否发生边沿变化
+- 输出最小的中性写事实
 
-它提供的接口保持最小：
+`application` 不负责：
 
-- `mark_dirty()`
-- `take_dirty() -> bool`
-- `notified().await`
+- 决定是否要重试 recovery
+- 维护 recovery 跟踪集合
+- 暴露 recovery 专用通知给 UI 或 websocket
 
-语义是：
+### `server`
 
-- 生产者只负责标记“pending submit 集合可能变化了”
-- 后台 worker 醒来后做一次完整重算
+`server` 负责：
 
-这样 `SubmitPreflight` 就不需要知道是谁触发了变化，也不需要追历史消息。
+- 持有 `RecoveryDirtyState`
+- 把 application 的写事实落成内部脏状态
+- 由 `recovery` worker 消费这份脏状态并更新跟踪集合
 
-#### `RecoveryDirtyState`
+`server` 不再负责：
 
-建议新增一个共享协调对象，内部至少包含：
+- 从通用 `TrackChanged` 广播里重新猜测 recovery 状态
 
-- `dirty_tracks: HashSet<String>`
-- `reseed_required: bool`
-- `notify: Notify`
+### `websocket` / UI
 
-它提供的接口保持最小：
+继续负责：
 
-- `mark_track_dirty(track_id)`
+- 订阅 `ApplicationNotification`
+- 收到 `TrackChanged` 后重新读取投影
+
+它们不需要知道：
+
+- `RecoveryDirtyState`
+- recovery anomaly 边沿变化回调
+- recovery worker 的调度策略
+
+## 接口形状
+
+### `application` 的专用 observer 接口
+
+建议新增一个只表达当前唯一事实的 observer trait，由 `TrackServiceSet` 提供安装点，默认实现为 no-op：
+
+```rust
+pub trait RecoveryAnomalyObserver: Send + Sync {
+    fn observe_recovery_anomaly_change(&self, track_id: &TrackId, active: bool);
+}
+```
+
+语义约束：
+
+- 只有在 `recovery_anomaly.is_some()` 的布尔值发生变化时才调用
+- `active == true` 表示 `recovery_anomaly` 从无变有
+- `active == false` 表示 `recovery_anomaly` 从有变无
+
+要求：
+
+- 这是 recovery anomaly 的专用回调，不是通用事实总线
+- 默认实现为 no-op，不把少见情况推给所有调用方
+- 同步接口即可，因为正常实现只是更新内存脏状态并 `notify_one`
+
+### 为什么不做 `TrackMutationFacts`
+
+本次刻意不引入类似：
+
+- `TrackMutationFacts`
+- `observe_track_mutation(...)`
+
+这种通用事实容器。
+
+原因是当前只有一个明确事实：
+
+- `recovery_anomaly` 边沿变化
+
+如果现在就把接口做宽，后续很容易变成“再加一个可选字段”的事实袋子，把多个运行时消费者重新混进同一个扩展点。更稳的做法是：
+
+- 当前只为当前事实定义专用接口
+- 将来真的出现第二个明确、稳定、同 owner 的写边界事实，再重新判断是否值得抽象
+
+### `server` 内部的 `RecoveryDirtyState`
+
+`server` 侧新增内部协调对象：
+
+```rust
+struct RecoveryDirtyState {
+    updates: Mutex<HashMap<TrackId, bool>>,
+    reseed_required: AtomicBool or Mutex<bool>,
+    notify: Notify,
+}
+```
+
+最小接口：
+
+- `mark_recovery_anomaly(track_id, active)`
 - `mark_reseed_required()`
 - `take() -> RecoveryWorkset`
-- `notified().await`
+- `wait().await`
 
-其中 `RecoveryWorkset` 只表达本轮要处理的最新事实：
+其中 `RecoveryWorkset` 建议是：
 
-- 一组去重后的 `track_id`
-- 是否需要 reseed
+```rust
+struct RecoveryWorkset {
+    anomaly_updates: HashMap<TrackId, bool>,
+    reseed_required: bool,
+}
+```
 
-### 生产者规则
+关键语义：
 
-#### `SubmitPreflight` 脏标记
+- 同一 track 连续多次变化，只保留最后一次状态
+- 不积累历史条数
+- 没有 lag 概念，因为它不是消息队列
 
-以下情况只需要 `mark_dirty()`：
+## 数据流
 
-- 启动时已经完成 `startup_pending_submit_effects` 初始采样后，后续任何可能改变 pending submit 集合的 effect 持久化
-- submit 成功、失败、supersede 等 effect 状态变化
+### 正常写入路径
 
-对应语义是：
+1. `MutationExecutor::commit_track_mutation(...)` 比较 `previous_snapshot` 和 `next_snapshot`
+2. 只要 `recovery_anomaly.is_some()` 的布尔值发生变化，就调用 `observe_recovery_anomaly_change(track_id, active)`
+3. server 的 observer 实现调用 `RecoveryDirtyState::mark_recovery_anomaly(track_id, active)`
+5. `recovery` worker 被唤醒，消费最新 `RecoveryWorkset`
+6. `recovery` worker 直接更新 `tracked` 集合，不再回库重读 snapshot
 
-- worker 不关心具体是哪条 effect 变化了
-- 只关心“现在数据库里的 pending submit 集合和内存缓存可能不一致”
+### 全量重建路径
 
-#### `Recovery` 脏标记
+以下情况仍允许 reseed：
 
-以下情况调用 `mark_track_dirty(track_id)`：
+- runtime 启动
+- 内部状态明确丢失
+- 将来如果出现 recovery 跟踪数据结构损坏
 
-- 某个 track snapshot 已持久化，并且它的 `recovery_anomaly` 可能变化
+reseed 仍然通过 `mutation_store.load_track_state(...)` 全量读取 snapshot 完成，但它不再是正常高频路径。
 
-以下情况调用 `mark_reseed_required()`：
+## 为什么这个方案更合理
 
-- 恢复跟踪状态已知可能丢失，需要整表重建
+### 它把知识放回了正确 owner
 
-这两个操作都不要求后台任务追历史条数，只要求最终能看到最新 workset。
+“`recovery_anomaly` 是否发生边沿变化”这份知识，只应该存在于：
 
-### 后台 worker
+- 写边界比较前后 snapshot 的地方
 
-#### `SubmitPreflight` worker
+而不应该分散在：
 
-运行模型：
+- 通知生产者
+- 广播消费者
+- recovery worker 的回库读取逻辑
 
-1. 等待 `notify`
-2. `take_dirty()`
-3. 若为脏，则读取 `effect_store.list_all_pending_submit_effects()`
-4. 把当前 pending submit effect id 集合传给 `submit_preflight.reconcile_pending_submit_effects(...)`
-5. 回到等待
+### 它没有把 runtime 术语泄漏到 UI
 
-这个 worker 是全局 bookkeeping worker，不属于 `recovery`。
+UI 仍然只消费：
 
-#### `Recovery` worker
+- `TrackChanged`
+- `AccountChanged`
 
-运行模型：
+后台协调事实只在：
 
-1. 启动时 `seed_recovery_tracking(...)`
-2. 同时等待：
-   - 周期 `ticker`
-   - `RecoveryDirtyState::notified()`
-3. 收到脏标记后，`take()` 一次性取出最新 workset
-4. 若需要 reseed，则整表重建 `tracked`
-5. 否则只对这批 `track_id` 重新读取 snapshot，更新 `tracked`
-6. 真正访问交易所的对账动作仍只在：
-   - anomaly retry 到期
-   - audit 到期
+- `application` 的 recovery anomaly observer
+- `server` 的 `RecoveryDirtyState`
 
-这保证了：
+这两层之间流动。
 
-- 普通状态变化不会直接触发交易所对账
-- `recovery` 不再因为通知风暴而被迫追消息
+### 它把问题从“消息处理性能”改成“状态同步正确性”
 
-### 对旧实现的替换关系
+当前 lag 的本质是：
 
-本设计落地后，应删除 `recovery` 任务里对 `SubmitPreflight` 的附带处理，包括：
+- 错误的消费者在追错误的消息流
 
-- `needs_preflight_reconcile()`
-- “收到 recovery notification batch 后顺手跑一次 `reconcile_submit_preflight_state(...)`” 这条路径
+新设计下，`recovery` 不再面对无关消息洪峰，系统行为会更接近它真实职责：
 
-`reconcile_submit_preflight_state(...)` 可以保留为 `SubmitPreflight` worker 的内部执行函数，或迁入专用模块，但不再由 `recovery` 拥有调用时机。
+- 收到相关事实
+- 更新跟踪集合
+- 在 retry / audit 定时点执行恢复动作
 
-`collect_recovery_notification_batch(...)` 这套围绕广播流做的批处理，也不应再是 `recovery` 的主路径。
-
-## 实现顺序
-
-### 第一步：拆开 `SubmitPreflight`
-
-- 引入 `SubmitPreflightDirtyState`
-- 增加独立 worker
-- 移除 `recovery` 中的 preflight 重算逻辑
-
-这是最小可独立验收的一步。完成后：
-
-- `SubmitPreflight` 与 `recovery` 的职责边界已经分开
-- 但 `recovery` 仍可能继续消费广播流
-
-### 第二步：把 `recovery` 改成脏状态消费者
-
-- 引入 `RecoveryDirtyState`
-- 把 track 脏标记与 reseed 标记下沉成显式接口
-- 去掉 `recovery` 对广播流批处理的主依赖
-
-完成后，`recovery` 将只按：
-
-- 脏 track 集合
-- reseed 标记
-- anomaly retry / audit ticker
-
-这三类输入运行。
-
-## 验收要求
+## 与现有改动的关系
 
 ### `SubmitPreflight`
 
-- pending submit 集合变化后，`SubmitPreflight` 不再依赖 `recovery` 通知批处理才清理本地缓存
-- 启动恢复 submit、同进程重复 submit、submit success/failure/supersede 的既有测试语义保持不变
+本次设计不再把 `SubmitPreflight` 和 `recovery` 混成一个问题。
 
-### `Recovery`
+当前 `SubmitPreflight` 的独立 worker、`SubmitCoordinator`、`SubmitFlight` / `SubmitCompletion` 设计保持不变。这次只处理：
 
-- 普通 `TrackChanged` 高频发生时，`recovery` 不再按消息条数线性放大处理成本
-- `recovery` 仍能在 anomaly retry / audit 到期时正常触发交易所同步
-- reseed 行为仍然正确
+- `recovery` 如何获得自己的输入
 
-## 与既有文档的关系
+### 50ms `refresh_market_data_health()` 轮询
 
-- 本文更新了 [`2026-04-02-submit-preflight-lookup-optimization-design.md`](2026-04-02-submit-preflight-lookup-optimization-design.md) 中“runtime 通过 `recovery` 通知回读统一做 preflight 缓存删除和重算”的运行时归属。
-- 本文不改变 [`2026-04-05-exchange-state-freshness-gate-design.md`](2026-04-05-exchange-state-freshness-gate-design.md) 的 freshness gate 语义；它只调整 runtime 内部任务边界与协调模型。
+这仍然是独立问题。
+
+它可能继续带来额外负载，但不是这次 `lagged by 92` 的根因。当前日志里的 lag 是因为 `recovery` 仍在消费高频广播，而不是因为它只做了 20Hz 自己的本地轮询。
+
+因此这次设计先不把调度模型和通知模型一起改。
+
+## 验收标准
+
+实现完成后需要满足：
+
+1. `server/src/runtime/reconcile.rs` 不再订阅 `state.notifications`
+2. `ApplicationNotification` 不新增 recovery 专用枚举
+3. 普通 `TrackChanged` 风暴下，如果 `recovery_anomaly` 没有边沿变化，就不会给 `recovery` 增加工作
+4. `recovery_anomaly` 从无到有、从有到无时，`recovery` 能正确更新跟踪集合
+5. websocket 和现有 UI 更新行为不变
+6. 启动和显式 reseed 路径仍然可用
+
+## 测试建议
+
+至少补这几类测试：
+
+### application 层
+
+- `commit_track_mutation` 在 `recovery_anomaly` 未变化时不调用 observer
+- `commit_track_mutation` 在 `None -> Some` 时调用 `observe_recovery_anomaly_change(..., true)`
+- `commit_track_mutation` 在 `Some -> None` 时调用 `observe_recovery_anomaly_change(..., false)`
+
+### server 层
+
+- `recovery` worker 不再因为高频 `TrackChanged` 广播触发 `Lagged`
+- `RecoveryDirtyState` 对同一 `track_id` 的连续更新只保留最后状态
+- startup reseed 仍能正确建立初始 `tracked` 集合
+
+## 实施顺序
+
+1. 在 `application` 新增 `RecoveryAnomalyObserver` 及其默认 no-op 实现
+2. 给 `TrackServiceSet` 增加安装 `RecoveryAnomalyObserver` 的能力，并提供默认 no-op 实现
+3. 在 `commit_track_mutation(...)` 里判断 `recovery_anomaly.is_some()` 是否发生边沿变化
+4. 在 `server` 新增 `RecoveryDirtyState` 和 observer 实现
+5. 改写 `recovery` worker，让它消费 `RecoveryDirtyState`
+6. 删除 `recovery` 对 `state.notifications.subscribe()` 的依赖
+7. 补齐回归测试
+
+## 决策总结
+
+这次不再沿着“优化 `recovery` 如何消费 `ApplicationNotification`”继续修补。
+
+新的设计结论是：
+
+- 读侧广播和 runtime 协调是两种不同抽象
+- `recovery` 不该订阅通用广播
+- `application` 应该输出中性写事实
+- `server` 应该把这些事实落成自己的内部脏状态
+
+这样才能从设计上消除这类 lag，而不是继续在同一条拥堵通道上做局部优化。

@@ -1,6 +1,6 @@
 # Submit Preflight Lookup 优化设计
 
-> 更新：2026-04-14 起，`SubmitPreflight` 的运行时维护边界从“由 `recovery` 任务收到通知后顺手重算”调整为“独立的脏标记/消费者”；同日又把 submit 生命周期接口下沉到 `application/src/submit_effect_service.rs`，不再由 `TrackEffectService` 暴露 submit-specific 协议。随后又在 `server` 侧引入 `SubmitCoordinator` / `SubmitFlight` / `SubmitCompletion`，由它们组合 `SubmitPreflight` 和 `SubmitDispatch`，把 `mark_submit_started(...)` 这类运行时 started 语义以及“一次 started submit 只能结束一次”的约束都留在 server 层。再往下一层，`application::SubmitDispatch` 自身也已经收紧成 one-shot handle，避免将来出现绕过 coordinator 的重复终态写回。新的任务边界见 [Recovery 与 Submit Preflight 解耦设计](2026-04-14-recovery-submit-preflight-decoupling-design.md)。
+> 更新：2026-04-14 起，`SubmitPreflight` 的运行时维护边界从“由 `recovery` 任务收到通知后顺手重算”调整为“独立的脏标记/消费者”；同日又把 submit 生命周期接口下沉到 `application/src/submit_effect_service.rs`，不再由 `TrackEffectService` 暴露 submit-specific 协议。随后又在 `server` 侧引入 `SubmitCoordinator` / `SubmitFlight` / `SubmitCompletion`，由它们组合 `SubmitPreflight` 和 `SubmitDispatch`，把 `mark_submit_started(...)` 这类运行时 started 语义以及“一次 started submit 只能结束一次”的约束都留在 server 层。再往下一层，`application::SubmitDispatch` 自身也已经收紧成 one-shot handle，避免将来出现绕过 coordinator 的重复终态写回。最新的 recovery 协调边界见 [Recovery 协调与读侧广播分离设计](2026-04-14-recovery-submit-preflight-decoupling-design.md)。
 
 ## 背景
 

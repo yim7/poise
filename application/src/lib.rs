@@ -24,8 +24,8 @@ pub use account_read_model::{AccountReadModel, AccountRiskSignal};
 pub use debug_query_service::TrackDebugQueryService;
 pub use diagnostics::{DiagnosticSeverity, TrackDiagnosticItem};
 pub use mutation_executor::{
-    AccountCapacityGuard, ApplyTrackLedgerEventResult, TrackInstrument, TrackMutationError,
-    TrackServiceSet, is_loaded_track_invariant_violation,
+    AccountCapacityGuard, ApplyTrackLedgerEventResult, RecoveryAnomalyObserver, TrackInstrument,
+    TrackMutationError, TrackServiceSet, is_loaded_track_invariant_violation,
 };
 pub use notifications::ApplicationNotification;
 pub use query_service::TrackQueryService;
