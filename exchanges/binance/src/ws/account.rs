@@ -19,8 +19,9 @@ use poise_engine::track::{Instrument, Venue};
 
 use super::{
     KeepaliveStatus, UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
-    log_user_stream_disconnect, log_user_stream_error, models::UserEventEnvelope, parse_decimal,
-    parse_side, quote_asset_for_symbol,
+    log_user_stream_disconnect, log_user_stream_error,
+    models::{AccountUpdateEnvelope, OrderTradeUpdateEnvelope, UserEventTypeEnvelope},
+    parse_decimal, parse_side, quote_asset_for_symbol,
 };
 use crate::{mapper::parse_order_status, rest::BinanceRestClient};
 
@@ -28,6 +29,7 @@ use crate::{mapper::parse_order_status, rest::BinanceRestClient};
 pub(super) enum UserStreamMessage {
     Events(Vec<UserDataEvent>),
     ListenKeyExpired,
+    UnsupportedEvent { event_type: String },
 }
 
 pub(super) async fn run_user_stream(
@@ -79,8 +81,14 @@ pub(super) async fn run_user_stream(
                                             );
                                             break;
                                         }
+                                        Ok(UserStreamMessage::UnsupportedEvent { event_type }) => {
+                                            tracing::warn!(
+                                                event_type = %event_type,
+                                                "ignoring unsupported user data event"
+                                            );
+                                        }
                                         Err(error) => {
-                                            tracing::warn!("failed to parse user data message: {error}");
+                                            tracing::warn!("failed to parse user data message: {error:#}");
                                         }
                                     }
                                 }
@@ -167,17 +175,16 @@ pub(super) async fn run_user_stream(
 }
 
 pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
-    let envelope: UserEventEnvelope = serde_json::from_str(payload)?;
-    let event_time = Utc
-        .timestamp_millis_opt(envelope.event_time)
-        .single()
-        .context("invalid user event timestamp")?;
+    let event_type = serde_json::from_str::<UserEventTypeEnvelope>(payload)
+        .context("failed to parse user data event type")?
+        .event_type;
 
-    match envelope.event_type.as_str() {
+    match event_type.as_str() {
         "ORDER_TRADE_UPDATE" => {
-            let order = envelope
-                .order
-                .context("missing order payload for ORDER_TRADE_UPDATE")?;
+            let envelope = serde_json::from_str::<OrderTradeUpdateEnvelope>(payload)
+                .with_context(|| format!("failed to parse {event_type} payload"))?;
+            let event_time = parse_user_event_time(&event_type, envelope.event_time)?;
+            let order = envelope.order;
             let realized_pnl = parse_decimal("o.rp", &order.realized_pnl)?;
             let price = parse_decimal("o.p", &order.price)?;
             let quantity = parse_decimal("o.q", &order.quantity)?;
@@ -243,9 +250,10 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
             }]))
         }
         "ACCOUNT_UPDATE" => {
-            let account = envelope
-                .account
-                .context("missing account payload for ACCOUNT_UPDATE")?;
+            let envelope = serde_json::from_str::<AccountUpdateEnvelope>(payload)
+                .with_context(|| format!("failed to parse {event_type} payload"))?;
+            let event_time = parse_user_event_time(&event_type, envelope.event_time)?;
+            let account = envelope.account;
             if account.reason.as_deref() == Some("FUNDING_FEE") {
                 let Some(symbol) = account
                     .positions
@@ -311,8 +319,14 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
             Ok(UserStreamMessage::Events(events))
         }
         "listenKeyExpired" => Ok(UserStreamMessage::ListenKeyExpired),
-        _ => Ok(UserStreamMessage::Events(Vec::new())),
+        _ => Ok(UserStreamMessage::UnsupportedEvent { event_type }),
     }
+}
+
+fn parse_user_event_time(event_type: &str, event_time: i64) -> Result<chrono::DateTime<Utc>> {
+    Utc.timestamp_millis_opt(event_time)
+        .single()
+        .with_context(|| format!("invalid {event_type} timestamp"))
 }
 
 #[cfg(test)]
@@ -563,6 +577,74 @@ mod tests {
         let event = parse_user_data_message(payload).unwrap();
 
         assert_eq!(event, UserStreamMessage::ListenKeyExpired);
+    }
+
+    #[test]
+    fn surfaces_algo_update_message_type() {
+        let payload = r#"{
+            "e": "ALGO_UPDATE",
+            "E": 1750515742303,
+            "T": 1750515742297,
+            "o": {
+                "caid": "Q5xaq5EGKgXXa0fD7fs0Ip",
+                "aid": 2148719,
+                "at": "CONDITIONAL",
+                "o": "TAKE_PROFIT",
+                "s": "BNBUSDT",
+                "S": "SELL",
+                "ps": "BOTH",
+                "f": "GTC",
+                "q": "0.01",
+                "X": "CANCELED",
+                "ai": "",
+                "ap": "0.00000",
+                "aq": "0.00000",
+                "act": "0",
+                "tp": "750",
+                "p": "750",
+                "V": "EXPIRE_MAKER",
+                "wt": "CONTRACT_PRICE",
+                "pm": "NONE",
+                "cp": false,
+                "pP": false,
+                "R": false,
+                "tt": 0,
+                "gtd": 0,
+                "rm": "Reduce Only reject"
+            }
+        }"#;
+
+        let event = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            event,
+            UserStreamMessage::UnsupportedEvent {
+                event_type: "ALGO_UPDATE".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_order_trade_update_error_mentions_event_type() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDT",
+                "c": "grid-order-004",
+                "S": "SELL",
+                "p": "65000.5",
+                "q": "0.020",
+                "rp": "12.34",
+                "X": "FILLED"
+            }
+        }"#;
+
+        let error = parse_user_data_message(payload).unwrap_err();
+        let error_text = format!("{error:#}");
+
+        assert!(error_text.contains("ORDER_TRADE_UPDATE"));
+        assert!(error_text.contains("missing field `i`"));
     }
 
     #[tokio::test]

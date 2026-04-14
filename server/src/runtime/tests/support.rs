@@ -307,11 +307,13 @@ pub(crate) async fn shutdown(handles: RuntimeHandles) {
     handles.user_task.abort();
     handles.effect_task.abort();
     handles.recovery_task.abort();
+    handles.submit_preflight_task.abort();
     handles.account_task.abort();
     let _ = handles.market_task.await;
     let _ = handles.user_task.await;
     let _ = handles.effect_task.await;
     let _ = handles.recovery_task.await;
+    let _ = handles.submit_preflight_task.await;
     let _ = handles.account_task.await;
 }
 
@@ -690,7 +692,7 @@ pub(crate) struct FakeExchange {
     position_failures_remaining: AtomicUsize,
     open_orders_failures_remaining: AtomicUsize,
     submit_error: Mutex<Option<String>>,
-    cancel_order_error: Mutex<Option<String>>,
+    cancel_order_error: Mutex<Option<CancelOrderFailure>>,
     cancel_all_error: Mutex<Option<String>>,
     server_time: chrono::DateTime<Utc>,
     sequence: AtomicUsize,
@@ -700,6 +702,12 @@ pub(crate) struct FakeExchange {
     release_get_position: Mutex<Option<Arc<Notify>>>,
     user_receiver: AsyncMutex<Option<mpsc::Receiver<UserDataEvent>>>,
     subscribe_user_data_calls: AtomicUsize,
+}
+
+#[derive(Clone)]
+enum CancelOrderFailure {
+    Generic(String),
+    OutcomeUnknown(String),
 }
 
 impl FakeExchange {
@@ -767,7 +775,19 @@ impl FakeExchange {
         error: &str,
     ) -> Self {
         let exchange = Self::new(position, open_orders);
-        *exchange.cancel_order_error.lock().unwrap() = Some(error.to_string());
+        *exchange.cancel_order_error.lock().unwrap() =
+            Some(CancelOrderFailure::Generic(error.to_string()));
+        exchange
+    }
+
+    pub(crate) fn with_cancel_order_outcome_unknown(
+        position: Position,
+        open_orders: Vec<ExchangeOrder>,
+        error: &str,
+    ) -> Self {
+        let exchange = Self::new(position, open_orders);
+        *exchange.cancel_order_error.lock().unwrap() =
+            Some(CancelOrderFailure::OutcomeUnknown(error.to_string()));
         exchange
     }
 
@@ -885,7 +905,12 @@ impl ExecutionPort for FakeExchangeExecutionPort {
             .unwrap()
             .push(order_id.to_string());
         if let Some(error) = self.exchange.cancel_order_error.lock().unwrap().clone() {
-            return Err(anyhow!(error));
+            return Err(match error {
+                CancelOrderFailure::Generic(message) => anyhow!(message),
+                CancelOrderFailure::OutcomeUnknown(message) => {
+                    poise_engine::ports::ExecutionPortError::cancel_outcome_unknown(message).into()
+                }
+            });
         }
         self.exchange
             .open_orders
@@ -1024,6 +1049,8 @@ pub(crate) struct MemoryPersistence {
     follow_up_retirements: AsyncMutex<HashMap<TrackId, Vec<FollowUpRetirementRequest>>>,
     next_effect_batch: AtomicUsize,
     pub(crate) save_transition_count: AtomicUsize,
+    fail_next_load_track_state_requests: AtomicUsize,
+    fail_next_pending_submit_effect_queries: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -1075,6 +1102,15 @@ impl TrackMutationStore for MemoryPersistence {
     }
 
     async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
+        if self
+            .fail_next_load_track_state_requests
+            .load(Ordering::SeqCst)
+            > 0
+        {
+            self.fail_next_load_track_state_requests
+                .fetch_sub(1, Ordering::SeqCst);
+            return Err(anyhow!("injected load_track_state failure"));
+        }
         Ok(self.snapshots.lock().await.get(id).cloned())
     }
 
@@ -1091,6 +1127,15 @@ impl TrackEffectStore for MemoryPersistence {
     }
 
     async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+        if self
+            .fail_next_pending_submit_effect_queries
+            .load(Ordering::SeqCst)
+            > 0
+        {
+            self.fail_next_pending_submit_effect_queries
+                .fetch_sub(1, Ordering::SeqCst);
+            return Err(anyhow!("injected pending submit effect query failure"));
+        }
         Ok(self
             .effects
             .lock()
@@ -1175,6 +1220,16 @@ impl TrackEffectStore for MemoryPersistence {
 impl MemoryPersistence {
     pub(crate) fn save_transition_count(&self) -> usize {
         self.save_transition_count.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn fail_next_load_track_state_requests(&self, count: usize) {
+        self.fail_next_load_track_state_requests
+            .store(count, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_next_pending_submit_effect_queries(&self, count: usize) {
+        self.fail_next_pending_submit_effect_queries
+            .store(count, Ordering::SeqCst);
     }
 
     pub(crate) async fn all_effects(&self) -> Vec<PersistedTrackEffect> {
@@ -1481,6 +1536,14 @@ impl FailOnSavePersistence {
             save_count: AtomicUsize::new(0),
             fail_on,
         }
+    }
+
+    pub(crate) async fn seed_snapshot(&self, id: &str, snapshot: TrackRuntimeSnapshot) {
+        self.snapshots.lock().await.insert(id.to_string(), snapshot);
+    }
+
+    pub(crate) async fn seed_effect(&self, effect: PersistedTrackEffect) {
+        self.effects.lock().await.push(effect);
     }
 
     pub(crate) async fn all_effects(&self) -> Vec<PersistedTrackEffect> {

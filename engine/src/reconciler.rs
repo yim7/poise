@@ -18,11 +18,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         let target = Exposure(0.0);
         let delta = track.current_exposure.delta(&target);
         return TargetReconcileResult {
-            events: (!delta.is_zero())
-                .then_some(DomainEvent::ExposureTargetChanged {
-                    from: track.current_exposure.clone(),
-                    to: target.clone(),
-                })
+            events: exposure_target_change_event(track, &target)
                 .into_iter()
                 .collect(),
             desired_exposure: target,
@@ -34,11 +30,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     if let Some(target_override) = track.manual_target_override.clone() {
         let delta = track.current_exposure.delta(&target_override);
         return TargetReconcileResult {
-            events: (!delta.is_zero())
-                .then_some(DomainEvent::ExposureTargetChanged {
-                    from: track.current_exposure.clone(),
-                    to: target_override.clone(),
-                })
+            events: exposure_target_change_event(track, &target_override)
                 .into_iter()
                 .collect(),
             desired_exposure: target_override,
@@ -50,7 +42,10 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     let band = strategy::band_status(strategy_price, &track.config);
 
     let (target, new_status) = match &band {
-        BandStatus::InBand { target } => (resolve_in_band_target(track, target), resolve_in_band_status(track)),
+        BandStatus::InBand { target } => (
+            resolve_in_band_target(track, target),
+            resolve_in_band_status(track),
+        ),
         BandStatus::OutOfBand { policy, .. } => apply_out_of_band(track, *policy),
     };
 
@@ -124,10 +119,9 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         };
     }
 
-    events.push(DomainEvent::ExposureTargetChanged {
-        from: track.current_exposure.clone(),
-        to: approved_target.clone(),
-    });
+    if let Some(event) = exposure_target_change_event(track, &approved_target) {
+        events.push(event);
+    }
 
     TargetReconcileResult {
         events,
@@ -135,6 +129,20 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         new_status,
         suppress_execution: false,
     }
+}
+
+fn exposure_target_change_event(
+    track: &TrackRuntime,
+    next_target: &Exposure,
+) -> Option<DomainEvent> {
+    let previous_target = track
+        .desired_exposure
+        .clone()
+        .unwrap_or_else(|| track.current_exposure.clone());
+    (previous_target != *next_target).then_some(DomainEvent::ExposureTargetChanged {
+        from: previous_target,
+        to: next_target.clone(),
+    })
 }
 
 fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
@@ -289,6 +297,25 @@ mod tests {
         assert!(!result.suppress_execution);
         assert!(
             result
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn reconcile_target_does_not_repeat_event_when_desired_exposure_is_unchanged() {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(Exposure(8.0));
+
+        let result = reconcile_target(&track, 90.0);
+
+        assert_eq!(result.desired_exposure, Exposure(8.0));
+        assert!(!result.suppress_execution);
+        assert!(
+            !result
                 .events
                 .iter()
                 .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))

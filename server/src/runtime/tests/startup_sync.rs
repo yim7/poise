@@ -655,6 +655,7 @@ async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data(
         user_task,
         effect_task,
         recovery_task,
+        submit_preflight_task,
         account_task,
     } = fixture.runtime.start().await.unwrap();
     market_task.abort();
@@ -723,6 +724,8 @@ async fn recovery_task_resyncs_recovery_anomaly_automatically_without_user_data(
 
     recovery_task.abort();
     let _ = recovery_task.await;
+    submit_preflight_task.abort();
+    let _ = submit_preflight_task.await;
     account_task.abort();
     let _ = account_task.await;
     user_task.abort();
@@ -767,6 +770,7 @@ async fn recovery_task_cancels_unknown_live_orders_automatically() {
         user_task,
         effect_task,
         recovery_task,
+        submit_preflight_task,
         account_task,
     } = fixture.runtime.start().await.unwrap();
     market_task.abort();
@@ -808,6 +812,8 @@ async fn recovery_task_cancels_unknown_live_orders_automatically() {
 
     recovery_task.abort();
     let _ = recovery_task.await;
+    submit_preflight_task.abort();
+    let _ = submit_preflight_task.await;
     account_task.abort();
     let _ = account_task.await;
     user_task.abort();
@@ -841,6 +847,7 @@ async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_eff
         user_task,
         effect_task,
         recovery_task,
+        submit_preflight_task,
         account_task,
     } = fixture.runtime.start().await.unwrap();
     market_task.abort();
@@ -924,6 +931,8 @@ async fn recovery_task_still_cancels_unknown_live_orders_when_pending_submit_eff
 
     recovery_task.abort();
     let _ = recovery_task.await;
+    submit_preflight_task.abort();
+    let _ = submit_preflight_task.await;
     account_task.abort();
     let _ = account_task.await;
     user_task.abort();

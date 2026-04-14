@@ -39,15 +39,25 @@ pub(super) struct BookTickerMessage {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct UserEventEnvelope {
+pub(super) struct UserEventTypeEnvelope {
     #[serde(rename = "e")]
     pub(super) event_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct OrderTradeUpdateEnvelope {
     #[serde(rename = "E")]
     pub(super) event_time: i64,
     #[serde(rename = "o")]
-    pub(super) order: Option<OrderTradeUpdate>,
+    pub(super) order: OrderTradeUpdate,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AccountUpdateEnvelope {
+    #[serde(rename = "E")]
+    pub(super) event_time: i64,
     #[serde(rename = "a")]
-    pub(super) account: Option<AccountUpdate>,
+    pub(super) account: AccountUpdate,
 }
 
 #[derive(Debug, Deserialize)]

@@ -269,7 +269,10 @@ async fn repeated_ticks_before_first_submit_are_absorbed_into_one_replacement_pl
         "new tick should update target only while first submit intent is pending"
     );
 
-    worker.run_once().await.unwrap();
+    timeout(Duration::from_secs(1), worker.run_once())
+        .await
+        .expect("cancel writeback recovery should finish promptly")
+        .unwrap();
 
     let submitted = exchange.submitted_orders.lock().unwrap().clone();
     assert_eq!(submitted.len(), 1);
@@ -1056,6 +1059,95 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
 }
 
 #[tokio::test]
+async fn submit_preflight_reconciles_tracked_entries_after_external_effect_status_change() {
+    let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+
+    fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
+    let effect_id = fixture
+        .persistence
+        .list_dispatchable_effects()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("pending submit effect should exist before runtime start")
+        .effect_id;
+
+    let handles = fixture.runtime.start().await.unwrap();
+
+    wait_until_async(|| {
+        let state = fixture.state.clone();
+        let effect_id = effect_id.clone();
+        async move {
+            state
+                .submit_preflight
+                .startup_pending_effect_ids()
+                .await
+                .contains(&effect_id)
+        }
+    })
+    .await;
+
+    fixture
+        .state
+        .effect_service
+        .complete_effect_failed("BTCUSDT", &effect_id, "manually retired in test")
+        .await
+        .unwrap();
+
+    wait_until_async(|| {
+        let state = fixture.state.clone();
+        let effect_id = effect_id.clone();
+        async move {
+            !state
+                .submit_preflight
+                .startup_pending_effect_ids()
+                .await
+                .contains(&effect_id)
+        }
+    })
+    .await;
+
+    shutdown(handles).await;
+}
+
+#[tokio::test]
+async fn submit_preflight_retries_after_transient_pending_effect_query_failure() {
+    let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = fixture.runtime.spawn_submit_preflight_task(shutdown_rx);
+
+    fixture
+        .state
+        .submit_preflight
+        .seed_startup_pending_submit_effects(["stale-effect".to_string()])
+        .await;
+    fixture
+        .persistence
+        .fail_next_pending_submit_effect_queries(1);
+    fixture
+        .state
+        .submit_preflight
+        .mark_pending_submit_effects_dirty();
+
+    wait_until_async(|| {
+        let state = fixture.state.clone();
+        async move {
+            !state
+                .submit_preflight
+                .startup_pending_effect_ids()
+                .await
+                .contains("stale-effect")
+        }
+    })
+    .await;
+
+    let _ = shutdown_tx.send(true);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn failed_effect_does_not_roll_back_committed_snapshot() {
     let exchange = Arc::new(FakeExchange::with_submit_error(
         btc_position(0.0, 0.0),
@@ -1314,7 +1406,7 @@ async fn effect_worker_leaves_submitting_working_order_when_receipt_persistence_
 
     let effects = persistence.all_effects().await;
     assert_eq!(effects.len(), 1);
-    assert_eq!(effects[0].status, EffectStatus::Failed);
+    assert_eq!(effects[0].status, EffectStatus::Pending);
 }
 
 #[tokio::test]
@@ -1947,7 +2039,7 @@ async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_s
 #[tokio::test]
 async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_blocking_new_lifecycle()
  {
-    let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+    let exchange = Arc::new(FakeExchange::with_cancel_order_outcome_unknown(
         btc_position(-22.5, 0.0),
         vec![],
         "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
@@ -2098,6 +2190,64 @@ async fn effect_worker_keeps_effect_pending_when_submit_cleanup_persistence_fail
 }
 
 #[tokio::test]
+async fn cancel_success_writeback_failure_keeps_cancel_pending_and_recovers_exchange_state() {
+    let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+    let persistence = Arc::new(FailOnSavePersistence::new(1));
+    let snapshot = test_snapshot();
+    let (state, worker_state) = test_launch_contexts(
+        exchange.metadata_port(),
+        exchange.account_summary_port(),
+        persistence.clone(),
+        Some(snapshot.clone()),
+        test_budget(),
+    )
+    .await;
+    persistence.seed_snapshot("BTCUSDT", snapshot).await;
+    persistence
+        .seed_effect(PersistedTrackEffect {
+            effect_id: "BTCUSDT:cancel:0".into(),
+            track_id: TrackId::new("BTCUSDT"),
+            batch_id: "cancel".into(),
+            sequence: 0,
+            effect: ExecutionAction::CancelOrder {
+                instrument: btc_instrument(),
+                order_id: "snapshot-1".into(),
+            },
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await;
+    let worker = EffectWorker::new(
+        worker_state,
+        exchange.execution_port(),
+        exchange.account_port(),
+        Duration::from_millis(10),
+    );
+
+    timeout(Duration::from_secs(1), worker.run_once())
+        .await
+        .expect("cancel writeback recovery should finish promptly")
+        .unwrap();
+    let effects = persistence.all_effects().await;
+    let cancel_effect = effects
+        .iter()
+        .find(|effect| effect.effect_id == "BTCUSDT:cancel:0")
+        .expect("cancel effect should remain persisted");
+    assert_eq!(cancel_effect.status, EffectStatus::Pending);
+    assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 1);
+    let instance = current_instance(&state).await;
+    assert_ne!(
+        inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
+        Some("snapshot-1"),
+        "reconcile should retire the stale pre-cancel working order"
+    );
+}
+
+#[tokio::test]
 async fn recovered_submit_emits_effect_state_changed_notification() {
     let exchange = Arc::new(FakeExchange::new(
         btc_position(0.0, 0.0),
@@ -2196,7 +2346,7 @@ async fn recovered_submit_emits_effect_state_changed_notification() {
 }
 
 #[tokio::test]
-async fn receipt_persistence_failure_emits_effect_state_changed_notification() {
+async fn receipt_persistence_failure_does_not_emit_spurious_effect_state_change() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(FailOnReceiptPersistence::default());
     let (state, worker_state) = test_launch_contexts(
@@ -2226,14 +2376,66 @@ async fn receipt_persistence_failure_emits_effect_state_changed_notification() {
     ));
     worker.run_once().await.unwrap();
 
-    let committed = timeout(Duration::from_secs(1), receiver.recv())
+    timeout(Duration::from_millis(100), receiver.recv())
+        .await
+        .expect_err(
+            "receipt writeback failure without recovered state should not emit extra track changes",
+        );
+}
+
+#[tokio::test]
+async fn receipt_persistence_failure_keeps_submit_pending_for_recovery() {
+    let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
+    let persistence = Arc::new(FailOnReceiptPersistence::default());
+    let (state, worker_state) = test_launch_contexts(
+        exchange.metadata_port(),
+        exchange.account_summary_port(),
+        persistence.clone(),
+        None,
+        test_budget(),
+    )
+    .await;
+    let worker = EffectWorker::new(
+        worker_state,
+        exchange.execution_port(),
+        exchange.account_port(),
+        Duration::from_millis(10),
+    );
+
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
+    let persisted = persistence
+        .list_dispatchable_effects()
         .await
         .unwrap()
-        .unwrap();
-    assert!(matches!(
-        committed,
-        poise_application::ApplicationNotification::TrackChanged { .. }
-    ));
+        .into_iter()
+        .next()
+        .expect("pending submit effect should exist");
+    let TrackEffect::SubmitOrder { request, .. } = &persisted.effect else {
+        panic!("expected persisted submit effect");
+    };
+    exchange.set_open_orders(vec![btc_exchange_order(
+        "order-restored",
+        &request.client_order_id,
+        request.side,
+        request.price,
+        request.quantity,
+        0.0,
+        OrderStatus::New,
+    )]);
+
+    worker.run_once().await.unwrap();
+
+    let recovered = persistence
+        .all_effects()
+        .await
+        .into_iter()
+        .find(|effect| effect.effect_id == persisted.effect_id)
+        .expect("submit effect should remain stored");
+    assert_eq!(
+        recovered.status,
+        EffectStatus::Pending,
+        "receipt writeback failure should keep the submit recoverable instead of failing it"
+    );
 }
 
 #[tokio::test]

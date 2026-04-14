@@ -1,18 +1,17 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    FollowUpRetirementRequest, PersistedTrackEffect, PreparedSubmitExecution,
-    is_loaded_track_invariant_violation,
+    FollowUpRetirementRequest, PersistedTrackEffect, is_loaded_track_invariant_violation,
 };
 use poise_engine::ports::OrderRequest;
 
+use super::{Cancellation, EffectWorker, is_insufficient_margin_failure};
 use crate::exchange_freshness::FreshnessGateDecision;
 use crate::order_outcome::{
-    OutcomeClass, classify_cancel_error, classify_submit_receipt_writeback_error,
+    OutcomeClass, cancel_writeback_outcome_unknown, classify_cancel_error,
+    classify_submit_receipt_writeback_error,
 };
-use crate::submit_preflight::SubmitPreflightDecision;
-
-use super::{Cancellation, EffectWorker, is_insufficient_margin_failure};
+use crate::submit_coordinator::SubmitCoordinator;
 
 pub(super) async fn execute_submit(
     worker: &EffectWorker,
@@ -20,6 +19,12 @@ pub(super) async fn execute_submit(
     request: OrderRequest,
     desired_exposure: poise_core::types::Exposure,
 ) -> Result<()> {
+    let submit = SubmitCoordinator::new(
+        worker.execution.clone(),
+        worker.state.submit_effect_service.clone(),
+        worker.state.reconcile.submit_preflight.clone(),
+    );
+
     if matches!(
         worker
             .state
@@ -39,44 +44,18 @@ pub(super) async fn execute_submit(
         return Ok(());
     }
 
-    let preflight_decision = worker
-        .state
-        .reconcile
-        .submit_preflight
-        .decide(&persisted.effect_id, &request.client_order_id)
-        .await;
-    let Some(prepared_submit) = worker
-        .prepare_submit_execution(
-            persisted,
-            &request,
-            desired_exposure.clone(),
-            preflight_decision,
-        )
+    let Some(flight) = submit
+        .prepare(persisted, request, desired_exposure.clone())
         .await?
     else {
         return Ok(());
     };
-    worker
-        .state
-        .reconcile
-        .submit_preflight
-        .mark_submit_started(&persisted.effect_id)
-        .await;
+    let (request, completion) = flight.into_parts();
 
     match worker.execution.submit_order(request.clone()).await {
         Ok(receipt) => {
-            if let Err(error) = worker
-                .state
-                .effect_service
-                .complete_submit_execution(
-                    persisted.track_id.as_str(),
-                    &persisted.effect_id,
-                    &request,
-                    prepared_submit.desired_exposure,
-                    &receipt,
-                )
-                .await
-            {
+            if let Err(writeback_failure) = completion.record_receipt(&receipt).await {
+                let (error, completion) = writeback_failure.into_parts();
                 if let OutcomeClass::OutcomeUnknown(recovery) =
                     classify_submit_receipt_writeback_error(&error)
                 {
@@ -87,19 +66,13 @@ pub(super) async fn execute_submit(
                             recovery,
                         )
                         .await?;
+                    return Err(error);
                 }
-                worker
-                    .state
-                    .effect_service
-                    .complete_effect_failed(
-                        persisted.track_id.as_str(),
-                        &persisted.effect_id,
-                        &error.to_string(),
-                    )
+                completion
+                    .record_completion_failure(&error.to_string())
                     .await?;
                 return Err(error);
             }
-
             Ok(())
         }
         Err(error) => {
@@ -124,17 +97,7 @@ pub(super) async fn execute_submit(
                         .update_snapshot(request.instrument.clone(), snapshot);
                 }
             }
-            match worker
-                .state
-                .effect_service
-                .record_submit_failure(
-                    persisted.track_id.as_str(),
-                    &persisted.effect_id,
-                    &request.client_order_id,
-                    &failure_message,
-                )
-                .await
-            {
+            match completion.record_failure(&failure_message).await {
                 Ok(()) => Err(anyhow!(failure_message)),
                 Err(clear_error) if is_loaded_track_invariant_violation(&clear_error) => {
                     Err(clear_error)
@@ -145,39 +108,6 @@ pub(super) async fn execute_submit(
             }
         }
     }
-}
-
-pub(super) async fn prepare_submit_execution(
-    worker: &EffectWorker,
-    persisted: &PersistedTrackEffect,
-    request: &OrderRequest,
-    desired_exposure: poise_core::types::Exposure,
-    preflight_decision: SubmitPreflightDecision,
-) -> Result<Option<PreparedSubmitExecution>> {
-    let live_order = match preflight_decision {
-        SubmitPreflightDecision::Direct => None,
-        SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => Some(
-            worker
-                .execution
-                .get_open_orders(&request.instrument)
-                .await?
-                .into_iter()
-                .find(|order| order.client_order_id == request.client_order_id),
-        )
-        .flatten(),
-    };
-
-    worker
-        .state
-        .effect_service
-        .prepare_submit_execution(
-            persisted.track_id.as_str(),
-            &persisted.effect_id,
-            request,
-            desired_exposure.clone(),
-            live_order.as_ref(),
-        )
-        .await
 }
 
 pub(super) async fn execute_cancellation(
@@ -241,12 +171,10 @@ pub(super) async fn execute_cancellation(
             };
             if let Err(error) = writeback {
                 worker
-                    .state
-                    .effect_service
-                    .complete_effect_failed(
+                    .recover_unknown_outcome(
                         persisted.track_id.as_str(),
-                        &persisted.effect_id,
-                        &error.to_string(),
+                        &instrument,
+                        cancel_writeback_outcome_unknown(),
                     )
                     .await?;
                 return Err(error);

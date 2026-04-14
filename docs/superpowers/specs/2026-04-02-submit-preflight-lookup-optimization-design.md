@@ -1,5 +1,7 @@
 # Submit Preflight Lookup 优化设计
 
+> 更新：2026-04-14 起，`SubmitPreflight` 的运行时维护边界从“由 `recovery` 任务收到通知后顺手重算”调整为“独立的脏标记/消费者”；同日又把 submit 生命周期接口下沉到 `application/src/submit_effect_service.rs`，不再由 `TrackEffectService` 暴露 submit-specific 协议。随后又在 `server` 侧引入 `SubmitCoordinator` / `SubmitFlight` / `SubmitCompletion`，由它们组合 `SubmitPreflight` 和 `SubmitDispatch`，把 `mark_submit_started(...)` 这类运行时 started 语义以及“一次 started submit 只能结束一次”的约束都留在 server 层。再往下一层，`application::SubmitDispatch` 自身也已经收紧成 one-shot handle，避免将来出现绕过 coordinator 的重复终态写回。新的任务边界见 [Recovery 与 Submit Preflight 解耦设计](2026-04-14-recovery-submit-preflight-decoupling-design.md)。
+
 ## 背景
 
 当前 `server/src/effect_worker.rs` 在执行每一条 `SubmitOrder` effect 前，都会先调用一次 `exchange.get_open_orders(...)`，再从返回结果里按 `client_order_id` 找匹配的 live order，最后把这个可选 live order 传给 `write_service.prepare_submit_execution(...)`。
@@ -128,9 +130,10 @@
   - 吸收启动恢复集合和运行时已尝试 effect 的本地跟踪
   - 在当前单 worker 顺序执行模型下，提供清晰但简单的协调接口
 
-- `write_service`
+- `SubmitEffectService`
   - 继续接受 `Option<&ExchangeOrder>` 作为可选 live order 证据
-  - 不直接维护 preflight 缓存的删除
+  - 输出 `SubmitAttempt::{Dispatch, Finished}`，把是否继续发单以及后续写回所需上下文一起封装
+  - 拥有 submit 生命周期变化与 pending submit 集合语义变化之间的映射
 
 - `executor`
   - 继续只处理“本地状态 + 可选 live order”
@@ -142,7 +145,7 @@
 
 - runtime 可以在启动阶段写入 `startup_pending_submit_effects`
 - effect worker 只在真实 submit 即将发生前记录 `attempted_submit_effects`
-- runtime 通过通知回读统一做 preflight 缓存的删除和重算
+- runtime 通过独立 worker 统一做 preflight 缓存的删除和重算
 - 两处不会各自持有一份集合副本
 
 ## 决策规则
@@ -204,10 +207,10 @@
 
 ### preflight 缓存的删除归属
 
-为了避免把同一份缓存的失效规则拆到 write side 和 runtime 两处，删除归属统一放在 runtime：
+为了避免把同一份缓存的失效规则拆到 submit worker 和 runtime 两处，当前归属拆成两层：
 
-- `write_service` 继续发出 `TrackEffectStateChanged`
-- runtime 在处理通知时，重新读取当前 pending submit 集合
+- `SubmitEffectService` 返回“这次 submit 尝试是否继续 dispatch，以及最终是否影响 pending submit 集合”这个事实
+- runtime 的独立 `submit_preflight` worker 读取 dirty 标记后，重新读取当前 pending submit 集合
 - `submit_preflight` 提供统一的重算接口，例如：
   - `reconcile_pending_submit_effects(current_pending_submit_effect_ids)`
 
@@ -224,23 +227,27 @@
 - `EffectWorker::run_once()` 顺序处理 dispatchable effects
 - 同一条 pending submit effect 不会被两个并发执行者同时推进
 
-在这个不变量下，`submit_preflight` 可以继续使用清晰的两步式接口：
+在这个不变量下，`submit_preflight` 内部仍可以保持两步式状态接口：
 
 - `decide(...)`
 - `mark_submit_started(effect_id)`
+
+但当前实现不再让 `effect_worker` 直接消费这两步；它们由 `server` 层的 `SubmitCoordinator::prepare(...)` 组合成一次性的 server 语义入口。
 
 如果未来引入并发 effect worker 或并发 `process_effect`，这部分接口需要升级成原子协调接口；那会是单独的设计变更，不在本次范围内。
 
 ### `attempted_submit_effects` 的写入时机
 
-精确顺序必须是：
+`SubmitCoordinator::prepare(...)` 内部维持的精确顺序必须是：
 
-1. `prepare_submit_execution(...)`
-2. 若返回 `Some(prepared_submit)`
+1. `recover_or_dispatch(...)`
+2. 若返回 `SubmitAttempt::Dispatch(...)`
 3. 调 `mark_submit_started(effect_id)`
-4. 再调用真实 `submit_order(...)`
+4. 返回 `SubmitFlight`
+5. `SubmitFlight` 再拆成 `OrderRequest + SubmitCompletion`
+6. 再调用真实 `submit_order(...)`
 
-不能在 `prepare_submit_execution(...)` 之前标记 started，因为 `prepare` 可能返回 `None`，此时并没有发生真实 submit。
+不能在 `recover_or_dispatch(...)` 之前标记 started，因为这一步可能直接结束当前 effect；此时并没有发生真实 submit，也不该把 effect 记成 in-flight。
 
 ### `attempted_submit_effects` 的清理时机
 
@@ -276,21 +283,22 @@
 ### 新鲜 submit
 
 1. `effect_worker` 取到一条 pending submit effect
-2. 调 `submit_preflight.decide(...)`
-3. 得到 `Direct`
-4. `prepare_submit_execution(..., None)`
-5. 若返回 `Some(prepared_submit)`，调用 `mark_submit_started(effect_id)`
-6. 执行 `submit_order(...)`
+2. 调 `SubmitCoordinator::prepare(...)`
+3. 内部得到 `Direct`
+4. 内部执行 `recover_or_dispatch(..., None)`
+5. 若需要真实 submit，则内部先 `mark_submit_started(effect_id)`，再返回 `SubmitFlight`
+6. `effect_worker` 从 `SubmitFlight` 拿到 `OrderRequest + SubmitCompletion`
+7. `effect_worker` 执行 `submit_order(...)`
 
 ### 启动后恢复旧 submit
 
 1. `effect_worker` 取到一条 pending submit effect
-2. 调 `submit_preflight.decide(...)`
-3. 得到 `NeedsLiveOrderLookup`
-4. 查询一次 `openOrders`
-5. 只找 `client_order_id` 对应的 live order
-6. `prepare_submit_execution(..., live_order)`
-7. 若已恢复则不再重复 submit；否则继续执行
+2. 调 `SubmitCoordinator::prepare(...)`
+3. 内部得到 `NeedsLiveOrderLookup`
+4. 内部查询一次 `openOrders`
+5. 内部只找 `client_order_id` 对应的 live order
+6. 内部执行 `recover_or_dispatch(..., live_order)`
+7. 若已恢复则不再重复 submit；否则返回 `SubmitFlight` 继续执行
 
 这里的“启动后恢复旧 submit”不要求这条 effect 在启动时已经 dispatchable，只要求它在 runtime 启动阶段已被识别为“启动前遗留的 pending submit”。
 

@@ -1,5 +1,5 @@
 use super::*;
-use poise_engine::ports::UserDataEvent;
+use poise_engine::ports::{ExecutionPortError, UserDataEvent};
 
 pub(crate) async fn test_state(repository: Arc<MemoryRepository>) -> EffectWorkerTestContext {
     test_state_with_track(
@@ -322,7 +322,7 @@ impl FakeExchange {
         }
     }
 
-    pub(crate) fn with_cancel_order_error(message: &str) -> Self {
+    pub(crate) fn with_cancel_order_outcome_unknown(message: &str) -> Self {
         Self {
             cancel_order_error: Some(message.to_string()),
             ..Self::default()
@@ -384,7 +384,7 @@ impl ExecutionPort for FakeExecutionPort {
 
     async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
         if let Some(message) = &self.exchange.cancel_order_error {
-            return Err(anyhow!(message.clone()));
+            return Err(ExecutionPortError::cancel_outcome_unknown(message.clone()).into());
         }
         Ok(())
     }

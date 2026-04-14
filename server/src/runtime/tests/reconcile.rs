@@ -59,6 +59,25 @@ async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
 }
 
 #[tokio::test]
+async fn shutdown_releases_recovery_notification_subscription() {
+    let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
+
+    assert_eq!(fixture.state.notifications.receiver_count(), 0);
+
+    let handles = fixture.runtime.start().await.unwrap();
+
+    wait_until(|| fixture.state.notifications.receiver_count() > 0).await;
+
+    shutdown(handles).await;
+
+    assert_eq!(
+        fixture.state.notifications.receiver_count(),
+        0,
+        "recovery shutdown should not leave notification subscribers behind"
+    );
+}
+
+#[tokio::test]
 async fn apply_user_data_event_persists_track_ledger_event_atomically() {
     let exchange = Arc::new(FakeExchange::new(btc_position(15.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
@@ -580,6 +599,52 @@ async fn normal_track_low_frequency_reconcile_discovers_untracked_live_orders_wi
     .await;
 
     shutdown(handles).await;
+}
+
+#[tokio::test]
+async fn transient_load_failure_does_not_drop_recovery_retry_tracking() {
+    let mut snapshot = test_snapshot();
+    snapshot.executor_state.diagnostics.recovery_anomaly =
+        Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
+    snapshot.executor_state.slots = vec![ExecutionSlot {
+        slot: OrderSlot::new("inventory_core"),
+        state: SlotState::Empty,
+        working_order: None,
+    }];
+    let fixture = runtime_fixture_with_intervals(
+        Some(snapshot),
+        btc_position(15.0, 0.0),
+        vec![],
+        test_budget(),
+        Duration::from_millis(200),
+        Duration::from_secs(5),
+    )
+    .await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = fixture.runtime.spawn_recovery_task(shutdown_rx);
+
+    wait_until(|| fixture.state.notifications.receiver_count() > 0).await;
+    fixture.persistence.fail_next_load_track_state_requests(1);
+    fixture
+        .state
+        .notifications
+        .send(poise_application::ApplicationNotification::TrackChanged {
+            track_id: TrackId::new("BTCUSDT"),
+        })
+        .unwrap();
+
+    wait_until(|| fixture.exchange.get_position_calls.load(Ordering::SeqCst) > 0).await;
+    assert_eq!(
+        fixture
+            .exchange
+            .get_open_orders_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+
+    let _ = shutdown_tx.send(true);
+    task.abort();
+    let _ = task.await;
 }
 
 #[tokio::test]

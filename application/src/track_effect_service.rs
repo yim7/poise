@@ -6,7 +6,7 @@ use poise_engine::manager::TrackManager;
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
-use crate::mutation_executor::{MutationExecutor, PreparedSubmitExecution};
+use crate::mutation_executor::MutationExecutor;
 
 #[derive(Clone)]
 pub struct TrackEffectService {
@@ -16,57 +16,6 @@ pub struct TrackEffectService {
 impl TrackEffectService {
     pub(crate) fn from_executor(executor: Arc<MutationExecutor>) -> Self {
         Self { executor }
-    }
-
-    pub async fn prepare_submit_execution(
-        &self,
-        id: &str,
-        effect_id: &str,
-        request: &poise_engine::ports::OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
-        live_order: Option<&poise_engine::ports::ExchangeOrder>,
-    ) -> Result<Option<PreparedSubmitExecution>> {
-        self.executor
-            .prepare_submit_execution(id, effect_id, request, desired_exposure, live_order)
-            .await
-    }
-
-    pub async fn recover_submit_effect(
-        &self,
-        id: &str,
-        effect_id: &str,
-        request: &poise_engine::ports::OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
-        live_order: Option<&poise_engine::ports::ExchangeOrder>,
-    ) -> Result<poise_engine::executor::SubmitRecoveryResolution> {
-        self.executor
-            .recover_submit_effect(id, effect_id, request, desired_exposure, live_order)
-            .await
-    }
-
-    pub async fn complete_submit_execution(
-        &self,
-        id: &str,
-        effect_id: &str,
-        request: &poise_engine::ports::OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
-        receipt: &poise_engine::ports::OrderReceipt,
-    ) -> Result<()> {
-        self.executor
-            .complete_submit_execution(id, effect_id, request, desired_exposure, receipt)
-            .await
-    }
-
-    pub async fn record_submit_failure(
-        &self,
-        id: &str,
-        effect_id: &str,
-        client_order_id: &str,
-        error: &str,
-    ) -> Result<()> {
-        self.executor
-            .record_submit_failure(id, effect_id, client_order_id, error)
-            .await
     }
 
     pub async fn record_cancel_order_success(
@@ -140,7 +89,7 @@ mod tests {
     use poise_engine::track::TrackId;
 
     #[tokio::test]
-    async fn effect_service_records_submit_failure_and_updates_effect_status() {
+    async fn effect_service_completes_effect_failed_and_updates_effect_status() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone());
         let mut receiver = service.1.subscribe();
@@ -150,12 +99,7 @@ mod tests {
 
         service
             .0
-            .record_submit_failure(
-                "btc-core",
-                "btc-core:batch-1:0",
-                "client-1",
-                "submit order rejected",
-            )
+            .complete_effect_failed("btc-core", "btc-core:batch-1:0", "submit order rejected")
             .await
             .unwrap();
 

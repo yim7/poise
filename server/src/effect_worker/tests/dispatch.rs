@@ -159,6 +159,54 @@ async fn fresh_submit_uses_direct_preflight_without_open_orders_lookup() {
 }
 
 #[tokio::test]
+async fn submit_coordinator_marks_submit_started_before_returning_flight() {
+    let repository = Arc::new(MemoryRepository::default());
+    let exchange = Arc::new(FakeExchange::default());
+    let state = test_state(repository.clone()).await;
+
+    let transition = state.observe_market("btc-core", 95.0).await.unwrap();
+    let (request, desired_exposure) = match transition.effects.as_slice() {
+        [
+            TrackEffect::SubmitOrder {
+                request,
+                desired_exposure,
+                ..
+            },
+        ] => (request.clone(), desired_exposure.clone()),
+        _ => panic!("expected a single submit effect"),
+    };
+    let persisted = repository
+        .list_all_effects()
+        .await
+        .into_iter()
+        .next()
+        .expect("submit effect should be persisted");
+
+    let coordinator = crate::submit_coordinator::SubmitCoordinator::new(
+        exchange.execution_port(),
+        state.effect_worker_state.submit_effect_service.clone(),
+        state.submit_preflight.clone(),
+    );
+
+    let flight = coordinator
+        .prepare(&persisted, request.clone(), desired_exposure)
+        .await
+        .unwrap()
+        .expect("fresh submit should produce a flight");
+    let (prepared_request, completion) = flight.into_parts();
+
+    assert!(
+        state
+            .submit_preflight
+            .is_attempted(&persisted.effect_id)
+            .await,
+        "flight should already mark the submit as started before returning"
+    );
+    assert_eq!(prepared_request, request);
+    completion.record_failure("submit rejected").await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_submit_effect_syncs_exchange_before_submitting() {
     let repository = Arc::new(MemoryRepository::default());
     let exchange = Arc::new(FakeExchange::default());

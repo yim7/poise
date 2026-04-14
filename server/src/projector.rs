@@ -658,7 +658,10 @@ mod tests {
             .expect("resume command should be present");
 
         assert!(!resume.enabled);
-        assert_eq!(resume.disabled_reason, Some("track is not paused".to_string()));
+        assert_eq!(
+            resume.disabled_reason,
+            Some("track is not paused".to_string())
+        );
     }
 
     #[test]

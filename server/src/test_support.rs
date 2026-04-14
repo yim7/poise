@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
     ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectService,
@@ -29,6 +30,7 @@ pub(crate) struct TestApplicationServices {
     pub(crate) command_service: Arc<TrackCommandService>,
     pub(crate) observation_service: Arc<TrackObservationService>,
     pub(crate) effect_service: Arc<TrackEffectService>,
+    pub(crate) submit_effect_service: Arc<SubmitEffectService>,
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
 }
@@ -40,6 +42,7 @@ pub(crate) struct RuntimeTestContext {
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) exchange_freshness: Arc<ExchangeFreshness>,
     pub(crate) submit_preflight: Arc<SubmitPreflight>,
+    pub(crate) effect_service: Arc<TrackEffectService>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
     pub(crate) projector: Arc<TrackProjector>,
     command_service: Arc<TrackCommandService>,
@@ -175,6 +178,7 @@ pub(crate) fn build_test_application_services(
         command_service: Arc::new(services.command),
         observation_service: Arc::new(services.observation),
         effect_service: Arc::new(services.effect),
+        submit_effect_service: Arc::new(services.submit_effect),
         notifications,
         account_margin_guard,
     }
@@ -317,6 +321,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let effect_worker_state = crate::assembly::build_effect_worker_state(
         reconcile,
         Arc::clone(&services.effect_service),
+        Arc::clone(&services.submit_effect_service),
         Arc::clone(&services.account_margin_guard),
     );
     build_test_contexts_from_runtime_states(
@@ -327,6 +332,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         projector,
         Arc::clone(&services.command_service),
         Arc::clone(&services.observation_service),
+        Arc::clone(&services.effect_service),
     )
 }
 
@@ -338,6 +344,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
     projector: Arc<TrackProjector>,
     command_service: Arc<TrackCommandService>,
     observation_service: Arc<TrackObservationService>,
+    effect_service: Arc<TrackEffectService>,
 ) -> (RuntimeTestContext, EffectWorkerTestContext) {
     debug_assert!(Arc::ptr_eq(
         &runtime_state.reconcile.exchange_freshness,
@@ -359,6 +366,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
             notifications,
             exchange_freshness: Arc::clone(&exchange_freshness),
             submit_preflight: Arc::clone(&submit_preflight),
+            effect_service,
             account_margin_guard,
             projector,
             command_service,
@@ -393,6 +401,7 @@ pub(crate) fn build_effect_worker_test_context(
         effect_worker_state: crate::assembly::build_effect_worker_state(
             reconcile,
             Arc::clone(&services.effect_service),
+            Arc::clone(&services.submit_effect_service),
             Arc::clone(&services.account_margin_guard),
         ),
         exchange_freshness,

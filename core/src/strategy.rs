@@ -371,8 +371,14 @@ mod tests {
         let parameters: ShapeFamilyExponentFile =
             serde_json::from_str(include_str!("../shape_family_exponents.json")).unwrap();
 
-        assert_close(parameters.linear, shape_family_exponent(ShapeFamily::Linear));
-        assert_close(parameters.inertial, shape_family_exponent(ShapeFamily::Inertial));
+        assert_close(
+            parameters.linear,
+            shape_family_exponent(ShapeFamily::Linear),
+        );
+        assert_close(
+            parameters.inertial,
+            shape_family_exponent(ShapeFamily::Inertial),
+        );
         assert_close(
             parameters.responsive,
             shape_family_exponent(ShapeFamily::Responsive),

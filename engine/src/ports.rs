@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -10,6 +12,39 @@ use crate::ledger::TrackLedgerEvent;
 use crate::track::Instrument;
 
 // ── Exchange types ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPortErrorKind {
+    CancelOutcomeUnknown,
+}
+
+#[derive(Debug)]
+pub struct ExecutionPortError {
+    kind: ExecutionPortErrorKind,
+    message: String,
+}
+
+impl ExecutionPortError {
+    pub fn cancel_outcome_unknown(message: impl Into<String>) -> Self {
+        Self {
+            kind: ExecutionPortErrorKind::CancelOutcomeUnknown,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> ExecutionPortErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for ExecutionPortError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ExecutionPortError {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderRequest {

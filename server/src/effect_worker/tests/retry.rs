@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arrives() {
     let repository = Arc::new(MemoryRepository::default());
-    let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+    let exchange = Arc::new(FakeExchange::with_cancel_order_outcome_unknown(
         "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
     ));
     exchange.set_position_qty(15.0).await;
@@ -125,7 +125,7 @@ async fn cancel_unknown_order_sent_retires_follow_up_after_terminal_update_arriv
 #[tokio::test]
 async fn cancel_unknown_order_sent_still_marks_cancel_effect_failed_when_follow_up_retry_errors() {
     let repository = Arc::new(MemoryRepository::default());
-    let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+    let exchange = Arc::new(FakeExchange::with_cancel_order_outcome_unknown(
         "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
     ));
     exchange.set_position_qty(15.0).await;
@@ -385,7 +385,7 @@ async fn effect_worker_stops_polling_new_effects_after_shutdown_signal() {
 }
 
 #[tokio::test]
-async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_failed() {
+async fn submit_receipt_unmatched_resyncs_exchange_state_while_keeping_submit_recoverable() {
     let repository = Arc::new(MemoryRepository::default());
     let submit_started = Arc::new(Notify::new());
     let release_submit = Arc::new(Notify::new());
@@ -401,6 +401,13 @@ async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_f
         transition.effects.as_slice(),
         [TrackEffect::SubmitOrder { .. }]
     ));
+    let effect_id = repository
+        .list_all_effects()
+        .await
+        .into_iter()
+        .next()
+        .expect("submit effect should exist before execution")
+        .effect_id;
 
     let worker = EffectWorker::new(
         state.clone(),
@@ -446,12 +453,10 @@ async fn submit_receipt_unmatched_resyncs_exchange_state_before_marking_effect_f
         .into_iter()
         .next()
         .expect("submit effect should remain persisted");
-    assert_eq!(effect.status, EffectStatus::Failed);
+    assert_eq!(effect.status, EffectStatus::Pending);
     assert!(
-        effect
-            .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("submit receipt did not match executor slot"))
+        state.submit_preflight.is_attempted(&effect_id).await,
+        "receipt writeback failure should keep preflight recovery tracking active"
     );
     assert_eq!(exchange.get_position_calls(), 1);
     assert_eq!(exchange.get_open_orders_calls(), 1);

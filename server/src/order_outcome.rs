@@ -1,4 +1,5 @@
 use anyhow::Error;
+use poise_engine::ports::{ExecutionPortError, ExecutionPortErrorKind};
 
 use crate::exchange_freshness::ExchangeFreshnessReason;
 
@@ -45,11 +46,11 @@ pub enum OutcomeClass {
 }
 
 pub fn classify_cancel_error(error: &Error) -> OutcomeClass {
-    classify_cancel_error_message(&error.to_string())
-}
-
-pub fn classify_cancel_error_message(message: &str) -> OutcomeClass {
-    if message.contains("\"code\":-2011") && message.contains("Unknown order sent.") {
+    if error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ExecutionPortError>())
+        .is_some_and(|error| error.kind() == ExecutionPortErrorKind::CancelOutcomeUnknown)
+    {
         return OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
             freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
             reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
@@ -59,18 +60,18 @@ pub fn classify_cancel_error_message(message: &str) -> OutcomeClass {
     OutcomeClass::FinalFailure
 }
 
-pub fn classify_submit_receipt_writeback_error(error: &Error) -> OutcomeClass {
-    if error
-        .to_string()
-        .contains("submit receipt did not match executor slot")
-    {
-        return OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
-            freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
-            reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
-        });
+pub fn cancel_writeback_outcome_unknown() -> OutcomeUnknownRecovery {
+    OutcomeUnknownRecovery {
+        freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
+        reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
     }
+}
 
-    OutcomeClass::FinalFailure
+pub fn classify_submit_receipt_writeback_error(_error: &Error) -> OutcomeClass {
+    OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+        freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
+        reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
+    })
 }
 
 pub fn reconcile_execution(
@@ -96,14 +97,16 @@ pub fn reconcile_execution(
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use poise_engine::ports::ExecutionPortError;
 
     use super::*;
 
     #[test]
-    fn classify_unknown_order_sent_as_cancel_outcome_unknown() {
-        let error = anyhow!(
-            "request DELETE /fapi/v1/order failed with status 400 Bad Request: {{\"code\":-2011,\"msg\":\"Unknown order sent.\"}}"
-        );
+    fn classify_cancel_outcome_unknown_port_error_as_unknown() {
+        let error = Error::new(ExecutionPortError::cancel_outcome_unknown(
+            "Unknown order sent.",
+        ))
+        .context("cancel request failed");
 
         assert_eq!(
             classify_cancel_error(&error),
@@ -115,21 +118,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_unknown_order_sent_message_as_cancel_outcome_unknown() {
-        assert_eq!(
-            classify_cancel_error_message(
-                "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}"
-            ),
-            OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
-                freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
-                reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
-            })
-        );
+    fn classify_plain_cancel_error_as_final_failure() {
+        let error = anyhow!("unknown order sent");
+
+        assert_eq!(classify_cancel_error(&error), OutcomeClass::FinalFailure);
     }
 
     #[test]
     fn classify_submit_receipt_writeback_error_returns_recovery_mapping() {
         let error = anyhow!("submit receipt did not match executor slot");
+
+        assert_eq!(
+            classify_submit_receipt_writeback_error(&error),
+            OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+                freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
+                reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
+            })
+        );
+    }
+
+    #[test]
+    fn classify_submit_receipt_persistence_failure_as_outcome_unknown() {
+        let error = anyhow!("injected receipt persistence failure");
 
         assert_eq!(
             classify_submit_receipt_writeback_error(&error),

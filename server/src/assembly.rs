@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
     TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackMutationStore,
@@ -246,6 +247,7 @@ async fn assemble_with_state_store(
     let command_service = Arc::new(write_services.command);
     let observation_service = Arc::new(write_services.observation);
     let effect_service = Arc::new(write_services.effect);
+    let submit_effect_service = Arc::new(write_services.submit_effect);
     #[cfg(test)]
     let manager = observation_service.manager();
     let query_service = Arc::new(TrackQueryService::new(
@@ -306,6 +308,7 @@ async fn assemble_with_state_store(
     let effect_worker_state = build_effect_worker_state(
         reconcile_state.clone(),
         effect_service.clone(),
+        submit_effect_service.clone(),
         account_margin_guard.clone(),
     );
     #[cfg(test)]
@@ -318,6 +321,7 @@ async fn assemble_with_state_store(
             projector.clone(),
             command_service.clone(),
             observation_service.clone(),
+            effect_service.clone(),
         );
 
     Ok(ServerPlatform {
@@ -523,11 +527,13 @@ pub(crate) fn build_runtime_state(
 pub(crate) fn build_effect_worker_state(
     reconcile: ReconcileState,
     effect_service: Arc<TrackEffectService>,
+    submit_effect_service: Arc<SubmitEffectService>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
 ) -> EffectWorkerState {
     EffectWorkerState {
         reconcile,
         effect_service,
+        submit_effect_service,
         account_margin_guard,
     }
 }
@@ -1074,10 +1080,12 @@ total_loss_limit = 600.0
         handles.user_task.abort();
         handles.effect_task.abort();
         handles.recovery_task.abort();
+        handles.submit_preflight_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.effect_task.await;
         let _ = handles.recovery_task.await;
+        let _ = handles.submit_preflight_task.await;
     }
 
     #[tokio::test]

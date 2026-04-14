@@ -6,12 +6,16 @@ use tokio::sync::mpsc;
 
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, OrderReceipt, OrderRequest,
-    Position, PriceTick, UserDataEvent,
+    ExchangeOrder, ExecutionPort, ExecutionPortError, MarketDataPort, MetadataPort, OrderReceipt,
+    OrderRequest, Position, PriceTick, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
-use crate::{Config, rest::BinanceRestClient, ws::BinanceWsClient};
+use crate::{
+    Config,
+    rest::{BinanceRestClient, BinanceRestError},
+    ws::BinanceWsClient,
+};
 
 pub async fn connect(config: &Config) -> Result<Connected> {
     let endpoints = config.endpoints();
@@ -151,8 +155,17 @@ impl ExecutionPort for BinanceExecution {
     }
 
     async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()> {
-        self.rest.cancel_order(&instrument.symbol, order_id).await?;
-        Ok(())
+        match self.rest.cancel_order(&instrument.symbol, order_id).await {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<BinanceRestError>()
+                    .is_some_and(BinanceRestError::is_cancel_outcome_unknown) =>
+            {
+                Err(ExecutionPortError::cancel_outcome_unknown(error.to_string()).into())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
@@ -217,7 +230,10 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_core::types::Side;
-    use poise_engine::track::{Instrument, Venue};
+    use poise_engine::{
+        ports::{ExecutionPortError, ExecutionPortErrorKind},
+        track::{Instrument, Venue},
+    };
 
     use super::*;
 
@@ -459,6 +475,31 @@ mod tests {
                 .path
                 .starts_with("/fapi/v1/order?symbol=BTCUSDT&orderId=12345")
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_order_maps_unknown_order_sent_to_exchange_neutral_port_error() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            400,
+            r#"{"code":-2011,"msg":"Unknown order sent."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .cancel_order(&Instrument::new(Venue::Binance, "BTCUSDT"), "12345")
+            .await
+            .unwrap_err();
+        let port_error = error
+            .downcast_ref::<ExecutionPortError>()
+            .expect("cancel should map to exchange-neutral execution port error");
+
+        assert_eq!(
+            port_error.kind(),
+            ExecutionPortErrorKind::CancelOutcomeUnknown
+        );
+        assert!(port_error.to_string().contains("Unknown order sent."));
     }
 
     #[tokio::test]

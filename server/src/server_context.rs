@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
     TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
@@ -54,5 +55,6 @@ pub struct RuntimeState {
 pub struct EffectWorkerState {
     pub reconcile: ReconcileState,
     pub effect_service: Arc<TrackEffectService>,
+    pub submit_effect_service: Arc<SubmitEffectService>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
 }

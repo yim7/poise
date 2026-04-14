@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use poise_application::{PersistedTrackEffect, PreparedSubmitExecution};
+use poise_application::PersistedTrackEffect;
 use poise_engine::ports::{AccountPort, ExecutionPort, OrderRequest};
 use poise_engine::track::Instrument;
 use tokio::sync::watch;
@@ -11,7 +11,6 @@ use tokio::time::sleep;
 
 use crate::order_outcome::OutcomeUnknownRecovery;
 use crate::server_context::EffectWorkerState;
-use crate::submit_preflight::SubmitPreflightDecision;
 
 mod dispatch;
 mod execute;
@@ -99,23 +98,6 @@ impl EffectWorker {
         desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
         execute::execute_submit(self, persisted, request, desired_exposure).await
-    }
-
-    async fn prepare_submit_execution(
-        &self,
-        persisted: &PersistedTrackEffect,
-        request: &OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
-        preflight_decision: SubmitPreflightDecision,
-    ) -> Result<Option<PreparedSubmitExecution>> {
-        execute::prepare_submit_execution(
-            self,
-            persisted,
-            request,
-            desired_exposure,
-            preflight_decision,
-        )
-        .await
     }
 
     async fn execute_cancellation(

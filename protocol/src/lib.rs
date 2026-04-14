@@ -462,9 +462,9 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSummaryView, RiskSignalView, ShapeFamily, StreamEvent, TrackCommandAccepted,
-        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackLedgerGapReasonView, TrackListResponse, StrategyPriceStatusView, TrackStatus,
+        AccountSummaryView, RiskSignalView, ShapeFamily, StrategyPriceStatusView, StreamEvent,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackLedgerGapReasonView, TrackListResponse, TrackStatus,
     };
 
     #[test]
@@ -572,11 +572,17 @@ mod tests {
 
         let json = serde_json::to_value(&detail).unwrap();
 
-        assert_eq!(detail.status.strategy_price_status, StrategyPriceStatusView::Live);
+        assert_eq!(
+            detail.status.strategy_price_status,
+            StrategyPriceStatusView::Live
+        );
         assert!(json["status"].get("reference_price").is_none());
         assert!(json["market"].get("index_price").is_none());
         assert_eq!(json["status"]["strategy_price"].as_f64(), Some(64000.0));
-        assert_eq!(json["status"]["strategy_price_status"].as_str(), Some("live"));
+        assert_eq!(
+            json["status"]["strategy_price_status"].as_str(),
+            Some("live")
+        );
         assert_eq!(json["market"]["mark_price"].as_f64(), Some(64123.4));
         assert_eq!(json["market"]["best_bid"].as_f64(), Some(64120.1));
         assert_eq!(json["market"]["best_ask"].as_f64(), Some(64124.5));

@@ -17,6 +17,7 @@ use poise_engine::ports::{
 };
 
 use super::auth::{encode_query, sign_query};
+use super::error::BinanceRestError;
 use super::models::{
     BinanceAccountSummaryInformation, BinanceErrorResponse, BinanceExchangeInfoResponse,
     BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk, BinanceSymbolConfiguration,
@@ -352,19 +353,14 @@ impl BinanceRestClient {
                         continue;
                     }
 
-                    let error = anyhow!(
-                        "request {} {} failed with status {}: {}",
-                        method,
-                        path,
-                        status,
-                        body
-                    );
+                    let error =
+                        BinanceRestError::new(method.clone(), path.to_string(), status, body);
 
                     if !is_retryable_status(status) || attempt + 1 == MAX_RETRIES {
-                        return Err(error);
+                        return Err(error.into());
                     }
 
-                    last_error = Some(error);
+                    last_error = Some(error.into());
                     sleep(retry_delay(retry_after, attempt)).await;
                     continue;
                 }
@@ -1101,6 +1097,42 @@ mod tests {
         assert!(message.contains("failed to deserialize response for /fapi/v1/openOrders"));
         assert!(message.contains("unexpected"));
         assert!(message.contains("not-an-open-order-array"));
+    }
+
+    #[tokio::test]
+    async fn cancel_order_preserves_structured_rest_error_through_anyhow_boundary() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            400,
+            r#"{"code":-2011,"msg":"Unknown order sent."}"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let error = client.cancel_order("BTCUSDT", "42").await.unwrap_err();
+        let rest_error = error
+            .downcast_ref::<BinanceRestError>()
+            .expect("cancel error should preserve structured BinanceRestError");
+        let requests = server.requests().await;
+
+        assert_eq!(rest_error.code(), Some(-2011));
+        assert_eq!(rest_error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            rest_error.body(),
+            r#"{"code":-2011,"msg":"Unknown order sent."}"#
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "DELETE");
+        assert!(
+            requests[0]
+                .path
+                .starts_with("/fapi/v1/order?symbol=BTCUSDT&orderId=42&timestamp=1700000000000")
+        );
+        assert!(requests[0].path.contains("&recvWindow=10000&signature="));
     }
 
     #[test]

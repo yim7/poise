@@ -1,4 +1,5 @@
 use super::*;
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
@@ -48,7 +49,10 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
         exchange.account_port(),
         Duration::from_secs(60),
     );
-    worker.run_once().await.unwrap();
+    timeout(Duration::from_secs(1), worker.run_once())
+        .await
+        .expect("submit recovery while anomaly is active should finish promptly")
+        .unwrap();
 
     assert!(exchange.effects.lock().await.is_empty());
     let effect = repository
@@ -58,6 +62,10 @@ async fn submit_recovery_waits_while_recovery_anomaly_is_active() {
         .next()
         .expect("submit effect should remain pending");
     assert_eq!(effect.status, EffectStatus::Pending);
+    assert!(
+        !state.submit_preflight.take_pending_submit_effects_dirty(),
+        "awaiting exchange state should not invalidate pending submit preflight tracking"
+    );
 }
 
 #[tokio::test]
@@ -127,6 +135,10 @@ async fn effect_worker_does_not_dispatch_pending_auto_submit_when_price_gate_is_
         .next()
         .expect("submit effect should remain persisted");
     assert_eq!(effect.status, EffectStatus::Superseded);
+    assert!(
+        state.submit_preflight.take_pending_submit_effects_dirty(),
+        "superseded submit should invalidate pending submit preflight tracking"
+    );
 }
 
 #[tokio::test]
@@ -305,7 +317,7 @@ async fn stale_cancel_all_effect_syncs_exchange_before_canceling() {
 #[tokio::test]
 async fn cancel_unknown_order_sent_resyncs_exchange_state_before_marking_effect_failed() {
     let repository = Arc::new(MemoryRepository::default());
-    let exchange = Arc::new(FakeExchange::with_cancel_order_error(
+    let exchange = Arc::new(FakeExchange::with_cancel_order_outcome_unknown(
         "request DELETE /fapi/v1/order failed with status 400 Bad Request: {\"code\":-2011,\"msg\":\"Unknown order sent.\"}",
     ));
     exchange.set_position_qty(15.0).await;

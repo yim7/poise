@@ -25,6 +25,7 @@ mod guards;
 mod market_data;
 mod reconcile;
 mod startup_sync;
+mod submit_preflight;
 mod user_data;
 
 pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
@@ -98,6 +99,8 @@ pub struct RuntimeHandles {
     pub effect_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub recovery_task: JoinHandle<()>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub submit_preflight_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub account_task: JoinHandle<()>,
 }
@@ -240,6 +243,7 @@ impl ServerRuntime {
             .await;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
+        let submit_preflight_task = self.spawn_submit_preflight_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task =
             self.spawn_user_task(user_receiver, startup_cutoff, self.shutdown_tx.subscribe());
@@ -250,6 +254,7 @@ impl ServerRuntime {
             user_task,
             effect_task,
             recovery_task,
+            submit_preflight_task,
             account_task,
         })
     }
@@ -303,10 +308,12 @@ impl ServerRuntime {
         handles.market_task.abort();
         handles.user_task.abort();
         handles.recovery_task.abort();
+        handles.submit_preflight_task.abort();
         handles.account_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.recovery_task.await;
+        let _ = handles.submit_preflight_task.await;
         let _ = handles.account_task.await;
 
         tracing::info!("shutdown complete");
@@ -341,6 +348,10 @@ impl ServerRuntime {
 
     fn spawn_recovery_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         reconcile::spawn_recovery_task(self, shutdown_rx)
+    }
+
+    fn spawn_submit_preflight_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        submit_preflight::spawn_submit_preflight_task(self, shutdown_rx)
     }
 
     fn spawn_account_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {

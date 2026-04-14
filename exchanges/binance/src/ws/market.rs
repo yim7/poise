@@ -164,9 +164,9 @@ mod tests {
     use poise_engine::track::{Instrument, Venue};
 
     use super::*;
-    use poise_engine::ports::ExecutionQuote;
     use crate::rest::BinanceRestClient;
     use crate::ws::BinanceWsClient;
+    use poise_engine::ports::ExecutionQuote;
 
     #[test]
     fn parses_binance_mark_and_book_into_price_tick() {

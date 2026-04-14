@@ -46,12 +46,25 @@ pub(super) fn spawn_recovery_task(
             .map(|track| (track.id.clone(), Instant::now() + audit_interval))
             .collect::<HashMap<_, _>>();
         let mut notifications = state.notifications.subscribe();
+        let mut pending_workset = RecoveryWorkset::default();
         let mut ticker = tokio::time::interval(Duration::from_millis(50));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             if *shutdown_rx.borrow() {
                 break;
+            }
+
+            if !pending_workset.is_empty() {
+                apply_recovery_workset(
+                    &state.reconcile,
+                    &instruments,
+                    &mut tracked,
+                    &mut pending_workset,
+                    retry_interval,
+                )
+                .await;
+                continue;
             }
 
             tokio::select! {
@@ -120,58 +133,10 @@ pub(super) fn spawn_recovery_task(
                     }
                 }
                 notification = notifications.recv() => {
-                    match notification {
-                        Ok(ApplicationNotification::TrackChanged { track_id }) => {
-                            let recovery_anomaly_active =
-                                load_recovery_anomaly_active(&state.reconcile, track_id.as_str()).await;
-                            update_recovery_tracking(
-                                &mut tracked,
-                                &instruments,
-                                track_id.as_str(),
-                                recovery_anomaly_active,
-                                retry_interval,
-                            );
-                            if let Err(error) =
-                                reconcile_submit_preflight_state(&state.reconcile).await
-                            {
-                                tracing::warn!(
-                                    "failed to reconcile submit preflight state after track change for {}: {}",
-                                    track_id.as_str(),
-                                    error.message()
-                                );
-                            }
-                        }
-                        Ok(ApplicationNotification::AccountChanged) => {
-                            if let Err(error) =
-                                reconcile_submit_preflight_state(&state.reconcile).await
-                            {
-                                tracing::warn!(
-                                    "failed to reconcile submit preflight state after account change: {}",
-                                    error.message()
-                                );
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(
-                                "recovery notification stream lagged by {skipped} messages; reseeding recovery tracking"
-                            );
-                            tracked = seed_recovery_tracking(
-                                &state.reconcile,
-                                &instruments,
-                                retry_interval,
-                            )
-                            .await;
-                            if let Err(error) =
-                                reconcile_submit_preflight_state(&state.reconcile).await
-                            {
-                                tracing::warn!(
-                                    "failed to reconcile submit preflight state after notification lag: {}",
-                                    error.message()
-                                );
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    if !record_recovery_notification(&mut pending_workset, notification) {
+                        break;
                     }
+                    drain_recovery_notifications(&mut notifications, &mut pending_workset);
                 }
             }
         }
@@ -269,25 +234,6 @@ pub(super) async fn sync_exchange_state_from_exchange(
     Ok(())
 }
 
-pub(super) async fn reconcile_submit_preflight_state(
-    state: &impl ReconcileStateAccess,
-) -> std::result::Result<(), TrackMutationError> {
-    let state = state.reconcile_state_view();
-    let current_pending_submit_effect_ids: HashSet<String> = state
-        .effect_store
-        .list_all_pending_submit_effects()
-        .await
-        .map_err(TrackMutationError::Persistence)?
-        .into_iter()
-        .map(|effect| effect.effect_id)
-        .collect();
-    state
-        .submit_preflight
-        .reconcile_pending_submit_effects(&current_pending_submit_effect_ids)
-        .await;
-    Ok(())
-}
-
 fn should_cancel_unknown_live_orders(
     snapshot: Option<&poise_engine::snapshot::TrackRuntimeSnapshot>,
     open_orders: &[ExchangeOrder],
@@ -357,19 +303,173 @@ async fn seed_recovery_tracking(
     tracked
 }
 
-async fn load_recovery_anomaly_active(state: &ReconcileState, track_id: &str) -> bool {
+async fn load_recovery_anomaly_active(state: &ReconcileState, track_id: &str) -> Option<bool> {
     match state.mutation_store.load_track_state(track_id).await {
-        Ok(Some(snapshot)) => snapshot
-            .executor_state
-            .diagnostics
-            .recovery_anomaly
-            .is_some(),
-        Ok(None) => false,
+        Ok(Some(snapshot)) => Some(
+            snapshot
+                .executor_state
+                .diagnostics
+                .recovery_anomaly
+                .is_some(),
+        ),
+        Ok(None) => Some(false),
         Err(error) => {
             tracing::warn!(
                 "failed to load runtime snapshot for recovery tracking on `{track_id}`: {error}"
             );
-            false
+            None
         }
+    }
+}
+
+async fn apply_recovery_workset(
+    state: &ReconcileState,
+    instruments: &[TrackInstrument],
+    tracked: &mut HashMap<String, RecoveryTrackedTrack>,
+    workset: &mut RecoveryWorkset,
+    retry_interval: Duration,
+) {
+    let workset = std::mem::take(workset);
+
+    if workset.reseed_required {
+        tracing::warn!(
+            "recovery notification stream lagged by {} messages; reseeding recovery tracking",
+            workset.skipped_messages
+        );
+        *tracked = seed_recovery_tracking(state, instruments, retry_interval).await;
+        return;
+    }
+
+    for track_id in &workset.changed_track_ids {
+        if let Some(recovery_anomaly_active) =
+            load_recovery_anomaly_active(state, track_id.as_str()).await
+        {
+            update_recovery_tracking(
+                tracked,
+                instruments,
+                track_id.as_str(),
+                recovery_anomaly_active,
+                retry_interval,
+            );
+        }
+    }
+}
+
+fn record_recovery_notification(
+    workset: &mut RecoveryWorkset,
+    notification: Result<ApplicationNotification, tokio::sync::broadcast::error::RecvError>,
+) -> bool {
+    match notification {
+        Ok(ApplicationNotification::TrackChanged { track_id }) => {
+            workset
+                .changed_track_ids
+                .insert(track_id.as_str().to_string());
+            true
+        }
+        Ok(ApplicationNotification::AccountChanged) => true,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+            workset.reseed_required = true;
+            workset.skipped_messages += skipped;
+            true
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+    }
+}
+
+fn drain_recovery_notifications(
+    notifications: &mut tokio::sync::broadcast::Receiver<ApplicationNotification>,
+    workset: &mut RecoveryWorkset,
+) {
+    loop {
+        match notifications.try_recv() {
+            Ok(notification) => {
+                let _ = record_recovery_notification(workset, Ok(notification));
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                workset.reseed_required = true;
+                workset.skipped_messages += skipped;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RecoveryWorkset {
+    changed_track_ids: HashSet<String>,
+    reseed_required: bool,
+    skipped_messages: u64,
+}
+
+impl RecoveryWorkset {
+    fn is_empty(&self) -> bool {
+        self.changed_track_ids.is_empty() && !self.reseed_required && self.skipped_messages == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_workset_coalesces_track_marks() {
+        let mut workset = RecoveryWorkset::default();
+
+        assert!(record_recovery_notification(
+            &mut workset,
+            Ok(ApplicationNotification::TrackChanged {
+                track_id: poise_engine::track::TrackId::new("BTCUSDT"),
+            }),
+        ));
+        assert!(record_recovery_notification(
+            &mut workset,
+            Ok(ApplicationNotification::TrackChanged {
+                track_id: poise_engine::track::TrackId::new("BTCUSDT"),
+            }),
+        ));
+        assert!(record_recovery_notification(
+            &mut workset,
+            Ok(ApplicationNotification::TrackChanged {
+                track_id: poise_engine::track::TrackId::new("ETHUSDT"),
+            }),
+        ));
+
+        assert_eq!(
+            workset,
+            RecoveryWorkset {
+                changed_track_ids: HashSet::from(["BTCUSDT".to_string(), "ETHUSDT".to_string()]),
+                reseed_required: false,
+                skipped_messages: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_workset_coalesces_reseed_requests() {
+        let mut workset = RecoveryWorkset::default();
+        assert!(record_recovery_notification(
+            &mut workset,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(1)),
+        ));
+        assert!(record_recovery_notification(
+            &mut workset,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(2)),
+        ));
+        assert!(record_recovery_notification(
+            &mut workset,
+            Ok(ApplicationNotification::TrackChanged {
+                track_id: poise_engine::track::TrackId::new("SOLUSDT"),
+            }),
+        ));
+
+        assert_eq!(
+            workset,
+            RecoveryWorkset {
+                changed_track_ids: HashSet::from(["SOLUSDT".to_string()]),
+                reseed_required: true,
+                skipped_messages: 3,
+            }
+        );
     }
 }

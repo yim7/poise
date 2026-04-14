@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
-use poise_core::types::Exposure;
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::{
     OrderSlot, OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution,
@@ -23,10 +22,13 @@ use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
+use crate::submit_effect_service::{SubmitAttemptResult, SubmitExecutionRecovery};
+
 pub struct TrackServiceSet {
     pub command: crate::TrackCommandService,
     pub observation: crate::TrackObservationService,
     pub effect: crate::TrackEffectService,
+    pub submit_effect: crate::submit_effect_service::SubmitEffectService,
 }
 
 pub trait AccountCapacityGuard: Send + Sync {
@@ -69,11 +71,6 @@ pub(crate) struct MutationExecutor {
 pub struct TrackInstrument {
     pub id: String,
     pub instrument: Instrument,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PreparedSubmitExecution {
-    pub desired_exposure: Exposure,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -251,7 +248,10 @@ impl TrackServiceSet {
         Self {
             command: crate::TrackCommandService::from_executor(executor.clone()),
             observation: crate::TrackObservationService::from_executor(executor.clone()),
-            effect: crate::TrackEffectService::from_executor(executor),
+            effect: crate::TrackEffectService::from_executor(executor.clone()),
+            submit_effect: crate::submit_effect_service::SubmitEffectService::from_executor(
+                executor,
+            ),
         }
     }
 }
@@ -480,14 +480,14 @@ impl MutationExecutor {
         Ok(transition)
     }
 
-    pub async fn complete_submit_execution(
+    pub(crate) async fn complete_submit_execution(
         &self,
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
         desired_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
-    ) -> Result<()> {
+    ) -> Result<SubmitAttemptResult> {
         self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
@@ -502,17 +502,17 @@ impl MutationExecutor {
             },
         )
         .await
-        .map(|_| ())
+        .map(|_| SubmitAttemptResult::changed())
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn record_submit_failure(
+    pub(crate) async fn record_submit_failure(
         &self,
         id: &str,
         effect_id: &str,
         client_order_id: &str,
         error: &str,
-    ) -> Result<()> {
+    ) -> Result<SubmitAttemptResult> {
         self.mutate_track_with_effect_status(
             id,
             effect_status_failed(effect_id, error),
@@ -522,8 +522,18 @@ impl MutationExecutor {
             },
         )
         .await
-        .map(|_| ())
+        .map(|_| SubmitAttemptResult::changed())
         .map_err(anyhow::Error::new)
+    }
+
+    pub(crate) async fn complete_submit_effect_failed(
+        &self,
+        id: &str,
+        effect_id: &str,
+        error: &str,
+    ) -> Result<SubmitAttemptResult> {
+        self.complete_effect_failed(id, effect_id, error).await?;
+        Ok(SubmitAttemptResult::changed())
     }
 
     pub async fn record_cancel_order_success(
@@ -726,14 +736,14 @@ impl MutationExecutor {
         Ok(())
     }
 
-    pub async fn prepare_submit_execution(
+    pub(crate) async fn recover_submit_execution(
         &self,
         id: &str,
         effect_id: &str,
         request: &OrderRequest,
         desired_exposure: poise_core::types::Exposure,
         live_order: Option<&ExchangeOrder>,
-    ) -> Result<Option<PreparedSubmitExecution>> {
+    ) -> Result<SubmitExecutionRecovery> {
         Ok(
             match self
                 .recover_submit_effect(id, effect_id, request, desired_exposure, live_order)
@@ -741,15 +751,21 @@ impl MutationExecutor {
             {
                 SubmitRecoveryResolution::Proceed {
                     desired_exposure, ..
-                } => Some(PreparedSubmitExecution { desired_exposure }),
-                SubmitRecoveryResolution::Recovered { .. }
-                | SubmitRecoveryResolution::Superseded { .. }
-                | SubmitRecoveryResolution::AwaitExchangeState => None,
+                } => SubmitExecutionRecovery::Dispatch { desired_exposure },
+                SubmitRecoveryResolution::Recovered { .. } => {
+                    SubmitExecutionRecovery::Finished(SubmitAttemptResult::changed())
+                }
+                SubmitRecoveryResolution::Superseded { .. } => {
+                    SubmitExecutionRecovery::Finished(SubmitAttemptResult::changed())
+                }
+                SubmitRecoveryResolution::AwaitExchangeState => {
+                    SubmitExecutionRecovery::Finished(SubmitAttemptResult::unchanged())
+                }
             },
         )
     }
 
-    pub async fn recover_submit_effect(
+    async fn recover_submit_effect(
         &self,
         id: &str,
         effect_id: &str,

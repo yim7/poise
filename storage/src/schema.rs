@@ -167,6 +167,9 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_track_effects_batch_sequence
          ON track_effects(track_id, batch_id, sequence, status);
 
+         CREATE INDEX IF NOT EXISTS idx_track_effects_recent
+         ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);
+
          CREATE INDEX IF NOT EXISTS idx_follow_up_retirements_track
          ON follow_up_retirements(track_id, updated_at, batch_id, blocked_sequence, closed_order_id);",
     )?;
@@ -470,6 +473,53 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         initialize(&conn).unwrap();
+    }
+
+    #[test]
+    fn initialize_adds_recent_track_effects_index_for_websocket_detail_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+
+        let recent_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_track_effects_recent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recent_index_count, 1);
+
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects
+                 WHERE track_id = ?1
+                 ORDER BY updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC
+                 LIMIT ?2",
+            )
+            .unwrap();
+        let plan_details = stmt
+            .query_map(rusqlite::params!["btc-core", 20_i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("idx_track_effects_recent")),
+            "unexpected query plan: {plan_details:?}"
+        );
+        assert!(
+            !plan_details
+                .iter()
+                .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "unexpected query plan: {plan_details:?}"
+        );
     }
 
     #[test]
