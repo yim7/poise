@@ -30,6 +30,12 @@ pub enum ExchangeSyncMode {
     RecoverAndReconcile,
 }
 
+#[derive(Debug, Clone)]
+pub enum MarketMutationOutcome {
+    LiveOnly,
+    Durable(TrackTransition),
+}
+
 impl ExchangeSyncMode {
     pub fn allows_follow_up_reconcile(self) -> bool {
         matches!(self, Self::RecoverAndReconcile)
@@ -115,6 +121,13 @@ impl TrackManager {
         id: &TrackId,
         observation: TrackObservation,
     ) -> Result<TrackTransition> {
+        if let TrackObservation::Market(observation) = observation {
+            return match self.observe_market_mutation(id, observation)? {
+                MarketMutationOutcome::LiveOnly => self.transition_for(id, vec![], vec![]),
+                MarketMutationOutcome::Durable(transition) => Ok(transition),
+            };
+        }
+
         if let TrackObservation::Order(observation) = observation {
             return self
                 .observe_order_update(id, observation)
@@ -122,7 +135,6 @@ impl TrackManager {
         }
 
         let (events, effects) = match observation {
-            TrackObservation::Market(observation) => self.observe_market(id, observation)?,
             TrackObservation::Position(observation) => {
                 self.observe_position(id, observation)?;
                 match self.live_strategy_price(id)? {
@@ -130,10 +142,83 @@ impl TrackManager {
                     None => (vec![], vec![]),
                 }
             }
-            TrackObservation::Order(_) => unreachable!("order observation handled above"),
+            TrackObservation::Market(_) | TrackObservation::Order(_) => {
+                unreachable!("market/order observation handled above")
+            }
         };
 
         self.transition_for(id, events, effects)
+    }
+
+    pub fn observe_market_mutation(
+        &mut self,
+        id: &TrackId,
+        observation: MarketObservation,
+    ) -> Result<MarketMutationOutcome> {
+        let previous_snapshot = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+            .snapshot();
+
+        let (events, effects) = self.observe_market(id, observation)?;
+        let next_snapshot = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+            .snapshot();
+
+        if market_mutation_requires_durable_write(
+            &previous_snapshot,
+            &next_snapshot,
+            &events,
+            &effects,
+        ) {
+            return Ok(MarketMutationOutcome::Durable(TrackTransition {
+                snapshot: next_snapshot,
+                events,
+                effects,
+            }));
+        }
+
+        let (
+            strategy_price,
+            strategy_price_status,
+            mark_price,
+            best_bid,
+            best_ask,
+            price_execution_gate,
+            last_tick_at,
+        ) = {
+            let track = self
+                .tracks
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+            (
+                track.strategy_price,
+                track.strategy_price_status,
+                track.mark_price,
+                track.best_bid,
+                track.best_ask,
+                track.price_execution_gate,
+                track.last_tick_at,
+            )
+        };
+
+        let track = self
+            .tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        track.restore_from_snapshot(&previous_snapshot)?;
+        track.strategy_price = strategy_price;
+        track.strategy_price_status = strategy_price_status;
+        track.mark_price = mark_price;
+        track.best_bid = best_bid;
+        track.best_ask = best_ask;
+        track.price_execution_gate = price_execution_gate;
+        track.last_tick_at = last_tick_at;
+
+        Ok(MarketMutationOutcome::LiveOnly)
     }
 
     pub fn observe_order_update(
@@ -1023,6 +1108,42 @@ struct PlannedInventoryExecution {
     executor_state: ExecutorState,
 }
 
+fn market_mutation_requires_durable_write(
+    previous_snapshot: &TrackRuntimeSnapshot,
+    next_snapshot: &TrackRuntimeSnapshot,
+    events: &[DomainEvent],
+    effects: &[TrackEffect],
+) -> bool {
+    let desired_exposure_changed =
+        previous_snapshot.desired_exposure != next_snapshot.desired_exposure;
+    let has_non_target_events = events
+        .iter()
+        .any(|event| !matches!(event, DomainEvent::ExposureTargetChanged { .. }));
+    let has_execution_effects = !effects.is_empty() && !matches!(effects, [TrackEffect::NoOp]);
+    let snapshot_changed_without_target = {
+        let mut normalized_next = next_snapshot.clone();
+        normalized_next.desired_exposure = previous_snapshot.desired_exposure.clone();
+        if !has_non_target_events && !has_execution_effects {
+            normalized_next.executor_state = previous_snapshot.executor_state.clone();
+        }
+        normalized_next != *previous_snapshot
+    };
+    let target_reached_without_new_effects = next_snapshot
+        .desired_exposure
+        .as_ref()
+        .is_some_and(|target| previous_snapshot.current_exposure.delta(target).is_zero());
+    let durable_target_change = desired_exposure_changed
+        && (has_execution_effects
+            || has_non_target_events
+            || target_reached_without_new_effects
+            || next_snapshot.desired_exposure.is_none());
+
+    snapshot_changed_without_target
+        || has_non_target_events
+        || has_execution_effects
+        || durable_target_change
+}
+
 #[cfg(test)]
 fn rounded_values_match(left: f64, right: f64, step: f64) -> bool {
     let tolerance = if step <= f64::EPSILON {
@@ -1761,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_noop_when_working_orders_match_desired_orders() {
+    fn observe_market_treats_matching_working_orders_as_live_only() {
         let mut manager = test_manager_with_active_track();
         let track = manager.tracks.get_mut(&TrackId::new("btc-core")).unwrap();
         track.status = TrackStatus::Active;
@@ -1775,7 +1896,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
+        assert!(transition.effects.is_empty());
+        assert!(transition.events.is_empty());
         let executor_state = transition.snapshot.executor_state;
         assert_eq!(executor_state.slots.len(), 1);
         assert_eq!(
@@ -1927,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn observe_market_recomputes_desired_exposure_after_quote_recovers() {
+    fn observe_market_keeps_durable_target_until_quote_recovery_changes_durable_intent() {
         let mut manager = test_manager_with_active_track();
 
         let initial = manager
@@ -1951,7 +2073,7 @@ mod tests {
 
         assert_eq!(initial.snapshot.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(stale.snapshot.desired_exposure, Some(Exposure(4.0)));
-        assert_eq!(recovered.snapshot.desired_exposure, Some(Exposure(-4.0)),);
+        assert_eq!(recovered.snapshot.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(
             manager.get_track("btc-core").unwrap().strategy_price_status,
             StrategyPriceStatus::Live
@@ -2083,7 +2205,7 @@ mod tests {
 
         assert_eq!(
             transition.snapshot.desired_exposure,
-            Some(poise_core::types::Exposure(4.0))
+            Some(poise_core::types::Exposure(6.0))
         );
         assert_eq!(
             manager.get_track("btc1").unwrap().strategy_price,
@@ -2101,11 +2223,12 @@ mod tests {
                 OrderStatus::Submitting,
             ))
         );
-        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
+        assert!(transition.effects.is_empty());
+        assert!(transition.events.is_empty());
     }
 
     #[test]
-    fn observe_market_keeps_strategy_target_while_suppressing_small_rebalance() {
+    fn observe_market_suppresses_small_rebalance_as_live_only() {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2122,24 +2245,36 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
-        assert!(
-            transition
-                .snapshot
-                .desired_exposure
-                .as_ref()
-                .is_some_and(|target| (target.0 - 2.4).abs() < 0.001)
-        );
-        assert!(
-            transition
-                .events
-                .iter()
-                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        assert!(transition.effects.is_empty());
+        assert!(transition.events.is_empty());
+        assert_eq!(transition.snapshot.desired_exposure, None);
+    }
+
+    #[test]
+    fn observe_market_returns_live_only_when_raw_target_moves_but_execution_intent_is_unchanged() {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        track.status = TrackStatus::Active;
+        track.current_exposure = poise_core::types::Exposure(2.0);
+        track.desired_exposure = Some(poise_core::types::Exposure(2.0));
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+
+        let outcome = manager
+            .observe_market_mutation(&TrackId::new("btc1"), quoted_market_observation(97.0))
+            .unwrap();
+
+        assert!(matches!(outcome, MarketMutationOutcome::LiveOnly));
+        assert_eq!(
+            manager.get_track("btc1").unwrap().desired_exposure,
+            Some(poise_core::types::Exposure(2.0))
         );
     }
 
     #[test]
-    fn observe_market_keeps_latest_strategy_target_while_preserving_active_execution_anchor() {
+    fn observe_market_keeps_active_execution_anchor_when_latest_target_is_live_only() {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2148,7 +2283,6 @@ mod tests {
         track.current_exposure = poise_core::types::Exposure(2.0);
         track.config.notional_per_unit = 100.0;
         track.config.min_rebalance_units = 0.5;
-        let expected_target = poise_core::strategy::desired_exposure(96.125, &track.config);
         seed_executor_slot(
             track,
             working_order(
@@ -2170,20 +2304,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
-        assert!(
-            transition
-                .snapshot
-                .desired_exposure
-                .as_ref()
-                .is_some_and(|target| (target.0 - expected_target.0).abs() < 0.001)
-        );
-        assert!(
-            transition
-                .events
-                .iter()
-                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
-        );
+        assert!(transition.effects.is_empty());
+        assert!(transition.events.is_empty());
+        assert_eq!(transition.snapshot.desired_exposure, None);
         assert_eq!(
             inventory_core_order_from_snapshot(&transition.snapshot),
             Some(&working_order(
@@ -2199,8 +2322,8 @@ mod tests {
     }
 
     #[test]
-    fn observe_market_keeps_submit_pending_slot_when_small_rebalance_is_below_min_rebalance_units()
-    {
+    fn observe_market_keeps_submit_pending_slot_live_only_when_small_rebalance_is_below_min_rebalance_units()
+     {
         let mut manager = test_manager();
         register_test_track(&mut manager, "btc1", "BTCUSDT");
 
@@ -2230,14 +2353,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.effects, vec![TrackEffect::NoOp]);
-        assert!(
-            transition
-                .snapshot
-                .desired_exposure
-                .as_ref()
-                .is_some_and(|target| (target.0 - 2.4).abs() < 0.001)
-        );
+        assert!(transition.effects.is_empty());
+        assert!(transition.events.is_empty());
+        assert_eq!(transition.snapshot.desired_exposure, None);
         assert_eq!(
             inventory_core_order_from_snapshot(&transition.snapshot),
             Some(&working_order(
@@ -2284,6 +2402,24 @@ mod tests {
                 desired_exposure.clone(),
             ))
         );
+    }
+
+    #[test]
+    fn observe_market_returns_durable_when_planned_effects_change() {
+        let mut manager = test_manager_with_active_track();
+
+        let outcome = manager
+            .observe_market_mutation(&TrackId::new("btc-core"), quoted_market_observation(95.0))
+            .unwrap();
+
+        let MarketMutationOutcome::Durable(transition) = outcome else {
+            panic!("expected durable transition");
+        };
+
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [TrackEffect::SubmitOrder { .. }]
+        ));
     }
 
     #[test]

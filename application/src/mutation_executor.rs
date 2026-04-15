@@ -12,6 +12,7 @@ use poise_engine::executor::{
     OrderSlot, OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution,
 };
 use poise_engine::ledger::TrackLedgerEvent;
+use poise_engine::manager::MarketMutationOutcome;
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
@@ -293,14 +294,63 @@ impl MutationExecutor {
         id: &str,
         observation: MarketObservation,
     ) -> Result<TrackTransition> {
-        self.mutate_track(id, |manager| {
-            manager.observe(
-                &TrackId::new(id),
-                TrackObservation::Market(observation.clone()),
-            )
-        })
-        .await
-        .map_err(anyhow::Error::new)
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let previous_snapshot = {
+            let manager = self.manager.read().await;
+            manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?
+        };
+
+        let outcome = self
+            .with_manager_mutation(id, |manager| {
+                manager.observe_market_mutation(&TrackId::new(id), observation.clone())
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+
+        match outcome {
+            MarketMutationOutcome::LiveOnly => {
+                let next_snapshot = {
+                    let manager = self.manager.read().await;
+                    manager
+                        .snapshot(id)
+                        .ok_or_else(|| anyhow!("track `{id}` not found"))?
+                };
+
+                if next_snapshot != previous_snapshot {
+                    self.commit_track_mutation(
+                        id,
+                        &previous_snapshot,
+                        &next_snapshot,
+                        &(),
+                        None,
+                        false,
+                    )
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                }
+
+                Ok(TrackTransition {
+                    snapshot: next_snapshot,
+                    events: Vec::new(),
+                    effects: Vec::new(),
+                })
+            }
+            MarketMutationOutcome::Durable(transition) => {
+                self.commit_track_mutation(
+                    id,
+                    &previous_snapshot,
+                    &transition.snapshot,
+                    &transition,
+                    None,
+                    false,
+                )
+                .await
+                .map_err(anyhow::Error::new)?;
+                Ok(transition)
+            }
+        }
     }
 
     pub async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
@@ -973,6 +1023,28 @@ impl MutationExecutor {
         Ok(result)
     }
 
+    async fn with_manager_mutation<R, F>(
+        &self,
+        id: &str,
+        mutate: F,
+    ) -> std::result::Result<R, TrackMutationError>
+    where
+        F: FnOnce(&mut TrackManager) -> Result<R>,
+    {
+        let mut manager = self.manager.write().await;
+        let previous_snapshot = manager
+            .snapshot(id)
+            .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+        self.sync_account_capacity_constraint(&mut manager, id)
+            .map_err(TrackMutationError::Mutation)?;
+        mutate(&mut manager).map_err(|error| {
+            manager
+                .restore_track_state(&previous_snapshot)
+                .expect("failed to restore previous snapshot after mutation error");
+            TrackMutationError::Mutation(error)
+        })
+    }
+
     async fn lock_track_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
         self.mutation_guards.lock(id).await
     }
@@ -1480,12 +1552,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use poise_engine::executor::RecoveryAnomaly;
+    use poise_engine::observation::MarketObservation;
+    use poise_engine::ports::ExecutionQuote;
     use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::TrackId;
     use tokio::sync::broadcast;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager};
     use super::{MutationExecutor, RecoveryAnomalyObserver};
+    use crate::TrackMutationStore;
 
     #[derive(Default)]
     struct RecordingRecoveryAnomalyObserver {
@@ -1606,6 +1682,64 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_market_live_only_tick_does_not_emit_track_changed() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let (notifications, _) = broadcast::channel(16);
+        let executor = MutationExecutor::new(
+            seeded_manager(),
+            repository.clone(),
+            repository.clone(),
+            notifications.clone(),
+            Arc::new(NoopGuard),
+            observer,
+        );
+        let mut receiver = notifications.subscribe();
+
+        {
+            let manager = executor.manager();
+            let mut manager = manager.write().await;
+            let track = manager
+                .get_track("btc-core")
+                .cloned()
+                .expect("seeded track should exist");
+            let mut updated = track.snapshot();
+            updated.status = poise_engine::runtime::TrackStatus::Active;
+            updated.current_exposure = poise_core::types::Exposure(2.0);
+            updated.desired_exposure = Some(poise_core::types::Exposure(2.0));
+            manager
+                .restore_track_state(&updated)
+                .expect("failed to seed active exposure state");
+        }
+
+        let transition = executor
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 97.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 97.0,
+                        best_ask: 97.0,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(transition.events.is_empty());
+        assert!(transition.effects.is_empty());
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            repository
+                .load_track_state("btc-core")
+                .await
+                .unwrap()
+                .is_none(),
+            "live-only tick should not persist a durable snapshot"
         );
     }
 }
