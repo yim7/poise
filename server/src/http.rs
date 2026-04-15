@@ -1021,7 +1021,7 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload.status.lifecycle.status, TrackStatus::Active);
+        assert_eq!(payload.status.lifecycle.status, TrackStatus::WaitingMarketData);
     }
 
     #[tokio::test]

@@ -42,6 +42,11 @@ async fn submit_success_updates_working_order_via_receipt_writeback() {
         manager.restore_track_state(&snapshot).unwrap();
         repository.seed_snapshot("btc-core", snapshot).await;
     }
+    let replay = state.observe_market("btc-core", 95.0).await.unwrap();
+    assert!(
+        replay.effects.is_empty(),
+        "restored pending submit should only rehydrate live quote before receipt writeback"
+    );
 
     let worker = EffectWorker::new(
         state.clone(),

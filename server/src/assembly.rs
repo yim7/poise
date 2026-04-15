@@ -1285,7 +1285,7 @@ total_loss_limit = 600.0
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.status, poise_engine::runtime::TrackStatus::Frozen);
-        assert_eq!(snapshot.observed.strategy_price, Some(85.0));
+        assert_eq!(snapshot.observed.strategy_price, None);
     }
 
     #[tokio::test]

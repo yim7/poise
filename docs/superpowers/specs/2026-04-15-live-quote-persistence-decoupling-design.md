@@ -380,6 +380,8 @@ market tick 进入后，系统不再问“raw target 变没变”，而是问：
 - durable snapshot 继续表达跨进程保留的业务事实与顶层 `desired_exposure`
 - recovery / startup 直接使用恢复出来的顶层 `desired_exposure`
 - 如果 snapshot 里已有 `active_round`，则 executor 内部继续沿用其 `desired_exposure` 作为当前 round anchor
+- 暂停 track 在没有新 tick 时恢复后，生命周期状态保持 `WaitingMarketData`，而不是假装回到 `Active`
+- user-data replay、position update 等 durable 观察仍可更新仓位/账本，但依赖 live quote 的 submit / replacement 仍要等首个新 tick 才恢复
 
 换句话说，重启恢复 durable 业务状态与稳定 `desired_exposure`，但不恢复实时盘口本身。
 

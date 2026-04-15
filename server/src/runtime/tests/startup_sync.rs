@@ -286,6 +286,52 @@ async fn startup_uses_restored_desired_exposure_before_first_tick() {
 }
 
 #[tokio::test]
+async fn startup_without_new_tick_exposes_missing_live_quote_baseline() {
+    let mut snapshot = test_snapshot();
+    snapshot.observed.last_tick_at = Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 59, 30).unwrap());
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(95.0);
+    snapshot.observed.best_bid = Some(94.5);
+    snapshot.observed.best_ask = Some(95.5);
+    let fixture = runtime_fixture(
+        Some(snapshot),
+        btc_position(0.0, 0.0),
+        vec![],
+        test_budget(),
+    )
+    .await;
+
+    fixture.runtime.startup_sync().await.unwrap();
+
+    let runtime = current_track_runtime(&fixture.state).await;
+    let live_quote = runtime.live_quote_state();
+    let live_view = runtime.live_view();
+
+    assert_eq!(live_quote.last_tick_at, None);
+    assert_eq!(live_quote.strategy_price, None);
+    assert_eq!(live_quote.mark_price, None);
+    assert_eq!(live_quote.execution_quote, None);
+    assert_eq!(live_view.strategy_price, None);
+    assert_eq!(
+        live_view.strategy_price_status,
+        poise_engine::runtime::StrategyPriceStatus::Stale
+    );
+    assert_eq!(live_view.mark_price, None);
+    assert_eq!(live_view.best_bid, None);
+    assert_eq!(live_view.best_ask, None);
+    assert_eq!(live_view.desired_exposure, Some(6.0));
+
+    let instance = current_instance(&fixture.state).await;
+    assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
+    assert!(instance.observed.last_tick_at.is_none());
+    assert!(instance.observed.strategy_price.is_none());
+    assert!(instance.observed.mark_price.is_none());
+    assert!(instance.observed.best_bid.is_none());
+    assert!(instance.observed.best_ask.is_none());
+}
+
+#[tokio::test]
 async fn startup_sync_keeps_slots_empty_when_exchange_has_no_open_orders_and_no_live_quote() {
     let fixture = runtime_fixture(
         Some(test_snapshot()),
@@ -371,6 +417,71 @@ async fn startup_sync_preserves_durable_target_without_rebuilding_submit_pending
             .map(|round| round.desired_exposure.clone()),
         Some(Exposure(6.0))
     );
+}
+
+#[tokio::test]
+async fn first_tick_after_startup_rehydrates_live_view_and_execution_inputs() {
+    let mut snapshot = test_snapshot();
+    snapshot.current_exposure = Exposure(0.0);
+    snapshot.executor_state = ExecutorState::empty(test_server_time());
+    let fixture = runtime_fixture(
+        Some(snapshot),
+        btc_position(0.0, 0.0),
+        vec![],
+        test_budget(),
+    )
+    .await;
+
+    let handles = fixture.runtime.start().await.unwrap();
+
+    assert!(
+        fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
+        "startup should not submit before the first live tick"
+    );
+
+    fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
+
+    wait_until_async(|| {
+        let state = fixture.state.clone();
+        async move {
+            let runtime = current_track_runtime(&state).await;
+            let live_quote = runtime.live_quote_state();
+            live_quote.last_tick_at.is_some()
+                && live_quote.strategy_price == Some(95.0)
+                && live_quote.mark_price == Some(95.0)
+                && live_quote.execution_quote
+                    == Some(poise_engine::ports::ExecutionQuote {
+                        best_bid: 95.0,
+                        best_ask: 95.0,
+                    })
+        }
+    })
+    .await;
+
+    wait_until(|| !fixture.exchange.submitted_orders.lock().unwrap().is_empty()).await;
+
+    let runtime = current_track_runtime(&fixture.state).await;
+    let live_view = runtime.live_view();
+    let instance = current_instance(&fixture.state).await;
+    assert_eq!(live_view.strategy_price, Some(95.0));
+    assert_eq!(live_view.mark_price, Some(95.0));
+    assert_eq!(live_view.best_bid, Some(95.0));
+    assert_eq!(live_view.best_ask, Some(95.0));
+    assert_eq!(
+        live_view.desired_exposure,
+        instance.desired_exposure.map(|value| value.0)
+    );
+    assert_eq!(
+        live_view.strategy_price_status,
+        poise_engine::runtime::StrategyPriceStatus::Live
+    );
+
+    let submitted_orders = fixture.exchange.submitted_orders.lock().unwrap().clone();
+    assert_eq!(submitted_orders.len(), 1);
+    assert_eq!(submitted_orders[0].price, 95.0);
+    assert!(submitted_orders[0].quantity > 0.0);
+
+    shutdown(handles).await;
 }
 
 #[tokio::test]

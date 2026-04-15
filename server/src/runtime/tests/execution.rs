@@ -264,9 +264,8 @@ async fn repeated_ticks_before_first_submit_are_absorbed_into_one_replacement_pl
     ));
 
     let second = state.observe_market("BTCUSDT", 92.5).await.unwrap();
-    assert_eq!(
-        second.effects,
-        vec![ExecutionAction::NoOp],
+    assert!(
+        second.effects.is_empty(),
         "new tick should update target only while first submit intent is pending"
     );
 
@@ -338,9 +337,8 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
     };
 
     let second = state.observe_market("BTCUSDT", 96.125).await.unwrap();
-    assert_eq!(
-        second.effects,
-        vec![ExecutionAction::NoOp],
+    assert!(
+        second.effects.is_empty(),
         "small drift should not supersede the active submit intent"
     );
 
@@ -355,12 +353,8 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
     assert_eq!(effects[0].status, EffectStatus::Succeeded);
 
     let instance = current_instance(&state).await;
-    assert!(
-        instance
-            .desired_exposure
-            .as_ref()
-            .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
-    );
+    assert!(instance.desired_exposure.is_some());
+    assert_eq!(instance.desired_exposure, Some(first_desired_exposure.clone()));
     let order = inventory_core_order(&instance).expect("submit should become working");
     assert_eq!(order.client_order_id, first_request.client_order_id);
     assert_eq!(
@@ -414,9 +408,8 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
     worker.run_once().await.unwrap();
 
     let second = state.observe_market("BTCUSDT", 96.125).await.unwrap();
-    assert_eq!(
-        second.effects,
-        vec![ExecutionAction::NoOp],
+    assert!(
+        second.effects.is_empty(),
         "small drift should keep the active working order"
     );
 
@@ -431,12 +424,8 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
     );
 
     let instance = current_instance(&state).await;
-    assert!(
-        instance
-            .desired_exposure
-            .as_ref()
-            .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
-    );
+    assert!(instance.desired_exposure.is_some());
+    assert_eq!(instance.desired_exposure, Some(first_desired_exposure.clone()));
     let order = inventory_core_order(&instance).expect("working order should remain active");
     assert_eq!(
         instance
@@ -517,9 +506,8 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
         .await
         .unwrap();
     let second = state.observe_market("BTCUSDT", 96.125).await.unwrap();
-    assert_eq!(
-        second.effects,
-        vec![ExecutionAction::NoOp],
+    assert!(
+        second.effects.is_empty(),
         "partial fill followed by small target drift should keep the active working order"
     );
 
@@ -538,12 +526,8 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
     assert_eq!(effects[0].status, EffectStatus::Succeeded);
 
     let instance = current_instance(&state).await;
-    assert!(
-        instance
-            .desired_exposure
-            .as_ref()
-            .is_some_and(|exposure| (exposure.0 - 3.1).abs() < 1e-9)
-    );
+    assert!(instance.desired_exposure.is_some());
+    assert_eq!(instance.desired_exposure, Some(first_desired_exposure.clone()));
     let order = inventory_core_order(&instance).expect("working order should remain active");
     assert_eq!(order.client_order_id, first_order.client_order_id);
     assert_eq!(
@@ -609,9 +593,8 @@ async fn runtime_small_drift_does_not_loop_replacing_orders_once_round_is_active
         .observe_market("BTCUSDT", 96.35)
         .await
         .unwrap();
-    assert_eq!(
-        third.effects,
-        vec![ExecutionAction::NoOp],
+    assert!(
+        third.effects.is_empty(),
         "fresh replacement should not trigger another replacement on the next small drift"
     );
     assert_eq!(fixture.exchange.submitted_orders.lock().unwrap().len(), 2);

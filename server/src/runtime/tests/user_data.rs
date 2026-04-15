@@ -72,7 +72,7 @@ async fn position_update_reconciles_actual_exposure_without_overwriting_target()
 }
 
 #[tokio::test]
-async fn position_update_reconciles_without_runtime_follow_up_command() {
+async fn position_update_without_live_quote_does_not_stage_submit_effect() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
     let (price_sender, price_receiver) = mpsc::channel(8);
@@ -159,11 +159,7 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
         1
     );
     let effects = persistence.all_effects().await;
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(
-        effects[0].effect,
-        ExecutionAction::SubmitOrder { .. }
-    ));
+    assert!(effects.is_empty());
     assert!(exchange.submitted_orders.lock().unwrap().is_empty());
 
     user_task.abort();
@@ -171,7 +167,7 @@ async fn position_update_reconciles_without_runtime_follow_up_command() {
 }
 
 #[tokio::test]
-async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
+async fn position_update_waits_for_first_tick_before_submitting_reconcile() {
     let mut snapshot = test_snapshot();
     snapshot.current_exposure = Exposure(0.0);
     snapshot.desired_exposure = Some(Exposure(4.0));
@@ -181,8 +177,7 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
 
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
-    let (price_sender, price_receiver) = mpsc::channel(8);
-    drop(price_sender);
+    let (_price_sender, price_receiver) = mpsc::channel(8);
     let (user_sender, user_receiver) = mpsc::channel(8);
     let market_data = Arc::new(FakeMarketData::without_user_receiver(price_receiver));
     let clock = Arc::new(FixedClock(test_server_time()));
@@ -245,6 +240,28 @@ async fn position_update_submits_reconcile_without_waiting_for_new_tick() {
         ))
         .await
         .unwrap();
+
+    wait_until_instance(&state, |instance| {
+        (instance.current_exposure.0 - 2.0).abs() < f64::EPSILON
+    })
+    .await;
+
+    assert!(
+        exchange.submitted_orders.lock().unwrap().is_empty(),
+        "position update alone should not submit before the first live tick"
+    );
+    assert!(
+        persistence.all_effects().await.is_empty(),
+        "position update alone should not stage submit effects without a live quote"
+    );
+
+    let tick_transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
+    assert!(
+        tick_transition
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+    );
 
     wait_until(|| exchange.submitted_orders.lock().unwrap().len() == 1).await;
     wait_until_instance(&state, |instance| {
