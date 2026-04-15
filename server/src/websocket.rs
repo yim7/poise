@@ -2,11 +2,274 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use poise_application::ApplicationNotification;
 use poise_protocol::StreamEvent;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::server_context::WebSocketState;
 
+#[cfg(not(test))]
+const WEBSOCKET_DIAGNOSTIC_LOG_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WEBSOCKET_DIAGNOSTIC_LOG_INTERVAL: Duration = Duration::from_millis(100);
+
+static NEXT_WEBSOCKET_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
 pub async fn ws_handler(ws: WebSocketUpgrade, state: WebSocketState) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WebSocketDiagnosticsSnapshot {
+    connection_id: u64,
+    window_duration: Duration,
+    raw_track_notifications: usize,
+    raw_account_notifications: usize,
+    batches: usize,
+    max_batch_size: usize,
+    track_pushes: usize,
+    account_pushes: usize,
+    detail_query_count: usize,
+    avg_detail_query: Duration,
+    max_detail_query: Duration,
+    send_count: usize,
+    avg_send: Duration,
+    max_send: Duration,
+}
+
+struct WebSocketDiagnostics {
+    connection_id: u64,
+    window_started_at: Instant,
+    raw_track_notifications: usize,
+    raw_account_notifications: usize,
+    batches: usize,
+    max_batch_size: usize,
+    track_pushes: usize,
+    account_pushes: usize,
+    detail_query_count: usize,
+    total_detail_query: Duration,
+    max_detail_query: Duration,
+    send_count: usize,
+    total_send: Duration,
+    max_send: Duration,
+}
+
+impl WebSocketDiagnostics {
+    fn new(connection_id: u64, started_at: Instant) -> Self {
+        Self {
+            connection_id,
+            window_started_at: started_at,
+            raw_track_notifications: 0,
+            raw_account_notifications: 0,
+            batches: 0,
+            max_batch_size: 0,
+            track_pushes: 0,
+            account_pushes: 0,
+            detail_query_count: 0,
+            total_detail_query: Duration::ZERO,
+            max_detail_query: Duration::ZERO,
+            send_count: 0,
+            total_send: Duration::ZERO,
+            max_send: Duration::ZERO,
+        }
+    }
+
+    fn record_notification(&mut self, notification: &ApplicationNotification) {
+        match notification {
+            ApplicationNotification::TrackChanged { .. } => {
+                self.raw_track_notifications += 1;
+            }
+            ApplicationNotification::AccountChanged => {
+                self.raw_account_notifications += 1;
+            }
+        }
+    }
+
+    fn record_batch(&mut self, batch_size: usize) {
+        if batch_size == 0 {
+            return;
+        }
+        self.batches += 1;
+        self.max_batch_size = self.max_batch_size.max(batch_size);
+    }
+
+    fn record_track_push(&mut self) {
+        self.track_pushes += 1;
+    }
+
+    fn record_account_push(&mut self) {
+        self.account_pushes += 1;
+    }
+
+    fn record_detail_query(&mut self, elapsed: Duration) {
+        self.detail_query_count += 1;
+        self.total_detail_query += elapsed;
+        self.max_detail_query = self.max_detail_query.max(elapsed);
+    }
+
+    fn record_send(&mut self, elapsed: Duration) {
+        self.send_count += 1;
+        self.total_send += elapsed;
+        self.max_send = self.max_send.max(elapsed);
+    }
+
+    fn snapshot(&self, now: Instant) -> WebSocketDiagnosticsSnapshot {
+        WebSocketDiagnosticsSnapshot {
+            connection_id: self.connection_id,
+            window_duration: now.duration_since(self.window_started_at),
+            raw_track_notifications: self.raw_track_notifications,
+            raw_account_notifications: self.raw_account_notifications,
+            batches: self.batches,
+            max_batch_size: self.max_batch_size,
+            track_pushes: self.track_pushes,
+            account_pushes: self.account_pushes,
+            detail_query_count: self.detail_query_count,
+            avg_detail_query: average_duration(self.total_detail_query, self.detail_query_count),
+            max_detail_query: self.max_detail_query,
+            send_count: self.send_count,
+            avg_send: average_duration(self.total_send, self.send_count),
+            max_send: self.max_send,
+        }
+    }
+
+    fn take_due_snapshot(&mut self, now: Instant) -> Option<WebSocketDiagnosticsSnapshot> {
+        if now.duration_since(self.window_started_at) < WEBSOCKET_DIAGNOSTIC_LOG_INTERVAL {
+            return None;
+        }
+        let snapshot = self.snapshot(now);
+        self.reset(now);
+        Some(snapshot)
+    }
+
+    fn take_snapshot_and_reset(&mut self, now: Instant) -> WebSocketDiagnosticsSnapshot {
+        let snapshot = self.snapshot(now);
+        self.reset(now);
+        snapshot
+    }
+
+    fn reset(&mut self, now: Instant) {
+        self.window_started_at = now;
+        self.raw_track_notifications = 0;
+        self.raw_account_notifications = 0;
+        self.batches = 0;
+        self.max_batch_size = 0;
+        self.track_pushes = 0;
+        self.account_pushes = 0;
+        self.detail_query_count = 0;
+        self.total_detail_query = Duration::ZERO;
+        self.max_detail_query = Duration::ZERO;
+        self.send_count = 0;
+        self.total_send = Duration::ZERO;
+        self.max_send = Duration::ZERO;
+    }
+}
+
+fn log_websocket_diagnostics(snapshot: &WebSocketDiagnosticsSnapshot) {
+    tracing::info!(
+        connection_id = snapshot.connection_id,
+        window_ms = snapshot.window_duration.as_millis() as u64,
+        raw_track_notifications = snapshot.raw_track_notifications,
+        raw_account_notifications = snapshot.raw_account_notifications,
+        batches = snapshot.batches,
+        max_batch_size = snapshot.max_batch_size,
+        track_pushes = snapshot.track_pushes,
+        account_pushes = snapshot.account_pushes,
+        detail_query_count = snapshot.detail_query_count,
+        avg_detail_query_ms = snapshot.avg_detail_query.as_secs_f64() * 1000.0,
+        max_detail_query_ms = snapshot.max_detail_query.as_secs_f64() * 1000.0,
+        send_count = snapshot.send_count,
+        avg_send_ms = snapshot.avg_send.as_secs_f64() * 1000.0,
+        max_send_ms = snapshot.max_send.as_secs_f64() * 1000.0,
+        "websocket push diagnostics"
+    );
+}
+
+fn log_websocket_lag(snapshot: &WebSocketDiagnosticsSnapshot, skipped: u64) {
+    tracing::warn!(
+        connection_id = snapshot.connection_id,
+        skipped,
+        window_ms = snapshot.window_duration.as_millis() as u64,
+        raw_track_notifications = snapshot.raw_track_notifications,
+        raw_account_notifications = snapshot.raw_account_notifications,
+        batches = snapshot.batches,
+        max_batch_size = snapshot.max_batch_size,
+        track_pushes = snapshot.track_pushes,
+        account_pushes = snapshot.account_pushes,
+        detail_query_count = snapshot.detail_query_count,
+        avg_detail_query_ms = snapshot.avg_detail_query.as_secs_f64() * 1000.0,
+        max_detail_query_ms = snapshot.max_detail_query.as_secs_f64() * 1000.0,
+        send_count = snapshot.send_count,
+        avg_send_ms = snapshot.avg_send.as_secs_f64() * 1000.0,
+        max_send_ms = snapshot.max_send.as_secs_f64() * 1000.0,
+        "websocket notification stream lagged; closing socket for resync"
+    );
+}
+
+#[cfg(test)]
+fn emit_test_snapshot(state: &WebSocketState, snapshot: WebSocketDiagnosticsSnapshot) {
+    if let Some(tx) = &state.diagnostics_tx {
+        let _ = tx.send(snapshot);
+    }
+}
+
+#[cfg(not(test))]
+fn emit_test_snapshot(_state: &WebSocketState, _snapshot: WebSocketDiagnosticsSnapshot) {}
+
+fn average_duration(total: Duration, count: usize) -> Duration {
+    if count == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs_f64(total.as_secs_f64() / count as f64)
+}
+
+enum PendingSocketUpdate {
+    TrackChanged {
+        track_id: poise_engine::track::TrackId,
+    },
+    AccountChanged,
+}
+
+#[derive(Default)]
+struct PendingSocketUpdates {
+    track_ids: Vec<poise_engine::track::TrackId>,
+    pending_track_ids: HashSet<poise_engine::track::TrackId>,
+    account_changed: bool,
+}
+
+impl PendingSocketUpdates {
+    fn is_empty(&self) -> bool {
+        self.track_ids.is_empty() && !self.account_changed
+    }
+
+    fn record(&mut self, notification: ApplicationNotification) {
+        match notification {
+            ApplicationNotification::TrackChanged { track_id } => {
+                if self.pending_track_ids.insert(track_id.clone()) {
+                    self.track_ids.push(track_id);
+                }
+            }
+            ApplicationNotification::AccountChanged => {
+                self.account_changed = true;
+            }
+        }
+    }
+
+    fn take(&mut self) -> Vec<PendingSocketUpdate> {
+        let mut updates = Vec::with_capacity(
+            self.track_ids.len() + usize::from(self.account_changed),
+        );
+        updates.extend(
+            self.track_ids
+                .drain(..)
+                .map(|track_id| PendingSocketUpdate::TrackChanged { track_id }),
+        );
+        self.pending_track_ids.clear();
+        if self.account_changed {
+            updates.push(PendingSocketUpdate::AccountChanged);
+            self.account_changed = false;
+        }
+        updates
+    }
 }
 
 #[cfg(test)]
@@ -19,27 +282,68 @@ pub async fn ws_handler_with_test_state(
 
 async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
     let mut receiver = state.notifications.subscribe();
+    let mut pending = PendingSocketUpdates::default();
+    let connection_id = NEXT_WEBSOCKET_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+    let mut diagnostics = WebSocketDiagnostics::new(connection_id, Instant::now());
 
     loop {
-        match receiver.recv().await {
-            Ok(ApplicationNotification::TrackChanged { track_id }) => {
-                if !push_projected_updates(&mut socket, &state, track_id).await {
+        let mut batch_size = 0;
+        if pending.is_empty() {
+            match receiver.recv().await {
+                Ok(notification) => {
+                    diagnostics.record_notification(&notification);
+                    pending.record(notification);
+                    batch_size += 1;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let snapshot = diagnostics.take_snapshot_and_reset(Instant::now());
+                    log_websocket_lag(&snapshot, skipped as u64);
+                    emit_test_snapshot(&state, snapshot);
+                    close_socket(&mut socket).await;
                     break;
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
-            Ok(ApplicationNotification::AccountChanged) => {
-                if !push_account_summary(&mut socket, &state).await {
-                    break;
+        }
+
+        loop {
+            match receiver.try_recv() {
+                Ok(notification) => {
+                    diagnostics.record_notification(&notification);
+                    pending.record(notification);
+                    batch_size += 1;
                 }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    let snapshot = diagnostics.take_snapshot_and_reset(Instant::now());
+                    log_websocket_lag(&snapshot, skipped as u64);
+                    emit_test_snapshot(&state, snapshot);
+                    close_socket(&mut socket).await;
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return,
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(
-                    "websocket notification stream lagged by {skipped} messages; closing socket for resync"
-                );
-                close_socket(&mut socket).await;
-                break;
+        }
+        diagnostics.record_batch(batch_size);
+
+        for update in pending.take() {
+            let pushed = match update {
+                PendingSocketUpdate::TrackChanged { track_id } => {
+                    diagnostics.record_track_push();
+                    push_projected_updates(&mut socket, &state, track_id, &mut diagnostics).await
+                }
+                PendingSocketUpdate::AccountChanged => {
+                    diagnostics.record_account_push();
+                    push_account_summary(&mut socket, &state, &mut diagnostics).await
+                }
+            };
+            if !pushed {
+                return;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+        if let Some(snapshot) = diagnostics.take_due_snapshot(Instant::now()) {
+            log_websocket_diagnostics(&snapshot);
+            emit_test_snapshot(&state, snapshot);
         }
     }
 }
@@ -48,14 +352,20 @@ async fn push_projected_updates(
     socket: &mut WebSocket,
     state: &WebSocketState,
     track_id: poise_engine::track::TrackId,
+    diagnostics: &mut WebSocketDiagnostics,
 ) -> bool {
+    let load_started_at = Instant::now();
     let source = match state
         .query_service
         .load_track_detail_source(&track_id)
         .await
     {
-        Ok(Some(source)) => source,
+        Ok(Some(source)) => {
+            diagnostics.record_detail_query(load_started_at.elapsed());
+            source
+        }
         Ok(None) => {
+            diagnostics.record_detail_query(load_started_at.elapsed());
             tracing::warn!(
                 "track `{}` missing from read model during websocket push; closing socket for resync",
                 track_id.as_str()
@@ -64,6 +374,7 @@ async fn push_projected_updates(
             return false;
         }
         Err(error) => {
+            diagnostics.record_detail_query(load_started_at.elapsed());
             tracing::warn!(
                 "failed to load read model for websocket track `{}`: {error}; closing socket for resync",
                 track_id.as_str()
@@ -88,7 +399,7 @@ async fn push_projected_updates(
     ];
 
     for event in events {
-        if !send_event(socket, event).await {
+        if !send_event(socket, event, diagnostics).await {
             return false;
         }
     }
@@ -100,7 +411,11 @@ async fn close_socket(socket: &mut WebSocket) {
     let _ = socket.send(Message::Close(None)).await;
 }
 
-async fn push_account_summary(socket: &mut WebSocket, state: &WebSocketState) -> bool {
+async fn push_account_summary(
+    socket: &mut WebSocket,
+    state: &WebSocketState,
+    diagnostics: &mut WebSocketDiagnostics,
+) -> bool {
     let Some(summary) = state.account_monitor.current_summary().await else {
         return true;
     };
@@ -109,11 +424,16 @@ async fn push_account_summary(socket: &mut WebSocket, state: &WebSocketState) ->
         StreamEvent::AccountSummaryChanged {
             summary: state.account_projector.project_summary(&summary),
         },
+        diagnostics,
     )
     .await
 }
 
-async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> bool {
+async fn send_event(
+    socket: &mut WebSocket,
+    event: StreamEvent,
+    diagnostics: &mut WebSocketDiagnostics,
+) -> bool {
     let message = match serde_json::to_string(&event) {
         Ok(message) => message,
         Err(error) => {
@@ -122,7 +442,10 @@ async fn send_event(socket: &mut WebSocket, event: StreamEvent) -> bool {
         }
     };
 
-    socket.send(Message::Text(message)).await.is_ok()
+    let send_started_at = Instant::now();
+    let sent = socket.send(Message::Text(message)).await.is_ok();
+    diagnostics.record_send(send_started_at.elapsed());
+    sent
 }
 
 #[cfg(test)]
@@ -167,7 +490,9 @@ mod tests {
         StoredAccountMonitorState, TrackCommandService, TrackQueryService,
     };
 
-    use super::ws_handler_with_test_state;
+    use super::{
+        WebSocketDiagnostics, WebSocketDiagnosticsSnapshot, ws_handler_with_test_state,
+    };
 
     #[derive(Clone)]
     struct WebSocketTestContext {
@@ -296,6 +621,59 @@ mod tests {
                 command_service: services.command_service.clone(),
                 notifications: services.notifications.clone(),
             },
+        )
+    }
+
+    async fn spawn_server_with_diagnostics(
+        repository: Arc<TestRepository>,
+        notification_capacity: usize,
+    ) -> (
+        String,
+        WebSocketTestContext,
+        tokio::sync::mpsc::UnboundedReceiver<WebSocketDiagnosticsSnapshot>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
+        let (diagnostics_tx, diagnostics_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager(),
+            mutation_store.clone(),
+            effect_store.clone(),
+            notifications,
+            account_margin_guard.clone(),
+        );
+        let query_service = Arc::new(TrackQueryService::new(
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            test_prepared_registry("btc-core"),
+        ));
+        let mut websocket_state = build_websocket_state(
+            &services,
+            query_service,
+            Arc::new(TrackProjector::new()),
+            unavailable_account_monitor(services.notifications.clone()),
+            Arc::new(crate::account_projector::AccountProjector::new()),
+        );
+        websocket_state.diagnostics_tx = Some(diagnostics_tx);
+        let app = Router::new()
+            .route("/ws", axum::routing::get(ws_handler_with_test_state))
+            .with_state(websocket_state.clone());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (
+            format!("ws://{address}/ws"),
+            WebSocketTestContext {
+                websocket_state,
+                command_service: services.command_service.clone(),
+                notifications: services.notifications.clone(),
+            },
+            diagnostics_rx,
         )
     }
 
@@ -540,6 +918,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coalesces_duplicate_track_notifications_before_loading_read_model() {
+        let repository = seeded_repository();
+        repository.set_read_delay(Duration::from_millis(10));
+        let (url, state) = spawn_server_with_capacity(repository.clone(), 16).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        for _ in 0..5 {
+            let _ = state
+                .notifications
+                .send(ApplicationNotification::TrackChanged {
+                    track_id: TrackId::new("btc-core"),
+                });
+        }
+
+        let first = recv_event(&mut stream).await;
+        let second = recv_event(&mut stream).await;
+        let events = [first, second];
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TrackListItemChanged { track_id, .. } if track_id == "btc-core"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TrackDetailChanged { track_id, .. } if track_id == "btc-core"
+        )));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(repository.load_snapshot_calls(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "duplicate track notifications should not emit extra websocket events"
+        );
+    }
+
+    #[tokio::test]
     async fn closes_socket_when_notification_stream_lags() {
         let repository = seeded_repository();
         repository.set_read_delay(Duration::from_millis(50));
@@ -643,6 +1059,84 @@ mod tests {
         assert!(matches!(next, None | Some(_)));
     }
 
+    #[test]
+    fn websocket_diagnostics_snapshot_tracks_counts_and_timings() {
+        let started_at = std::time::Instant::now();
+        let mut diagnostics = WebSocketDiagnostics::new(7, started_at);
+
+        diagnostics.record_notification(&ApplicationNotification::TrackChanged {
+            track_id: TrackId::new("btc-core"),
+        });
+        diagnostics.record_notification(&ApplicationNotification::TrackChanged {
+            track_id: TrackId::new("eth-core"),
+        });
+        diagnostics.record_notification(&ApplicationNotification::AccountChanged);
+        diagnostics.record_batch(3);
+        diagnostics.record_track_push();
+        diagnostics.record_track_push();
+        diagnostics.record_account_push();
+        diagnostics.record_detail_query(Duration::from_millis(12));
+        diagnostics.record_detail_query(Duration::from_millis(18));
+        diagnostics.record_send(Duration::from_millis(4));
+        diagnostics.record_send(Duration::from_millis(10));
+
+        let snapshot = diagnostics.snapshot(started_at + Duration::from_secs(5));
+
+        assert_eq!(snapshot.connection_id, 7);
+        assert_eq!(snapshot.window_duration, Duration::from_secs(5));
+        assert_eq!(snapshot.raw_track_notifications, 2);
+        assert_eq!(snapshot.raw_account_notifications, 1);
+        assert_eq!(snapshot.batches, 1);
+        assert_eq!(snapshot.max_batch_size, 3);
+        assert_eq!(snapshot.track_pushes, 2);
+        assert_eq!(snapshot.account_pushes, 1);
+        assert_eq!(snapshot.detail_query_count, 2);
+        assert_eq!(snapshot.avg_detail_query, Duration::from_millis(15));
+        assert_eq!(snapshot.max_detail_query, Duration::from_millis(18));
+        assert_eq!(snapshot.send_count, 2);
+        assert_eq!(snapshot.avg_send, Duration::from_millis(7));
+        assert_eq!(snapshot.max_send, Duration::from_millis(10));
+    }
+
+    #[tokio::test]
+    async fn stress_same_track_notifications_emit_deduplicated_diagnostics_snapshot() {
+        let repository = seeded_repository();
+        repository.set_read_delay(Duration::from_millis(10));
+        let (url, state, mut diagnostics_rx) =
+            spawn_server_with_diagnostics(repository, 128).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        for _ in 0..48 {
+            let _ = state
+                .notifications
+                .send(ApplicationNotification::TrackChanged {
+                    track_id: TrackId::new("btc-core"),
+                });
+        }
+
+        let _ = recv_event(&mut stream).await;
+        let _ = recv_event(&mut stream).await;
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = state
+            .notifications
+            .send(ApplicationNotification::AccountChanged);
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), diagnostics_rx.recv())
+            .await
+            .expect("stress test should emit diagnostics snapshot")
+            .expect("diagnostics channel should stay open");
+
+        assert_eq!(snapshot.raw_track_notifications, 48);
+        assert_eq!(snapshot.raw_account_notifications, 1);
+        assert_eq!(snapshot.track_pushes, 1);
+        assert_eq!(snapshot.account_pushes, 1);
+        assert_eq!(snapshot.detail_query_count, 1);
+        assert_eq!(snapshot.max_batch_size, 48);
+        assert!(snapshot.avg_detail_query >= Duration::from_millis(25));
+    }
+
     fn test_manager() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
@@ -732,6 +1226,7 @@ mod tests {
         next_event_id: Mutex<i64>,
         read_delay: Mutex<Option<Duration>>,
         load_snapshot_error: Mutex<Option<String>>,
+        load_snapshot_calls: Mutex<usize>,
     }
 
     impl TestRepository {
@@ -755,6 +1250,10 @@ mod tests {
 
         fn set_load_snapshot_error(&self, error: &str) {
             *self.load_snapshot_error.lock().unwrap() = Some(error.to_string());
+        }
+
+        fn load_snapshot_calls(&self) -> usize {
+            *self.load_snapshot_calls.lock().unwrap()
         }
 
         fn seed_pending_noop_effect(&self) {
@@ -979,6 +1478,7 @@ mod tests {
             track_id: &TrackId,
         ) -> Result<Option<StoredTrackSnapshot>> {
             self.maybe_delay_read().await;
+            *self.load_snapshot_calls.lock().unwrap() += 1;
             if let Some(error) = self.load_snapshot_error.lock().unwrap().clone() {
                 return Err(anyhow!(error));
             }

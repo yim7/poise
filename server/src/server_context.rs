@@ -31,6 +31,9 @@ pub struct WebSocketState {
     pub projector: Arc<TrackProjector>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_projector: Arc<AccountProjector>,
+    #[cfg(test)]
+    pub diagnostics_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::websocket::WebSocketDiagnosticsSnapshot>>,
 }
 
 #[derive(Clone)]

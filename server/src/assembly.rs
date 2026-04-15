@@ -496,6 +496,8 @@ pub(crate) fn build_websocket_state(
         projector,
         account_monitor,
         account_projector,
+        #[cfg(test)]
+        diagnostics_tx: None,
     }
 }
 
