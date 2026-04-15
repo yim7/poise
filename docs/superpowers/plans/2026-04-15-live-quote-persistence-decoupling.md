@@ -286,7 +286,7 @@ git commit -m "refactor(engine): narrow durable desired exposure owner"
 - Test: `engine/src/manager.rs`
 - Test: `application/src/mutation_executor.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 raw target 不再直接触发 durable**
+- [x] **Step 1: 先写失败测试，锁住 raw target 不再直接触发 durable**
 
 新增至少这些测试：
 
@@ -307,7 +307,7 @@ async fn observe_market_live_only_tick_does_not_emit_track_changed() {}
 - 只有 effect plan / durable 后果变化时，才返回 `Durable(...)`
 - application 只对 `Durable(...)` 发 `TrackChanged`
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -319,7 +319,7 @@ Expected:
 
 - `observe_market(...)` 现在仍然会因为 raw target 改变而落到 durable 写路径
 
-- [ ] **Step 3: 引入窄结果类型并按执行意图判定 durable**
+- [x] **Step 3: 引入窄结果类型并按执行意图判定 durable**
 
 在 `engine/src/manager.rs` 引入：
 
@@ -348,7 +348,7 @@ pub fn observe_market(
 - 如果没有新的 domain events、effects、durable executor/risk changes，也没有 stale 边界变化，则返回 `LiveOnly`
 - 只有这些 durable 后果真正变化时，才返回 `Durable(...)`
 
-- [ ] **Step 4: application 只对 `Durable(...)` 走持久化与广播**
+- [x] **Step 4: application 只对 `Durable(...)` 走持久化与广播**
 
 在 `application/src/mutation_executor.rs` 改成：
 
@@ -368,9 +368,14 @@ pub(crate) async fn observe_market(
 }
 ```
 
-`TrackObservationService::observe_market(...)` 同步改成返回 `Result<Option<TrackTransition>>`。
+Task 2 实际实现说明：
 
-- [ ] **Step 5: 跑 Task 2 回归**
+- 新增了 `TrackManager::observe_market_mutation(...) -> Result<MarketMutationOutcome>`，把 market tick 先分成 `LiveOnly / Durable(...)`
+- `MutationExecutor::observe_market(...)` 不再复用通用 `mutate_track(...)`；它会先运行 `observe_market_mutation(...)`，只有 `Durable(...)` 才走 `commit_track_mutation(...)`
+- 为了避免把 server 侧大面积调用一起拖进改动，本轮 **没有** 修改 `TrackObservationService::observe_market(...)` 的返回类型；它仍返回 `Result<TrackTransition>`
+- 当 tick 只触发 `LiveOnly` 时，service 返回一个空 `events/effects` 的 `TrackTransition`，但不会持久化 snapshot，也不会发 `TrackChanged`
+
+- [x] **Step 5: 跑 Task 2 回归**
 
 Run:
 
@@ -383,12 +388,25 @@ Expected:
 - raw target 抖动不再直接写库
 - 真正 durable 变化仍会持久化
 
-- [ ] **Step 6: Commit**
+实际通过的验证命令：
+
+- `cargo fmt --all`
+- `cargo test -p poise-engine manager::tests::observe_market_returns_live_only_when_raw_target_moves_but_execution_intent_is_unchanged -- --exact --nocapture`
+- `cargo test -p poise-engine manager::tests::observe_market_returns_durable_when_planned_effects_change -- --exact --nocapture`
+- `cargo test -p poise-application mutation_executor::tests::observe_market_live_only_tick_does_not_emit_track_changed -- --exact --nocapture`
+- `cargo test -p poise-engine manager::tests:: -- --nocapture`
+- `cargo test -p poise-application --lib -- --nocapture`
+
+- [x] **Step 6: Commit**
 
 ```bash
 git add engine/src/manager.rs application/src/mutation_executor.rs application/src/track_observation_service.rs docs/superpowers/plans/2026-04-15-live-quote-persistence-decoupling.md
 git commit -m "feat(application): persist market updates only on durable intent changes"
 ```
+
+对应 commit SHA：
+
+- `9b84cd0` `feat(application): persist market updates only on durable intent changes`
 
 ### Task 3: 用 `TrackLiveView` 重建 query/read-model，但保持 HTTP / durable 读模型形状稳定
 
