@@ -476,6 +476,25 @@ mod tests {
     }
 
     #[test]
+    fn projector_preserves_existing_detail_and_list_shapes() {
+        let source = source_with_submitting_effect();
+        let list_json =
+            serde_json::to_value(TrackProjector::new().project_list_item(&source)).unwrap();
+        let detail_json =
+            serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
+
+        assert!(list_json.get("execution").is_some());
+        assert!(list_json.get("exposure").is_some());
+        assert!(detail_json.get("market").is_some());
+        assert!(detail_json.get("position").is_some());
+        assert_eq!(detail_json["market"]["mark_price"].as_f64(), Some(101.5));
+        assert_eq!(
+            detail_json["position"]["desired_exposure"].as_f64(),
+            Some(4.0)
+        );
+    }
+
+    #[test]
     fn projects_detail_ledger_from_unified_ledger_state() {
         let source = source_with_submitting_effect();
         let detail_json =

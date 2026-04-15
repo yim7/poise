@@ -165,7 +165,7 @@ mod tests {
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, StrategyPriceStatus,
-        TrackStatus, WorkingOrder,
+        TrackLiveView, TrackStatus, WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -357,6 +357,89 @@ mod tests {
         assert_eq!(read_model.mark_price, Some(101.5));
         assert_eq!(read_model.best_bid, Some(101.0));
         assert_eq!(read_model.best_ask, Some(101.5));
+        assert_eq!(
+            read_model.price_execution_block_reason,
+            Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote)
+        );
+    }
+
+    #[test]
+    fn read_model_uses_track_live_view_for_market_and_target_fields() {
+        let track_config = test_track_config();
+        let read_model = TrackReadModel::from_source(TrackReadSource {
+            definition: TrackReadDefinition {
+                track_id: TrackId::new("btc-core"),
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                track_config: track_config.clone(),
+                budget: CapacityBudget {
+                    max_notional: 3000.0,
+                    daily_loss_limit: 100.0,
+                    total_loss_limit: 300.0,
+                },
+            },
+            runtime: TrackRuntimeReadState::from_parts(
+                TrackRuntimeSnapshot {
+                    track_id: TrackId::new("btc-core"),
+                    restore_revision: TrackRestoreRevision::for_track(
+                        &Instrument::new(Venue::Binance, "BTCUSDT"),
+                        &track_config,
+                    ),
+                    status: TrackStatus::Active,
+                    current_exposure: Exposure(1.0),
+                    desired_exposure: Some(Exposure(4.0)),
+                    manual_target_override: None,
+                    executor_state: ExecutorState {
+                        active_round: None,
+                        diagnostics: poise_engine::runtime::ExecutorDiagnostics::empty(),
+                        slots: Vec::new(),
+                        recent_terminal_orders: Vec::new(),
+                        stats: ExecutionStats {
+                            started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                            max_inventory_gap_abs: Exposure(0.0),
+                            max_gap_age_ms: 0,
+                        },
+                    },
+                    ledger_state: Default::default(),
+                    replacement_gate_reason: None,
+                    price_execution_block_reason: None,
+                    risk: RiskState {
+                        unrealized_pnl: 0.0,
+                        ..RiskState::default()
+                    },
+                    observed: ObservedState {
+                        strategy_price: None,
+                        strategy_price_status: StrategyPriceStatus::Stale,
+                        mark_price: None,
+                        best_bid: None,
+                        best_ask: None,
+                        out_of_band_since: None,
+                        last_tick_at: None,
+                        market_data_stale_since: None,
+                    },
+                },
+                TrackLiveView {
+                    strategy_price: Some(101.25),
+                    strategy_price_status: StrategyPriceStatus::Live,
+                    mark_price: Some(101.5),
+                    best_bid: Some(101.0),
+                    best_ask: Some(101.5),
+                    desired_exposure: Some(2.0),
+                    price_execution_block_reason: Some(
+                        poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
+                    ),
+                },
+            ),
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            recent_track_events: Vec::new(),
+            recent_effects: Vec::new(),
+        });
+
+        assert_eq!(read_model.strategy_price, Some(101.25));
+        assert_eq!(read_model.strategy_price_status, StrategyPriceStatus::Live);
+        assert_eq!(read_model.mark_price, Some(101.5));
+        assert_eq!(read_model.best_bid, Some(101.0));
+        assert_eq!(read_model.best_ask, Some(101.5));
+        assert_eq!(read_model.desired_exposure, Some(2.0));
         assert_eq!(
             read_model.price_execution_block_reason,
             Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote)

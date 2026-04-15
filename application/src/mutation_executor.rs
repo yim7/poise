@@ -18,7 +18,9 @@ use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
-use poise_engine::runtime::AccountCapacityConstraint;
+use poise_engine::runtime::{
+    AccountCapacityConstraint, QuoteHealthView, StrategyTargetView, TrackLiveView,
+};
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
@@ -375,6 +377,21 @@ impl MutationExecutor {
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         let manager = self.manager.read().await;
         manager.market_data_health_deadline(&TrackId::new(id))
+    }
+
+    pub(crate) async fn track_live_view(&self, id: &str) -> Result<TrackLiveView> {
+        let manager = self.manager.read().await;
+        manager.track_live_view(&TrackId::new(id))
+    }
+
+    pub(crate) async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
+        let manager = self.manager.read().await;
+        manager.quote_health_view(&TrackId::new(id))
+    }
+
+    pub(crate) async fn strategy_target_view(&self, id: &str) -> Result<StrategyTargetView> {
+        let manager = self.manager.read().await;
+        manager.strategy_target_view(&TrackId::new(id))
     }
 
     pub async fn observe_position(

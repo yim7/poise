@@ -3,7 +3,7 @@ use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 use poise_engine::ledger::TrackLedgerState;
 use poise_engine::price_gate::PriceExecutionBlockReason;
-use poise_engine::runtime::{ExecutorState, StrategyPriceStatus, TrackStatus};
+use poise_engine::runtime::{ExecutorState, StrategyPriceStatus, TrackLiveView, TrackStatus};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 
 use crate::track_definition::TrackReadDefinition;
@@ -31,6 +31,10 @@ pub struct TrackRuntimeReadState {
 
 impl TrackRuntimeReadState {
     pub fn from_snapshot(snapshot: TrackRuntimeSnapshot) -> Self {
+        Self::from_parts(snapshot, TrackLiveView::default())
+    }
+
+    pub fn from_parts(snapshot: TrackRuntimeSnapshot, live: TrackLiveView) -> Self {
         let TrackRuntimeSnapshot {
             status,
             current_exposure,
@@ -47,19 +51,19 @@ impl TrackRuntimeReadState {
         Self {
             status,
             current_exposure,
-            desired_exposure,
+            desired_exposure: live.desired_exposure.map(Exposure).or(desired_exposure),
             manual_target_override,
             executor_state,
             replacement_gate_reason,
             ledger_state,
             unrealized_pnl: risk.unrealized_pnl,
             has_account_margin_guard: risk.account_capacity_constraint.increase_blocked,
-            price_execution_block_reason: None,
-            strategy_price: None,
-            strategy_price_status: StrategyPriceStatus::Stale,
-            mark_price: None,
-            best_bid: None,
-            best_ask: None,
+            price_execution_block_reason: live.price_execution_block_reason,
+            strategy_price: live.strategy_price,
+            strategy_price_status: live.strategy_price_status,
+            mark_price: live.mark_price,
+            best_bid: live.best_bid,
+            best_ask: live.best_ask,
             market_data_stale_since: observed.market_data_stale_since,
         }
     }

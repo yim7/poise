@@ -17,7 +17,10 @@ use crate::observation::{
 use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
-use crate::runtime::{ExecutorState, StrategyPriceStatus, TrackRuntime, TrackStatus};
+use crate::runtime::{
+    ExecutorState, QuoteHealthView, StrategyPriceStatus, StrategyTargetView, TrackLiveView,
+    TrackRuntime, TrackStatus,
+};
 use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
 use crate::transition::{TrackEffect, TrackTransition};
@@ -507,6 +510,30 @@ impl TrackManager {
 
     pub fn snapshot(&self, id: &str) -> Option<TrackRuntimeSnapshot> {
         self.get_track(id).map(TrackRuntime::snapshot)
+    }
+
+    pub fn track_live_view(&self, id: &TrackId) -> Result<TrackLiveView> {
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        Ok(track.live_view())
+    }
+
+    pub fn quote_health_view(&self, id: &TrackId) -> Result<QuoteHealthView> {
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        Ok(track.quote_health_view())
+    }
+
+    pub fn strategy_target_view(&self, id: &TrackId) -> Result<StrategyTargetView> {
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        Ok(track.strategy_target_view())
     }
 
     pub fn restore_track_state(&mut self, snapshot: &TrackRuntimeSnapshot) -> Result<()> {

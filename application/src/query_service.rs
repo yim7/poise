@@ -4,7 +4,8 @@ use anyhow::Result;
 use poise_engine::track::TrackId;
 
 use crate::{
-    PreparedTrackRegistry, TrackQueryStore, TrackReadModel, TrackReadSource, TrackRuntimeReadState,
+    PreparedTrackRegistry, TrackObservationService, TrackQueryStore, TrackReadModel,
+    TrackReadSource, TrackRuntimeReadState,
 };
 
 const LIST_EFFECTS_LIMIT: usize = 20;
@@ -14,6 +15,7 @@ const DETAIL_EFFECTS_LIMIT: usize = 20;
 pub struct TrackQueryService {
     repository: Arc<dyn TrackQueryStore>,
     prepared_registry: Arc<PreparedTrackRegistry>,
+    observation: Option<Arc<TrackObservationService>>,
 }
 
 impl TrackQueryService {
@@ -21,9 +23,18 @@ impl TrackQueryService {
         repository: Arc<dyn TrackQueryStore>,
         prepared_registry: Arc<PreparedTrackRegistry>,
     ) -> Self {
+        Self::new_with_observation(repository, prepared_registry, None)
+    }
+
+    pub fn new_with_observation(
+        repository: Arc<dyn TrackQueryStore>,
+        prepared_registry: Arc<PreparedTrackRegistry>,
+        observation: Option<Arc<TrackObservationService>>,
+    ) -> Self {
         Self {
             repository,
             prepared_registry,
+            observation,
         }
     }
 
@@ -42,13 +53,15 @@ impl TrackQueryService {
                 .repository
                 .list_recent_track_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
                 .await?;
-            let source = self.read_source_from_snapshot(
-                snapshot.snapshot.track_id.clone(),
-                snapshot.snapshot,
-                snapshot.updated_at,
-                Vec::new(),
-                recent_effects,
-            )?;
+            let source = self
+                .read_source_from_snapshot(
+                    snapshot.snapshot.track_id.clone(),
+                    snapshot.snapshot,
+                    snapshot.updated_at,
+                    Vec::new(),
+                    recent_effects,
+                )
+                .await?;
 
             sources.push(TrackReadModel::from_source(source));
         }
@@ -79,11 +92,12 @@ impl TrackQueryService {
                 snapshot.updated_at,
                 recent_track_events,
                 recent_effects,
-            )?,
+            )
+            .await?,
         )))
     }
 
-    fn read_source_from_snapshot(
+    async fn read_source_from_snapshot(
         &self,
         track_id: TrackId,
         snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
@@ -101,10 +115,17 @@ impl TrackQueryService {
                 )
             })?
             .read_definition();
+        let runtime = match &self.observation {
+            Some(observation) => {
+                let live_view = observation.track_live_view(track_id.as_str()).await?;
+                TrackRuntimeReadState::from_parts(snapshot, live_view)
+            }
+            None => TrackRuntimeReadState::from_snapshot(snapshot),
+        };
 
         Ok(TrackReadSource {
             definition,
-            runtime: TrackRuntimeReadState::from_snapshot(snapshot),
+            runtime,
             updated_at,
             recent_track_events,
             recent_effects,
@@ -124,7 +145,9 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::observation::MarketObservation;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
+    use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
@@ -134,6 +157,9 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
+    use crate::mutation_executor::test_support::{
+        MemoryRepository, seeded_manager, track_write_services,
+    };
     use crate::{
         ConfiguredTrackDefinition, ConfiguredTrackInput, EffectStatus, PersistedTrackEffect,
         PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
@@ -190,6 +216,43 @@ mod tests {
         );
         assert_eq!(source.recent_track_events.len(), 1);
         assert_eq!(source.recent_effects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_track_detail_source_merges_durable_snapshot_and_live_view() {
+        let repository = Arc::new(FakeReadRepository::new());
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 95.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 94.5,
+                        best_ask: 95.5,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let service = TrackQueryService::new_with_observation(
+            repository,
+            test_prepared_registry(),
+            Some(Arc::new(services.observation)),
+        );
+
+        let source = service
+            .load_track_detail_source(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source.mark_price, Some(95.0));
+        assert_eq!(source.best_bid, Some(94.5));
+        assert_eq!(source.best_ask, Some(95.5));
+        assert_eq!(source.strategy_price, Some(95.0));
     }
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {

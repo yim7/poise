@@ -4,6 +4,7 @@ use anyhow::Result;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::{MarketObservation, OrderObservation, PositionObservation};
+use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -50,6 +51,18 @@ impl TrackObservationService {
         id: &str,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         self.executor.market_data_health_deadline(id).await
+    }
+
+    pub async fn track_live_view(&self, id: &str) -> Result<TrackLiveView> {
+        self.executor.track_live_view(id).await
+    }
+
+    pub async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
+        self.executor.quote_health_view(id).await
+    }
+
+    pub async fn strategy_target_view(&self, id: &str) -> Result<StrategyTargetView> {
+        self.executor.strategy_target_view(id).await
     }
 
     pub async fn observe_position(
