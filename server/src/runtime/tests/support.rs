@@ -304,6 +304,14 @@ pub(crate) async fn current_instance(
     manager.get_track("BTCUSDT").unwrap().snapshot()
 }
 
+pub(crate) async fn current_track_runtime(
+    state: &RuntimeTestContext,
+) -> poise_engine::runtime::TrackRuntime {
+    let manager_handle = state.manager();
+    let manager = manager_handle.read().await;
+    manager.get_track("BTCUSDT").unwrap().clone()
+}
+
 pub(crate) async fn shutdown(handles: RuntimeHandles) {
     handles.market_task.abort();
     handles.user_task.abort();

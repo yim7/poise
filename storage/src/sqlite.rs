@@ -334,18 +334,7 @@ impl SqliteStorage {
             .map(serde_json::to_string)
             .transpose()
             .context("failed to serialize replacement gate reason")?;
-        let price_execution_block_reason =
-            state
-                .price_execution_block_reason
-                .as_ref()
-                .map(|reason| match reason {
-                    poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote => {
-                        "missing_execution_quote"
-                    }
-                    poise_engine::price_gate::PriceExecutionBlockReason::MarkBookDivergence => {
-                        "mark_book_divergence"
-                    }
-                });
+        let price_execution_block_reason: Option<&str> = None;
         let ledger_state = state.ledger_state.clone();
         let ledger_state_json =
             serde_json::to_string(&ledger_state).context("failed to serialize ledger state")?;
@@ -353,7 +342,7 @@ impl SqliteStorage {
             .observed
             .out_of_band_since
             .map(|value| value.to_rfc3339());
-        let last_tick_at = state.observed.last_tick_at.map(|value| value.to_rfc3339());
+        let last_tick_at: Option<String> = None;
         let market_data_stale_since = state
             .observed
             .market_data_stale_since
@@ -407,14 +396,11 @@ impl SqliteStorage {
                 price_execution_block_reason,
                 ledger_state_json,
                 state.risk.unrealized_pnl,
-                state.observed.strategy_price,
-                match state.observed.strategy_price_status {
-                    poise_engine::runtime::StrategyPriceStatus::Live => "live",
-                    poise_engine::runtime::StrategyPriceStatus::Stale => "stale",
-                },
-                state.observed.mark_price,
-                state.observed.best_bid,
-                state.observed.best_ask,
+                Option::<f64>::None,
+                "stale",
+                Option::<f64>::None,
+                Option::<f64>::None,
+                Option::<f64>::None,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,

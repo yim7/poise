@@ -272,3 +272,111 @@ fn update_stats(
         max_gap_age_ms: previous_max_age.max(gap_age_ms),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use poise_core::types::Side;
+
+    use super::*;
+    use crate::executor::INVENTORY_CORE_SLOT;
+    use crate::runtime::{
+        ExecutionSlot, ExecutionStats, ExecutorDiagnostics, ExecutorState, SlotState, WorkingOrder,
+    };
+
+    fn state_with_active_round(desired_exposure: Exposure) -> ExecutorState {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        ExecutorState {
+            active_round: Some(ExecutionRound {
+                desired_exposure,
+                mode: ExecutionMode::Passive,
+                started_at,
+            }),
+            diagnostics: ExecutorDiagnostics::empty(),
+            slots: vec![],
+            recent_terminal_orders: vec![],
+            stats: ExecutionStats::new(started_at),
+        }
+    }
+
+    fn state_with_active_round_and_inventory_working_order(
+        active_round_desired_exposure: Exposure,
+        side: Side,
+    ) -> ExecutorState {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        ExecutorState {
+            active_round: Some(ExecutionRound {
+                desired_exposure: active_round_desired_exposure,
+                mode: ExecutionMode::Passive,
+                started_at,
+            }),
+            diagnostics: ExecutorDiagnostics::empty(),
+            slots: vec![ExecutionSlot {
+                slot: OrderSlot::new(INVENTORY_CORE_SLOT),
+                state: SlotState::Working,
+                working_order: Some(WorkingOrder {
+                    order_id: Some("order-1".into()),
+                    client_order_id: "client-1".into(),
+                    side,
+                    price: 95.0,
+                    quantity: 15.0,
+                    status: crate::ports::OrderStatus::New,
+                    role: super::super::OrderRole::IncreaseInventory,
+                }),
+            }],
+            recent_terminal_orders: vec![],
+            stats: ExecutionStats::new(started_at),
+        }
+    }
+
+    #[test]
+    fn active_round_anchor_syncs_from_durable_desired_exposure_on_start_and_switch() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap();
+        let start = evaluate_round_policy(round_policy_input_from_state(
+            &Exposure(0.0),
+            &Exposure(4.0),
+            None,
+            0.5,
+            observed_at,
+        ));
+        assert_eq!(start.lifecycle, RoundLifecycleDecision::Start);
+        assert_eq!(
+            start.active_round.map(|round| round.desired_exposure),
+            Some(Exposure(4.0))
+        );
+
+        let switch = evaluate_round_policy(round_policy_input_from_state(
+            &Exposure(0.0),
+            &Exposure(-4.0),
+            Some(&state_with_active_round(Exposure(4.0))),
+            0.5,
+            observed_at,
+        ));
+        assert_eq!(switch.lifecycle, RoundLifecycleDecision::Switch);
+        assert_eq!(
+            switch.active_round.map(|round| round.desired_exposure),
+            Some(Exposure(-4.0))
+        );
+    }
+
+    #[test]
+    fn active_round_anchor_may_differ_from_durable_desired_exposure_during_continue() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap();
+        let decision = evaluate_round_policy(round_policy_input_from_state(
+            &Exposure(0.0),
+            &Exposure(4.0),
+            Some(&state_with_active_round_and_inventory_working_order(
+                Exposure(3.8),
+                Side::Buy,
+            )),
+            0.5,
+            observed_at,
+        ));
+
+        assert_eq!(decision.lifecycle, RoundLifecycleDecision::Continue);
+        assert_eq!(
+            decision.active_round.map(|round| round.desired_exposure),
+            Some(Exposure(3.8))
+        );
+    }
+}

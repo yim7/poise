@@ -2,24 +2,32 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::persisted_runtime::TrackRestoreRevision;
-use crate::price_gate::PriceExecutionBlockReason;
 use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 
 use crate::ledger::TrackLedgerState;
+use crate::price_gate::PriceExecutionBlockReason;
 use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackStatus};
 use crate::track::TrackId;
 
+fn strategy_price_status_is_stale(status: &StrategyPriceStatus) -> bool {
+    matches!(status, StrategyPriceStatus::Stale)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ObservedState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_price: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "strategy_price_status_is_stale")]
     pub strategy_price_status: StrategyPriceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_bid: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_ask: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_tick_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub market_data_stale_since: Option<DateTime<Utc>>,
@@ -37,7 +45,7 @@ pub struct TrackRuntimeSnapshot {
     pub executor_state: ExecutorState,
     #[serde(default)]
     pub replacement_gate_reason: Option<ReplacementGateReason>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
     pub ledger_state: TrackLedgerState,
     pub risk: RiskState,
@@ -98,14 +106,6 @@ mod tests {
         assert!(value.get("restore_revision").is_some());
         assert_eq!(value["current_exposure"], serde_json::json!(0.0));
         assert_eq!(value["desired_exposure"], serde_json::Value::Null);
-        assert_eq!(value["observed"]["strategy_price"], serde_json::Value::Null);
-        assert_eq!(
-            value["observed"]["strategy_price_status"],
-            serde_json::json!("stale")
-        );
-        assert_eq!(value["observed"]["mark_price"], serde_json::Value::Null);
-        assert_eq!(value["observed"]["best_bid"], serde_json::Value::Null);
-        assert_eq!(value["observed"]["best_ask"], serde_json::Value::Null);
         assert_eq!(value["risk"]["unrealized_pnl"], serde_json::json!(0.0));
         assert_eq!(value["track_id"], serde_json::json!("track-1"));
         assert_eq!(value["status"], serde_json::json!("waiting_market_data"));
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_round_trips_strategy_price_mark_price_and_quote() {
+    fn persisted_snapshot_preserves_durable_desired_exposure_but_omits_raw_live_target() {
         let mut runtime = TrackRuntime::with_tick_timeout_secs(
             TrackId::new("track-1"),
             Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -151,35 +151,22 @@ mod tests {
             chrono::Utc::now(),
             45,
         );
+        runtime.desired_exposure = Some(Exposure(6.0));
         runtime.strategy_price = Some(95.0);
         runtime.strategy_price_status = StrategyPriceStatus::Live;
         runtime.mark_price = Some(95.2);
         runtime.best_bid = Some(94.9);
         runtime.best_ask = Some(95.1);
 
-        let snapshot = runtime.snapshot();
-        let json = PersistedRuntimeCodec::encode_snapshot(&snapshot).unwrap();
+        let value = PersistedRuntimeCodec::encode_snapshot(&runtime.snapshot()).unwrap();
 
-        assert!(json["observed"].get("reference_price").is_none());
-        assert_eq!(json["observed"]["strategy_price"], serde_json::json!(95.0));
-        assert_eq!(
-            json["observed"]["strategy_price_status"],
-            serde_json::json!("live")
-        );
-        assert_eq!(json["observed"]["mark_price"], serde_json::json!(95.2));
-        assert_eq!(json["observed"]["best_bid"], serde_json::json!(94.9));
-        assert_eq!(json["observed"]["best_ask"], serde_json::json!(95.1));
-
-        let restored = PersistedRuntimeCodec::decode(json).unwrap();
-
-        assert_eq!(restored.observed.strategy_price, Some(95.0));
-        assert_eq!(
-            restored.observed.strategy_price_status,
-            StrategyPriceStatus::Live
-        );
-        assert_eq!(restored.observed.mark_price, Some(95.2));
-        assert_eq!(restored.observed.best_bid, Some(94.9));
-        assert_eq!(restored.observed.best_ask, Some(95.1));
+        assert_eq!(value["desired_exposure"], serde_json::json!(6.0));
+        assert!(value["observed"].get("strategy_price").is_none());
+        assert!(value["observed"].get("strategy_price_status").is_none());
+        assert!(value["observed"].get("mark_price").is_none());
+        assert!(value["observed"].get("best_bid").is_none());
+        assert!(value["observed"].get("best_ask").is_none());
+        assert!(value["observed"].get("last_tick_at").is_none());
     }
 
     #[test]

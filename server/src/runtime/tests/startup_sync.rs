@@ -30,7 +30,7 @@ async fn startup_sync_restores_claimed_live_order_before_replanning() {
 
     let instance = current_instance(&fixture.state).await;
     assert_eq!(instance.current_exposure, Exposure(2.0));
-    assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
+    assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
     assert_eq!(
         instance.observed.out_of_band_since,
         Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 30, 0).unwrap())
@@ -52,31 +52,14 @@ async fn startup_sync_restores_claimed_live_order_before_replanning() {
             }),
         }]
     );
-    let effects = fixture.persistence.all_effects().await;
-    assert!(effects.iter().any(|effect| {
-        matches!(
-            &effect.effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "snapshot-1"
-        )
-    }));
-    assert!(effects.iter().any(|effect| {
-        matches!(
-            &effect.effect,
-            ExecutionAction::SubmitOrder {
-                request,
-                desired_exposure,
-                ..
-            }
-                if request.client_order_id.starts_with("BTCUSDT-")
-                    && (request.price - 95.0).abs() < f64::EPSILON
-                    && (request.quantity - 7.5).abs() < f64::EPSILON
-                    && *desired_exposure == Exposure(4.0)
-        )
-    }));
+    assert!(
+        fixture.persistence.all_effects().await.is_empty(),
+        "startup sync should not synthesize replacement effects before the first live quote"
+    );
 }
 
 #[tokio::test]
-async fn startup_sync_replans_even_when_pending_submit_effect_is_present() {
+async fn startup_sync_defers_replanning_until_first_tick_when_pending_submit_effect_is_present() {
     let mut snapshot = test_snapshot();
     set_executor_state(
         &mut snapshot,
@@ -128,26 +111,29 @@ async fn startup_sync_replans_even_when_pending_submit_effect_is_present() {
     fixture.runtime.startup_sync().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
-    assert_eq!(
-        inventory_core_order(&instance).map(|order| order.client_order_id.starts_with("BTCUSDT-")),
-        Some(true)
-    );
+    let order =
+        inventory_core_order(&instance).expect("pending submit slot should survive startup");
+    assert_eq!(order.client_order_id, "snapshot-1");
+    assert_eq!(order.order_id, None);
+    assert_eq!(order.status, OrderStatus::Submitting);
+    assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
 
     let effects = fixture.persistence.all_effects().await;
-    assert!(effects.iter().any(|effect| {
-        matches!(
-            &effect.effect,
-            ExecutionAction::SubmitOrder {
-                request,
-                desired_exposure,
-                ..
-            }
-                if request.client_order_id.starts_with("BTCUSDT-")
-                    && (request.price - 95.0).abs() < f64::EPSILON
-                    && (request.quantity - 15.0).abs() < f64::EPSILON
-                    && *desired_exposure == Exposure(4.0)
-        )
-    }));
+    assert!(matches!(
+        effects.as_slice(),
+        [PersistedTrackEffect {
+            effect:
+                ExecutionAction::SubmitOrder {
+                    request,
+                    desired_exposure,
+                    ..
+                },
+            ..
+        }] if request.client_order_id == "snapshot-1"
+            && (request.price - 94.0).abs() < f64::EPSILON
+            && (request.quantity - 0.25).abs() < f64::EPSILON
+            && *desired_exposure == Exposure(6.0)
+    ));
 }
 
 #[tokio::test]
@@ -272,7 +258,35 @@ async fn startup_sync_marks_attention_required_when_live_order_cannot_be_claimed
 }
 
 #[tokio::test]
-async fn startup_sync_rebuilds_inventory_core_slot_when_exchange_has_no_open_orders() {
+async fn startup_uses_restored_desired_exposure_before_first_tick() {
+    let mut snapshot = test_snapshot();
+    snapshot.observed.last_tick_at = Some(Utc.with_ymd_and_hms(2026, 3, 24, 7, 59, 30).unwrap());
+    snapshot.observed.strategy_price = Some(95.0);
+    snapshot.observed.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Live;
+    snapshot.observed.mark_price = Some(95.0);
+    snapshot.observed.best_bid = Some(94.5);
+    snapshot.observed.best_ask = Some(95.5);
+    let fixture = runtime_fixture(
+        Some(snapshot),
+        btc_position(0.0, 0.0),
+        vec![],
+        test_budget(),
+    )
+    .await;
+
+    fixture.runtime.startup_sync().await.unwrap();
+
+    let instance = current_instance(&fixture.state).await;
+    assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
+    assert!(instance.observed.last_tick_at.is_none());
+    assert!(instance.observed.strategy_price.is_none());
+    assert!(instance.observed.mark_price.is_none());
+    assert!(instance.observed.best_bid.is_none());
+    assert!(instance.observed.best_ask.is_none());
+}
+
+#[tokio::test]
+async fn startup_sync_keeps_slots_empty_when_exchange_has_no_open_orders_and_no_live_quote() {
     let fixture = runtime_fixture(
         Some(test_snapshot()),
         btc_position(7.5, 3.0),
@@ -285,19 +299,13 @@ async fn startup_sync_rebuilds_inventory_core_slot_when_exchange_has_no_open_ord
 
     let instance = current_instance(&fixture.state).await;
     assert_eq!(instance.current_exposure, Exposure(2.0));
-    assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
-    assert_eq!(
-        inventory_core_order(&instance).map(|order| order.client_order_id.starts_with("BTCUSDT-")),
-        Some(true)
-    );
-    assert_ne!(
-        inventory_core_order(&instance).and_then(|order| order.order_id.as_deref()),
-        Some("snapshot-1")
-    );
+    assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
+    assert!(inventory_core_order(&instance).is_none());
 }
 
 #[tokio::test]
-async fn startup_sync_rebuilds_submit_pending_slot_to_current_plan_before_follow_up_sync() {
+async fn startup_sync_preserves_durable_target_without_rebuilding_submit_pending_slot_before_first_tick()
+ {
     let mut snapshot = test_snapshot();
     set_executor_state(
         &mut snapshot,
@@ -348,24 +356,21 @@ async fn startup_sync_rebuilds_submit_pending_slot_to_current_plan_before_follow
     fixture.runtime.startup_sync().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
-    let order = inventory_core_order(&instance).expect("expected submit pending working order");
-    assert!(order.client_order_id.starts_with("BTCUSDT-"));
+    let order = inventory_core_order(&instance).expect("pending submit slot should remain durable");
+    assert_eq!(order.client_order_id, "BTCUSDT-reconcile");
     assert_eq!(order.order_id, None);
     assert_eq!(order.side, Side::Buy);
-    assert_eq!(order.price, 95.0);
-    assert_eq!(order.quantity, 7.5);
+    assert_eq!(order.price, 94.0);
+    assert_eq!(order.quantity, 0.25);
+    assert_eq!(order.status, OrderStatus::Submitting);
     assert_eq!(
         instance
             .executor_state
             .active_round
             .as_ref()
             .map(|round| round.desired_exposure.clone()),
-        Some(Exposure(4.0))
+        Some(Exposure(6.0))
     );
-    assert_eq!(order.status, OrderStatus::Submitting);
-
-    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
-    assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
 }
 
 #[tokio::test]
@@ -461,13 +466,7 @@ async fn startup_sync_clears_orphaned_submit_pending_slot_without_effect() {
     fixture.runtime.startup_sync().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
-    assert_eq!(
-        inventory_core_order(&instance).map(|order| order.client_order_id.starts_with("BTCUSDT-")),
-        Some(true)
-    );
-
-    let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
-    assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
+    assert!(inventory_core_order(&instance).is_none());
 }
 
 #[tokio::test]
@@ -973,8 +972,12 @@ async fn background_health_check_marks_market_data_stale_without_follow_up_event
     let handles = fixture.runtime.start().await.unwrap();
     fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
 
-    wait_until_instance(&fixture.state, |instance| {
-        instance.observed.last_tick_at.is_some()
+    wait_until_async(|| async {
+        current_track_runtime(&fixture.state)
+            .await
+            .live_quote_state()
+            .last_tick_at
+            .is_some()
     })
     .await;
 
@@ -1017,8 +1020,12 @@ async fn fresh_tick_resets_market_data_health_deadline_before_timeout() {
     let handles = fixture.runtime.start().await.unwrap();
     fixture.price_sender.send(btc_tick(95.0)).await.unwrap();
 
-    wait_until_instance(&fixture.state, |instance| {
-        instance.observed.last_tick_at == Some(started_at)
+    wait_until_async(|| async {
+        current_track_runtime(&fixture.state)
+            .await
+            .live_quote_state()
+            .last_tick_at
+            == Some(started_at)
     })
     .await;
 
@@ -1026,8 +1033,12 @@ async fn fresh_tick_resets_market_data_health_deadline_before_timeout() {
     clock.set(second_tick_at);
     fixture.price_sender.send(btc_tick(96.0)).await.unwrap();
 
-    wait_until_instance(&fixture.state, |instance| {
-        instance.observed.last_tick_at == Some(second_tick_at)
+    wait_until_async(|| async {
+        current_track_runtime(&fixture.state)
+            .await
+            .live_quote_state()
+            .last_tick_at
+            == Some(second_tick_at)
     })
     .await;
 

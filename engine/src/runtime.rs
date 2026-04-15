@@ -14,9 +14,9 @@ use crate::executor::{
 };
 use crate::ledger::TrackLedgerState;
 use crate::persisted_runtime::{PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed};
-use crate::ports::OrderStatus;
+use crate::ports::{ExecutionQuote, OrderStatus};
 use crate::price_gate::{
-    PriceExecutionBlockReason, PriceExecutionGate, gate_block_reason, restore_gate_from_snapshot,
+    PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
@@ -53,6 +53,36 @@ pub struct AccountCapacityConstraint {
 pub struct RiskState {
     pub unrealized_pnl: f64,
     pub account_capacity_constraint: AccountCapacityConstraint,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LiveQuoteState {
+    pub strategy_price: Option<f64>,
+    pub mark_price: Option<f64>,
+    pub execution_quote: Option<ExecutionQuote>,
+    pub last_tick_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StrategyTargetView {
+    pub desired_exposure: Option<Exposure>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuoteHealthView {
+    pub strategy_price_status: StrategyPriceStatus,
+    pub price_execution_gate: PriceExecutionGate,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TrackLiveView {
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatus,
+    pub mark_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub desired_exposure: Option<f64>,
+    pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -330,21 +360,17 @@ impl TrackRuntime {
             manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
-            price_execution_block_reason: gate_block_reason(self.price_execution_gate),
+            price_execution_block_reason: None,
             ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
-                strategy_price: self.strategy_price,
-                strategy_price_status: if self.strategy_price.is_some() {
-                    self.strategy_price_status
-                } else {
-                    StrategyPriceStatus::Stale
-                },
-                mark_price: self.mark_price,
-                best_bid: self.best_bid,
-                best_ask: self.best_ask,
+                strategy_price: None,
+                strategy_price_status: StrategyPriceStatus::Stale,
+                mark_price: None,
+                best_bid: None,
+                best_ask: None,
                 out_of_band_since: self.out_of_band_since,
-                last_tick_at: self.last_tick_at,
+                last_tick_at: None,
                 market_data_stale_since: self.market_data_stale_since,
             },
         }
@@ -375,32 +401,25 @@ impl TrackRuntime {
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.ledger_state = snapshot.ledger_state.clone();
         self.risk_state = snapshot.risk.clone();
-        let strategy_price = snapshot.observed.strategy_price;
-        self.strategy_price = strategy_price;
-        self.strategy_price_status = if strategy_price.is_some() {
-            snapshot.observed.strategy_price_status
-        } else {
-            StrategyPriceStatus::Stale
+        self.strategy_price = None;
+        self.strategy_price_status = StrategyPriceStatus::Stale;
+        self.mark_price = None;
+        self.best_bid = None;
+        self.best_ask = None;
+        self.price_execution_gate = PriceExecutionGate::NoSubmit {
+            reason: PriceExecutionBlockReason::MissingExecutionQuote,
         };
-        self.mark_price = snapshot.observed.mark_price;
-        self.best_bid = snapshot.observed.best_bid;
-        self.best_ask = snapshot.observed.best_ask;
-        self.price_execution_gate = restore_gate_from_snapshot(
-            snapshot.price_execution_block_reason,
-            self.mark_price,
-            self.best_bid,
-            self.best_ask,
-        );
         self.out_of_band_since = snapshot.observed.out_of_band_since;
-        self.last_tick_at = snapshot.observed.last_tick_at;
+        self.last_tick_at = None;
         self.market_data_stale_since = snapshot.observed.market_data_stale_since;
-
         let mut expected_snapshot = snapshot.clone();
-        expected_snapshot.price_execution_block_reason =
-            gate_block_reason(self.price_execution_gate);
-        if expected_snapshot.observed.strategy_price.is_none() {
-            expected_snapshot.observed.strategy_price_status = StrategyPriceStatus::Stale;
-        }
+        expected_snapshot.price_execution_block_reason = None;
+        expected_snapshot.observed.strategy_price = None;
+        expected_snapshot.observed.strategy_price_status = StrategyPriceStatus::Stale;
+        expected_snapshot.observed.mark_price = None;
+        expected_snapshot.observed.best_bid = None;
+        expected_snapshot.observed.best_ask = None;
+        expected_snapshot.observed.last_tick_at = None;
         debug_assert_eq!(
             self.snapshot(),
             expected_snapshot,
@@ -408,6 +427,59 @@ impl TrackRuntime {
         );
 
         Ok(())
+    }
+
+    pub fn live_quote_state(&self) -> LiveQuoteState {
+        LiveQuoteState {
+            strategy_price: self.strategy_price,
+            mark_price: self.mark_price,
+            execution_quote: match (self.best_bid, self.best_ask) {
+                (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
+                _ => None,
+            },
+            last_tick_at: self.last_tick_at,
+        }
+    }
+
+    pub fn quote_health_view(&self) -> QuoteHealthView {
+        QuoteHealthView {
+            strategy_price_status: if self.strategy_price.is_some() {
+                self.strategy_price_status
+            } else {
+                StrategyPriceStatus::Stale
+            },
+            price_execution_gate: evaluate_price_execution_gate(
+                PriceExecutionGate::Open,
+                self.mark_price,
+                match (self.best_bid, self.best_ask) {
+                    (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
+                    _ => None,
+                },
+            ),
+        }
+    }
+
+    pub fn strategy_target_view(&self) -> StrategyTargetView {
+        StrategyTargetView {
+            desired_exposure: self.desired_exposure.clone(),
+        }
+    }
+
+    pub fn live_view(&self) -> TrackLiveView {
+        let quote_health = self.quote_health_view();
+        TrackLiveView {
+            strategy_price: self.strategy_price,
+            strategy_price_status: quote_health.strategy_price_status,
+            mark_price: self.mark_price,
+            best_bid: self.best_bid,
+            best_ask: self.best_ask,
+            desired_exposure: self.desired_exposure.clone().map(|value| value.0),
+            price_execution_block_reason: match quote_health.price_execution_gate {
+                PriceExecutionGate::Open => None,
+                PriceExecutionGate::ManualRiskReductionOnly { reason }
+                | PriceExecutionGate::NoSubmit { reason } => Some(reason),
+            },
+        }
     }
 
     pub fn apply_post_restore_constraints(&mut self, constraints: PostRestoreConstraints) {
@@ -477,8 +549,8 @@ mod tests {
 
     use super::{
         AccountCapacityConstraint, ExecutionRound, ExecutionSlot, ExecutionStats,
-        ExecutorDiagnostics, ExecutorState, RiskState, SlotState, StrategyPriceStatus,
-        TrackRuntime, TrackStatus, WorkingOrder,
+        ExecutorDiagnostics, ExecutorState, QuoteHealthView, RiskState, SlotState,
+        StrategyPriceStatus, TrackRuntime, TrackStatus, WorkingOrder,
     };
     use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate};
 
@@ -724,7 +796,7 @@ mod tests {
         assert_eq!(restored.current_exposure, Exposure(4.0));
         assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
-        assert_eq!(restored.last_tick_at, runtime.last_tick_at);
+        assert_eq!(restored.last_tick_at, None);
         assert_eq!(
             restored.market_data_stale_since,
             runtime.market_data_stale_since
@@ -819,6 +891,53 @@ mod tests {
     }
 
     #[test]
+    fn restore_from_snapshot_restores_durable_desired_exposure_but_not_live_quote_or_live_target() {
+        let mut runtime = test_runtime();
+        runtime.status = TrackStatus::Active;
+        runtime.current_exposure = Exposure(4.0);
+        runtime.desired_exposure = Some(Exposure(6.0));
+        runtime.strategy_price = Some(96.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(96.1);
+        runtime.best_bid = Some(95.9);
+        runtime.best_ask = Some(96.1);
+        runtime.last_tick_at = Some(Utc.with_ymd_and_hms(2026, 3, 29, 8, 3, 0).unwrap());
+        runtime.executor_state = test_executor_state();
+
+        let snapshot = runtime.snapshot();
+        let mut fresh = test_runtime();
+        fresh.restore_from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(fresh.desired_exposure, Some(Exposure(6.0)));
+        assert_eq!(fresh.strategy_price, None);
+        assert_eq!(fresh.mark_price, None);
+        assert_eq!(fresh.best_bid, None);
+        assert_eq!(fresh.best_ask, None);
+        assert_eq!(fresh.last_tick_at, None);
+        assert_eq!(
+            fresh.price_execution_gate,
+            PriceExecutionGate::NoSubmit {
+                reason: PriceExecutionBlockReason::MissingExecutionQuote,
+            }
+        );
+    }
+
+    #[test]
+    fn quote_health_view_returns_missing_quote_baseline_without_tick() {
+        let runtime = test_runtime();
+
+        assert_eq!(
+            runtime.quote_health_view(),
+            QuoteHealthView {
+                strategy_price_status: StrategyPriceStatus::Stale,
+                price_execution_gate: PriceExecutionGate::NoSubmit {
+                    reason: PriceExecutionBlockReason::MissingExecutionQuote,
+                },
+            }
+        );
+    }
+
+    #[test]
     fn restore_from_snapshot_rejects_manual_flattening_without_zero_override() {
         let mut runtime = test_runtime();
         runtime.status = TrackStatus::ManualFlattening;
@@ -834,55 +953,6 @@ mod tests {
                 .to_string()
                 .contains("manual_flattening requires manual_target_override = 0"),
             "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn restore_from_legacy_snapshot_recomputes_divergence_gate_from_observed_prices() {
-        let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
-        runtime.strategy_price = Some(95.0);
-        runtime.strategy_price_status = StrategyPriceStatus::Live;
-        runtime.mark_price = Some(100.0);
-        runtime.best_bid = Some(95.0);
-        runtime.best_ask = Some(95.0);
-        runtime.price_execution_gate = PriceExecutionGate::ManualRiskReductionOnly {
-            reason: PriceExecutionBlockReason::MarkBookDivergence,
-        };
-
-        let mut snapshot = runtime.snapshot();
-        snapshot.price_execution_block_reason = None;
-        let mut fresh = test_runtime();
-        fresh.restore_from_snapshot(&snapshot).unwrap();
-
-        assert_eq!(
-            fresh.price_execution_gate,
-            PriceExecutionGate::ManualRiskReductionOnly {
-                reason: PriceExecutionBlockReason::MarkBookDivergence,
-            }
-        );
-    }
-
-    #[test]
-    fn restore_from_legacy_snapshot_recomputes_missing_quote_gate_when_observed_quote_is_absent() {
-        let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
-        runtime.strategy_price = Some(95.0);
-        runtime.strategy_price_status = StrategyPriceStatus::Stale;
-        runtime.mark_price = Some(95.0);
-        runtime.best_bid = None;
-        runtime.best_ask = None;
-
-        let mut snapshot = runtime.snapshot();
-        snapshot.price_execution_block_reason = None;
-        let mut fresh = test_runtime();
-        fresh.restore_from_snapshot(&snapshot).unwrap();
-
-        assert_eq!(
-            fresh.price_execution_gate,
-            PriceExecutionGate::NoSubmit {
-                reason: PriceExecutionBlockReason::MissingExecutionQuote,
-            }
         );
     }
 

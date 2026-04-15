@@ -103,6 +103,12 @@ impl PersistedRuntimeCodec {
             .map(serde_json::from_str::<ReplacementGateReason>)
             .transpose()
             .context("failed to deserialize replacement gate reason")?;
+        let ledger_state = row
+            .ledger_state_json
+            .as_deref()
+            .map(serde_json::from_str::<TrackLedgerState>)
+            .transpose()
+            .context("failed to deserialize ledger state")?;
         let price_execution_block_reason = row
             .price_execution_block_reason
             .as_deref()
@@ -111,12 +117,6 @@ impl PersistedRuntimeCodec {
             })
             .transpose()
             .context("failed to deserialize price execution block reason")?;
-        let ledger_state = row
-            .ledger_state_json
-            .as_deref()
-            .map(serde_json::from_str::<TrackLedgerState>)
-            .transpose()
-            .context("failed to deserialize ledger state")?;
         let out_of_band_since = row
             .out_of_band_since
             .as_deref()

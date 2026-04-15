@@ -1730,7 +1730,10 @@ mod tests {
             .unwrap();
 
         assert!(!transition.effects.is_empty());
-        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(
+            manager.get_track("btc-core").unwrap().strategy_price,
+            Some(95.0)
+        );
         assert!(!transition.events.is_empty());
     }
 
@@ -1798,7 +1801,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(
+            manager.get_track("btc-core").unwrap().strategy_price,
+            Some(95.0)
+        );
         assert_eq!(
             transition
                 .snapshot
@@ -1834,21 +1840,19 @@ mod tests {
     fn observe_market_derives_strategy_price_from_book_mid() {
         let mut manager = test_manager_with_active_track();
 
-        let transition = manager
+        let _transition = manager
             .observe(
                 &TrackId::new("btc-core"),
                 TrackObservation::Market(market_observation(120.0, 94.0, 96.0)),
             )
             .unwrap();
 
-        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
-        assert_eq!(
-            transition.snapshot.observed.strategy_price_status,
-            StrategyPriceStatus::Live
-        );
-        assert_eq!(transition.snapshot.observed.mark_price, Some(120.0));
-        assert_eq!(transition.snapshot.observed.best_bid, Some(94.0));
-        assert_eq!(transition.snapshot.observed.best_ask, Some(96.0));
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.strategy_price, Some(95.0));
+        assert_eq!(track.strategy_price_status, StrategyPriceStatus::Live);
+        assert_eq!(track.mark_price, Some(120.0));
+        assert_eq!(track.best_bid, Some(94.0));
+        assert_eq!(track.best_ask, Some(96.0));
     }
 
     #[test]
@@ -1868,13 +1872,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(first.snapshot.observed.strategy_price, Some(95.0));
-        assert_eq!(second.snapshot.observed.strategy_price, Some(95.0));
-        assert_eq!(
-            second.snapshot.observed.strategy_price_status,
-            StrategyPriceStatus::Stale
-        );
-        assert_eq!(second.snapshot.observed.mark_price, Some(120.0));
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.strategy_price, Some(95.0));
+        assert_eq!(track.strategy_price_status, StrategyPriceStatus::Stale);
+        assert_eq!(track.mark_price, Some(120.0));
         assert_eq!(
             second.snapshot.desired_exposure,
             first.snapshot.desired_exposure
@@ -1893,8 +1894,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
-        assert_eq!(transition.snapshot.observed.mark_price, Some(120.0));
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.strategy_price, Some(95.0));
+        assert_eq!(track.mark_price, Some(120.0));
         assert_eq!(transition.snapshot.desired_exposure, Some(Exposure(4.0)),);
     }
 
@@ -1919,11 +1921,9 @@ mod tests {
             second.snapshot.desired_exposure,
             first.snapshot.desired_exposure
         );
-        assert_eq!(second.snapshot.observed.strategy_price, Some(95.0));
-        assert_eq!(
-            second.snapshot.observed.strategy_price_status,
-            StrategyPriceStatus::Stale
-        );
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.strategy_price, Some(95.0));
+        assert_eq!(track.strategy_price_status, StrategyPriceStatus::Stale);
     }
 
     #[test]
@@ -1953,7 +1953,7 @@ mod tests {
         assert_eq!(stale.snapshot.desired_exposure, Some(Exposure(4.0)));
         assert_eq!(recovered.snapshot.desired_exposure, Some(Exposure(-4.0)),);
         assert_eq!(
-            recovered.snapshot.observed.strategy_price_status,
+            manager.get_track("btc-core").unwrap().strategy_price_status,
             StrategyPriceStatus::Live
         );
     }
@@ -2085,7 +2085,10 @@ mod tests {
             transition.snapshot.desired_exposure,
             Some(poise_core::types::Exposure(4.0))
         );
-        assert_eq!(transition.snapshot.observed.strategy_price, Some(95.0));
+        assert_eq!(
+            manager.get_track("btc1").unwrap().strategy_price,
+            Some(95.0)
+        );
         assert_eq!(
             inventory_core_order_from_snapshot(&transition.snapshot),
             Some(&working_order(
@@ -3490,6 +3493,40 @@ mod tests {
     }
 
     #[test]
+    fn market_data_health_deadline_uses_live_last_tick_only() {
+        let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap();
+        let clock = MutableClock(Arc::new(Mutex::new(started_at)));
+        let mut manager = test_manager_with_clock(Arc::new(clock));
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let mut runtime = TrackRuntime::new(
+            TrackId::new("btc1"),
+            test_instrument("BTCUSDT"),
+            test_config(),
+            test_budget(),
+            test_exchange_rules(),
+            started_at,
+        );
+        runtime.status = TrackStatus::Active;
+        runtime.desired_exposure = Some(Exposure(6.0));
+        runtime.last_tick_at = Some(started_at);
+        runtime.strategy_price = Some(95.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(95.0);
+        runtime.best_bid = Some(94.5);
+        runtime.best_ask = Some(95.5);
+
+        manager.restore_track_state(&runtime.snapshot()).unwrap();
+
+        assert_eq!(
+            manager
+                .market_data_health_deadline(&TrackId::new("btc1"))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn sync_exchange_state_clears_stale_inventory_core_slot_when_pending_submit_effect_is_not_preserved()
      {
         let mut manager = test_manager();
@@ -3582,6 +3619,68 @@ mod tests {
                 0.25,
                 poise_core::types::Exposure(6.0),
                 OrderStatus::New,
+            ))
+        );
+    }
+
+    #[test]
+    fn sync_exchange_state_preserves_submit_pending_slot_without_live_orders_when_pending_effect_exists()
+     {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        seed_executor_slot(
+            track,
+            working_order(
+                None,
+                "restore-1",
+                poise_core::types::Side::Buy,
+                94.5,
+                0.25,
+                poise_core::types::Exposure(6.0),
+                OrderStatus::Submitting,
+            ),
+            SlotState::SubmitPending,
+        );
+
+        let transition = manager
+            .sync_exchange_state(
+                &TrackId::new("btc1"),
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                vec![],
+                vec![executor::PendingSubmitHint {
+                    request: OrderRequest {
+                        instrument: test_instrument("BTCUSDT"),
+                        side: poise_core::types::Side::Buy,
+                        price: 94.5,
+                        quantity: 0.25,
+                        client_order_id: "restore-1".into(),
+                        reduce_only: false,
+                    },
+                    desired_exposure: poise_core::types::Exposure(6.0),
+                    submit_purpose: SubmitPurpose::AutoReconcile,
+                }],
+            )
+            .unwrap();
+
+        assert!(transition.events.is_empty());
+        assert!(transition.effects.is_empty());
+
+        let track = manager.get_track("btc1").unwrap();
+        assert_eq!(track.current_exposure, poise_core::types::Exposure(0.0));
+        assert_eq!(
+            inventory_core_order(track),
+            Some(&working_order(
+                None,
+                "restore-1",
+                poise_core::types::Side::Buy,
+                94.5,
+                0.25,
+                poise_core::types::Exposure(6.0),
+                OrderStatus::Submitting,
             ))
         );
     }

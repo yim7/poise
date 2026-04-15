@@ -1457,7 +1457,7 @@ async fn effect_worker_skips_stale_submit_when_track_is_paused_before_execution(
 }
 
 #[tokio::test]
-async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
+async fn effect_worker_retires_stale_submit_until_first_tick_when_current_exposure_has_changed() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
     let mut snapshot = test_snapshot();
@@ -1511,23 +1511,12 @@ async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
     worker.run_once().await.unwrap();
 
     let submitted = exchange.submitted_orders.lock().unwrap().clone();
-    assert_eq!(
-        submitted.len(),
-        1,
-        "replacement submit should run in the same worker iteration"
+    assert!(
+        submitted.is_empty(),
+        "without a fresh tick, stale submit recovery should not derive a replacement order"
     );
-    assert!(matches!(
-        submitted.as_slice(),
-        [OrderRequest {
-            side: Side::Buy,
-            price,
-            quantity,
-            ..
-        }] if (*price - 95.0).abs() < f64::EPSILON
-            && (*quantity - test_config().base_qty_per_unit() * 2.0).abs() < f64::EPSILON
-    ));
     let effects = persistence.all_effects().await;
-    assert_eq!(effects.len(), 2);
+    assert_eq!(effects.len(), 1);
     assert_eq!(
         effects
             .iter()
@@ -1535,27 +1524,11 @@ async fn effect_worker_skips_stale_submit_when_current_exposure_has_changed() {
             .map(|effect| effect.status),
         Some(EffectStatus::Superseded)
     );
-    let replacement = effects
-        .iter()
-        .find(|effect| effect.effect_id != "BTCUSDT:stale:0")
-        .expect("replacement submit should be persisted for the current target");
-    assert_eq!(replacement.status, EffectStatus::Succeeded);
-    assert!(matches!(
-        &replacement.effect,
-        ExecutionAction::SubmitOrder {
-            request,
-            desired_exposure,
-            ..
-        } if request.side == Side::Buy
-            && (request.price - 95.0).abs() < f64::EPSILON
-            && (request.quantity - test_config().base_qty_per_unit() * 2.0).abs() < f64::EPSILON
-            && *desired_exposure == Exposure(4.0)
-    ));
 }
 
 #[tokio::test]
-async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_reverse_exposure_math()
-{
+async fn effect_worker_retires_submit_until_first_tick_when_restored_quote_is_missing_even_if_quantity_rounding_breaks_reverse_exposure_math()
+ {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
     let config = rounded_submit_test_config();
@@ -1616,12 +1589,14 @@ async fn effect_worker_executes_current_submit_when_quantity_rounding_breaks_rev
     worker.run_once().await.unwrap();
 
     let submitted_orders = exchange.submitted_orders.lock().unwrap().clone();
-    assert_eq!(submitted_orders.len(), 1);
-    assert!((submitted_orders[0].quantity - 3.3).abs() < 1e-9);
+    assert!(
+        submitted_orders.is_empty(),
+        "without a fresh tick, restored submit effects should wait instead of reusing stale quote-derived prices"
+    );
 
     let effects = persistence.all_effects().await;
     assert_eq!(effects.len(), 1);
-    assert_eq!(effects[0].status, EffectStatus::Succeeded);
+    assert_eq!(effects[0].status, EffectStatus::Superseded);
 }
 
 #[tokio::test]
@@ -1705,7 +1680,7 @@ async fn effect_worker_waits_for_exchange_state_when_receipt_snapshot_has_no_liv
 }
 
 #[tokio::test]
-async fn superseded_recovery_submit_executes_replacement_without_waiting_for_next_poll() {
+async fn superseded_recovery_submit_waits_for_first_tick_before_replacement() {
     let exchange = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let persistence = Arc::new(MemoryPersistence::default());
     let mut snapshot = test_snapshot();
@@ -1749,10 +1724,10 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
         )
         .await
         .unwrap();
-    assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
+    assert!(transition.effects.is_empty());
     assert_eq!(
         current_instance(&state).await.desired_exposure,
-        Some(Exposure(4.0))
+        Some(Exposure(6.0))
     );
 
     persistence
@@ -1790,23 +1765,12 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
     worker.run_once().await.unwrap();
 
     let submitted = exchange.submitted_orders.lock().unwrap().clone();
-    assert_eq!(
-        submitted.len(),
-        1,
-        "replacement submit should run in the same worker iteration"
+    assert!(
+        submitted.is_empty(),
+        "without a fresh tick, recovery should not synthesize a replacement submit"
     );
-    assert!(matches!(
-        submitted.as_slice(),
-        [OrderRequest {
-            side: Side::Buy,
-            price,
-            quantity,
-            ..
-        }] if (*price - 95.0).abs() < f64::EPSILON
-            && (*quantity - test_config().base_qty_per_unit() * 4.0).abs() < f64::EPSILON
-    ));
     let effects = persistence.all_effects().await;
-    assert_eq!(effects.len(), 2);
+    assert_eq!(effects.len(), 1);
     assert_eq!(
         effects
             .iter()
@@ -1814,22 +1778,6 @@ async fn superseded_recovery_submit_executes_replacement_without_waiting_for_nex
             .map(|effect| effect.status),
         Some(EffectStatus::Superseded)
     );
-    let replacement = effects
-        .iter()
-        .find(|effect| effect.effect_id != "BTCUSDT:recovery:0")
-        .expect("replacement submit effect should be persisted immediately");
-    assert_eq!(replacement.status, EffectStatus::Succeeded);
-    assert!(matches!(
-        &replacement.effect,
-        ExecutionAction::SubmitOrder {
-            request,
-            desired_exposure,
-            ..
-        } if request.side == Side::Buy
-            && (request.price - 95.0).abs() < f64::EPSILON
-            && (request.quantity - test_config().base_qty_per_unit() * 4.0).abs() < f64::EPSILON
-            && *desired_exposure == Exposure(4.0)
-    ));
 }
 
 #[tokio::test]
@@ -2046,8 +1994,7 @@ async fn effect_worker_does_not_submit_follow_up_effect_after_failed_cancel_in_s
 }
 
 #[tokio::test]
-async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_blocking_new_lifecycle()
- {
+async fn filled_order_after_failed_cancel_waits_for_fresh_tick_before_starting_new_lifecycle() {
     let exchange = Arc::new(FakeExchange::with_cancel_order_outcome_unknown(
         btc_position(-22.5, 0.0),
         vec![],
@@ -2097,35 +2044,16 @@ async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_
         )
         .await
         .unwrap();
-    assert!(matches!(
-        transition.effects.as_slice(),
-        [
-            ExecutionAction::CancelOrder { order_id, .. },
-            ExecutionAction::SubmitOrder { request, .. }
-        ] if order_id == "order-large-sell"
-            && request.reduce_only
-            && request.side == Side::Buy
-    ));
+    assert!(
+        transition.effects.is_empty(),
+        "without a fresh tick, filled position replay should not start a new quote-driven lifecycle"
+    );
 
     worker.run_once().await.unwrap();
 
     let effects = persistence.all_effects().await;
-    assert!(
-        effects.iter().all(|effect| {
-            !(effect.status == EffectStatus::Pending
-                && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
-        }),
-        "old lifecycle should not leave a pending submit behind after new lifecycle executes"
-    );
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| effect.status == EffectStatus::Superseded)
-            .count(),
-        1,
-        "stale follow-up submit should be retired instead of staying pending"
-    );
-    assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
+    assert!(effects.is_empty());
+    assert!(exchange.submitted_orders.lock().unwrap().is_empty());
 
     state
         .observe_order_with_absorb_result(
@@ -2144,13 +2072,7 @@ async fn filled_order_after_failed_cancel_does_not_leave_stale_follow_up_submit_
         .unwrap();
 
     let effects_after_terminal_update = persistence.all_effects().await;
-    assert!(
-        effects_after_terminal_update.iter().all(|effect| {
-            !(effect.status == EffectStatus::Pending
-                && matches!(effect.effect, ExecutionAction::SubmitOrder { .. }))
-        }),
-        "terminal update should not resurrect stale follow-up submits"
-    );
+    assert!(effects_after_terminal_update.is_empty());
 }
 
 #[tokio::test]

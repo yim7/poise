@@ -310,6 +310,28 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
             return recovery_anomaly(&base_state, RecoveryAnomaly::UnknownLiveOrder);
         }
 
+        let preserved_pending_submit_slots = base_state
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(slot.state, SlotState::SubmitPending)
+                    && slot.working_order.as_ref().is_some_and(|order| {
+                        order.order_id.is_none()
+                            && input
+                                .pending_submit_hints
+                                .iter()
+                                .any(|hint| hint.request.client_order_id == order.client_order_id)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !preserved_pending_submit_slots.is_empty() {
+            let mut state = base_state;
+            state.slots = preserved_pending_submit_slots;
+            state.diagnostics.recovery_anomaly = None;
+            return RecoveryResolution::Rebuilt { state };
+        }
+
         let mut state = base_state;
         state.slots = vec![slots::empty_inventory_core_slot()];
         state.diagnostics.recovery_anomaly = None;
