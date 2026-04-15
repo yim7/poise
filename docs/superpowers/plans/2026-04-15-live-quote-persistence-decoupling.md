@@ -266,12 +266,16 @@ Expected:
 - `cargo test -p poise-engine -- --nocapture`
 - `cargo test -p poise-application -- --nocapture`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/manager.rs engine/src/executor/recovery.rs engine/src/executor/round_policy.rs server/src/runtime/startup_sync.rs docs/superpowers/plans/2026-04-15-live-quote-persistence-decoupling.md
 git commit -m "refactor(engine): narrow durable desired exposure owner"
 ```
+
+对应 commit SHA：
+
+- `5667e5b` `refactor(engine): narrow durable desired exposure owner`
 
 ### Task 2: 把 durable 边界下沉到“顶层 `desired_exposure` 变化”
 
