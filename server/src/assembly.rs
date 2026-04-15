@@ -234,6 +234,7 @@ async fn assemble_with_state_store(
     }
 
     let (notifications, _) = broadcast::channel(256);
+    let (live_view_notifications, _) = broadcast::channel(1024);
     let mutation_store = repositories.mutation_store();
     let query_store = repositories.query_store();
     let effect_store = repositories.effect_store();
@@ -255,9 +256,10 @@ async fn assemble_with_state_store(
     let submit_effect_service = Arc::new(write_services.submit_effect);
     #[cfg(test)]
     let manager = observation_service.manager();
-    let query_service = Arc::new(TrackQueryService::new(
+    let query_service = Arc::new(TrackQueryService::new_with_observation(
         query_store,
         prepared_registry.clone(),
+        Some(observation_service.clone()),
     ));
     let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
     let projector = Arc::new(TrackProjector::new());
@@ -300,6 +302,8 @@ async fn assemble_with_state_store(
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
+        live_view_notifications.clone(),
+        observation_service.clone(),
         query_service.clone(),
         projector.clone(),
         account_monitor.clone(),
@@ -308,6 +312,7 @@ async fn assemble_with_state_store(
     let runtime_state = build_runtime_state(
         reconcile_state.clone(),
         notifications.clone(),
+        live_view_notifications.clone(),
         account_monitor.clone(),
         account_margin_guard.clone(),
     );
@@ -485,6 +490,8 @@ pub(crate) fn build_http_state(
 
 pub(crate) fn build_websocket_state(
     notifications: broadcast::Sender<ApplicationNotification>,
+    live_view_notifications: broadcast::Sender<String>,
+    observation_service: Arc<TrackObservationService>,
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
@@ -492,6 +499,8 @@ pub(crate) fn build_websocket_state(
 ) -> WebSocketState {
     WebSocketState {
         notifications,
+        live_view_notifications,
+        observation_service,
         query_service,
         projector,
         account_monitor,
@@ -524,12 +533,14 @@ pub(crate) fn build_reconcile_state(
 pub(crate) fn build_runtime_state(
     reconcile: ReconcileState,
     notifications: broadcast::Sender<ApplicationNotification>,
+    live_view_notifications: broadcast::Sender<String>,
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
 ) -> RuntimeState {
     RuntimeState {
         reconcile,
         notifications,
+        live_view_notifications,
         account_monitor,
         account_margin_guard,
     }

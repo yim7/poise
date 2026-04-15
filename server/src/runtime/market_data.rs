@@ -64,6 +64,9 @@ pub(super) fn spawn_market_task(
                                         .await
                                     {
                                         Ok(_) => {
+                                            let _ = state
+                                                .live_view_notifications
+                                                .send(track.id.clone());
                                             market_data_health_state.mark_dirty(&track.id);
                                         }
                                         Err(error) => {

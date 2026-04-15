@@ -130,6 +130,24 @@ pub enum StrategyPriceStatusView {
     Stale,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceExecutionBlockReasonView {
+    MissingExecutionQuote,
+    MarkBookDivergence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackLiveView {
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatusView,
+    pub mark_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub desired_exposure: Option<f64>,
+    pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackPositionView {
@@ -365,6 +383,10 @@ pub enum StreamEvent {
     TrackDetailChanged {
         track_id: String,
         detail: Box<TrackDetailView>,
+    },
+    TrackLiveViewChanged {
+        track_id: String,
+        live: TrackLiveView,
     },
     AccountSummaryChanged {
         summary: AccountSummaryView,

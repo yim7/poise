@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::{
     AccountSummaryView, ExecutionStatusView, TrackCommandType, TrackDetailView,
-    TrackDiagnosticsView, TrackListItemView,
+    TrackDiagnosticsView, TrackListItemView, TrackLiveView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +155,27 @@ impl App {
                 .is_some_and(|current| current.identity.id == detail.identity.id);
         if should_refresh_current {
             self.current_track = Some(detail);
+        }
+    }
+
+    pub fn apply_track_live_view(&mut self, track_id: &str, live: TrackLiveView) {
+        if let Some(item) = self.tracks.iter_mut().find(|track| track.id == track_id) {
+            item.strategy_price = live.strategy_price;
+            item.strategy_price_status = live.strategy_price_status;
+            item.exposure.target = live.desired_exposure;
+        }
+
+        if let Some(detail) = self
+            .current_track
+            .as_mut()
+            .filter(|detail| detail.identity.id == track_id)
+        {
+            detail.status.strategy_price = live.strategy_price;
+            detail.status.strategy_price_status = live.strategy_price_status;
+            detail.market.mark_price = live.mark_price;
+            detail.market.best_bid = live.best_bid;
+            detail.market.best_ask = live.best_ask;
+            detail.position.desired_exposure = live.desired_exposure;
         }
     }
 

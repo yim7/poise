@@ -296,6 +296,8 @@ pub(crate) fn build_websocket_state(
 ) -> crate::server_context::WebSocketState {
     crate::assembly::build_websocket_state(
         services.notifications.clone(),
+        broadcast::channel(1024).0,
+        Arc::clone(&services.observation_service),
         query_service,
         projector,
         account_monitor,
@@ -342,6 +344,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let runtime_state = crate::assembly::build_runtime_state(
         reconcile.clone(),
         services.notifications.clone(),
+        broadcast::channel(1024).0,
         Arc::clone(&account_monitor),
         Arc::clone(&services.account_margin_guard),
     );

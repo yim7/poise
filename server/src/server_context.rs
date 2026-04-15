@@ -27,6 +27,8 @@ pub struct HttpState {
 #[derive(Clone)]
 pub struct WebSocketState {
     pub notifications: broadcast::Sender<ApplicationNotification>,
+    pub live_view_notifications: broadcast::Sender<String>,
+    pub observation_service: Arc<TrackObservationService>,
     pub query_service: Arc<TrackQueryService>,
     pub projector: Arc<TrackProjector>,
     pub account_monitor: Arc<AccountMonitor>,
@@ -51,6 +53,7 @@ pub struct ReconcileState {
 pub struct RuntimeState {
     pub reconcile: ReconcileState,
     pub notifications: broadcast::Sender<ApplicationNotification>,
+    pub live_view_notifications: broadcast::Sender<String>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
 }

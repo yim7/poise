@@ -448,6 +448,9 @@ async fn handle_ws_event(client: &ApiClient, app: &mut App, event: StreamEvent) 
                 refresh_selected_track_diagnostics_best_effort(client, app).await;
             }
         }
+        StreamEvent::TrackLiveViewChanged { track_id, live } => {
+            app.apply_track_live_view(&track_id, live);
+        }
         StreamEvent::AccountSummaryChanged { summary } => app.apply_account_summary(summary),
     }
 }
@@ -1529,6 +1532,64 @@ mod tests {
         ));
 
         drop(sender);
+    }
+
+    #[tokio::test]
+    async fn tui_applies_track_live_view_patch_without_reloading_detail() {
+        let (client, state) = spawn_projection_stub_server().await;
+        let mut app = load_initial_state(&client).await.unwrap();
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        state.requests.lock().await.clear();
+
+        handle_ws_event(
+            &client,
+            &mut app,
+            StreamEvent::TrackLiveViewChanged {
+                track_id: BTC_GRID_ID.into(),
+                live: crate::protocol::TrackLiveView {
+                    strategy_price: Some(111.5),
+                    strategy_price_status: crate::protocol::StrategyPriceStatusView::Live,
+                    mark_price: Some(112.0),
+                    best_bid: Some(111.0),
+                    best_ask: Some(112.0),
+                    desired_exposure: Some(4.5),
+                    price_execution_block_reason: None,
+                },
+            },
+        )
+        .await;
+
+        assert_eq!(app.tracks[0].strategy_price, Some(111.5));
+        assert_eq!(app.tracks[0].exposure.target, Some(4.5));
+        assert_eq!(
+            app.current_track.as_ref().unwrap().status.strategy_price,
+            Some(111.5)
+        );
+        assert_eq!(
+            app.current_track.as_ref().unwrap().market.mark_price,
+            Some(112.0)
+        );
+        assert_eq!(
+            app.current_track.as_ref().unwrap().market.best_bid,
+            Some(111.0)
+        );
+        assert_eq!(
+            app.current_track.as_ref().unwrap().market.best_ask,
+            Some(112.0)
+        );
+        assert_eq!(
+            app.current_track
+                .as_ref()
+                .unwrap()
+                .position
+                .desired_exposure,
+            Some(4.5)
+        );
+        assert!(
+            state.requests.lock().await.is_empty(),
+            "live patch should not trigger an extra HTTP reload"
+        );
     }
 
     #[tokio::test]
