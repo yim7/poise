@@ -686,7 +686,7 @@ Task 4 implementation commit: `a606d8a`
 - Modify: `docs/superpowers/specs/2026-04-15-live-quote-persistence-decoupling-design.md`
 - Modify: `docs/superpowers/plans/2026-04-15-live-quote-persistence-decoupling.md`
 
-- [ ] **Step 1: 先写失败测试，锁住启动后无 live quote 的基线**
+- [x] **Step 1: 先写失败测试，锁住启动后无 live quote 的基线**
 
 新增至少这些测试：
 
@@ -703,7 +703,7 @@ async fn first_tick_after_startup_rehydrates_live_view_and_execution_inputs() {}
 - 从 persisted snapshot 恢复后，在第一条 tick 前没有有效 live quote
 - 首个 tick 到来后，`TrackLiveView` 与执行输入恢复
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -714,7 +714,12 @@ Expected:
 
 - 当前启动路径和夹具仍默认带着旧 quote
 
-- [ ] **Step 3: 做最小实现与夹具更新**
+实际定向验证结果：
+
+- `startup_without_new_tick_exposes_missing_live_quote_baseline` 首次即通过，说明启动路径本身已经满足“无 live quote 基线”
+- `first_tick_after_startup_rehydrates_live_view_and_execution_inputs` 初次失败，暴露的是真实问题：旧测试和夹具仍在假设“恢复后的 snapshot 自带 live quote / target 值”
+
+- [x] **Step 3: 做最小实现与夹具更新**
 
 在 `server/src/effect_worker/tests/support.rs`、`server/src/test_support.rs`、`server/src/runtime/startup_sync.rs` 里统一改成：
 
@@ -727,7 +732,15 @@ Expected:
 - 启动阶段没有 live quote
 - 首个新 tick 后自然恢复
 
-- [ ] **Step 4: 跑完整回归**
+Task 5 实际实现说明：
+
+- 新增了 `startup_without_new_tick_exposes_missing_live_quote_baseline`
+- 新增了 `first_tick_after_startup_rehydrates_live_view_and_execution_inputs`
+- `server/src/runtime/tests/support.rs` 和 `server/src/effect_worker/tests/support.rs` 的默认恢复夹具不再注入 persisted quote 字段
+- 旧的 runtime / user-data / HTTP / assembly / effect-worker 测试中，凡是依赖“恢复态自带 live quote”的假设，都改成了显式等待首个 tick，或者改成断言 `WaitingMarketData` / “不生成 submit effect”
+- `server/src/runtime/startup_sync.rs` 的生产逻辑本轮不需要改；变化主要在测试夹具与旧测试语义对齐
+
+- [x] **Step 4: 跑完整回归**
 
 Run:
 
@@ -748,7 +761,18 @@ Expected:
 - `poise-tui` 全绿
 - websocket diagnostics 相关测试继续通过
 
-- [ ] **Step 5: 同步 spec / plan 与回写 commit SHA**
+实际通过的验证命令：
+
+- `cargo fmt --all`
+- `cargo test -p poise-server runtime::tests::startup_sync::startup_without_new_tick_exposes_missing_live_quote_baseline -- --exact --nocapture`
+- `cargo test -p poise-server runtime::tests::startup_sync::first_tick_after_startup_rehydrates_live_view_and_execution_inputs -- --exact --nocapture`
+- `cargo test -p poise-engine -- --nocapture`
+- `cargo test -p poise-application -- --nocapture`
+- `cargo test -p poise-protocol -- --nocapture`
+- `cargo test -p poise-server -- --nocapture`
+- `cargo test -p poise-tui -- --nocapture`
+
+- [x] **Step 5: 同步 spec / plan 与回写 commit SHA**
 
 把 spec 里接口名同步到最终实现版本，并把本 plan 中每个 task 的：
 
@@ -757,12 +781,14 @@ Expected:
 
 回写成真实状态。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/src/runtime/startup_sync.rs server/src/runtime/tests/startup_sync.rs server/src/runtime/tests/execution.rs server/src/effect_worker/tests/support.rs server/src/test_support.rs docs/superpowers/specs/2026-04-15-live-quote-persistence-decoupling-design.md docs/superpowers/plans/2026-04-15-live-quote-persistence-decoupling.md
 git commit -m "docs(runtime): sync live quote persistence decoupling plan and design"
 ```
+
+Task 5 implementation commit: `11c4b1f`
 
 ## Plan Self-Review
 
