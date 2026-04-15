@@ -548,7 +548,7 @@ Task 3 implementation commit: `adca340`
 - Test: `server/src/websocket.rs`
 - Test: `tui/src/main.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住“市场字段单独低频刷新”**
+- [x] **Step 1: 先写失败测试，锁住“市场字段单独低频刷新”**
 
 新增至少这些测试：
 
@@ -569,7 +569,7 @@ async fn tui_applies_track_live_view_patch_without_reloading_detail() {}
 - `TrackLiveViewChanged` 不会触发 full detail 重投影
 - TUI 收到 live patch 后会更新市场/目标字段
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -582,7 +582,7 @@ Expected:
 - protocol 里还没有 `TrackLiveViewChanged`
 - websocket 还没有 live dirty / 250ms flush
 
-- [ ] **Step 3: 先扩协议，再实现 server 低频 live 刷新**
+- [x] **Step 3: 先扩协议，再实现 server 低频 live 刷新**
 
 在 `protocol/src/lib.rs` 增加：
 
@@ -619,7 +619,13 @@ pub enum StreamEvent {
 - 继续保留 durable `TrackChanged` 的现有批内去重
 - diagnostics 分开统计 durable pushes 和 live pushes
 
-- [ ] **Step 4: 让 TUI 合并 live patch**
+Task 4 实际实现说明：
+
+- 没有引入一个会被全连接共享消费的 live dirty state；这里改成了 `broadcast::Sender<String>` 作为轻量 invalidation 通道，每条 websocket 连接自己维护 `track_id` 脏集合和 `250ms` flush 窗口。
+- `server/src/runtime/market_data.rs` 在 `observe_market(...)` 成功后只发送 `track_id`，真正的 `TrackLiveView` 查询发生在 websocket flush 时。
+- `server/src/assembly.rs` 同步把 `TrackQueryService` 切到了 `new_with_observation(...)`，让 durable detail/list 投影也能读到 query-time live 视图。
+
+- [x] **Step 4: 让 TUI 合并 live patch**
 
 在 `tui/src/main.rs` / `tui/src/app.rs`：
 
@@ -639,7 +645,7 @@ match event {
 
 不触发额外 HTTP reload。
 
-- [ ] **Step 5: 跑 Task 4 回归**
+- [x] **Step 5: 跑 Task 4 回归**
 
 Run:
 
@@ -651,12 +657,23 @@ Expected:
 - 高频 live 更新会被低频合并
 - full-detail durable 重投影不再由市场字段刷新驱动
 
-- [ ] **Step 6: Commit**
+实际通过的验证命令：
+
+- `cargo fmt --all`
+- `cargo test -p poise-server websocket::tests::websocket_coalesces_live_view_updates_per_track_at_250ms_windows -- --nocapture`
+- `cargo test -p poise-server websocket::tests::websocket_live_view_updates_do_not_trigger_full_detail_projection -- --nocapture`
+- `cargo test -p poise-tui tests::tui_applies_track_live_view_patch_without_reloading_detail -- --nocapture`
+- `cargo test -p poise-server websocket::tests:: -- --nocapture`
+- `cargo test -p poise-tui -- --nocapture`
+
+- [x] **Step 6: Commit**
 
 ```bash
 git add protocol/src/lib.rs server/src/websocket.rs server/src/server_context.rs server/src/assembly.rs server/src/runtime/market_data.rs tui/src/protocol.rs tui/src/app.rs tui/src/main.rs docs/superpowers/plans/2026-04-15-live-quote-persistence-decoupling.md
 git commit -m "feat(ws): add low-frequency live market refresh stream"
 ```
+
+Task 4 implementation commit: `a606d8a`
 
 ### Task 5: 明确启动基线与全量验收
 
