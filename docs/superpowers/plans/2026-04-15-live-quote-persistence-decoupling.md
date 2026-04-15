@@ -421,7 +421,7 @@ git commit -m "feat(application): persist market updates only on durable intent 
 - Test: `application/src/read_model.rs`
 - Test: `server/src/projector.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住“字段形状不变，但来源改成 durable + live 拼装”**
+- [x] **Step 1: 先写失败测试，锁住“字段形状不变，但来源改成 durable + live 拼装”**
 
 新增至少这些测试：
 
@@ -442,7 +442,7 @@ fn projector_preserves_existing_detail_and_list_shapes() {}
 - 这些字段不再直接来自 snapshot
 - projector 仍然消费同样的 `TrackReadModel` 字段
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -454,7 +454,7 @@ Expected:
 
 - 当前 query/read-model 仍然直接依赖 snapshot 中的 quote / target 字段
 
-- [ ] **Step 3: 给 application query 层暴露窄的 live 查询**
+- [x] **Step 3: 给 application query 层暴露窄的 live 查询**
 
 在 `application/src/mutation_executor.rs` / `application/src/track_observation_service.rs` 增加：
 
@@ -468,7 +468,13 @@ pub(crate) async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView
 pub(crate) async fn strategy_target_view(&self, id: &str) -> Result<StrategyTargetView> { ... }
 ```
 
-- [ ] **Step 4: 让 `TrackReadSource` / `TrackReadModel` 改为显式从 parts 构造**
+Task 3 实际实现说明：
+
+- `TrackManager` 新增了 `track_live_view(...)`、`quote_health_view(...)`、`strategy_target_view(...)` 只读查询。
+- `MutationExecutor` / `TrackObservationService` 透传了这三条窄查询，保持 owner 仍在 engine/runtime。
+- `TrackQueryService` 没有直接改掉现有 `new(...)`，而是新增了 `new_with_observation(...)`。这样 server 旧构造点和当前脏改的 `websocket.rs` 不必在 Task 3 被动跟着改。
+
+- [x] **Step 4: 让 `TrackReadSource` / `TrackReadModel` 改为显式从 parts 构造**
 
 在 `application/src/track_read_source.rs` 改成：
 
@@ -496,7 +502,7 @@ Ok(TrackReadSource {
 })
 ```
 
-- [ ] **Step 5: 跑 Task 3 回归**
+- [x] **Step 5: 跑 Task 3 回归**
 
 Run:
 
@@ -509,12 +515,24 @@ Expected:
 - HTTP / durable websocket 读模型形状稳定
 - quote/target 字段改为 query-time live 拼装
 
-- [ ] **Step 6: Commit**
+实际通过的验证命令：
+
+- `cargo fmt --all`
+- `cargo test -p poise-application query_service::tests::load_track_detail_source_merges_durable_snapshot_and_live_view -- --nocapture`
+- `cargo test -p poise-application read_model::tests::read_model_uses_track_live_view_for_market_and_target_fields -- --nocapture`
+- `cargo test -p poise-server projector::tests::projector_preserves_existing_detail_and_list_shapes -- --nocapture`
+- `cargo test -p poise-application query_service::tests:: -- --nocapture`
+- `cargo test -p poise-application read_model::tests:: -- --nocapture`
+- `cargo test -p poise-server projector::tests:: -- --nocapture`
+
+- [x] **Step 6: Commit**
 
 ```bash
 git add application/src/mutation_executor.rs application/src/track_observation_service.rs application/src/track_read_source.rs application/src/query_service.rs application/src/read_model.rs server/src/projector.rs docs/superpowers/plans/2026-04-15-live-quote-persistence-decoupling.md
 git commit -m "refactor(application): compose read models from durable snapshot and live views"
 ```
+
+Task 3 implementation commit: `adca340`
 
 ### Task 4: 为 UI 增加低频 `TrackLiveViewChanged` 路径
 
