@@ -354,7 +354,10 @@ async fn repeated_ticks_do_not_supersede_submit_effect_when_target_drift_stays_w
 
     let instance = current_instance(&state).await;
     assert!(instance.desired_exposure.is_some());
-    assert_eq!(instance.desired_exposure, Some(first_desired_exposure.clone()));
+    assert_eq!(
+        instance.desired_exposure,
+        Some(first_desired_exposure.clone())
+    );
     let order = inventory_core_order(&instance).expect("submit should become working");
     assert_eq!(order.client_order_id, first_request.client_order_id);
     assert_eq!(
@@ -425,7 +428,10 @@ async fn active_working_order_is_not_cancel_replaced_for_small_target_drift() {
 
     let instance = current_instance(&state).await;
     assert!(instance.desired_exposure.is_some());
-    assert_eq!(instance.desired_exposure, Some(first_desired_exposure.clone()));
+    assert_eq!(
+        instance.desired_exposure,
+        Some(first_desired_exposure.clone())
+    );
     let order = inventory_core_order(&instance).expect("working order should remain active");
     assert_eq!(
         instance
@@ -527,7 +533,10 @@ async fn partial_fill_does_not_cancel_replace_active_working_order_when_target_d
 
     let instance = current_instance(&state).await;
     assert!(instance.desired_exposure.is_some());
-    assert_eq!(instance.desired_exposure, Some(first_desired_exposure.clone()));
+    assert_eq!(
+        instance.desired_exposure,
+        Some(first_desired_exposure.clone())
+    );
     let order = inventory_core_order(&instance).expect("working order should remain active");
     assert_eq!(order.client_order_id, first_order.client_order_id);
     assert_eq!(

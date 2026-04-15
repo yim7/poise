@@ -2298,6 +2298,20 @@ mod tests {
             manager.get_track("btc1").unwrap().desired_exposure,
             Some(poise_core::types::Exposure(2.0))
         );
+        assert_eq!(
+            manager
+                .strategy_target_view(&TrackId::new("btc1"))
+                .unwrap()
+                .desired_exposure,
+            Some(poise_core::types::Exposure(2.4))
+        );
+        assert_eq!(
+            manager
+                .track_live_view(&TrackId::new("btc1"))
+                .unwrap()
+                .desired_exposure,
+            Some(2.4)
+        );
     }
 
     #[test]

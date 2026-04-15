@@ -320,7 +320,8 @@ async fn startup_without_new_tick_exposes_missing_live_quote_baseline() {
     assert_eq!(live_view.mark_price, None);
     assert_eq!(live_view.best_bid, None);
     assert_eq!(live_view.best_ask, None);
-    assert_eq!(live_view.desired_exposure, Some(6.0));
+    assert_eq!(live_view.desired_exposure, None);
+    assert_eq!(runtime.strategy_target_view().desired_exposure, None);
 
     let instance = current_instance(&fixture.state).await;
     assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));

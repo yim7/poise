@@ -18,6 +18,7 @@ use crate::ports::{ExecutionQuote, OrderStatus};
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
+use crate::reconciler;
 use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
 
@@ -461,25 +462,38 @@ impl TrackRuntime {
 
     pub fn strategy_target_view(&self) -> StrategyTargetView {
         StrategyTargetView {
-            desired_exposure: self.desired_exposure.clone(),
+            desired_exposure: self.live_desired_exposure(),
         }
     }
 
     pub fn live_view(&self) -> TrackLiveView {
         let quote_health = self.quote_health_view();
+        let live_desired_exposure = self.live_desired_exposure();
         TrackLiveView {
             strategy_price: self.strategy_price,
             strategy_price_status: quote_health.strategy_price_status,
             mark_price: self.mark_price,
             best_bid: self.best_bid,
             best_ask: self.best_ask,
-            desired_exposure: self.desired_exposure.clone().map(|value| value.0),
+            desired_exposure: live_desired_exposure.map(|value| value.0),
             price_execution_block_reason: match quote_health.price_execution_gate {
                 PriceExecutionGate::Open => None,
                 PriceExecutionGate::ManualRiskReductionOnly { reason }
                 | PriceExecutionGate::NoSubmit { reason } => Some(reason),
             },
         }
+    }
+
+    fn live_desired_exposure(&self) -> Option<Exposure> {
+        if matches!(self.status, TrackStatus::Paused) {
+            return None;
+        }
+
+        let strategy_price = matches!(self.strategy_price_status, StrategyPriceStatus::Live)
+            .then_some(self.strategy_price)
+            .flatten()?;
+
+        Some(reconciler::reconcile_target(self, strategy_price).desired_exposure)
     }
 
     pub fn apply_post_restore_constraints(&mut self, constraints: PostRestoreConstraints) {
@@ -914,6 +928,8 @@ mod tests {
         assert_eq!(fresh.best_bid, None);
         assert_eq!(fresh.best_ask, None);
         assert_eq!(fresh.last_tick_at, None);
+        assert_eq!(fresh.strategy_target_view().desired_exposure, None);
+        assert_eq!(fresh.live_view().desired_exposure, None);
         assert_eq!(
             fresh.price_execution_gate,
             PriceExecutionGate::NoSubmit {
