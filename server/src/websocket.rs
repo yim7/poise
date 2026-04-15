@@ -22,7 +22,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade, state: WebSocketState) -> Response
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WebSocketDiagnosticsSnapshot {
     connection_id: u64,
     window_duration: Duration,
@@ -34,6 +34,10 @@ pub(crate) struct WebSocketDiagnosticsSnapshot {
     track_pushes: usize,
     account_pushes: usize,
     live_pushes: usize,
+    live_flushes: usize,
+    avg_tracks_per_live_flush: f64,
+    max_tracks_per_live_flush: usize,
+    live_coalesced: usize,
     detail_query_count: usize,
     avg_detail_query: Duration,
     max_detail_query: Duration,
@@ -56,6 +60,9 @@ struct WebSocketDiagnostics {
     track_pushes: usize,
     account_pushes: usize,
     live_pushes: usize,
+    live_flushes: usize,
+    total_tracks_per_live_flush: usize,
+    max_tracks_per_live_flush: usize,
     detail_query_count: usize,
     total_detail_query: Duration,
     max_detail_query: Duration,
@@ -80,6 +87,9 @@ impl WebSocketDiagnostics {
             track_pushes: 0,
             account_pushes: 0,
             live_pushes: 0,
+            live_flushes: 0,
+            total_tracks_per_live_flush: 0,
+            max_tracks_per_live_flush: 0,
             detail_query_count: 0,
             total_detail_query: Duration::ZERO,
             max_detail_query: Duration::ZERO,
@@ -127,6 +137,15 @@ impl WebSocketDiagnostics {
         self.live_pushes += 1;
     }
 
+    fn record_live_flush(&mut self, track_count: usize) {
+        if track_count == 0 {
+            return;
+        }
+        self.live_flushes += 1;
+        self.total_tracks_per_live_flush += track_count;
+        self.max_tracks_per_live_flush = self.max_tracks_per_live_flush.max(track_count);
+    }
+
     fn record_detail_query(&mut self, elapsed: Duration) {
         self.detail_query_count += 1;
         self.total_detail_query += elapsed;
@@ -157,6 +176,13 @@ impl WebSocketDiagnostics {
             track_pushes: self.track_pushes,
             account_pushes: self.account_pushes,
             live_pushes: self.live_pushes,
+            live_flushes: self.live_flushes,
+            avg_tracks_per_live_flush: average_count(
+                self.total_tracks_per_live_flush,
+                self.live_flushes,
+            ),
+            max_tracks_per_live_flush: self.max_tracks_per_live_flush,
+            live_coalesced: self.raw_live_notifications.saturating_sub(self.live_pushes),
             detail_query_count: self.detail_query_count,
             avg_detail_query: average_duration(self.total_detail_query, self.detail_query_count),
             max_detail_query: self.max_detail_query,
@@ -194,6 +220,9 @@ impl WebSocketDiagnostics {
         self.track_pushes = 0;
         self.account_pushes = 0;
         self.live_pushes = 0;
+        self.live_flushes = 0;
+        self.total_tracks_per_live_flush = 0;
+        self.max_tracks_per_live_flush = 0;
         self.detail_query_count = 0;
         self.total_detail_query = Duration::ZERO;
         self.max_detail_query = Duration::ZERO;
@@ -218,6 +247,10 @@ fn log_websocket_diagnostics(snapshot: &WebSocketDiagnosticsSnapshot) {
         track_pushes = snapshot.track_pushes,
         account_pushes = snapshot.account_pushes,
         live_pushes = snapshot.live_pushes,
+        live_flushes = snapshot.live_flushes,
+        avg_tracks_per_live_flush = snapshot.avg_tracks_per_live_flush,
+        max_tracks_per_live_flush = snapshot.max_tracks_per_live_flush,
+        live_coalesced = snapshot.live_coalesced,
         detail_query_count = snapshot.detail_query_count,
         avg_detail_query_ms = snapshot.avg_detail_query.as_secs_f64() * 1000.0,
         max_detail_query_ms = snapshot.max_detail_query.as_secs_f64() * 1000.0,
@@ -244,6 +277,10 @@ fn log_websocket_lag(snapshot: &WebSocketDiagnosticsSnapshot, skipped: u64) {
         track_pushes = snapshot.track_pushes,
         account_pushes = snapshot.account_pushes,
         live_pushes = snapshot.live_pushes,
+        live_flushes = snapshot.live_flushes,
+        avg_tracks_per_live_flush = snapshot.avg_tracks_per_live_flush,
+        max_tracks_per_live_flush = snapshot.max_tracks_per_live_flush,
+        live_coalesced = snapshot.live_coalesced,
         detail_query_count = snapshot.detail_query_count,
         avg_detail_query_ms = snapshot.avg_detail_query.as_secs_f64() * 1000.0,
         max_detail_query_ms = snapshot.max_detail_query.as_secs_f64() * 1000.0,
@@ -272,6 +309,13 @@ fn average_duration(total: Duration, count: usize) -> Duration {
         return Duration::ZERO;
     }
     Duration::from_secs_f64(total.as_secs_f64() / count as f64)
+}
+
+fn average_count(total: usize, count: usize) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    total as f64 / count as f64
 }
 
 enum PendingSocketUpdate {
@@ -469,7 +513,9 @@ async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
         }
 
         if live_flush_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-            for track_id in pending_live.take() {
+            let track_ids = pending_live.take();
+            diagnostics.record_live_flush(track_ids.len());
+            for track_id in track_ids {
                 diagnostics.record_live_push();
                 if !push_live_view_update(&mut socket, &state, &track_id, &mut diagnostics).await {
                     return;
@@ -1330,10 +1376,20 @@ mod tests {
             track_id: TrackId::new("eth-core"),
         });
         diagnostics.record_notification(&ApplicationNotification::AccountChanged);
+        diagnostics.record_live_notification();
+        diagnostics.record_live_notification();
+        diagnostics.record_live_notification();
+        diagnostics.record_live_notification();
+        diagnostics.record_live_notification();
         diagnostics.record_batch(3);
         diagnostics.record_track_push();
         diagnostics.record_track_push();
         diagnostics.record_account_push();
+        diagnostics.record_live_push();
+        diagnostics.record_live_push();
+        diagnostics.record_live_push();
+        diagnostics.record_live_flush(2);
+        diagnostics.record_live_flush(1);
         diagnostics.record_detail_query(Duration::from_millis(12));
         diagnostics.record_detail_query(Duration::from_millis(18));
         diagnostics.record_send(Duration::from_millis(4));
@@ -1345,10 +1401,16 @@ mod tests {
         assert_eq!(snapshot.window_duration, Duration::from_secs(5));
         assert_eq!(snapshot.raw_track_notifications, 2);
         assert_eq!(snapshot.raw_account_notifications, 1);
+        assert_eq!(snapshot.raw_live_notifications, 5);
         assert_eq!(snapshot.batches, 1);
         assert_eq!(snapshot.max_batch_size, 3);
         assert_eq!(snapshot.track_pushes, 2);
         assert_eq!(snapshot.account_pushes, 1);
+        assert_eq!(snapshot.live_pushes, 3);
+        assert_eq!(snapshot.live_flushes, 2);
+        assert_eq!(snapshot.avg_tracks_per_live_flush, 1.5);
+        assert_eq!(snapshot.max_tracks_per_live_flush, 2);
+        assert_eq!(snapshot.live_coalesced, 2);
         assert_eq!(snapshot.detail_query_count, 2);
         assert_eq!(snapshot.avg_detail_query, Duration::from_millis(15));
         assert_eq!(snapshot.max_detail_query, Duration::from_millis(18));
@@ -1393,6 +1455,42 @@ mod tests {
         assert_eq!(snapshot.detail_query_count, 1);
         assert_eq!(snapshot.max_batch_size, 48);
         assert!(snapshot.avg_detail_query >= Duration::from_millis(25));
+    }
+
+    #[tokio::test]
+    async fn stress_same_track_live_notifications_emit_coalesced_live_diagnostics_snapshot() {
+        let repository = seeded_repository();
+        let (url, state, mut diagnostics_rx) = spawn_server_with_diagnostics(repository, 128).await;
+        let (client, _) = connect_async(&url).await.unwrap();
+        let (_, mut stream) = client.split();
+
+        for _ in 0..48 {
+            let _ = state
+                .websocket_state
+                .live_view_notifications
+                .send("btc-core".to_string());
+        }
+
+        let event = recv_event(&mut stream).await;
+        assert!(matches!(
+            event,
+            StreamEvent::TrackLiveViewChanged { ref track_id, .. } if track_id == "btc-core"
+        ));
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), diagnostics_rx.recv())
+            .await
+            .expect("stress test should emit diagnostics snapshot")
+            .expect("diagnostics channel should stay open");
+
+        assert_eq!(snapshot.raw_live_notifications, 48);
+        assert_eq!(snapshot.live_pushes, 1);
+        assert_eq!(snapshot.live_flushes, 1);
+        assert_eq!(snapshot.avg_tracks_per_live_flush, 1.0);
+        assert_eq!(snapshot.max_tracks_per_live_flush, 1);
+        assert_eq!(snapshot.live_coalesced, 47);
+        assert_eq!(snapshot.detail_query_count, 0);
+        assert_eq!(snapshot.live_query_count, 1);
+        assert_eq!(snapshot.send_count, 1);
     }
 
     fn test_manager() -> TrackManager {
