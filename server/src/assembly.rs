@@ -29,6 +29,10 @@ use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
 use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
+use crate::exchange_startup::{
+    SymbolLeverageSetter, TrackLeverageIndex, build_symbol_leverage_setter,
+    build_track_leverage_index,
+};
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
@@ -133,9 +137,20 @@ pub async fn assemble(
             .map(|track| track.track_id().clone()),
     )?;
     let exchange = build_exchange(&config.exchange).await?;
+    let symbol_leverage_setter = build_symbol_leverage_setter(&config.exchange)?;
+    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
+    assemble_with_state_store(
+        config,
+        prepared_registry,
+        exchange,
+        symbol_leverage_setter,
+        track_leverage_index,
+        repositories,
+        clock,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -145,6 +160,18 @@ pub(crate) struct ExchangePorts {
     account_summary: Arc<dyn AccountSummaryPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
+    symbol_leverage_setter: Arc<dyn SymbolLeverageSetter>,
+}
+
+#[cfg(test)]
+struct DefaultNoopSymbolLeverageSetter;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl SymbolLeverageSetter for DefaultNoopSymbolLeverageSetter {
+    async fn set_leverage(&self, _instrument: &Instrument, _leverage: u32) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -156,12 +183,31 @@ impl ExchangePorts {
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
     ) -> Self {
+        Self::with_symbol_leverage_setter(
+            execution,
+            market_data,
+            account_summary,
+            account,
+            metadata,
+            Arc::new(DefaultNoopSymbolLeverageSetter),
+        )
+    }
+
+    pub(crate) fn with_symbol_leverage_setter(
+        execution: Arc<dyn ExecutionPort>,
+        market_data: Arc<dyn MarketDataPort>,
+        account_summary: Arc<dyn AccountSummaryPort>,
+        account: Arc<dyn AccountPort>,
+        metadata: Arc<dyn MetadataPort>,
+        symbol_leverage_setter: Arc<dyn SymbolLeverageSetter>,
+    ) -> Self {
         Self {
             execution,
             market_data,
             account_summary,
             account,
             metadata,
+            symbol_leverage_setter,
         }
     }
 }
@@ -174,6 +220,7 @@ pub(crate) async fn assemble_with_exchange_ports(
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
+    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     let exchange = Exchange::new(
         config.exchange.venue(),
         exchange_ports.execution,
@@ -182,13 +229,24 @@ pub(crate) async fn assemble_with_exchange_ports(
         exchange_ports.account,
         exchange_ports.metadata,
     );
-    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
+    assemble_with_state_store(
+        config,
+        prepared_registry,
+        exchange,
+        exchange_ports.symbol_leverage_setter,
+        track_leverage_index,
+        repositories,
+        clock,
+    )
+    .await
 }
 
 async fn assemble_with_state_store(
     config: &Config,
     prepared_registry: Arc<PreparedTrackRegistry>,
     exchange: Exchange,
+    symbol_leverage_setter: Arc<dyn SymbolLeverageSetter>,
+    track_leverage_index: TrackLeverageIndex,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
@@ -208,6 +266,22 @@ async fn assemble_with_state_store(
     for track in prepared_registry.iter() {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
+        let leverage = track_leverage_index
+            .get(&track_id)
+            .copied()
+            .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
+        symbol_leverage_setter
+            .set_leverage(&instrument, leverage)
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "failed to set startup leverage for track `{}` symbol `{}` to {}x: {}",
+                    track_id.as_str(),
+                    instrument.symbol,
+                    leverage,
+                    error
+                )
+            })?;
         let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
         let account_capacity_snapshot =
             load_account_capacity_snapshot_with_retry(exchange.account(), &instrument).await?;
@@ -591,6 +665,7 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, TrackDefinition, parse_config};
+    use crate::exchange_startup::SymbolLeverageSetter;
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
@@ -1065,6 +1140,123 @@ total_loss_limit = 600.0
     }
 
     #[tokio::test]
+    async fn startup_sets_track_leverage_before_loading_metadata_and_capacity() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
+        let config = Config {
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
+                max_notional: Some(3_000.0),
+                leverage: Some(20),
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
+                tick_timeout_secs: None,
+            }],
+            exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
+        };
+
+        super::assemble_with_exchange_ports(
+            &config,
+            test_prepared_registry(&config),
+            super::ExchangePorts::with_symbol_leverage_setter(
+                Arc::new(FakeExecutionPort),
+                Arc::new(FakeMarketData::empty()),
+                Arc::new(FakeAccountSummaryPort),
+                startup_exchange.clone(),
+                startup_exchange,
+                Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone())),
+            ),
+            StateRepositories::new(repository),
+            Arc::new(SystemClock),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *call_log.lock().unwrap(),
+            vec![
+                "set_leverage:BTCUSDT:20".to_string(),
+                "get_exchange_info:BTCUSDT".to_string(),
+                "get_account_capacity_snapshot:BTCUSDT".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_fails_with_track_symbol_and_leverage_when_setting_track_leverage_fails() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
+        let config = Config {
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
+                max_notional: Some(3_000.0),
+                leverage: Some(7),
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
+                tick_timeout_secs: None,
+            }],
+            exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
+        };
+
+        let result = super::assemble_with_exchange_ports(
+            &config,
+            test_prepared_registry(&config),
+            super::ExchangePorts::with_symbol_leverage_setter(
+                Arc::new(FakeExecutionPort),
+                Arc::new(FakeMarketData::empty()),
+                Arc::new(FakeAccountSummaryPort),
+                startup_exchange.clone(),
+                startup_exchange,
+                Arc::new(RecordingSymbolLeverageSetter::fail(
+                    call_log.clone(),
+                    "exchange rejected leverage",
+                )),
+            ),
+            StateRepositories::new(repository),
+            Arc::new(SystemClock),
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("assemble_with_exchange_ports should fail when leverage setup fails"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("btc-core"));
+        assert!(message.contains("BTCUSDT"));
+        assert!(message.contains("7"));
+        assert!(message.contains("exchange rejected leverage"));
+        assert_eq!(
+            *call_log.lock().unwrap(),
+            vec!["set_leverage:BTCUSDT:7".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn start_market_data_tasks_broadcasts_events_to_ws_clients() {
         let (platform, btc_sender) = test_platform();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1460,6 +1652,15 @@ total_loss_limit = 600.0
     struct FakeMetadataPort;
     #[derive(Default)]
     struct FakeMarketDataPort;
+    struct RecordingSymbolLeverageSetter {
+        call_log: Arc<Mutex<Vec<String>>>,
+        failure: Option<String>,
+    }
+
+    struct StartupOrderExchange {
+        call_log: Arc<Mutex<Vec<String>>>,
+        max_increase_notional: f64,
+    }
 
     struct LimitedMarginExchange {
         max_increase_notional: f64,
@@ -1476,6 +1677,86 @@ total_loss_limit = 600.0
                 remaining_failures: AtomicUsize::new(initial_failures),
                 get_exchange_info_calls: AtomicUsize::new(0),
             }
+        }
+    }
+
+    impl RecordingSymbolLeverageSetter {
+        fn succeed(call_log: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                call_log,
+                failure: None,
+            }
+        }
+
+        fn fail(call_log: Arc<Mutex<Vec<String>>>, message: impl Into<String>) -> Self {
+            Self {
+                call_log,
+                failure: Some(message.into()),
+            }
+        }
+    }
+
+    impl StartupOrderExchange {
+        fn new(call_log: Arc<Mutex<Vec<String>>>, max_increase_notional: f64) -> Self {
+            Self {
+                call_log,
+                max_increase_notional,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SymbolLeverageSetter for RecordingSymbolLeverageSetter {
+        async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
+            self.call_log
+                .lock()
+                .unwrap()
+                .push(format!("set_leverage:{}:{leverage}", instrument.symbol));
+            if let Some(message) = &self.failure {
+                return Err(anyhow!(message.clone()));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPort for StartupOrderExchange {
+        async fn get_account_capacity_snapshot(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            self.call_log.lock().unwrap().push(format!(
+                "get_account_capacity_snapshot:{}",
+                instrument.symbol
+            ));
+            Ok(poise_engine::ports::AccountCapacitySnapshot {
+                max_increase_notional: self.max_increase_notional,
+            })
+        }
+
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPort for StartupOrderExchange {
+        async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
+            self.call_log
+                .lock()
+                .unwrap()
+                .push(format!("get_exchange_info:{}", instrument.symbol));
+            Ok(ExchangeInfo {
+                instrument: instrument.clone(),
+                rules: test_exchange_rules(),
+            })
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+            Ok(chrono::Utc::now())
         }
     }
 

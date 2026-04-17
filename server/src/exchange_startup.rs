@@ -1,12 +1,51 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use poise_engine::track::Instrument;
 use poise_engine::track::TrackId;
 
-use crate::config::TrackFileDefinition;
+use crate::config::{ExchangeConfig, TrackFileDefinition};
 
 pub(crate) const DEFAULT_TRACK_LEVERAGE: u32 = 10;
 pub(crate) type TrackLeverageIndex = HashMap<TrackId, u32>;
+
+#[async_trait::async_trait]
+pub(crate) trait SymbolLeverageSetter: Send + Sync {
+    async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()>;
+}
+
+enum VenueSymbolLeverageSetter {
+    Binance(poise_binance::SymbolLeverageControl),
+    Bybit(poise_bybit::SymbolLeverageControl),
+}
+
+#[async_trait::async_trait]
+impl SymbolLeverageSetter for VenueSymbolLeverageSetter {
+    async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
+        match self {
+            Self::Binance(control) => control.set_leverage(&instrument.symbol, leverage).await,
+            Self::Bybit(control) => control.set_leverage(&instrument.symbol, leverage).await,
+        }
+    }
+}
+
+pub(crate) fn build_symbol_leverage_setter(
+    config: &ExchangeConfig,
+) -> Result<Arc<dyn SymbolLeverageSetter>> {
+    Ok(Arc::new(build_venue_symbol_leverage_setter(config)?))
+}
+
+fn build_venue_symbol_leverage_setter(config: &ExchangeConfig) -> Result<VenueSymbolLeverageSetter> {
+    match config {
+        ExchangeConfig::Binance(binance_config) => Ok(VenueSymbolLeverageSetter::Binance(
+            poise_binance::SymbolLeverageControl::new(binance_config)?,
+        )),
+        ExchangeConfig::Bybit(bybit_config) => Ok(VenueSymbolLeverageSetter::Bybit(
+            poise_bybit::SymbolLeverageControl::new(bybit_config)?,
+        )),
+    }
+}
 
 pub(crate) fn build_track_leverage_index(tracks: &[TrackFileDefinition]) -> Result<TrackLeverageIndex> {
     let mut index = HashMap::with_capacity(tracks.len());
@@ -29,8 +68,8 @@ mod tests {
 
     use poise_engine::track::TrackId;
 
-    use super::build_track_leverage_index;
-    use crate::config::TrackDefinition;
+    use super::{VenueSymbolLeverageSetter, build_track_leverage_index, build_venue_symbol_leverage_setter};
+    use crate::config::{ExchangeConfig, TrackDefinition};
 
     #[test]
     fn track_leverage_index_defaults_to_ten() {
@@ -72,5 +111,33 @@ mod tests {
             total_loss_limit: 600.0,
             tick_timeout_secs: None,
         }
+    }
+
+    #[test]
+    fn build_symbol_leverage_setter_uses_binance_helper() {
+        let setter = build_venue_symbol_leverage_setter(&ExchangeConfig::Binance(
+            poise_binance::Config {
+                deployment: poise_binance::Deployment::Testnet,
+                api_key: Some("demo-key".into()),
+                api_secret: Some("demo-secret".into()),
+            },
+        ))
+        .unwrap();
+
+        assert!(matches!(setter, VenueSymbolLeverageSetter::Binance(_)));
+    }
+
+    #[test]
+    fn build_symbol_leverage_setter_uses_bybit_helper() {
+        let setter = build_venue_symbol_leverage_setter(&ExchangeConfig::Bybit(
+            poise_bybit::Config {
+                deployment: poise_bybit::Deployment::Testnet,
+                api_key: Some("demo-key".into()),
+                api_secret: Some("demo-secret".into()),
+            },
+        ))
+        .unwrap();
+
+        assert!(matches!(setter, VenueSymbolLeverageSetter::Bybit(_)));
     }
 }
