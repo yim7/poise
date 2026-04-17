@@ -171,7 +171,7 @@
 **Commit**
 
 - Message: `docs: document track startup leverage behavior`
-- Commit SHA: `TODO`
+- Commit SHA: `f85dd01`
 
 ---
 
