@@ -20,8 +20,8 @@ use super::auth::{encode_query, sign_query};
 use super::error::BinanceRestError;
 use super::models::{
     BinanceAccountSummaryInformation, BinanceErrorResponse, BinanceExchangeInfoResponse,
-    BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk, BinanceSymbolConfiguration,
-    ListenKeyResponse, ServerTimeResponse,
+    BinanceLeverageChangeResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
+    BinanceSymbolConfiguration, ListenKeyResponse, ServerTimeResponse,
 };
 use crate::mapper::build_account_capacity_snapshot;
 
@@ -193,6 +193,22 @@ impl BinanceRestClient {
             .await?;
 
         account.into_account_summary_snapshot()
+    }
+
+    pub async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> Result<()> {
+        let response: BinanceLeverageChangeResponse = self
+            .send_request(
+                Method::POST,
+                "/fapi/v1/leverage",
+                vec![
+                    ("symbol", _symbol.to_string()),
+                    ("leverage", _leverage.to_string()),
+                ],
+                AuthMode::Signed,
+            )
+            .await?;
+        let _ = (response.leverage, response.symbol, response.max_notional_value);
+        Ok(())
     }
 
     async fn get_symbol_configuration(&self, symbol: &str) -> Result<BinanceSymbolConfiguration> {
@@ -978,6 +994,36 @@ mod tests {
         );
         assert_eq!(
             requests[1].headers.get("x-mbx-apikey"),
+            Some(&"api-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn set_leverage_posts_symbol_and_leverage() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"leverage":10,"maxNotionalValue":"1000000","symbol":"BTCUSDT"}"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        client.set_leverage("BTCUSDT", 10).await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert!(
+            requests[0]
+                .path
+                .starts_with("/fapi/v1/leverage?symbol=BTCUSDT&leverage=10&timestamp=")
+        );
+        assert_eq!(
+            requests[0].headers.get("x-mbx-apikey"),
             Some(&"api-key".to_string())
         );
     }

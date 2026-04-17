@@ -20,7 +20,7 @@ use super::auth::sign_v5_payload;
 use super::models::{
     BybitResponse, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
     CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, OpenOrderListResult,
-    PositionListResult, ServerTimeResult, WalletBalanceResult,
+    PositionListResult, ServerTimeResult, SetLeverageRequestBody, WalletBalanceResult,
 };
 use crate::Deployment;
 use crate::mapper::{
@@ -250,6 +250,25 @@ impl BybitRestClient {
                 }
             })
             .collect()
+    }
+
+    pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
+        let body = SetLeverageRequestBody {
+            category: "linear",
+            symbol: symbol.to_string(),
+            buy_leverage: leverage.to_string(),
+            sell_leverage: leverage.to_string(),
+        };
+        let _: serde_json::Value = self
+            .send_request(
+                Method::POST,
+                "/v5/position/set-leverage",
+                Vec::new(),
+                Some(serde_json::to_string(&body).context("failed to serialize leverage body")?),
+                AuthMode::Signed,
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
@@ -504,6 +523,32 @@ mod tests {
         assert!(request.body.contains(r#""orderType":"Limit""#));
         assert!(request.body.contains(r#""timeInForce":"GTC""#));
         assert!(request.body.contains(r#""positionIdx":0"#));
+    }
+
+    #[tokio::test]
+    async fn set_leverage_uses_linear_position_body() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{},"retExtInfo":{},"time":1672281607343}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        client.set_leverage("BTCUSDT", 10).await.unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v5/position/set-leverage");
+        assert!(request.body.contains(r#""category":"linear""#));
+        assert!(request.body.contains(r#""symbol":"BTCUSDT""#));
+        assert!(request.body.contains(r#""buyLeverage":"10""#));
+        assert!(request.body.contains(r#""sellLeverage":"10""#));
     }
 
     #[tokio::test]

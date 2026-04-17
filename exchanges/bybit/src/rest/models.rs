@@ -145,6 +145,17 @@ pub(crate) struct CancelAllRequestBody {
     pub order_filter: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetLeverageRequestBody {
+    pub category: &'static str,
+    pub symbol: String,
+    #[serde(rename = "buyLeverage")]
+    pub buy_leverage: String,
+    #[serde(rename = "sellLeverage")]
+    pub sell_leverage: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CancelAllResult {

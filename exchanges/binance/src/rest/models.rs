@@ -37,6 +37,14 @@ pub struct BinanceSymbolConfiguration {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct BinanceLeverageChangeResponse {
+    pub leverage: u32,
+    pub symbol: String,
+    #[serde(rename = "maxNotionalValue")]
+    pub max_notional_value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct BinanceOpenOrder {
     pub symbol: String,
     #[serde(rename = "orderId")]
