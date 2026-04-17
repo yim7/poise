@@ -86,6 +86,7 @@ min_rebalance_units = 0.5
 shape_family = "linear"
 out_of_band_policy = "freeze"
 max_notional = 3750.0
+leverage = 10
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 tick_timeout_secs = 30
@@ -100,6 +101,7 @@ tick_timeout_secs = 30
 - `exchange.deployment = "mainnet"` 时，服务端接对应交易所的主网地址
 - 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
 - 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
+- `leverage` 不写时默认按 `10x` 处理，并会在每个 `track` 启动时先下发到交易所
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
 - `shape_family` 当前支持 `linear`、`inertial`、`responsive`
 - `out_of_band_policy` 当前支持 `freeze`、`hold`、`flatten`、`terminate`
