@@ -4,11 +4,12 @@ use poise_core::strategy::{self, BandStatus, OutOfBandPolicy};
 use poise_core::types::Exposure;
 
 use crate::loss_guard::build_loss_guard_snapshot;
-use crate::runtime::{AccountCapacityConstraint, TrackRuntime, TrackStatus};
+use crate::runtime::{AccountCapacityConstraint, AppliedRiskCap, TrackRuntime, TrackStatus};
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
     pub desired_exposure: Exposure,
+    pub applied_risk_cap: Option<AppliedRiskCap>,
     pub new_status: Option<TrackStatus>,
     pub suppress_execution: bool,
 }
@@ -22,6 +23,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 .into_iter()
                 .collect(),
             desired_exposure: target,
+            applied_risk_cap: None,
             new_status: Some(TrackStatus::Terminated),
             suppress_execution: delta.is_zero(),
         };
@@ -34,6 +36,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 .into_iter()
                 .collect(),
             desired_exposure: target_override,
+            applied_risk_cap: None,
             new_status: Some(TrackStatus::ManualFlattening),
             suppress_execution: delta.is_zero(),
         };
@@ -58,19 +61,21 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
 
     let decision = risk::evaluate_risk(&intent, &track.budget);
 
-    let (approved_target, mut events) = match decision {
-        RiskDecision::Allow(target) => (target, vec![]),
-        RiskDecision::Cap(capped) => (
-            capped.clone(),
-            vec![DomainEvent::RiskCapApplied {
+    let (approved_target, applied_risk_cap, mut events) = match decision {
+        RiskDecision::Allow(target) => (target, None, vec![]),
+        RiskDecision::Cap(capped) => {
+            let applied_risk_cap = AppliedRiskCap {
                 intended: target.clone(),
-                capped,
-            }],
-        ),
+                capped: capped.clone(),
+            };
+            let event = risk_cap_applied_event(track, &applied_risk_cap);
+            (capped, Some(applied_risk_cap), event.into_iter().collect())
+        }
         RiskDecision::Deny { reason } => {
             return TargetReconcileResult {
                 events: vec![DomainEvent::RiskDenied { reason }],
                 desired_exposure: track.current_exposure.clone(),
+                applied_risk_cap: None,
                 new_status: None,
                 suppress_execution: true,
             };
@@ -90,6 +95,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         return TargetReconcileResult {
             events,
             desired_exposure: approved_target,
+            applied_risk_cap,
             new_status,
             suppress_execution: true,
         };
@@ -104,6 +110,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         return TargetReconcileResult {
             events: vec![DomainEvent::RiskDenied { reason }],
             desired_exposure: track.current_exposure.clone(),
+            applied_risk_cap: None,
             new_status: None,
             suppress_execution: true,
         };
@@ -114,6 +121,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         return TargetReconcileResult {
             events,
             desired_exposure: approved_target,
+            applied_risk_cap,
             new_status,
             suppress_execution: true,
         };
@@ -126,6 +134,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     TargetReconcileResult {
         events,
         desired_exposure: approved_target,
+        applied_risk_cap,
         new_status,
         suppress_execution: false,
     }
@@ -143,6 +152,18 @@ fn exposure_target_change_event(
         from: previous_target,
         to: next_target.clone(),
     })
+}
+
+fn risk_cap_applied_event(
+    track: &TrackRuntime,
+    applied_risk_cap: &AppliedRiskCap,
+) -> Option<DomainEvent> {
+    (track.active_risk_cap.as_ref() != Some(applied_risk_cap)).then_some(
+        DomainEvent::RiskCapApplied {
+            intended: applied_risk_cap.intended.clone(),
+            capped: applied_risk_cap.capped.clone(),
+        },
+    )
 }
 
 fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
@@ -467,6 +488,70 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
         );
+    }
+
+    #[test]
+    fn reconcile_target_emits_risk_cap_event_when_cap_is_new_even_if_capped_target_matches_desired()
+    {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(Exposure(4.0));
+        track.budget = CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        };
+
+        let result = reconcile_target(&track, 90.0);
+
+        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert!(!result.suppress_execution);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::RiskCapApplied { intended, capped }
+                if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+        )));
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }))
+        );
+        assert_eq!(
+            result.applied_risk_cap,
+            Some(AppliedRiskCap {
+                intended: Exposure(8.0),
+                capped: Exposure(4.0),
+            })
+        );
+    }
+
+    #[test]
+    fn reconcile_target_does_not_repeat_risk_cap_event_when_same_cap_is_already_active() {
+        let mut track = test_runtime();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(Exposure(4.0));
+        track.active_risk_cap = Some(AppliedRiskCap {
+            intended: Exposure(8.0),
+            capped: Exposure(4.0),
+        });
+        track.budget = CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        };
+
+        let result = reconcile_target(&track, 90.0);
+
+        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert!(!result.suppress_execution);
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::RiskCapApplied { .. }))
+        );
+        assert_eq!(result.applied_risk_cap, track.active_risk_cap);
     }
 
     #[test]

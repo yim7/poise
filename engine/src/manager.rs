@@ -163,6 +163,12 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .snapshot();
+        let previous_active_risk_cap = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+            .active_risk_cap
+            .clone();
 
         let (events, effects) = self.observe_market(id, observation)?;
         let next_snapshot = self
@@ -213,6 +219,7 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         track.restore_from_snapshot(&previous_snapshot)?;
+        track.active_risk_cap = previous_active_risk_cap;
         track.strategy_price = strategy_price;
         track.strategy_price_status = strategy_price_status;
         track.mark_price = mark_price;
@@ -358,7 +365,7 @@ impl TrackManager {
         }
         // Pause disables strategy targeting, but does not rewrite observed exchange state.
         track.status = TrackStatus::Paused;
-        track.desired_exposure = None;
+        Self::clear_targeting_state(track);
         Ok(())
     }
 
@@ -380,8 +387,7 @@ impl TrackManager {
                     .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
                 track.manual_target_override = None;
                 track.status = TrackStatus::WaitingMarketData;
-                track.desired_exposure = None;
-                track.replacement_gate_reason = None;
+                Self::clear_targeting_state(track);
                 Self::live_strategy_price_for(track)
             };
 
@@ -398,8 +404,7 @@ impl TrackManager {
                     .get_mut(&track_id)
                     .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
                 track.status = TrackStatus::WaitingMarketData;
-                track.desired_exposure = None;
-                track.replacement_gate_reason = None;
+                Self::clear_targeting_state(track);
                 Self::live_strategy_price_for(track)
             };
 
@@ -453,8 +458,7 @@ impl TrackManager {
             .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
         let (status, exposure, replacement_gate_reason, executor_state) = resumed_state;
         track.status = status;
-        track.desired_exposure = exposure;
-        track.replacement_gate_reason = replacement_gate_reason;
+        Self::apply_targeting_state(track, exposure, None, replacement_gate_reason);
         track.executor_state = executor_state;
 
         Ok((vec![], vec![]))
@@ -473,8 +477,7 @@ impl TrackManager {
 
             track.manual_target_override = None;
             track.status = TrackStatus::Terminated;
-            track.desired_exposure = Some(Exposure(0.0));
-            track.replacement_gate_reason = None;
+            Self::apply_targeting_state(track, Some(Exposure(0.0)), None, None);
             Self::live_strategy_price_for(track)
         };
 
@@ -497,8 +500,7 @@ impl TrackManager {
 
             track.manual_target_override = Some(Exposure(0.0));
             track.status = TrackStatus::ManualFlattening;
-            track.desired_exposure = Some(Exposure(0.0));
-            track.replacement_gate_reason = None;
+            Self::apply_targeting_state(track, Some(Exposure(0.0)), None, None);
             Self::live_strategy_price_for(track)
         };
 
@@ -952,8 +954,12 @@ impl TrackManager {
                 if let Some(new_status) = planned.new_status {
                     track.status = new_status;
                 }
-                track.desired_exposure = Some(planned.desired_exposure);
-                track.replacement_gate_reason = planned.replacement_gate_reason;
+                Self::apply_targeting_state(
+                    track,
+                    Some(planned.desired_exposure),
+                    planned.applied_risk_cap,
+                    planned.replacement_gate_reason,
+                );
                 track.executor_state = planned.executor_state;
                 Ok((planned.events, effects))
             }
@@ -971,8 +977,7 @@ impl TrackManager {
 
         if matches!(self.tracks[id].status, TrackStatus::Paused) {
             let track = self.tracks.get_mut(id).unwrap();
-            track.desired_exposure = None;
-            track.replacement_gate_reason = None;
+            Self::clear_targeting_state(track);
             return Ok((vec![], vec![]));
         }
 
@@ -984,6 +989,7 @@ impl TrackManager {
             mut events,
             effects: planned_effects,
             desired_exposure,
+            applied_risk_cap,
             new_status,
             replacement_gate_reason,
             executor_state,
@@ -998,8 +1004,12 @@ impl TrackManager {
         if let Some(new_status) = new_status {
             track.status = new_status;
         }
-        track.desired_exposure = Some(desired_exposure);
-        track.replacement_gate_reason = replacement_gate_reason;
+        Self::apply_targeting_state(
+            track,
+            Some(desired_exposure),
+            applied_risk_cap,
+            replacement_gate_reason,
+        );
         track.executor_state = executor_state;
 
         if let Some(event) = replacement_gate_event {
@@ -1007,6 +1017,21 @@ impl TrackManager {
         }
 
         Ok((events, effects))
+    }
+
+    fn clear_targeting_state(track: &mut TrackRuntime) {
+        Self::apply_targeting_state(track, None, None, None);
+    }
+
+    fn apply_targeting_state(
+        track: &mut TrackRuntime,
+        desired_exposure: Option<Exposure>,
+        active_risk_cap: Option<crate::runtime::AppliedRiskCap>,
+        replacement_gate_reason: Option<poise_core::events::ReplacementGateReason>,
+    ) {
+        track.desired_exposure = desired_exposure;
+        track.active_risk_cap = active_risk_cap;
+        track.replacement_gate_reason = replacement_gate_reason;
     }
 
     fn guard_market_data_freshness(&mut self, id: &TrackId) -> Result<bool> {
@@ -1087,6 +1112,7 @@ impl TrackManager {
                 events: target.events,
                 effects: vec![TrackEffect::NoOp],
                 desired_exposure: target.desired_exposure,
+                applied_risk_cap: target.applied_risk_cap,
                 new_status: target.new_status,
                 replacement_gate_reason: None,
                 executor_state: track.executor_state.clone(),
@@ -1105,6 +1131,7 @@ impl TrackManager {
                 events: target.events,
                 effects: vec![TrackEffect::NoOp],
                 desired_exposure: target.desired_exposure.clone(),
+                applied_risk_cap: target.applied_risk_cap,
                 new_status: target.new_status,
                 replacement_gate_reason: None,
                 executor_state,
@@ -1119,6 +1146,7 @@ impl TrackManager {
             events: target.events,
             effects: plan.effects,
             desired_exposure: target.desired_exposure,
+            applied_risk_cap: target.applied_risk_cap,
             new_status: target.new_status,
             replacement_gate_reason: plan.replacement_gate_reason,
             executor_state: plan.state,
@@ -1130,6 +1158,7 @@ struct PlannedInventoryExecution {
     events: Vec<DomainEvent>,
     effects: Vec<TrackEffect>,
     desired_exposure: Exposure,
+    applied_risk_cap: Option<crate::runtime::AppliedRiskCap>,
     new_status: Option<TrackStatus>,
     replacement_gate_reason: Option<poise_core::events::ReplacementGateReason>,
     executor_state: ExecutorState,
@@ -2311,6 +2340,36 @@ mod tests {
                 .unwrap()
                 .desired_exposure,
             Some(2.4)
+        );
+    }
+
+    #[test]
+    fn observe_market_live_only_preserves_active_risk_cap_memory() {
+        let mut manager = test_manager();
+        register_test_track(&mut manager, "btc1", "BTCUSDT");
+
+        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
+        track.status = TrackStatus::Active;
+        track.current_exposure = Exposure(2.0);
+        track.desired_exposure = Some(Exposure(2.0));
+        track.active_risk_cap = Some(crate::runtime::AppliedRiskCap {
+            intended: Exposure(8.0),
+            capped: Exposure(4.0),
+        });
+        track.config.notional_per_unit = 100.0;
+        track.config.min_rebalance_units = 0.5;
+
+        let outcome = manager
+            .observe_market_mutation(&TrackId::new("btc1"), quoted_market_observation(97.0))
+            .unwrap();
+
+        assert!(matches!(outcome, MarketMutationOutcome::LiveOnly));
+        assert_eq!(
+            manager.get_track("btc1").unwrap().active_risk_cap,
+            Some(crate::runtime::AppliedRiskCap {
+                intended: Exposure(8.0),
+                capped: Exposure(4.0),
+            })
         );
     }
 

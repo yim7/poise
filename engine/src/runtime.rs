@@ -56,6 +56,12 @@ pub struct RiskState {
     pub account_capacity_constraint: AccountCapacityConstraint,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedRiskCap {
+    pub intended: Exposure,
+    pub capped: Exposure,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LiveQuoteState {
     pub strategy_price: Option<f64>,
@@ -214,6 +220,7 @@ pub struct TrackRuntime {
     pub(crate) current_exposure: Exposure,
     // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
     pub(crate) desired_exposure: Option<Exposure>,
+    pub(crate) active_risk_cap: Option<AppliedRiskCap>,
     pub(crate) manual_target_override: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
@@ -280,6 +287,7 @@ impl TrackRuntime {
             status: TrackStatus::WaitingMarketData,
             current_exposure: Exposure(0.0),
             desired_exposure: None,
+            active_risk_cap: None,
             manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
@@ -397,6 +405,7 @@ impl TrackRuntime {
         self.status = snapshot.status.clone();
         self.current_exposure = snapshot.current_exposure.clone();
         self.desired_exposure = snapshot.desired_exposure.clone();
+        self.active_risk_cap = None;
         self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
@@ -773,6 +782,7 @@ mod tests {
                 blocked_reason: Some("insufficient_margin".into()),
                 max_increase_notional: Some(1_500.0),
             },
+            ..RiskState::default()
         };
         runtime.ledger_state = TrackLedgerState {
             gross_realized_pnl_today: 1.0,
@@ -893,6 +903,10 @@ mod tests {
         runtime.status = TrackStatus::Active;
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
+        runtime.active_risk_cap = Some(super::AppliedRiskCap {
+            intended: Exposure(8.0),
+            capped: Exposure(4.0),
+        });
         runtime.strategy_price = Some(96.0);
         runtime.strategy_price_status = StrategyPriceStatus::Live;
         runtime.executor_state = test_executor_state();
@@ -901,6 +915,7 @@ mod tests {
         let mut fresh = test_runtime();
         fresh.restore_from_snapshot(&snapshot).unwrap();
 
+        assert_eq!(fresh.active_risk_cap, None);
         assert_eq!(fresh.snapshot(), snapshot);
     }
 

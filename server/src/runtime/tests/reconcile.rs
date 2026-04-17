@@ -59,6 +59,60 @@ async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
 }
 
 #[tokio::test]
+async fn repeated_reconcile_does_not_persist_duplicate_risk_cap_events() {
+    let fixture = runtime_fixture(
+        None,
+        btc_position(0.0, 0.0),
+        vec![],
+        CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        },
+    )
+    .await;
+
+    let first = fixture.state.observe_market("BTCUSDT", 90.0).await.unwrap();
+    assert!(first.events.iter().any(|event| matches!(
+        event,
+        DomainEvent::RiskCapApplied { intended, capped }
+            if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+    )));
+
+    let second = fixture.state.observe_market("BTCUSDT", 90.0).await.unwrap();
+    assert!(
+        !second
+            .events
+            .iter()
+            .any(|event| matches!(event, DomainEvent::RiskCapApplied { .. }))
+    );
+}
+
+#[tokio::test]
+async fn first_reconcile_emits_risk_cap_when_desired_exposure_already_matches_capped_target() {
+    let mut snapshot = test_snapshot();
+    snapshot.current_exposure = Exposure(0.0);
+    snapshot.desired_exposure = Some(Exposure(4.0));
+    let fixture = runtime_fixture(
+        Some(snapshot),
+        btc_position(0.0, 0.0),
+        vec![],
+        CapacityBudget {
+            max_notional: 1500.0,
+            ..test_budget()
+        },
+    )
+    .await;
+
+    let transition = fixture.state.observe_market("BTCUSDT", 90.0).await.unwrap();
+
+    assert!(transition.events.iter().any(|event| matches!(
+        event,
+        DomainEvent::RiskCapApplied { intended, capped }
+            if *intended == Exposure(8.0) && *capped == Exposure(4.0)
+    )));
+}
+
+#[tokio::test]
 async fn shutdown_releases_recovery_notification_subscription() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
