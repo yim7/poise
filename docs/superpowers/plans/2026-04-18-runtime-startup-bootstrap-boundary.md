@@ -788,11 +788,12 @@ Implemented in: `18865fc`
 ### Task 3: 全量验收并同步文档
 
 **Files:**
+- Modify: `server/src/assembly.rs` to remove stale assembly-owned startup probe assertions discovered during full verification
 - Modify: `docs/superpowers/specs/2026-04-18-runtime-startup-bootstrap-boundary-design.md` if implementation forces wording adjustment
 - Modify: `docs/superpowers/plans/2026-04-18-runtime-startup-bootstrap-boundary.md`
 - Modify: `TODO.md`
 
-- [ ] **Step 1: 跑全量验收，确认 startup 语义和周边测试都通过**
+- [x] **Step 1: 跑全量验收，确认 startup 语义和周边测试都通过**
 
 Run:
 
@@ -808,7 +809,7 @@ Expected:
 - runtime tests 全部通过新 bootstrap owner
 - server crate 全量通过
 
-- [ ] **Step 2: 对照 spec 回扫实现，修正文档差异**
+- [x] **Step 2: 对照 spec 回扫实现，修正文档差异**
 
 核对：
 
@@ -819,6 +820,11 @@ Expected:
 - runtime tests 是否继续通过 prepared definition owner 获取 `startup_definition()`
 
 如果实现与 spec 或 plan 命名有小偏差，先改文档，再结束。
+
+结果：
+
+- spec 边界与实现一致，无需改 spec wording
+- 全量 assembly 验收暴露两条旧的 assembly-owned startup probe 测试残留，已从 `server/src/assembly.rs` 删除
 
 - [ ] **Step 3: Commit**
 

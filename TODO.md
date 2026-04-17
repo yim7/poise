@@ -1,6 +1,6 @@
 # 任务追踪
 
-- [ ] 收紧 runtime 启动 bootstrap 边界
+- [x] 收紧 runtime 启动 bootstrap 边界
   - 设计：[`docs/superpowers/specs/2026-04-18-runtime-startup-bootstrap-boundary-design.md`](docs/superpowers/specs/2026-04-18-runtime-startup-bootstrap-boundary-design.md)
   - 计划：[`docs/superpowers/plans/2026-04-18-runtime-startup-bootstrap-boundary.md`](docs/superpowers/plans/2026-04-18-runtime-startup-bootstrap-boundary.md)
   - 目标：把启动期实时交易所状态探测、保证金预检、guard seed 和初始 exchange state sync 收到同一条 runtime bootstrap 路径里，避免 `assembly` 和 `startup_sync` 各自维护一套启动探测语义。
