@@ -826,7 +826,7 @@ Expected:
 - spec 边界与实现一致，无需改 spec wording
 - 全量 assembly 验收暴露两条旧的 assembly-owned startup probe 测试残留，已从 `server/src/assembly.rs` 删除
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-18-runtime-startup-bootstrap-boundary-design.md docs/superpowers/plans/2026-04-18-runtime-startup-bootstrap-boundary.md TODO.md
@@ -834,6 +834,8 @@ git commit -m "docs: sync runtime startup bootstrap plan and spec"
 ```
 
 执行后在本 task 下追加一行：`Implemented in: <commit-sha>`
+
+Implemented in: `2e5e32e`
 
 ## Guardrails
 
