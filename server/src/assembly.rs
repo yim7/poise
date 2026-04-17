@@ -17,9 +17,9 @@ use poise_application::{
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{AccountPort, ClockPort, MetadataPort};
+use poise_engine::ports::{ClockPort, MetadataPort};
 #[cfg(test)]
-use poise_engine::ports::{AccountSummaryPort, ExecutionPort, MarketDataPort};
+use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
 use poise_engine::track::{Instrument, TrackId, Venue};
 #[cfg(test)]
 use tokio::sync::RwLock;

@@ -5,9 +5,9 @@ use poise_engine::ports::{
 };
 use poise_engine::track::Venue;
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone)]
 pub struct Exchange {
+    #[cfg(test)]
     venue: Venue,
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
@@ -25,7 +25,11 @@ impl Exchange {
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
     ) -> Self {
+        #[cfg(not(test))]
+        let _ = venue;
+
         Self {
+            #[cfg(test)]
             venue,
             execution,
             market_data,
@@ -35,26 +39,27 @@ impl Exchange {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn venue(&self) -> Venue {
         self.venue
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn execution(&self) -> &dyn ExecutionPort {
         self.execution.as_ref()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn market_data(&self) -> &dyn MarketDataPort {
         self.market_data.as_ref()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn account_summary(&self) -> &dyn AccountSummaryPort {
         self.account_summary.as_ref()
     }
 
+    #[cfg(test)]
     pub fn account(&self) -> &dyn AccountPort {
         self.account.as_ref()
     }
