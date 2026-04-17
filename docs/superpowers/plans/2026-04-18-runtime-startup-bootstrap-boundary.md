@@ -56,7 +56,7 @@
 - Test: `core/src/strategy.rs`
 - Test: `application/src/track_definition.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 core/application 两层的 startup 预算语义**
+- [x] **Step 1: 先写失败测试，锁住 core/application 两层的 startup 预算语义**
 
 在 `core/src/strategy.rs` 的 tests 模块里先增加这两条回归测试：
 
@@ -136,7 +136,7 @@ fn startup_definition_required_additional_notional_clamps_to_zero() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -152,7 +152,7 @@ Expected:
 - `TrackPreparedDefinition` 还没有 `startup_definition()`
 - `TrackStartupDefinition` 还不存在
 
-- [ ] **Step 3: 先补 core helper，再实现 TrackStartupDefinition 和 startup_definition() 投影**
+- [x] **Step 3: 先补 core helper，再实现 TrackStartupDefinition 和 startup_definition() 投影**
 
 先在 `core/src/strategy.rs` 的 `impl TrackConfig` 里增加：
 
@@ -221,7 +221,7 @@ pub use track_definition::{
 };
 ```
 
-- [ ] **Step 4: 跑 Task 1 回归**
+- [x] **Step 4: 跑 Task 1 回归**
 
 Run:
 
@@ -234,7 +234,7 @@ Expected:
 - startup definition 的 owner 固定在 application 边界
 - runtime 只需要 `required_additional_notional(position_qty)`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/src/strategy.rs application/src/track_definition.rs application/src/lib.rs docs/superpowers/plans/2026-04-18-runtime-startup-bootstrap-boundary.md
@@ -242,6 +242,8 @@ git commit -m "feat(application): add track startup definitions"
 ```
 
 执行后在本 task 下追加一行：`Implemented in: <commit-sha>`
+
+Implemented in: `3219271`
 
 ### Task 2: 在同一个提交边界内完成 startup owner 切换
 
