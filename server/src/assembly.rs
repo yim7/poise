@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 #[cfg(test)]
 use std::path::Path;
@@ -244,22 +244,12 @@ async fn assemble_with_state_store(
     )?;
 
     let mut manager = TrackManager::new(clock.clone());
-    let mut account_capacity_snapshots = HashMap::new();
+    let mut startup_definitions = Vec::new();
     for track in prepared_registry.iter() {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
         let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
-        let account_capacity_snapshot =
-            load_account_capacity_snapshot_with_retry(exchange.account(), &instrument).await?;
-        if track.budget().max_notional > account_capacity_snapshot.max_increase_notional {
-            return Err(anyhow!(
-                "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
-                track_id.as_str(),
-                track.budget().max_notional,
-                account_capacity_snapshot.max_increase_notional
-            ));
-        }
-        account_capacity_snapshots.insert(instrument.clone(), account_capacity_snapshot);
+        startup_definitions.push(track.startup_definition());
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             instrument,
@@ -384,7 +374,7 @@ async fn assemble_with_state_store(
         runtime_test_context: runtime_test_context.clone(),
         #[cfg(test)]
         effect_worker_test_context: effect_worker_test_context.clone(),
-        runtime: ServerRuntime::with_account_capacity_snapshots(
+        runtime: ServerRuntime::with_startup_definitions(
             runtime_state,
             effect_worker_state,
             RuntimePorts::new(
@@ -394,7 +384,7 @@ async fn assemble_with_state_store(
                 exchange.metadata_port(),
                 clock,
             ),
-            account_capacity_snapshots,
+            startup_definitions,
             Duration::from_secs(1),
         ),
     })
@@ -427,35 +417,6 @@ async fn load_exchange_info_with_retry(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("failed to load exchange info")))
-}
-
-async fn load_account_capacity_snapshot_with_retry(
-    account: &dyn AccountPort,
-    instrument: &Instrument,
-) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-    let mut last_error = None;
-
-    for attempt in 0..STARTUP_RETRY_ATTEMPTS {
-        match account.get_account_capacity_snapshot(instrument).await {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(error) => {
-                if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
-                    return Err(error);
-                }
-                tracing::warn!(
-                    instrument = %instrument.symbol,
-                    attempt = attempt + 1,
-                    max_attempts = STARTUP_RETRY_ATTEMPTS,
-                    "startup account capacity probe failed: {error}"
-                );
-                last_error = Some(error);
-            }
-        }
-
-        sleep(STARTUP_RETRY_DELAY).await;
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow!("failed to load account capacity snapshot")))
 }
 
 impl ServerPlatform {
@@ -1107,8 +1068,8 @@ total_loss_limit = 600.0
     }
 
     #[tokio::test]
-    async fn startup_preparation_builds_runtime_exchange_before_setting_leverage_and_loading_capacity(
-    ) {
+    async fn startup_preparation_builds_runtime_exchange_before_setting_leverage_and_loading_capacity()
+     {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let call_log = Arc::new(Mutex::new(Vec::new()));
         let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
@@ -1145,10 +1106,7 @@ total_loss_limit = 600.0
                     let call_log = call_log.clone();
                     let startup_exchange = startup_exchange.clone();
                     async move {
-                        call_log
-                            .lock()
-                            .unwrap()
-                            .push("build_exchange".to_string());
+                        call_log.lock().unwrap().push("build_exchange".to_string());
                         Ok(Exchange::new(
                             Venue::Binance,
                             Arc::new(FakeExecutionPort),
@@ -1163,8 +1121,10 @@ total_loss_limit = 600.0
             {
                 let call_log = call_log.clone();
                 move || {
-                    Ok(Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone()))
-                        as Arc<dyn SymbolLeverageSetter>)
+                    Ok(
+                        Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone()))
+                            as Arc<dyn SymbolLeverageSetter>,
+                    )
                 }
             },
         )
@@ -1188,6 +1148,90 @@ total_loss_limit = 600.0
                 "set_leverage:BTCUSDT:20".to_string(),
                 "get_exchange_info:BTCUSDT".to_string(),
                 "get_account_capacity_snapshot:BTCUSDT".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_preparation_builds_runtime_exchange_before_setting_leverage_and_loading_exchange_info()
+     {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
+        let config = Config {
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
+                max_notional: Some(3_000.0),
+                leverage: Some(20),
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
+                tick_timeout_secs: None,
+            }],
+            exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
+        };
+        let prepared_registry = test_prepared_registry(&config);
+        let exchange = super::build_exchange_and_prepare_startup_with(
+            &config,
+            prepared_registry.as_ref(),
+            {
+                let call_log = call_log.clone();
+                let startup_exchange = startup_exchange.clone();
+                move || {
+                    let call_log = call_log.clone();
+                    let startup_exchange = startup_exchange.clone();
+                    async move {
+                        call_log.lock().unwrap().push("build_exchange".to_string());
+                        Ok(Exchange::new(
+                            Venue::Binance,
+                            Arc::new(FakeExecutionPort),
+                            Arc::new(FakeMarketData::empty()),
+                            Arc::new(FakeAccountSummaryPort),
+                            startup_exchange.clone(),
+                            startup_exchange,
+                        ))
+                    }
+                }
+            },
+            {
+                let call_log = call_log.clone();
+                move || {
+                    Ok(
+                        Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone()))
+                            as Arc<dyn SymbolLeverageSetter>,
+                    )
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        super::assemble_with_state_store(
+            &config,
+            prepared_registry,
+            exchange,
+            StateRepositories::new(repository),
+            Arc::new(SystemClock),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *call_log.lock().unwrap(),
+            vec![
+                "build_exchange".to_string(),
+                "set_leverage:BTCUSDT:20".to_string(),
+                "get_exchange_info:BTCUSDT".to_string(),
             ]
         );
     }
@@ -1229,10 +1273,7 @@ total_loss_limit = 600.0
                     let call_log = call_log.clone();
                     let startup_exchange = startup_exchange.clone();
                     async move {
-                        call_log
-                            .lock()
-                            .unwrap()
-                            .push("build_exchange".to_string());
+                        call_log.lock().unwrap().push("build_exchange".to_string());
                         Ok(Exchange::new(
                             Venue::Binance,
                             Arc::new(FakeExecutionPort),
@@ -1257,7 +1298,9 @@ total_loss_limit = 600.0
         .await;
 
         let error = match result {
-            Ok(_) => panic!("build_exchange_and_prepare_startup_with should fail on leverage error"),
+            Ok(_) => {
+                panic!("build_exchange_and_prepare_startup_with should fail on leverage error")
+            }
             Err(error) => error,
         };
         let message = error.to_string();
@@ -1267,7 +1310,10 @@ total_loss_limit = 600.0
         assert!(message.contains("exchange rejected leverage"));
         assert_eq!(
             *call_log.lock().unwrap(),
-            vec!["build_exchange".to_string(), "set_leverage:BTCUSDT:7".to_string()]
+            vec![
+                "build_exchange".to_string(),
+                "set_leverage:BTCUSDT:7".to_string()
+            ]
         );
     }
 
@@ -1650,6 +1696,12 @@ total_loss_limit = 600.0
                         exchange,
                         Arc::new(SystemClock),
                     ),
+                    vec![
+                        crate::test_support::test_prepared_registry("btc-core")
+                            .get(&TrackId::new("btc-core"))
+                            .unwrap()
+                            .startup_definition(),
+                    ],
                 ),
             },
             btc_sender,

@@ -10,7 +10,7 @@ use poise_application::{
     AccountMonitor, AccountMonitorConfig, AccountMonitorStore, CommittedTrackWrite, EffectStatus,
     EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect, StoredAccountMonitorState,
     StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationError,
-    TrackMutationStore, TrackQueryService, TrackQueryStore,
+    TrackMutationStore, TrackQueryService, TrackQueryStore, TrackStartupDefinition,
 };
 use poise_core::events::DomainEvent;
 use poise_core::risk::CapacityBudget;
@@ -55,7 +55,7 @@ use super::{
 
 mod execution;
 mod reconcile;
-mod startup_sync;
+mod startup;
 mod support;
 mod user_data;
 

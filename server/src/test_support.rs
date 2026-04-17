@@ -231,6 +231,14 @@ pub(crate) fn test_prepared_registry(track_id: &str) -> Arc<PreparedTrackRegistr
     prepared_registry_for(track_id, default_symbol_for(track_id), test_budget())
 }
 
+pub(crate) fn test_prepared_registry_with_budget(
+    track_id: &str,
+    symbol: &str,
+    budget: CapacityBudget,
+) -> Arc<PreparedTrackRegistry> {
+    prepared_registry_for(track_id, symbol, budget)
+}
+
 fn prepared_registry_for(
     track_id: &str,
     symbol: &str,

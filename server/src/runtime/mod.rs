@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,13 +9,13 @@ use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
 use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
+use poise_application::TrackStartupDefinition;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    AccountCapacitySnapshot, AccountPort, ClockPort, ExchangeOrder, ExecutionPort, MarketDataPort,
-    MetadataPort, Position, UserDataEvent,
+    AccountPort, ClockPort, ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, Position,
+    UserDataEvent,
 };
-use poise_engine::track::Instrument;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -25,7 +24,7 @@ mod guards;
 mod market_data;
 mod market_data_health;
 mod reconcile;
-mod startup_sync;
+mod startup_bootstrap;
 mod submit_preflight;
 mod user_data;
 
@@ -41,6 +40,7 @@ pub struct ServerRuntime {
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
     clock: Arc<dyn ClockPort>,
+    startup_definitions: Vec<TrackStartupDefinition>,
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     account_refresh_interval: Duration,
@@ -130,12 +130,13 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
+        startup_definitions: Vec<TrackStartupDefinition>,
     ) -> Self {
         Self::with_runtime_options(
             state,
             effect_worker_state,
             ports,
-            HashMap::new(),
+            startup_definitions,
             RuntimeIntervals::new(
                 Duration::from_secs(1),
                 Duration::from_secs(5),
@@ -145,18 +146,18 @@ impl ServerRuntime {
         )
     }
 
-    pub(crate) fn with_account_capacity_snapshots(
+    pub(crate) fn with_startup_definitions(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
+        startup_definitions: Vec<TrackStartupDefinition>,
         recovery_retry_interval: Duration,
     ) -> Self {
         Self::with_runtime_options(
             state,
             effect_worker_state,
             ports,
-            account_capacity_snapshots,
+            startup_definitions,
             RuntimeIntervals::new(
                 recovery_retry_interval,
                 Duration::from_secs(5),
@@ -171,6 +172,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
+        startup_definitions: Vec<TrackStartupDefinition>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
@@ -178,7 +180,7 @@ impl ServerRuntime {
             state,
             effect_worker_state,
             ports,
-            HashMap::new(),
+            startup_definitions,
             RuntimeIntervals::new(
                 recovery_retry_interval,
                 audit_interval,
@@ -193,6 +195,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
+        startup_definitions: Vec<TrackStartupDefinition>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
@@ -201,7 +204,7 @@ impl ServerRuntime {
             state,
             effect_worker_state,
             ports,
-            HashMap::new(),
+            startup_definitions,
             RuntimeIntervals::new(
                 recovery_retry_interval,
                 audit_interval,
@@ -215,13 +218,10 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot>,
+        startup_definitions: Vec<TrackStartupDefinition>,
         intervals: RuntimeIntervals,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
-        state
-            .account_margin_guard
-            .replace_snapshots(account_capacity_snapshots);
         Self {
             state,
             effect_worker_state,
@@ -230,6 +230,7 @@ impl ServerRuntime {
             account: ports.account,
             metadata: ports.metadata,
             clock: ports.clock,
+            startup_definitions,
             recovery_retry_interval: intervals.recovery_retry_interval,
             audit_interval: intervals.audit_interval,
             account_refresh_interval: intervals.account_refresh_interval,
@@ -243,9 +244,7 @@ impl ServerRuntime {
         let mut user_receiver = self.account.subscribe_user_data().await?;
         let startup_cutoff =
             retry_startup_step("get_server_time", || self.metadata.get_server_time()).await?;
-        retry_startup_step("startup_sync", || self.startup_sync()).await?;
-        self.replay_startup_user_data(&mut user_receiver, startup_cutoff)
-            .await?;
+        startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
         let startup_pending_submit_effects = self
             .state
             .reconcile
@@ -344,16 +343,12 @@ impl ServerRuntime {
         tracing::info!("shutdown complete");
     }
 
-    async fn startup_sync(&self) -> Result<()> {
-        startup_sync::startup_sync(self).await
-    }
-
-    async fn replay_startup_user_data(
-        &self,
-        receiver: &mut mpsc::Receiver<UserDataEvent>,
-        startup_cutoff: chrono::DateTime<chrono::Utc>,
-    ) -> Result<()> {
-        startup_sync::replay_startup_user_data(self, receiver, startup_cutoff).await
+    #[cfg(test)]
+    async fn complete_startup_for_test(&self) -> Result<()> {
+        let mut user_receiver = self.account.subscribe_user_data().await?;
+        let startup_cutoff =
+            retry_startup_step("get_server_time", || self.metadata.get_server_time()).await?;
+        startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await
     }
 
     fn spawn_market_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
@@ -419,7 +414,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    startup_sync::retry_startup_step(step_name, operation).await
+    startup_bootstrap::retry_startup_step(step_name, operation).await
 }
 
 async fn apply_user_data_event(
@@ -429,7 +424,7 @@ async fn apply_user_data_event(
     event: UserDataEvent,
 ) -> std::result::Result<(), TrackMutationError> {
     let state = state.reconcile_state_view();
-    startup_sync::apply_user_data_event(&state, execution, track_id, event).await
+    startup_bootstrap::apply_user_data_event(&state, execution, track_id, event).await
 }
 
 pub(crate) async fn enqueue_reconcile_request(
@@ -463,22 +458,11 @@ fn mutate_error(error: TrackMutationError) -> anyhow::Error {
 }
 
 fn position_observation(position: &Position) -> PositionObservation {
-    PositionObservation {
-        qty: position.qty,
-        unrealized_pnl: position.unrealized_pnl,
-    }
+    startup_bootstrap::position_observation(position)
 }
 
 fn order_observation(order: &ExchangeOrder) -> OrderObservation {
-    OrderObservation {
-        order_id: order.order_id.clone(),
-        client_order_id: order.client_order_id.clone(),
-        side: order.side,
-        price: order.price,
-        quantity: order.qty,
-        realized_pnl: order.realized_pnl,
-        status: order.status,
-    }
+    startup_bootstrap::order_observation(order)
 }
 
 #[cfg(test)]

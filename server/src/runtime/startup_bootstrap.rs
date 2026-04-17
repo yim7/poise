@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::ports::{ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload};
+use poise_engine::ports::{
+    AccountCapacitySnapshot, ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload,
+};
+use poise_engine::track::Instrument;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -16,29 +20,69 @@ use super::{
     enqueue_reconcile_request, preserve_track_mutation_error,
 };
 
-pub(super) async fn startup_sync(runtime: &ServerRuntime) -> Result<()> {
-    for track in runtime
+struct TrackStartupSeed {
+    track_id: String,
+    position: PositionObservation,
+    open_orders: Vec<OrderObservation>,
+}
+
+pub(super) async fn complete_startup(
+    runtime: &ServerRuntime,
+    receiver: &mut mpsc::Receiver<UserDataEvent>,
+    startup_cutoff: DateTime<Utc>,
+) -> Result<()> {
+    let mut account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot> =
+        HashMap::new();
+    let mut track_seeds = Vec::new();
+
+    for track in &runtime.startup_definitions {
+        let instrument = track.instrument().clone();
+        let position = retry_startup_step("get_position", || {
+            runtime.execution.get_position(&instrument)
+        })
+        .await?;
+        let open_orders = retry_startup_step("get_open_orders", || {
+            runtime.execution.get_open_orders(&instrument)
+        })
+        .await?;
+        let account_capacity_snapshot = retry_startup_step("get_account_capacity_snapshot", || {
+            runtime.account.get_account_capacity_snapshot(&instrument)
+        })
+        .await?;
+
+        let required_additional_notional = track.required_additional_notional(position.qty);
+        if required_additional_notional > account_capacity_snapshot.max_increase_notional {
+            return Err(anyhow!(
+                "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
+                track.track_id().as_str(),
+                required_additional_notional,
+                account_capacity_snapshot.max_increase_notional
+            ));
+        }
+
+        account_capacity_snapshots.insert(instrument, account_capacity_snapshot);
+        track_seeds.push(TrackStartupSeed {
+            track_id: track.track_id().as_str().to_string(),
+            position: position_observation(&position),
+            open_orders: open_orders.iter().map(order_observation).collect(),
+        });
+    }
+
+    runtime
         .state
-        .reconcile
-        .observation_service
-        .track_instruments()
-        .await
-    {
-        let position = runtime.execution.get_position(&track.instrument).await?;
-        let open_orders = runtime.execution.get_open_orders(&track.instrument).await?;
+        .account_margin_guard
+        .replace_snapshots(account_capacity_snapshots);
+
+    for seed in track_seeds {
         runtime
             .state
             .reconcile
             .observation_service
-            .sync_exchange_state(
-                &track.id,
-                position_observation(&position),
-                open_orders.iter().map(order_observation).collect(),
-            )
+            .sync_exchange_state(&seed.track_id, seed.position, seed.open_orders)
             .await?;
     }
 
-    Ok(())
+    replay_startup_user_data(runtime, receiver, startup_cutoff).await
 }
 
 pub(super) async fn replay_startup_user_data(

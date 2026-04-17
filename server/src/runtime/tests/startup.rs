@@ -1,6 +1,72 @@
 use super::*;
 
 #[tokio::test]
+async fn startup_bootstrap_restores_claimed_live_order_before_first_tick() {
+    let snapshot = test_snapshot();
+    let live_order = btc_exchange_order(
+        "snapshot-1",
+        "snapshot-1",
+        Side::Buy,
+        94.5,
+        0.25,
+        0.0,
+        OrderStatus::New,
+    );
+    let fixture = runtime_fixture(
+        Some(snapshot),
+        btc_position(7.5, 3.0),
+        vec![live_order],
+        test_budget(),
+    )
+    .await;
+
+    let handles = fixture.runtime.start().await.unwrap();
+    let instance = current_instance(&fixture.state).await;
+
+    assert_eq!(instance.current_exposure, Exposure(2.0));
+    assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
+
+    shutdown(handles).await;
+}
+
+#[tokio::test]
+async fn startup_bootstrap_seeds_account_margin_guard_from_capacity_probe() {
+    let mut budget = test_budget();
+    budget.max_notional = 300.0;
+    let fixture =
+        runtime_fixture_with_account_capacity(None, btc_position(0.0, 0.0), vec![], budget, 500.0)
+            .await;
+
+    let handles = fixture.runtime.start().await.unwrap();
+    let constraint = fixture
+        .state
+        .account_margin_guard
+        .constraint_for(&btc_instrument());
+
+    assert_eq!(constraint.max_increase_notional, Some(500.0));
+    shutdown(handles).await;
+}
+
+#[tokio::test]
+async fn startup_bootstrap_rejects_insufficient_remaining_margin() {
+    let mut budget = test_budget();
+    budget.max_notional = 20_000.0;
+    let fixture = runtime_fixture_with_account_capacity(
+        None,
+        btc_position(195.0, 0.0),
+        vec![],
+        budget,
+        499.0,
+    )
+    .await;
+
+    let error = fixture.runtime.start().await.err().unwrap();
+
+    assert!(error.to_string().contains("required 500"));
+    assert!(error.to_string().contains("available 499"));
+}
+
+#[tokio::test]
 async fn startup_sync_restores_claimed_live_order_before_replanning() {
     let snapshot = test_snapshot();
     let live_order = btc_exchange_order(
@@ -21,7 +87,7 @@ async fn startup_sync_restores_claimed_live_order_before_replanning() {
     .await;
     let save_count_before_start = fixture.persistence.save_transition_count();
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
     assert_eq!(
         fixture.persistence.save_transition_count() - save_count_before_start,
         1,
@@ -108,7 +174,7 @@ async fn startup_sync_defers_replanning_until_first_tick_when_pending_submit_eff
         })
         .await;
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
     let order =
@@ -193,7 +259,7 @@ async fn startup_sync_does_not_duplicate_matching_pending_submit_effect() {
         })
         .await;
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let pending_effects = fixture
         .persistence
@@ -274,7 +340,7 @@ async fn startup_uses_restored_desired_exposure_before_first_tick() {
     )
     .await;
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
     assert_eq!(instance.desired_exposure, Some(Exposure(6.0)));
@@ -302,7 +368,7 @@ async fn startup_without_new_tick_exposes_missing_live_quote_baseline() {
     )
     .await;
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let runtime = current_track_runtime(&fixture.state).await;
     let live_quote = runtime.live_quote_state();
@@ -342,7 +408,7 @@ async fn startup_sync_keeps_slots_empty_when_exchange_has_no_open_orders_and_no_
     )
     .await;
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
     assert_eq!(instance.current_exposure, Exposure(2.0));
@@ -400,7 +466,7 @@ async fn startup_sync_preserves_durable_target_without_rebuilding_submit_pending
             updated_at: Utc::now(),
         })
         .await;
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
     let order = inventory_core_order(&instance).expect("pending submit slot should remain durable");
@@ -575,7 +641,7 @@ async fn startup_sync_clears_orphaned_submit_pending_slot_without_effect() {
     )
     .await;
 
-    fixture.runtime.startup_sync().await.unwrap();
+    fixture.runtime.complete_startup_for_test().await.unwrap();
 
     let instance = current_instance(&fixture.state).await;
     assert!(inventory_core_order(&instance).is_none());
@@ -1254,7 +1320,7 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
         build_test_account_monitor(exchange.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),
     );
-    let runtime = ServerRuntime::with_account_capacity_snapshots(
+    let runtime = ServerRuntime::with_startup_definitions(
         state.runtime_state(),
         worker_state.effect_worker_state,
         RuntimePorts::new(
@@ -1264,7 +1330,7 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
             exchange.metadata_port(),
             clock.clone() as Arc<dyn ClockPort>,
         ),
-        HashMap::new(),
+        vec![test_startup_definition(test_budget())],
         Duration::from_secs(1),
     );
 

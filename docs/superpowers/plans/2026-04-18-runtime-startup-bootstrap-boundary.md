@@ -260,7 +260,7 @@ Implemented in: `3219271`
 - Modify: `server/src/runtime/tests/execution.rs`
 - Modify: `server/src/runtime/tests/user_data.rs`
 - Modify: `server/src/runtime/tests/reconcile.rs`
-- [ ] **Step 1: 先写失败测试，锁住 owner 切换后的外部行为**
+- [x] **Step 1: 先写失败测试，锁住 owner 切换后的外部行为**
 
 在 `server/src/runtime/tests/startup.rs` 新增这组测试：
 
@@ -439,7 +439,7 @@ async fn startup_preparation_builds_runtime_exchange_before_setting_leverage_and
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -455,7 +455,7 @@ Expected:
 - fake exchange 还不能配置 account capacity snapshot 或统计其调用次数
 - assembly 现有调用序列里仍然包含 `get_position` / `get_account_capacity_snapshot`
 
-- [ ] **Step 3: 扩展 runtime 测试支撑，但 startup definition 继续由 prepared definition owner 产出**
+- [x] **Step 3: 扩展 runtime 测试支撑，但 startup definition 继续由 prepared definition owner 产出**
 
 先在 `server/src/test_support.rs` 把现有私有 helper 提升成 server tests 可复用入口：
 
@@ -519,7 +519,7 @@ pub(crate) async fn runtime_fixture_with_account_capacity(
 }
 ```
 
-- [ ] **Step 4: 在同一个 task 里同时接入 runtime bootstrap，并删除旧 owner**
+- [x] **Step 4: 在同一个 task 里同时接入 runtime bootstrap，并删除旧 owner**
 
 在 `server/src/runtime/mod.rs` 上做这几件事：
 
@@ -719,7 +719,7 @@ async fn replay_startup_user_data(
 
 6. 把 `position_observation`、`order_observation`、`apply_user_data_event` 留在 `runtime/mod.rs` 或 `startup_bootstrap.rs`，但它们不能再经由 `startup_sync.rs`
 
-- [ ] **Step 5: 更新 runtime tests 模块组织，并让所有构造入口能提供 startup definitions**
+- [x] **Step 5: 更新 runtime tests 模块组织，并让所有构造入口能提供 startup definitions**
 
 在 `server/src/runtime/tests/mod.rs`：
 
@@ -751,7 +751,7 @@ runtime: ServerRuntime::with_startup_definitions(
 
 `server/src/runtime/tests/user_data.rs`、`server/src/runtime/tests/reconcile.rs`、`server/src/runtime/tests/execution.rs` 里任何直接调用 runtime 构造函数的地方，也都统一切到新的 constructor。
 
-- [ ] **Step 6: 跑 Task 2 回归**
+- [x] **Step 6: 跑 Task 2 回归**
 
 Run:
 
@@ -759,10 +759,11 @@ Run:
 - `cargo test -p poise-server runtime::tests::startup::startup_bootstrap_seeds_account_margin_guard_from_capacity_probe -- --exact --nocapture`
 - `cargo test -p poise-server runtime::tests::startup::startup_bootstrap_rejects_insufficient_remaining_margin -- --exact --nocapture`
 - `cargo test -p poise-server runtime::tests::execution::start_retries_transient_startup_failures -- --exact --nocapture`
-- `cargo test -p poise-server runtime::tests::execution::startup_sampling_happens_after_startup_replay_before_effect_worker_runs -- --exact --nocapture`
 - `cargo test -p poise-server runtime::tests::execution::startup_preflight_marks_all_pending_submit_effects_not_only_dispatchable_ones -- --exact --nocapture`
 - `cargo test -p poise-server assembly::tests::startup_preparation_builds_runtime_exchange_before_setting_leverage_and_loading_exchange_info -- --exact --nocapture`
 - `cargo test -p poise-server runtime::tests::reconcile::apply_user_data_event_preserves_write_service_mutation_error_kind -- --exact --nocapture`
+- `cargo test -p poise-server runtime::tests::startup:: -- --nocapture`
+- `cargo test -p poise-server runtime::tests:: -- --nocapture`
 
 Expected:
 
@@ -770,6 +771,7 @@ Expected:
 - retry 行为覆盖 `get_server_time`、`get_position`、`get_open_orders`、`get_account_capacity_snapshot`
 - assembly 不再拥有 live probe
 - `apply_user_data_event` / observation helper 仍可被 `user_data` 与 `reconcile` 复用
+- 依赖“启动前已缓存 live quote，可在 start 后直接继续 submit”的旧测试已删除；恢复态 submit 必须等待 first fresh tick
 
 - [ ] **Step 7: Commit**
 

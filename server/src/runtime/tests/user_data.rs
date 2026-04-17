@@ -131,6 +131,7 @@ async fn position_update_without_live_quote_does_not_stage_submit_effect() {
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
     let user_task = runtime.spawn_user_task(
@@ -224,6 +225,7 @@ async fn position_update_waits_for_first_tick_before_submitting_reconcile() {
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
     let user_task = runtime.spawn_user_task(

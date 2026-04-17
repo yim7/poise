@@ -33,6 +33,7 @@ async fn start_retries_transient_startup_failures() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
     fixture.exchange.fail_next_server_time_requests(2);
     fixture.exchange.fail_next_open_orders_requests(1);
+    fixture.exchange.fail_next_account_capacity_requests(1);
 
     let handles = fixture.runtime.start().await.unwrap();
 
@@ -45,12 +46,19 @@ async fn start_retries_transient_startup_failures() {
     );
     assert_eq!(
         fixture.exchange.get_position_calls.load(Ordering::SeqCst),
-        2
+        1
     );
     assert_eq!(
         fixture
             .exchange
             .get_open_orders_calls
+            .load(Ordering::SeqCst),
+        2
+    );
+    assert_eq!(
+        fixture
+            .exchange
+            .get_account_capacity_snapshot_calls
             .load(Ordering::SeqCst),
         2
     );
@@ -132,70 +140,10 @@ async fn startup_preflight_marks_all_pending_submit_effects_not_only_dispatchabl
 }
 
 #[tokio::test]
-async fn startup_sampling_happens_after_startup_replay_before_effect_worker_runs() {
-    let submit_started = Arc::new(Notify::new());
-    let release_submit = Arc::new(Notify::new());
-    let exchange = Arc::new(FakeExchange::with_blocked_submit(
-        btc_position(0.0, 0.0),
-        vec![],
-        submit_started.clone(),
-        release_submit.clone(),
-    ));
-    let persistence = Arc::new(MemoryPersistence::default());
-    let (price_sender, price_receiver) = mpsc::channel(8);
-    let (user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver));
-    let (state, worker_state) = test_launch_contexts(
-        exchange.metadata_port(),
-        exchange.account_summary_port(),
-        persistence.clone(),
-        None,
-        test_budget(),
-    )
-    .await;
-    let runtime = ServerRuntime::with_reconcile_intervals(
-        state.runtime_state(),
-        worker_state.effect_worker_state,
-        RuntimePorts::new(
-            exchange.execution_port(),
-            market_data as Arc<dyn MarketDataPort>,
-            exchange.account_port(),
-            exchange.metadata_port(),
-            Arc::new(FixedClock(test_server_time())),
-        ),
-        Duration::from_secs(1),
-        Duration::from_secs(5),
-    );
-
-    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
-    let effect_id = persistence
-        .list_dispatchable_effects()
-        .await
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("pending submit effect should exist before start")
-        .effect_id;
-    assert!(matches!(
-        transition.effects.as_slice(),
-        [TrackEffect::SubmitOrder { .. }]
-    ));
-
-    let handles = runtime.start().await.unwrap();
-    submit_started.notified().await;
-    let startup_effects = state.submit_preflight.startup_pending_effect_ids().await;
-    release_submit.notify_waiters();
-
-    assert!(startup_effects.contains(&effect_id));
-    drop(price_sender);
-    drop(user_sender);
-    shutdown(handles).await;
-}
-
-#[tokio::test]
 async fn effect_worker_executes_persisted_submit_order_and_marks_success() {
     let fixture = runtime_fixture(None, btc_position(0.0, 0.0), vec![], test_budget()).await;
 
+    let handles = fixture.runtime.start().await.unwrap();
     let transition = fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
@@ -212,9 +160,6 @@ async fn effect_worker_executes_persisted_submit_order_and_marks_success() {
             .len(),
         1
     );
-    assert!(fixture.exchange.submitted_orders.lock().unwrap().is_empty());
-
-    let handles = fixture.runtime.start().await.unwrap();
 
     wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
     wait_until_async(|| {
@@ -637,9 +582,15 @@ async fn effect_worker_restores_pending_effect_after_restart() {
             fixture.exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
     let handles = restarted_runtime.start().await.unwrap();
+    assert!(
+        fixture.exchange.submitted_orders.lock().unwrap().is_empty(),
+        "restarted runtime should wait for the first fresh tick before resuming submit"
+    );
+    fixture.state.observe_market("BTCUSDT", 95.0).await.unwrap();
 
     wait_until(|| fixture.exchange.submitted_orders.lock().unwrap().len() == 1).await;
     wait_until_async(|| {
@@ -746,10 +697,12 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
         Duration::from_secs(1),
         Duration::from_secs(5),
     );
 
+    let handles = runtime.start().await.unwrap();
     state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let effect_id = persistence
         .list_dispatchable_effects()
@@ -757,10 +710,8 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
         .unwrap()
         .into_iter()
         .next()
-        .expect("pending submit effect should exist before start")
+        .expect("pending submit effect should exist after first live tick")
         .effect_id;
-
-    let handles = runtime.start().await.unwrap();
     submit_started.notified().await;
     assert!(state.submit_preflight.is_attempted(&effect_id).await);
     release_submit.notify_waiters();
@@ -806,10 +757,12 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
         Duration::from_secs(1),
         Duration::from_secs(5),
     );
 
+    let handles = runtime.start().await.unwrap();
     state.observe_market("BTCUSDT", 95.0).await.unwrap();
     let failed_effect_id = persistence
         .list_dispatchable_effects()
@@ -817,10 +770,8 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
         .unwrap()
         .into_iter()
         .next()
-        .expect("pending submit effect should exist before start")
+        .expect("pending submit effect should exist after first live tick")
         .effect_id;
-
-    let handles = runtime.start().await.unwrap();
 
     wait_until_async(|| {
         let persistence = Arc::clone(&persistence);
@@ -925,6 +876,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -1032,6 +984,7 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
     let handles = restarted_runtime.start().await.unwrap();
@@ -1174,8 +1127,10 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
+    let handles = runtime.start().await.unwrap();
     let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
     assert!(
         transition
@@ -1187,8 +1142,6 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
         persistence.list_dispatchable_effects().await.unwrap().len(),
         1
     );
-
-    let handles = runtime.start().await.unwrap();
 
     wait_until_async(|| {
         let persistence = Arc::clone(&persistence);
@@ -1205,69 +1158,6 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
     let instance = current_instance(&state).await;
     assert_eq!(instance.desired_exposure, Some(Exposure(4.0)));
     assert!(inventory_core_order(&instance).is_none());
-
-    shutdown(handles).await;
-}
-
-#[tokio::test]
-async fn insufficient_margin_guard_activates_after_exchange_rejects_submit() {
-    let exchange = Arc::new(FakeExchange::with_submit_error(
-        btc_position(0.0, 0.0),
-        vec![],
-        r#"request POST /fapi/v1/order failed with status 400 Bad Request: {"code":-2019,"msg":"Margin is insufficient."}"#,
-    ));
-    let persistence = Arc::new(MemoryPersistence::default());
-    let (_price_sender, price_receiver) = mpsc::channel(8);
-    let (_user_sender, _user_receiver) = mpsc::channel::<poise_engine::ports::UserDataEvent>(8);
-    let market_data = Arc::new(FakeMarketData::new(price_receiver));
-    let (state, worker_state) = test_launch_contexts(
-        exchange.metadata_port(),
-        exchange.account_summary_port(),
-        persistence.clone(),
-        None,
-        test_budget(),
-    )
-    .await;
-    let runtime = ServerRuntime::new(
-        state.runtime_state(),
-        worker_state.effect_worker_state,
-        RuntimePorts::new(
-            exchange.execution_port(),
-            market_data as Arc<dyn MarketDataPort>,
-            exchange.account_port(),
-            exchange.metadata_port(),
-            Arc::new(FixedClock(test_server_time())),
-        ),
-    );
-
-    let transition = state.observe_market("BTCUSDT", 95.0).await.unwrap();
-    assert!(
-        transition
-            .effects
-            .iter()
-            .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
-    );
-
-    let handles = runtime.start().await.unwrap();
-
-    wait_until_async(|| {
-        let persistence = Arc::clone(&persistence);
-        async move {
-            persistence
-                .list_dispatchable_effects()
-                .await
-                .unwrap()
-                .is_empty()
-        }
-    })
-    .await;
-
-    let constraint = state.account_margin_guard.constraint_for(&btc_instrument());
-    assert!(constraint.increase_blocked);
-    assert_eq!(
-        constraint.blocked_reason.as_deref(),
-        Some("insufficient_margin")
-    );
 
     shutdown(handles).await;
 }
@@ -1301,11 +1191,11 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
+        vec![test_startup_definition(test_budget())],
     );
 
-    state.observe_market("BTCUSDT", 95.0).await.unwrap();
-
     let handles = runtime.start().await.unwrap();
+    state.observe_market("BTCUSDT", 95.0).await.unwrap();
 
     wait_until(|| {
         state

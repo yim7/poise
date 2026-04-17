@@ -34,6 +34,20 @@ pub(crate) async fn runtime_fixture(
     .await
 }
 
+pub(crate) async fn runtime_fixture_with_account_capacity(
+    restored_snapshot: Option<TrackRuntimeSnapshot>,
+    position: Position,
+    open_orders: Vec<ExchangeOrder>,
+    budget: CapacityBudget,
+    max_increase_notional: f64,
+) -> RuntimeFixture {
+    let fixture = runtime_fixture(restored_snapshot, position, open_orders, budget).await;
+    fixture
+        .exchange
+        .set_max_increase_notional(max_increase_notional);
+    fixture
+}
+
 pub(crate) async fn runtime_fixture_with_recovery_retry_interval(
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     position: Position,
@@ -140,6 +154,7 @@ pub(crate) async fn runtime_fixture_with_options(
 
     let clock = options.clock.clone();
     let mut manager = TrackManager::new(clock.clone());
+    let startup_definition = test_startup_definition(budget.clone());
     manager
         .add_track(
             TrackId::new("BTCUSDT"),
@@ -187,6 +202,7 @@ pub(crate) async fn runtime_fixture_with_options(
                 metadata,
                 clock,
             ),
+            vec![startup_definition],
             options.recovery_retry_interval,
             options.audit_interval,
             options.account_refresh_interval,
@@ -473,6 +489,13 @@ pub(crate) fn test_budget() -> CapacityBudget {
     }
 }
 
+pub(crate) fn test_startup_definition(budget: CapacityBudget) -> TrackStartupDefinition {
+    crate::test_support::test_prepared_registry_with_budget("BTCUSDT", "BTCUSDT", budget)
+        .get(&TrackId::new("BTCUSDT"))
+        .unwrap()
+        .startup_definition()
+}
+
 pub(crate) fn test_server_time() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap()
 }
@@ -697,13 +720,16 @@ pub(crate) struct FakeExchange {
     pub(crate) get_server_time_calls: AtomicUsize,
     pub(crate) get_position_calls: AtomicUsize,
     pub(crate) get_open_orders_calls: AtomicUsize,
+    pub(crate) get_account_capacity_snapshot_calls: AtomicUsize,
     pub(crate) get_account_summary_calls: AtomicUsize,
     server_time_failures_remaining: AtomicUsize,
     position_failures_remaining: AtomicUsize,
     open_orders_failures_remaining: AtomicUsize,
+    account_capacity_failures_remaining: AtomicUsize,
     submit_error: Mutex<Option<String>>,
     cancel_order_error: Mutex<Option<CancelOrderFailure>>,
     cancel_all_error: Mutex<Option<String>>,
+    max_increase_notional: Mutex<f64>,
     server_time: chrono::DateTime<Utc>,
     sequence: AtomicUsize,
     submit_started: Option<Arc<Notify>>,
@@ -751,13 +777,16 @@ impl FakeExchange {
             get_server_time_calls: AtomicUsize::new(0),
             get_position_calls: AtomicUsize::new(0),
             get_open_orders_calls: AtomicUsize::new(0),
+            get_account_capacity_snapshot_calls: AtomicUsize::new(0),
             get_account_summary_calls: AtomicUsize::new(0),
             server_time_failures_remaining: AtomicUsize::new(0),
             position_failures_remaining: AtomicUsize::new(0),
             open_orders_failures_remaining: AtomicUsize::new(0),
+            account_capacity_failures_remaining: AtomicUsize::new(0),
             submit_error: Mutex::new(None),
             cancel_order_error: Mutex::new(None),
             cancel_all_error: Mutex::new(None),
+            max_increase_notional: Mutex::new(1_000_000.0),
             server_time: test_server_time(),
             sequence: AtomicUsize::new(1),
             submit_started: None,
@@ -835,12 +864,21 @@ impl FakeExchange {
             .store(count, Ordering::SeqCst);
     }
 
+    pub(crate) fn fail_next_account_capacity_requests(&self, count: usize) {
+        self.account_capacity_failures_remaining
+            .store(count, Ordering::SeqCst);
+    }
+
     pub(crate) fn set_open_orders(&self, open_orders: Vec<ExchangeOrder>) {
         *self.open_orders.lock().unwrap() = open_orders;
     }
 
     pub(crate) fn set_position(&self, position: Position) {
         *self.position.lock().unwrap() = position;
+    }
+
+    pub(crate) fn set_max_increase_notional(&self, value: f64) {
+        *self.max_increase_notional.lock().unwrap() = value;
     }
 
     pub(crate) fn account_summary_port(self: &Arc<Self>) -> Arc<dyn AccountSummaryPort> {
@@ -993,8 +1031,22 @@ impl AccountPort for FakeExchangeAccountPort {
         &self,
         _instrument: &Instrument,
     ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+        self.exchange
+            .get_account_capacity_snapshot_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .exchange
+            .account_capacity_failures_remaining
+            .load(Ordering::SeqCst)
+            > 0
+        {
+            self.exchange
+                .account_capacity_failures_remaining
+                .fetch_sub(1, Ordering::SeqCst);
+            return Err(anyhow!("temporary get_account_capacity_snapshot timeout"));
+        }
         Ok(poise_engine::ports::AccountCapacitySnapshot {
-            max_increase_notional: 1_000_000.0,
+            max_increase_notional: *self.exchange.max_increase_notional.lock().unwrap(),
         })
     }
 
@@ -1804,6 +1856,7 @@ pub(crate) async fn build_test_runtime_with_ports(
     let persistence = Arc::new(MemoryPersistence::default());
     let mut manager = TrackManager::new(Arc::new(FixedClock(test_server_time())));
     let instrument = btc_instrument();
+    let startup_definition = test_startup_definition(test_budget());
     manager
         .add_track(
             TrackId::new("BTCUSDT"),
@@ -1842,7 +1895,7 @@ pub(crate) async fn build_test_runtime_with_ports(
     );
 
     RuntimeWithPortsFixture {
-        runtime: ServerRuntime::with_account_capacity_snapshots(
+        runtime: ServerRuntime::with_startup_definitions(
             state.runtime_state(),
             worker_state.effect_worker_state,
             RuntimePorts::new(
@@ -1852,7 +1905,7 @@ pub(crate) async fn build_test_runtime_with_ports(
                 metadata,
                 Arc::new(FixedClock(test_server_time())),
             ),
-            HashMap::new(),
+            vec![startup_definition],
             Duration::from_secs(1),
         ),
         state,

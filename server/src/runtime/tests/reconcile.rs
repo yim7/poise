@@ -736,7 +736,7 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
         Arc::new(TrackProjector::new()),
     );
 
-    let runtime = ServerRuntime::with_account_capacity_snapshots(
+    let runtime = ServerRuntime::with_startup_definitions(
         state.runtime_state(),
         worker_state.effect_worker_state,
         RuntimePorts::new(
@@ -746,7 +746,7 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
         ),
-        HashMap::new(),
+        vec![test_startup_definition(test_budget())],
         Duration::from_secs(1),
     );
 
