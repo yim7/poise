@@ -773,7 +773,7 @@ Expected:
 - `apply_user_data_event` / observation helper 仍可被 `user_data` 与 `reconcile` 复用
 - 依赖“启动前已缓存 live quote，可在 start 后直接继续 submit”的旧测试已删除；恢复态 submit 必须等待 first fresh tick
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add server/src/assembly.rs server/src/runtime/mod.rs server/src/runtime/startup_bootstrap.rs server/src/runtime/tests/mod.rs server/src/runtime/tests/startup.rs server/src/runtime/tests/support.rs server/src/runtime/tests/execution.rs server/src/runtime/tests/user_data.rs server/src/runtime/tests/reconcile.rs server/src/test_support.rs docs/superpowers/plans/2026-04-18-runtime-startup-bootstrap-boundary.md
@@ -782,6 +782,8 @@ git commit -m "refactor(server): move startup probing into runtime bootstrap"
 ```
 
 执行后在本 task 下追加一行：`Implemented in: <commit-sha>`
+
+Implemented in: `18865fc`
 
 ### Task 3: 全量验收并同步文档
 
