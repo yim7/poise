@@ -4,6 +4,7 @@ mod config;
 mod effect_worker;
 mod event_presentation;
 mod exchange;
+mod exchange_startup;
 mod exchange_freshness;
 mod http;
 mod instance_dir;
@@ -762,6 +763,7 @@ total_loss_limit = 600.0
                 shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
                 out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
+                leverage: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
                 tick_timeout_secs: None,

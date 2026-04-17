@@ -8,6 +8,8 @@ use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
 use poise_engine::track::{TrackId, Venue};
 use serde::{Deserialize, Deserializer};
 
+use crate::exchange_startup::build_track_leverage_index;
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -34,6 +36,7 @@ pub struct TrackFileDefinition {
     pub shape_family: Option<ShapeFamily>,
     pub out_of_band_policy: Option<OutOfBandPolicy>,
     pub max_notional: Option<f64>,
+    pub leverage: Option<u32>,
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub tick_timeout_secs: Option<u64>,
@@ -79,6 +82,7 @@ pub fn parse_config(input: &str) -> Result<Config> {
         )
         .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
     }
+    build_track_leverage_index(&config.tracks)?;
     config.account_monitor.validate()?;
     Ok(config)
 }
@@ -173,6 +177,56 @@ total_loss_limit = 600.0
         assert_eq!(input.symbol, "BTCUSDT");
         assert_eq!(input.min_rebalance_units, None);
         assert_eq!(input.tick_timeout_secs, None);
+    }
+
+    #[test]
+    fn parses_explicit_track_leverage() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+leverage = 20
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.tracks[0].leverage, Some(20));
+    }
+
+    #[test]
+    fn rejects_zero_leverage_at_config_boundary() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+leverage = 0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("leverage"));
     }
 
     #[test]

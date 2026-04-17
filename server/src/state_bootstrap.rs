@@ -982,6 +982,7 @@ mod tests {
                 shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
                 out_of_band_policy: Some(poise_core::strategy::OutOfBandPolicy::Freeze),
                 max_notional: None,
+                leverage: None,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
                 tick_timeout_secs: None,
