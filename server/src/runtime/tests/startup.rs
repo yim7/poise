@@ -176,6 +176,15 @@ async fn startup_sync_defers_replanning_until_first_tick_when_pending_submit_eff
 
     fixture.runtime.complete_startup_for_test().await.unwrap();
 
+    assert_eq!(
+        fixture
+            .state
+            .submit_preflight
+            .startup_pending_effect_ids()
+            .await,
+        std::iter::once("BTCUSDT:startup:0".to_string()).collect()
+    );
+
     let instance = current_instance(&fixture.state).await;
     let order =
         inventory_core_order(&instance).expect("pending submit slot should survive startup");

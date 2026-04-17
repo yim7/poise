@@ -52,9 +52,11 @@ mod tests {
             r#"{"leverage":10,"maxNotionalValue":"1000000","symbol":"BTCUSDT"}"#,
         )])
         .await;
-        let control = SymbolLeverageControl::from_rest_client(Arc::new(
-            BinanceRestClient::new(server.base_url(), "api-key", "secret-key"),
-        ));
+        let control = SymbolLeverageControl::from_rest_client(Arc::new(BinanceRestClient::new(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+        )));
 
         control.set_leverage("BTCUSDT", 10).await.unwrap();
 

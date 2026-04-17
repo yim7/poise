@@ -207,8 +207,9 @@ impl TrackStartupDefinition {
     }
 
     pub fn required_additional_notional(&self, position_qty: f64) -> f64 {
-        let current_position_notional =
-            self.track_config.abs_notional_from_position_qty(position_qty);
+        let current_position_notional = self
+            .track_config
+            .abs_notional_from_position_qty(position_qty);
         (self.budget.max_notional - current_position_notional).max(0.0)
     }
 }

@@ -5,7 +5,7 @@ use poise_engine::ports::UserDataEvent;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use super::{ServerRuntime, apply_user_data_event};
+use super::{ServerRuntime, exchange_state::apply_user_data_event};
 
 pub(super) fn spawn_user_task(
     runtime: &ServerRuntime,

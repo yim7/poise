@@ -214,12 +214,29 @@
 - 写入 `account_margin_guard`
 - 调用 `observation_service.sync_exchange_state(...)`
 - 回放 cutoff 之后的 buffered user data
+- seed startup pending submit effects
 
 它拥有以下知识：
 
 - 启动期需要哪些实时状态
 - 这些状态的获取顺序和 retry 策略
 - 哪份探测结果被视为启动真相
+
+### `server/src/runtime/exchange_state.rs`
+
+允许存在一个 runtime 私有的中性 helper 模块，负责：
+
+- `Position` / `ExchangeOrder` 到 observation 的翻译
+- steady-state user data 的吸收
+- startup bootstrap、reconcile、user task 之间共享的 exchange state 应用细节
+
+它不拥有以下知识：
+
+- 启动期需要探测哪些端口
+- startup probe / preflight / replay 的顺序
+- 哪份结果算 startup 真相
+
+也就是说，`exchange_state.rs` 可以承接通用运行时语义，但 startup 时序 owner 仍然固定在 `startup_bootstrap`。
 
 ### `server/src/runtime/startup_sync.rs`
 
@@ -231,7 +248,7 @@
 - 如果需要保留一层纯应用 helper，只允许存在被动的私有函数，例如 `apply_startup_seed(...)`
 - 这类 helper 只能消费 `startup_bootstrap` 已经准备好的 seed，不能访问交易所端口
 
-也就是说，启动探测、预检、apply 和 replay 的 owner 全部固定在 `startup_bootstrap` 模块。
+也就是说，启动探测、预检、startup apply 编排、buffered replay 和 startup pending seed 的 owner 全部固定在 `startup_bootstrap` 模块；通用 exchange state helper 可以留在 runtime 私有模块，但不能重新拥有 startup 时序。
 
 ## 接口形状
 
@@ -283,7 +300,7 @@ pub(super) async fn complete_startup(
 - `AccountCapacitySeed`
   - 供 `account_margin_guard` 初始化的 instrument keyed snapshot 集合
 
-这样 raw exchange DTO 不会越过 `startup_bootstrap` 模块边界。
+这样 raw exchange DTO 不会变成 runtime 外可见的公共结果类型；它们最多只会存在于 `startup_bootstrap` 与 `exchange_state` 这类 runtime 私有 helper 边界内。
 
 ## 启动顺序
 
@@ -303,9 +320,10 @@ pub(super) async fn complete_startup(
    - 写入 `account_margin_guard`
    - 应用 `sync_exchange_state(...)`
    - 回放 cutoff 之后的 buffered user data
+   - seed startup pending submit effects
 9. runtime 进入 live user task
 
-这样，启动探测、保证金预检、runtime 初始 live state、account guard seed 和 startup replay 都归同一个 owner。
+这样，启动探测、保证金预检、runtime 初始 live state、account guard seed、startup replay 和 startup pending seed 都归同一个 owner。
 
 ## 错误语义
 
@@ -336,6 +354,7 @@ pub(super) async fn complete_startup(
   - account margin guard seed
   - exchange state apply
   - buffered replay
+  - startup pending submit seed
 - 现有持仓已经覆盖部分 `max_notional` 时，启动允许通过
 - 剩余 required notional 超过 `max_increase_notional` 时，启动失败
 
@@ -352,7 +371,8 @@ pub(super) async fn complete_startup(
 - `assembly` 不再在装配期查询 `get_position`
 - `assembly` 不再通过构造函数向 runtime 注入 startup `account_capacity_snapshots`
 - runtime 不再通过 server 手工拼装的 DTO 获取 startup 静态输入
-- raw `Position` / `ExchangeOrder` 不再跨出 `startup_bootstrap` 模块边界
+- raw `Position` / `ExchangeOrder` 不再暴露成 runtime 私有 helper 之外的公共结果类型
+- `apply_user_data_event` / observation translation 这类通用运行时语义不再挂在 `startup_bootstrap` 名下
 - `startup_sync.rs` 删除，或降为不访问端口的私有 apply helper
 
 ## 落地拆分
@@ -371,5 +391,5 @@ pub(super) async fn complete_startup(
 - 不让 runtime 通过测试专用的 `manager()` 读取静态定义
 - 不把完整 `PreparedTrackRegistry` 暴露给 runtime
 - 不让 server 自己手工维护第二份 startup 字段切片知识
-- 不把 raw exchange DTO 暴露成 bootstrap 模块外的公共结果类型
+- 不把 raw exchange DTO 暴露成 runtime 私有 helper 之外的公共结果类型
 - 先补 runtime 启动验收测试，再做边界调整

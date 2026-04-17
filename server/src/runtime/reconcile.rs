@@ -14,8 +14,8 @@ use crate::order_outcome::reconcile_execution;
 use crate::server_context::ReconcileState;
 
 use super::{
-    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, ServerRuntime, order_observation,
-    position_observation, preserve_track_mutation_error,
+    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, ServerRuntime, exchange_state,
+    preserve_track_mutation_error,
 };
 
 #[derive(Debug, Clone)]
@@ -252,8 +252,11 @@ pub(super) async fn sync_exchange_state_from_exchange(
             .observation_service
             .sync_exchange_state(
                 track_id,
-                position_observation(&position),
-                open_orders.iter().map(order_observation).collect(),
+                exchange_state::position_observation(&position),
+                open_orders
+                    .iter()
+                    .map(exchange_state::order_observation)
+                    .collect(),
             )
             .await
             .map_err(preserve_track_mutation_error)?;
@@ -262,8 +265,11 @@ pub(super) async fn sync_exchange_state_from_exchange(
             .observation_service
             .sync_exchange_state_without_reconcile(
                 track_id,
-                position_observation(&position),
-                open_orders.iter().map(order_observation).collect(),
+                exchange_state::position_observation(&position),
+                open_orders
+                    .iter()
+                    .map(exchange_state::order_observation)
+                    .collect(),
             )
             .await
             .map_err(preserve_track_mutation_error)?;

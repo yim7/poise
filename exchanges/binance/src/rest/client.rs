@@ -207,7 +207,11 @@ impl BinanceRestClient {
                 AuthMode::Signed,
             )
             .await?;
-        let _ = (response.leverage, response.symbol, response.max_notional_value);
+        let _ = (
+            response.leverage,
+            response.symbol,
+            response.max_notional_value,
+        );
         Ok(())
     }
 

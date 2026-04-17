@@ -160,7 +160,6 @@ impl TrackConfig {
     pub fn abs_notional_from_position_qty(&self, qty: f64) -> f64 {
         self.exposure_from_position_qty(qty).0.abs() * self.notional_per_unit
     }
-
 }
 
 #[cfg(test)]

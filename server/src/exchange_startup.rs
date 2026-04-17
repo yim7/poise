@@ -34,12 +34,12 @@ pub(crate) fn build_symbol_leverage_setter(
     config: &ExchangeConfig,
 ) -> Result<Arc<dyn SymbolLeverageSetter>> {
     match config {
-        ExchangeConfig::Binance(binance_config) => {
-            Ok(Arc::new(poise_binance::SymbolLeverageControl::new(binance_config)?))
-        }
-        ExchangeConfig::Bybit(bybit_config) => {
-            Ok(Arc::new(poise_bybit::SymbolLeverageControl::new(bybit_config)?))
-        }
+        ExchangeConfig::Binance(binance_config) => Ok(Arc::new(
+            poise_binance::SymbolLeverageControl::new(binance_config)?,
+        )),
+        ExchangeConfig::Bybit(bybit_config) => Ok(Arc::new(
+            poise_bybit::SymbolLeverageControl::new(bybit_config)?,
+        )),
     }
 }
 
@@ -71,7 +71,9 @@ pub(crate) async fn apply_track_startup_leverage(
     Ok(())
 }
 
-pub(crate) fn build_track_leverage_index(tracks: &[TrackFileDefinition]) -> Result<TrackLeverageIndex> {
+pub(crate) fn build_track_leverage_index(
+    tracks: &[TrackFileDefinition],
+) -> Result<TrackLeverageIndex> {
     let mut index = HashMap::with_capacity(tracks.len());
     for track in tracks {
         let leverage = track.leverage.unwrap_or(DEFAULT_TRACK_LEVERAGE);
@@ -111,24 +113,18 @@ mod tests {
 
     #[test]
     fn track_leverage_index_preserves_explicit_leverage() {
-        let index = build_track_leverage_index(&[track_definition(
-            "btc-core",
-            "BTCUSDT",
-            Some(25),
-        )])
-        .unwrap();
+        let index =
+            build_track_leverage_index(&[track_definition("btc-core", "BTCUSDT", Some(25))])
+                .unwrap();
 
         assert_eq!(index.get(&TrackId::new("btc-core")), Some(&25));
     }
 
     #[test]
     fn track_leverage_index_stores_only_startup_fields() {
-        let index = build_track_leverage_index(&[track_definition(
-            "btc-core",
-            "BTCUSDT",
-            Some(12),
-        )])
-        .unwrap();
+        let index =
+            build_track_leverage_index(&[track_definition("btc-core", "BTCUSDT", Some(12))])
+                .unwrap();
         let expected = HashMap::from([(TrackId::new("btc-core"), 12)]);
 
         assert_eq!(index, expected);
@@ -136,25 +132,21 @@ mod tests {
 
     #[test]
     fn build_symbol_leverage_setter_accepts_binance_credentials() {
-        build_symbol_leverage_setter(&ExchangeConfig::Binance(
-            poise_binance::Config {
-                deployment: poise_binance::Deployment::Testnet,
-                api_key: Some("demo-key".into()),
-                api_secret: Some("demo-secret".into()),
-            },
-        ))
+        build_symbol_leverage_setter(&ExchangeConfig::Binance(poise_binance::Config {
+            deployment: poise_binance::Deployment::Testnet,
+            api_key: Some("demo-key".into()),
+            api_secret: Some("demo-secret".into()),
+        }))
         .unwrap();
     }
 
     #[test]
     fn build_symbol_leverage_setter_accepts_bybit_credentials() {
-        build_symbol_leverage_setter(&ExchangeConfig::Bybit(
-            poise_bybit::Config {
-                deployment: poise_bybit::Deployment::Testnet,
-                api_key: Some("demo-key".into()),
-                api_secret: Some("demo-secret".into()),
-            },
-        ))
+        build_symbol_leverage_setter(&ExchangeConfig::Bybit(poise_bybit::Config {
+            deployment: poise_bybit::Deployment::Testnet,
+            api_key: Some("demo-key".into()),
+            api_secret: Some("demo-secret".into()),
+        }))
         .unwrap();
     }
 
@@ -207,20 +199,14 @@ mod tests {
         let configured = tracks
             .iter()
             .map(|track| {
-                ConfiguredTrackDefinition::try_from_input(
-                    track.to_configured_input(Venue::Binance),
-                )
+                ConfiguredTrackDefinition::try_from_input(track.to_configured_input(Venue::Binance))
             })
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         PreparedTrackRegistry::new(configured).unwrap()
     }
 
-    fn track_definition(
-        track_id: &str,
-        symbol: &str,
-        leverage: Option<u32>,
-    ) -> TrackDefinition {
+    fn track_definition(track_id: &str, symbol: &str, leverage: Option<u32>) -> TrackDefinition {
         TrackDefinition {
             track_id: track_id.into(),
             symbol: symbol.into(),

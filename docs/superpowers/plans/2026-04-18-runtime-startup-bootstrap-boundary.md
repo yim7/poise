@@ -4,7 +4,7 @@
 
 **Goal:** 把启动期实时交易所状态探测、保证金预检、guard seed 和初始 exchange state sync 从 `assembly` 收到 runtime-owned `startup_bootstrap`，删除两套启动探测语义，同时保持现有启动外部行为不变。
 
-**Architecture:** `poise-application` 在 `TrackPreparedDefinition` 上新增 `TrackStartupDefinition` 行为投影，让 startup 预算语义继续留在 definition owner 内部；`poise-server` 的 `assembly` 只负责静态装配和传递 startup definitions，不再查询 live `position` / `account_capacity_snapshot`。`server::runtime::startup_bootstrap` 统一拥有 `subscribe_user_data -> get_server_time -> probe -> preflight -> apply -> replay`，并删除独立 `startup_sync` owner 与 `with_account_capacity_snapshots` 启动注入路径。
+**Architecture:** `poise-application` 在 `TrackPreparedDefinition` 上新增 `TrackStartupDefinition` 行为投影，让 startup 预算语义继续留在 definition owner 内部；`poise-server` 的 `assembly` 只负责静态装配和传递 startup definitions，不再查询 live `position` / `account_capacity_snapshot`。`ServerRuntime::start()` 只负责 `subscribe_user_data -> get_server_time -> startup_bootstrap::complete_startup -> spawn` 的启动编排；`server::runtime::startup_bootstrap` 从 `probe -> preflight -> startup apply -> replay -> startup pending seed` 开始统一拥有 startup 时序，并删除独立 `startup_sync` owner 与 `with_account_capacity_snapshots` 启动注入路径；共享的 exchange state 吸收细节则下沉到中性的 runtime 私有 helper。
 
 **Tech Stack:** Rust workspace, Tokio, Cargo tests, chrono, Markdown
 
@@ -22,10 +22,12 @@
   由 core owner 提供 `position_qty -> exposure -> abs_notional` 换算 helper，供 startup definition 和 runtime 仓位吸收共用。
 - Create: `server/src/runtime/startup_bootstrap.rs`
   单独拥有 startup probe、预检、guard seed、exchange state apply 和 buffered replay。
+- Create: `server/src/runtime/exchange_state.rs`
+  承接 `Position` / `ExchangeOrder` 到 observation 的翻译，以及 startup / reconcile / user-data 共享的 exchange state 吸收细节，但不拥有 startup 时序。
 - Modify: `server/src/runtime/mod.rs`
   runtime 持有 startup definitions，`start()` 改成调用 `startup_bootstrap::complete_startup`，删除 `with_account_capacity_snapshots` 路径和独立 `startup_sync` owner。
 - Delete: `server/src/runtime/startup_sync.rs`
-  删除旧的启动探测 owner；保留的 helper 要么移动到 `startup_bootstrap.rs`，要么留在 `runtime/mod.rs` 作为不访问端口的共享小函数。
+  删除旧的启动探测 owner；保留的 helper 要么移动到 `startup_bootstrap.rs`，要么下沉到 `exchange_state.rs` 这类不访问启动端口时序的共享小函数。
 - Modify: `server/src/runtime/tests/mod.rs`
   把 startup 测试模块从 `startup_sync` 改成 `startup`。
 - Create: `server/src/runtime/tests/startup.rs`
@@ -558,10 +560,12 @@ pub(crate) fn with_startup_definitions(
 ```rust
 pub async fn start(&self) -> Result<RuntimeHandles> {
     let mut user_receiver = self.account.subscribe_user_data().await?;
-    let startup_cutoff =
-        retry_startup_step("get_server_time", || self.metadata.get_server_time()).await?;
+    let startup_cutoff = startup_bootstrap::retry_startup_step("get_server_time", || {
+        self.metadata.get_server_time()
+    })
+    .await?;
     startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
-    // 之后保留现有 startup pending seed 与 task spawn 逻辑
+    // 之后只保留 task spawn 逻辑
 }
 ```
 
@@ -592,15 +596,15 @@ pub(super) async fn complete_startup(
 
     for track in &runtime.startup_definitions {
         let instrument = track.instrument().clone();
-        let position = super::retry_startup_step("get_position", || {
+        let position = retry_startup_step("get_position", || {
             runtime.execution.get_position(&instrument)
         })
         .await?;
-        let open_orders = super::retry_startup_step("get_open_orders", || {
+        let open_orders = retry_startup_step("get_open_orders", || {
             runtime.execution.get_open_orders(&instrument)
         })
         .await?;
-        let account_capacity_snapshot = super::retry_startup_step(
+        let account_capacity_snapshot = retry_startup_step(
             "get_account_capacity_snapshot",
             || runtime.account.get_account_capacity_snapshot(&instrument),
         )
@@ -620,8 +624,11 @@ pub(super) async fn complete_startup(
         account_capacity_snapshots.insert(instrument.clone(), account_capacity_snapshot);
         track_seeds.push(TrackStartupSeed {
             track_id: track.track_id().as_str().to_string(),
-            position: super::position_observation(&position),
-            open_orders: open_orders.iter().map(super::order_observation).collect(),
+            position: exchange_state::position_observation(&position),
+            open_orders: open_orders
+                .iter()
+                .map(exchange_state::order_observation)
+                .collect(),
         });
     }
 
@@ -639,11 +646,12 @@ pub(super) async fn complete_startup(
             .await?;
     }
 
-    replay_buffered_user_data(runtime, receiver, startup_cutoff).await
+    replay_buffered_user_data(runtime, receiver, startup_cutoff).await?;
+    seed_startup_pending_submit_effects(runtime).await
 }
 ```
 
-并把 buffered replay 逻辑移到本模块里，保留 `apply_user_data_event` 复用。
+并把 buffered replay 逻辑移到本模块里；`apply_user_data_event`、observation translation 等通用吸收细节下沉到中性的 `exchange_state.rs` 私有 helper。
 
 在同一个未提交工作区里，同时完成旧 owner 删除，避免形成已提交的双轨状态：
 
@@ -715,9 +723,9 @@ async fn replay_startup_user_data(
 }
 ```
 
-5. 把 `retry_startup_step` 保留在 `runtime/mod.rs`
+5. `retry_startup_step` 由 `startup_bootstrap.rs` 自己持有，`runtime/mod.rs` 只在启动编排时调用
 
-6. 把 `position_observation`、`order_observation`、`apply_user_data_event` 留在 `runtime/mod.rs` 或 `startup_bootstrap.rs`，但它们不能再经由 `startup_sync.rs`
+6. 把 `position_observation`、`order_observation`、`apply_user_data_event` 下沉到中性的 runtime 私有 helper，例如 `exchange_state.rs`；它们不能再经由 `startup_sync.rs`
 
 - [x] **Step 5: 更新 runtime tests 模块组织，并让所有构造入口能提供 startup definitions**
 
@@ -814,7 +822,7 @@ Expected:
 核对：
 
 - `TrackStartupDefinition` 是否只暴露行为接口
-- `startup_bootstrap` 是否真的同时拥有 probe / preflight / apply / replay
+- `startup_bootstrap` 是否真的同时拥有 probe / preflight / startup apply / replay / startup pending seed
 - `startup_sync.rs` 是否已删除
 - `with_account_capacity_snapshots` 是否已删除
 - runtime tests 是否继续通过 prepared definition owner 获取 `startup_definition()`
@@ -823,7 +831,7 @@ Expected:
 
 结果：
 
-- spec 边界与实现一致，无需改 spec wording
+- spec 和 plan 边界都已同步到当前实现
 - 全量 assembly 验收暴露两条旧的 assembly-owned startup probe 测试残留，已从 `server/src/assembly.rs` 删除
 
 - [x] **Step 3: Commit**
@@ -842,5 +850,5 @@ Implemented in: `2e5e32e`
 - `qty -> strategy budget` 的换算继续留在 `TrackConfig` / `TrackStartupDefinition` owner 一侧，runtime 不得重新拼公式
 - `assembly` 不得重新引入 live `position` / `account_capacity_snapshot` 查询
 - `startup_bootstrap` 是唯一 startup probe owner；不得再长出第二条 `startup_sync` 端口访问路径
-- raw `Position` / `ExchangeOrder` 只能留在 `startup_bootstrap` 内部，不能变成跨模块公共结果类型
+- raw `Position` / `ExchangeOrder` 不能变成 runtime 私有 helper 之外的公共结果类型
 - runtime 不得通过测试专用 `manager()` 或 query 接口反向读取静态定义

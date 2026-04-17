@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,15 +10,14 @@ use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_application::TrackStartupDefinition;
 use poise_engine::manager::ExchangeSyncMode;
-use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
-    AccountPort, ClockPort, ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, Position,
-    UserDataEvent,
+    AccountPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort, UserDataEvent,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 mod account_refresh;
+mod exchange_state;
 mod guards;
 mod market_data;
 mod market_data_health;
@@ -242,24 +240,11 @@ impl ServerRuntime {
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
         let mut user_receiver = self.account.subscribe_user_data().await?;
-        let startup_cutoff =
-            retry_startup_step("get_server_time", || self.metadata.get_server_time()).await?;
+        let startup_cutoff = startup_bootstrap::retry_startup_step("get_server_time", || {
+            self.metadata.get_server_time()
+        })
+        .await?;
         startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
-        let startup_pending_submit_effects = self
-            .state
-            .reconcile
-            .effect_store
-            .list_all_pending_submit_effects()
-            .await?;
-        self.state
-            .reconcile
-            .submit_preflight
-            .seed_startup_pending_submit_effects(
-                startup_pending_submit_effects
-                    .into_iter()
-                    .map(|effect| effect.effect_id),
-            )
-            .await;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let market_data_health_task =
@@ -346,8 +331,10 @@ impl ServerRuntime {
     #[cfg(test)]
     async fn complete_startup_for_test(&self) -> Result<()> {
         let mut user_receiver = self.account.subscribe_user_data().await?;
-        let startup_cutoff =
-            retry_startup_step("get_server_time", || self.metadata.get_server_time()).await?;
+        let startup_cutoff = startup_bootstrap::retry_startup_step("get_server_time", || {
+            self.metadata.get_server_time()
+        })
+        .await?;
         startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await
     }
 
@@ -409,24 +396,6 @@ impl ReconcileStateAccess for RuntimeTestContext {
     }
 }
 
-async fn retry_startup_step<T, F, Fut>(step_name: &'static str, operation: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    startup_bootstrap::retry_startup_step(step_name, operation).await
-}
-
-async fn apply_user_data_event(
-    state: &impl ReconcileStateAccess,
-    execution: &dyn ExecutionPort,
-    track_id: &str,
-    event: UserDataEvent,
-) -> std::result::Result<(), TrackMutationError> {
-    let state = state.reconcile_state_view();
-    startup_bootstrap::apply_user_data_event(&state, execution, track_id, event).await
-}
-
 pub(crate) async fn enqueue_reconcile_request(
     state: &impl ReconcileStateAccess,
     execution: &dyn ExecutionPort,
@@ -455,14 +424,6 @@ fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {
 
 fn mutate_error(error: TrackMutationError) -> anyhow::Error {
     anyhow!(error.message())
-}
-
-fn position_observation(position: &Position) -> PositionObservation {
-    startup_bootstrap::position_observation(position)
-}
-
-fn order_observation(order: &ExchangeOrder) -> OrderObservation {
-    startup_bootstrap::order_observation(order)
 }
 
 #[cfg(test)]

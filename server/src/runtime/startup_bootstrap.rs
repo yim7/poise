@@ -3,27 +3,17 @@ use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::ports::{
-    AccountCapacitySnapshot, ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload,
-};
+use poise_engine::ports::{AccountCapacitySnapshot, UserDataEvent};
 use poise_engine::track::Instrument;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-use crate::exchange_freshness::ExchangeFreshnessReason;
-use crate::order_outcome::{ReconcileReason, ReconcileRequest};
-use crate::server_context::ReconcileState;
-
-use super::{
-    STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_DELAY, ServerRuntime, TrackMutationError,
-    enqueue_reconcile_request, preserve_track_mutation_error,
-};
+use super::{STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_DELAY, ServerRuntime, exchange_state};
 
 struct TrackStartupSeed {
     track_id: String,
-    position: PositionObservation,
-    open_orders: Vec<OrderObservation>,
+    position: poise_engine::observation::PositionObservation,
+    open_orders: Vec<poise_engine::observation::OrderObservation>,
 }
 
 pub(super) async fn complete_startup(
@@ -63,8 +53,11 @@ pub(super) async fn complete_startup(
         account_capacity_snapshots.insert(instrument, account_capacity_snapshot);
         track_seeds.push(TrackStartupSeed {
             track_id: track.track_id().as_str().to_string(),
-            position: position_observation(&position),
-            open_orders: open_orders.iter().map(order_observation).collect(),
+            position: exchange_state::position_observation(&position),
+            open_orders: open_orders
+                .iter()
+                .map(exchange_state::order_observation)
+                .collect(),
         });
     }
 
@@ -82,7 +75,8 @@ pub(super) async fn complete_startup(
             .await?;
     }
 
-    replay_startup_user_data(runtime, receiver, startup_cutoff).await
+    replay_startup_user_data(runtime, receiver, startup_cutoff).await?;
+    seed_startup_pending_submit_effects(runtime).await
 }
 
 pub(super) async fn replay_startup_user_data(
@@ -113,7 +107,7 @@ pub(super) async fn replay_startup_user_data(
                 );
                 continue;
             };
-            apply_user_data_event(
+            exchange_state::apply_user_data_event(
                 &runtime.state.reconcile,
                 runtime.execution.as_ref(),
                 &track_id,
@@ -124,6 +118,26 @@ pub(super) async fn replay_startup_user_data(
         }
     }
 
+    Ok(())
+}
+
+async fn seed_startup_pending_submit_effects(runtime: &ServerRuntime) -> Result<()> {
+    let startup_pending_submit_effects = runtime
+        .state
+        .reconcile
+        .effect_store
+        .list_all_pending_submit_effects()
+        .await?;
+    runtime
+        .state
+        .reconcile
+        .submit_preflight
+        .seed_startup_pending_submit_effects(
+            startup_pending_submit_effects
+                .into_iter()
+                .map(|effect| effect.effect_id),
+        )
+        .await;
     Ok(())
 }
 
@@ -158,101 +172,4 @@ where
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("startup step `{step_name}` failed")))
-}
-
-pub(super) async fn apply_user_data_event(
-    state: &ReconcileState,
-    execution: &dyn ExecutionPort,
-    track_id: &str,
-    event: UserDataEvent,
-) -> std::result::Result<(), TrackMutationError> {
-    let instrument = event.instrument().clone();
-    match event.payload {
-        UserDataPayload::PositionUpdate(position) => {
-            let _ = state
-                .observation_service
-                .observe_position(track_id, position_observation(&position))
-                .await
-                .map_err(preserve_track_mutation_error)?;
-        }
-        UserDataPayload::OrderUpdate(order) => {
-            let (_, absorb_result): (_, poise_engine::executor::OrderUpdateAbsorbResult) = state
-                .observation_service
-                .observe_order_with_absorb_result(track_id, order_observation(&order))
-                .await
-                .map_err(preserve_track_mutation_error)?;
-            if absorb_result == poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
-                    .await;
-                enqueue_reconcile_request(
-                    state,
-                    execution,
-                    ReconcileRequest {
-                        track_id: track_id.to_string(),
-                        reason: ReconcileReason::UnabsorbedOrderUpdate,
-                    },
-                    &instrument,
-                )
-                .await?;
-            } else if order.status == poise_engine::ports::OrderStatus::Filled {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::FilledAwaitingSync)
-                    .await;
-            }
-        }
-        UserDataPayload::TrackLedger(update) => {
-            let result = state
-                .observation_service
-                .apply_track_ledger_event(track_id, update.event)
-                .await
-                .map_err(preserve_track_mutation_error)?;
-            if result.absorb_result
-                == Some(poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed)
-            {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
-                    .await;
-                enqueue_reconcile_request(
-                    state,
-                    execution,
-                    ReconcileRequest {
-                        track_id: track_id.to_string(),
-                        reason: ReconcileReason::UnabsorbedOrderUpdate,
-                    },
-                    &instrument,
-                )
-                .await?;
-            } else if result.order_status == Some(poise_engine::ports::OrderStatus::Filled) {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::FilledAwaitingSync)
-                    .await;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub(super) fn position_observation(position: &Position) -> PositionObservation {
-    PositionObservation {
-        qty: position.qty,
-        unrealized_pnl: position.unrealized_pnl,
-    }
-}
-
-pub(super) fn order_observation(order: &ExchangeOrder) -> OrderObservation {
-    OrderObservation {
-        order_id: order.order_id.clone(),
-        client_order_id: order.client_order_id.clone(),
-        side: order.side,
-        price: order.price,
-        quantity: order.qty,
-        realized_pnl: order.realized_pnl,
-        status: order.status,
-    }
 }
