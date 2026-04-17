@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
@@ -30,8 +31,7 @@ use crate::config::{Config, ExchangeConfig};
 use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::exchange_startup::{
-    SymbolLeverageSetter, TrackLeverageIndex, build_symbol_leverage_setter,
-    build_track_leverage_index,
+    apply_track_startup_leverage, build_symbol_leverage_setter, build_track_leverage_index,
 };
 use crate::projector::TrackProjector;
 use crate::runtime::{
@@ -136,21 +136,46 @@ pub async fn assemble(
             .iter()
             .map(|track| track.track_id().clone()),
     )?;
-    let exchange = build_exchange(&config.exchange).await?;
-    let symbol_leverage_setter = build_symbol_leverage_setter(&config.exchange)?;
-    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
+    let exchange = build_exchange_and_prepare_startup(config, prepared_registry.as_ref()).await?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_state_store(
+    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
+}
+
+async fn build_exchange_and_prepare_startup(
+    config: &Config,
+    prepared_registry: &PreparedTrackRegistry,
+) -> Result<Exchange> {
+    build_exchange_and_prepare_startup_with(
         config,
         prepared_registry,
-        exchange,
-        symbol_leverage_setter,
-        track_leverage_index,
-        repositories,
-        clock,
+        || build_exchange(&config.exchange),
+        || build_symbol_leverage_setter(&config.exchange),
     )
     .await
+}
+
+async fn build_exchange_and_prepare_startup_with<BuildExchange, BuildExchangeFuture, BuildSetter>(
+    config: &Config,
+    prepared_registry: &PreparedTrackRegistry,
+    build_exchange_fn: BuildExchange,
+    build_symbol_leverage_setter_fn: BuildSetter,
+) -> Result<Exchange>
+where
+    BuildExchange: FnOnce() -> BuildExchangeFuture,
+    BuildExchangeFuture: Future<Output = Result<Exchange>>,
+    BuildSetter: FnOnce() -> Result<Arc<dyn crate::exchange_startup::SymbolLeverageSetter>>,
+{
+    let exchange = build_exchange_fn().await?;
+    let symbol_leverage_setter = build_symbol_leverage_setter_fn()?;
+    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
+    apply_track_startup_leverage(
+        prepared_registry,
+        &track_leverage_index,
+        symbol_leverage_setter.as_ref(),
+    )
+    .await?;
+    Ok(exchange)
 }
 
 #[cfg(test)]
@@ -160,18 +185,6 @@ pub(crate) struct ExchangePorts {
     account_summary: Arc<dyn AccountSummaryPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
-    symbol_leverage_setter: Arc<dyn SymbolLeverageSetter>,
-}
-
-#[cfg(test)]
-struct DefaultNoopSymbolLeverageSetter;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl SymbolLeverageSetter for DefaultNoopSymbolLeverageSetter {
-    async fn set_leverage(&self, _instrument: &Instrument, _leverage: u32) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -183,31 +196,12 @@ impl ExchangePorts {
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
     ) -> Self {
-        Self::with_symbol_leverage_setter(
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-            Arc::new(DefaultNoopSymbolLeverageSetter),
-        )
-    }
-
-    pub(crate) fn with_symbol_leverage_setter(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-        symbol_leverage_setter: Arc<dyn SymbolLeverageSetter>,
-    ) -> Self {
         Self {
             execution,
             market_data,
             account_summary,
             account,
             metadata,
-            symbol_leverage_setter,
         }
     }
 }
@@ -220,7 +214,6 @@ pub(crate) async fn assemble_with_exchange_ports(
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
-    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     let exchange = Exchange::new(
         config.exchange.venue(),
         exchange_ports.execution,
@@ -229,24 +222,13 @@ pub(crate) async fn assemble_with_exchange_ports(
         exchange_ports.account,
         exchange_ports.metadata,
     );
-    assemble_with_state_store(
-        config,
-        prepared_registry,
-        exchange,
-        exchange_ports.symbol_leverage_setter,
-        track_leverage_index,
-        repositories,
-        clock,
-    )
-    .await
+    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
 }
 
 async fn assemble_with_state_store(
     config: &Config,
     prepared_registry: Arc<PreparedTrackRegistry>,
     exchange: Exchange,
-    symbol_leverage_setter: Arc<dyn SymbolLeverageSetter>,
-    track_leverage_index: TrackLeverageIndex,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
@@ -266,22 +248,6 @@ async fn assemble_with_state_store(
     for track in prepared_registry.iter() {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
-        let leverage = track_leverage_index
-            .get(&track_id)
-            .copied()
-            .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
-        symbol_leverage_setter
-            .set_leverage(&instrument, leverage)
-            .await
-            .map_err(|error| {
-                anyhow!(
-                    "failed to set startup leverage for track `{}` symbol `{}` to {}x: {}",
-                    track_id.as_str(),
-                    instrument.symbol,
-                    leverage,
-                    error
-                )
-            })?;
         let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
         let account_capacity_snapshot =
             load_account_capacity_snapshot_with_retry(exchange.account(), &instrument).await?;
@@ -665,6 +631,7 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, TrackDefinition, parse_config};
+    use crate::exchange::Exchange;
     use crate::exchange_startup::SymbolLeverageSetter;
     use crate::http::router;
     use crate::projector::TrackProjector;
@@ -1140,7 +1107,8 @@ total_loss_limit = 600.0
     }
 
     #[tokio::test]
-    async fn startup_sets_track_leverage_before_loading_metadata_and_capacity() {
+    async fn startup_preparation_builds_runtime_exchange_before_setting_leverage_and_loading_capacity(
+    ) {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let call_log = Arc::new(Mutex::new(Vec::new()));
         let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
@@ -1166,18 +1134,47 @@ total_loss_limit = 600.0
             exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
-
-        super::assemble_with_exchange_ports(
+        let prepared_registry = test_prepared_registry(&config);
+        let exchange = super::build_exchange_and_prepare_startup_with(
             &config,
-            test_prepared_registry(&config),
-            super::ExchangePorts::with_symbol_leverage_setter(
-                Arc::new(FakeExecutionPort),
-                Arc::new(FakeMarketData::empty()),
-                Arc::new(FakeAccountSummaryPort),
-                startup_exchange.clone(),
-                startup_exchange,
-                Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone())),
-            ),
+            prepared_registry.as_ref(),
+            {
+                let call_log = call_log.clone();
+                let startup_exchange = startup_exchange.clone();
+                move || {
+                    let call_log = call_log.clone();
+                    let startup_exchange = startup_exchange.clone();
+                    async move {
+                        call_log
+                            .lock()
+                            .unwrap()
+                            .push("build_exchange".to_string());
+                        Ok(Exchange::new(
+                            Venue::Binance,
+                            Arc::new(FakeExecutionPort),
+                            Arc::new(FakeMarketData::empty()),
+                            Arc::new(FakeAccountSummaryPort),
+                            startup_exchange.clone(),
+                            startup_exchange,
+                        ))
+                    }
+                }
+            },
+            {
+                let call_log = call_log.clone();
+                move || {
+                    Ok(Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone()))
+                        as Arc<dyn SymbolLeverageSetter>)
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        super::assemble_with_state_store(
+            &config,
+            prepared_registry,
+            exchange,
             StateRepositories::new(repository),
             Arc::new(SystemClock),
         )
@@ -1187,6 +1184,7 @@ total_loss_limit = 600.0
         assert_eq!(
             *call_log.lock().unwrap(),
             vec![
+                "build_exchange".to_string(),
                 "set_leverage:BTCUSDT:20".to_string(),
                 "get_exchange_info:BTCUSDT".to_string(),
                 "get_account_capacity_snapshot:BTCUSDT".to_string(),
@@ -1195,8 +1193,7 @@ total_loss_limit = 600.0
     }
 
     #[tokio::test]
-    async fn startup_fails_with_track_symbol_and_leverage_when_setting_track_leverage_fails() {
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+    async fn startup_preparation_failure_surfaces_track_symbol_and_leverage_context() {
         let call_log = Arc::new(Mutex::new(Vec::new()));
         let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
         let config = Config {
@@ -1221,28 +1218,46 @@ total_loss_limit = 600.0
             exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
+        let prepared_registry = test_prepared_registry(&config);
 
-        let result = super::assemble_with_exchange_ports(
+        let result = super::build_exchange_and_prepare_startup_with(
             &config,
-            test_prepared_registry(&config),
-            super::ExchangePorts::with_symbol_leverage_setter(
-                Arc::new(FakeExecutionPort),
-                Arc::new(FakeMarketData::empty()),
-                Arc::new(FakeAccountSummaryPort),
-                startup_exchange.clone(),
-                startup_exchange,
-                Arc::new(RecordingSymbolLeverageSetter::fail(
-                    call_log.clone(),
-                    "exchange rejected leverage",
-                )),
-            ),
-            StateRepositories::new(repository),
-            Arc::new(SystemClock),
+            prepared_registry.as_ref(),
+            {
+                let call_log = call_log.clone();
+                move || {
+                    let call_log = call_log.clone();
+                    let startup_exchange = startup_exchange.clone();
+                    async move {
+                        call_log
+                            .lock()
+                            .unwrap()
+                            .push("build_exchange".to_string());
+                        Ok(Exchange::new(
+                            Venue::Binance,
+                            Arc::new(FakeExecutionPort),
+                            Arc::new(FakeMarketData::empty()),
+                            Arc::new(FakeAccountSummaryPort),
+                            startup_exchange.clone(),
+                            startup_exchange,
+                        ))
+                    }
+                }
+            },
+            {
+                let call_log = call_log.clone();
+                move || {
+                    Ok(Arc::new(RecordingSymbolLeverageSetter::fail(
+                        call_log.clone(),
+                        "exchange rejected leverage",
+                    )) as Arc<dyn SymbolLeverageSetter>)
+                }
+            },
         )
         .await;
 
         let error = match result {
-            Ok(_) => panic!("assemble_with_exchange_ports should fail when leverage setup fails"),
+            Ok(_) => panic!("build_exchange_and_prepare_startup_with should fail on leverage error"),
             Err(error) => error,
         };
         let message = error.to_string();
@@ -1252,7 +1267,7 @@ total_loss_limit = 600.0
         assert!(message.contains("exchange rejected leverage"));
         assert_eq!(
             *call_log.lock().unwrap(),
-            vec!["set_leverage:BTCUSDT:7".to_string()]
+            vec!["build_exchange".to_string(), "set_leverage:BTCUSDT:7".to_string()]
         );
     }
 

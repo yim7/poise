@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use poise_application::PreparedTrackRegistry;
 use poise_engine::track::Instrument;
 use poise_engine::track::TrackId;
 
@@ -15,36 +16,59 @@ pub(crate) trait SymbolLeverageSetter: Send + Sync {
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()>;
 }
 
-enum VenueSymbolLeverageSetter {
-    Binance(poise_binance::SymbolLeverageControl),
-    Bybit(poise_bybit::SymbolLeverageControl),
+#[async_trait::async_trait]
+impl SymbolLeverageSetter for poise_binance::SymbolLeverageControl {
+    async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
+        self.set_leverage(&instrument.symbol, leverage).await
+    }
 }
 
 #[async_trait::async_trait]
-impl SymbolLeverageSetter for VenueSymbolLeverageSetter {
+impl SymbolLeverageSetter for poise_bybit::SymbolLeverageControl {
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
-        match self {
-            Self::Binance(control) => control.set_leverage(&instrument.symbol, leverage).await,
-            Self::Bybit(control) => control.set_leverage(&instrument.symbol, leverage).await,
-        }
+        self.set_leverage(&instrument.symbol, leverage).await
     }
 }
 
 pub(crate) fn build_symbol_leverage_setter(
     config: &ExchangeConfig,
 ) -> Result<Arc<dyn SymbolLeverageSetter>> {
-    Ok(Arc::new(build_venue_symbol_leverage_setter(config)?))
+    match config {
+        ExchangeConfig::Binance(binance_config) => {
+            Ok(Arc::new(poise_binance::SymbolLeverageControl::new(binance_config)?))
+        }
+        ExchangeConfig::Bybit(bybit_config) => {
+            Ok(Arc::new(poise_bybit::SymbolLeverageControl::new(bybit_config)?))
+        }
+    }
 }
 
-fn build_venue_symbol_leverage_setter(config: &ExchangeConfig) -> Result<VenueSymbolLeverageSetter> {
-    match config {
-        ExchangeConfig::Binance(binance_config) => Ok(VenueSymbolLeverageSetter::Binance(
-            poise_binance::SymbolLeverageControl::new(binance_config)?,
-        )),
-        ExchangeConfig::Bybit(bybit_config) => Ok(VenueSymbolLeverageSetter::Bybit(
-            poise_bybit::SymbolLeverageControl::new(bybit_config)?,
-        )),
+pub(crate) async fn apply_track_startup_leverage(
+    prepared_registry: &PreparedTrackRegistry,
+    track_leverage_index: &TrackLeverageIndex,
+    symbol_leverage_setter: &dyn SymbolLeverageSetter,
+) -> Result<()> {
+    for track in prepared_registry.iter() {
+        let track_id = track.track_id().clone();
+        let instrument = track.instrument().clone();
+        let leverage = track_leverage_index
+            .get(&track_id)
+            .copied()
+            .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
+        symbol_leverage_setter
+            .set_leverage(&instrument, leverage)
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "failed to set startup leverage for track `{}` symbol `{}` to {}x: {}",
+                    track_id.as_str(),
+                    instrument.symbol,
+                    leverage,
+                    error
+                )
+            })?;
     }
+    Ok(())
 }
 
 pub(crate) fn build_track_leverage_index(tracks: &[TrackFileDefinition]) -> Result<TrackLeverageIndex> {
@@ -65,38 +89,141 @@ pub(crate) fn build_track_leverage_index(tracks: &[TrackFileDefinition]) -> Resu
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
-    use poise_engine::track::TrackId;
+    use anyhow::anyhow;
+    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
+    use poise_engine::track::{Instrument, TrackId, Venue};
 
-    use super::{VenueSymbolLeverageSetter, build_track_leverage_index, build_venue_symbol_leverage_setter};
+    use super::{
+        SymbolLeverageSetter, apply_track_startup_leverage, build_symbol_leverage_setter,
+        build_track_leverage_index,
+    };
     use crate::config::{ExchangeConfig, TrackDefinition};
 
     #[test]
     fn track_leverage_index_defaults_to_ten() {
-        let index = build_track_leverage_index(&[track_definition(None)]).unwrap();
+        let index =
+            build_track_leverage_index(&[track_definition("btc-core", "BTCUSDT", None)]).unwrap();
 
         assert_eq!(index.get(&TrackId::new("btc-core")), Some(&10));
     }
 
     #[test]
     fn track_leverage_index_preserves_explicit_leverage() {
-        let index = build_track_leverage_index(&[track_definition(Some(25))]).unwrap();
+        let index = build_track_leverage_index(&[track_definition(
+            "btc-core",
+            "BTCUSDT",
+            Some(25),
+        )])
+        .unwrap();
 
         assert_eq!(index.get(&TrackId::new("btc-core")), Some(&25));
     }
 
     #[test]
     fn track_leverage_index_stores_only_startup_fields() {
-        let index = build_track_leverage_index(&[track_definition(Some(12))]).unwrap();
+        let index = build_track_leverage_index(&[track_definition(
+            "btc-core",
+            "BTCUSDT",
+            Some(12),
+        )])
+        .unwrap();
         let expected = HashMap::from([(TrackId::new("btc-core"), 12)]);
 
         assert_eq!(index, expected);
     }
 
-    fn track_definition(leverage: Option<u32>) -> TrackDefinition {
+    #[test]
+    fn build_symbol_leverage_setter_accepts_binance_credentials() {
+        build_symbol_leverage_setter(&ExchangeConfig::Binance(
+            poise_binance::Config {
+                deployment: poise_binance::Deployment::Testnet,
+                api_key: Some("demo-key".into()),
+                api_secret: Some("demo-secret".into()),
+            },
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn build_symbol_leverage_setter_accepts_bybit_credentials() {
+        build_symbol_leverage_setter(&ExchangeConfig::Bybit(
+            poise_bybit::Config {
+                deployment: poise_bybit::Deployment::Testnet,
+                api_key: Some("demo-key".into()),
+                api_secret: Some("demo-secret".into()),
+            },
+        ))
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_track_startup_leverage_uses_track_index_in_registry_order() {
+        let tracks = vec![
+            track_definition("btc-core", "BTCUSDT", Some(20)),
+            track_definition("eth-core", "ETHUSDT", None),
+        ];
+        let registry = prepared_registry(&tracks);
+        let index = build_track_leverage_index(&tracks).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        apply_track_startup_leverage(
+            &registry,
+            &index,
+            &RecordingSymbolLeverageSetter::succeed(calls.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["BTCUSDT:20".to_string(), "ETHUSDT:10".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_track_startup_leverage_adds_track_symbol_and_leverage_context() {
+        let tracks = vec![track_definition("btc-core", "BTCUSDT", Some(7))];
+        let registry = prepared_registry(&tracks);
+        let index = build_track_leverage_index(&tracks).unwrap();
+
+        let error = apply_track_startup_leverage(
+            &registry,
+            &index,
+            &RecordingSymbolLeverageSetter::fail("exchange rejected leverage"),
+        )
+        .await
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("btc-core"));
+        assert!(message.contains("BTCUSDT"));
+        assert!(message.contains("7"));
+        assert!(message.contains("exchange rejected leverage"));
+    }
+
+    fn prepared_registry(tracks: &[TrackDefinition]) -> PreparedTrackRegistry {
+        let configured = tracks
+            .iter()
+            .map(|track| {
+                ConfiguredTrackDefinition::try_from_input(
+                    track.to_configured_input(Venue::Binance),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        PreparedTrackRegistry::new(configured).unwrap()
+    }
+
+    fn track_definition(
+        track_id: &str,
+        symbol: &str,
+        leverage: Option<u32>,
+    ) -> TrackDefinition {
         TrackDefinition {
-            track_id: "btc-core".into(),
-            symbol: "BTCUSDT".into(),
+            track_id: track_id.into(),
+            symbol: symbol.into(),
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -113,31 +240,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_symbol_leverage_setter_uses_binance_helper() {
-        let setter = build_venue_symbol_leverage_setter(&ExchangeConfig::Binance(
-            poise_binance::Config {
-                deployment: poise_binance::Deployment::Testnet,
-                api_key: Some("demo-key".into()),
-                api_secret: Some("demo-secret".into()),
-            },
-        ))
-        .unwrap();
-
-        assert!(matches!(setter, VenueSymbolLeverageSetter::Binance(_)));
+    struct RecordingSymbolLeverageSetter {
+        calls: Arc<Mutex<Vec<String>>>,
+        failure: Option<String>,
     }
 
-    #[test]
-    fn build_symbol_leverage_setter_uses_bybit_helper() {
-        let setter = build_venue_symbol_leverage_setter(&ExchangeConfig::Bybit(
-            poise_bybit::Config {
-                deployment: poise_bybit::Deployment::Testnet,
-                api_key: Some("demo-key".into()),
-                api_secret: Some("demo-secret".into()),
-            },
-        ))
-        .unwrap();
+    impl RecordingSymbolLeverageSetter {
+        fn succeed(calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                calls,
+                failure: None,
+            }
+        }
 
-        assert!(matches!(setter, VenueSymbolLeverageSetter::Bybit(_)));
+        fn fail(message: impl Into<String>) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                failure: Some(message.into()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SymbolLeverageSetter for RecordingSymbolLeverageSetter {
+        async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:{leverage}", instrument.symbol));
+            if let Some(message) = &self.failure {
+                return Err(anyhow!(message.clone()));
+            }
+            Ok(())
+        }
     }
 }
