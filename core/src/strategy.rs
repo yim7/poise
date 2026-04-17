@@ -147,6 +147,20 @@ impl TrackConfig {
             self.notional_per_unit / center
         }
     }
+
+    pub fn exposure_from_position_qty(&self, qty: f64) -> Exposure {
+        let unit_qty = self.base_qty_per_unit();
+        if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
+            Exposure(0.0)
+        } else {
+            Exposure(qty / unit_qty)
+        }
+    }
+
+    pub fn abs_notional_from_position_qty(&self, qty: f64) -> f64 {
+        self.exposure_from_position_qty(qty).0.abs() * self.notional_per_unit
+    }
+
 }
 
 #[cfg(test)]
@@ -390,5 +404,23 @@ mod tests {
         let config = neutral_config();
         let qty = config.base_qty_per_unit();
         assert!((qty - 3.75).abs() < 0.01); // 375 / 100
+    }
+
+    #[test]
+    fn exposure_from_position_qty_uses_base_qty_per_unit() {
+        let config = neutral_config();
+
+        let exposure = config.exposure_from_position_qty(195.0);
+
+        assert!((exposure.0 - 52.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn abs_notional_from_position_qty_reuses_exposure_conversion() {
+        let config = neutral_config();
+
+        let notional = config.abs_notional_from_position_qty(195.0);
+
+        assert!((notional - 19_500.0).abs() < 0.01);
     }
 }

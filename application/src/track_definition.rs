@@ -170,6 +170,15 @@ impl TrackPreparedDefinition {
             tick_timeout_secs: self.tick_timeout_secs,
         }
     }
+
+    pub fn startup_definition(&self) -> TrackStartupDefinition {
+        TrackStartupDefinition {
+            track_id: self.track_id.clone(),
+            instrument: self.instrument.clone(),
+            track_config: self.track_config.clone(),
+            budget: self.budget.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +187,30 @@ pub struct TrackReadDefinition {
     pub instrument: Instrument,
     pub track_config: TrackConfig,
     pub budget: CapacityBudget,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackStartupDefinition {
+    track_id: TrackId,
+    instrument: Instrument,
+    track_config: TrackConfig,
+    budget: CapacityBudget,
+}
+
+impl TrackStartupDefinition {
+    pub fn track_id(&self) -> &TrackId {
+        &self.track_id
+    }
+
+    pub fn instrument(&self) -> &Instrument {
+        &self.instrument
+    }
+
+    pub fn required_additional_notional(&self, position_qty: f64) -> f64 {
+        let current_position_notional =
+            self.track_config.abs_notional_from_position_qty(position_qty);
+        (self.budget.max_notional - current_position_notional).max(0.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -212,7 +245,33 @@ mod tests {
     use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
     use poise_engine::track::{TrackId, Venue};
 
-    use super::{ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry};
+    use super::{
+        ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry,
+        TrackPreparedDefinition,
+    };
+
+    fn startup_definition_fixture(max_notional: Option<f64>) -> TrackPreparedDefinition {
+        TrackPreparedDefinition::from_configured(
+            ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+                track_id: TrackId::new("btc-core"),
+                venue: Venue::Binance,
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(ShapeFamily::Linear),
+                out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+                max_notional,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
+                tick_timeout_secs: Some(30),
+            })
+            .unwrap(),
+        )
+    }
 
     #[test]
     fn configured_track_definition_expands_defaults_and_validates_budget() {
@@ -280,5 +339,34 @@ mod tests {
         let constraints = prepared.post_restore_constraints();
         assert_eq!(constraints.budget.max_notional, 4200.0);
         assert_eq!(constraints.tick_timeout_secs, 45);
+    }
+
+    #[test]
+    fn prepared_track_definition_projects_startup_definition() {
+        let prepared = startup_definition_fixture(Some(3_000.0));
+        let startup = prepared.startup_definition();
+
+        assert_eq!(startup.track_id().as_str(), "btc-core");
+        assert_eq!(startup.instrument().symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn startup_definition_required_additional_notional_subtracts_existing_position_notional() {
+        let prepared = startup_definition_fixture(Some(3_000.0));
+        let startup = prepared.startup_definition();
+
+        // center = 100, notional_per_unit = 375, 所以 1 unit = 3.75 qty。
+        // 现有 4 units -> qty = 15.0，对应已占用 1_500 notional。
+        assert_eq!(startup.required_additional_notional(15.0), 1_500.0);
+    }
+
+    #[test]
+    fn startup_definition_required_additional_notional_clamps_to_zero() {
+        let prepared = startup_definition_fixture(Some(3_000.0));
+        let startup = prepared.startup_definition();
+
+        // 8 units -> qty = 30.0，正好覆盖 3_000 notional。
+        assert_eq!(startup.required_additional_notional(30.0), 0.0);
+        assert_eq!(startup.required_additional_notional(45.0), 0.0);
     }
 }

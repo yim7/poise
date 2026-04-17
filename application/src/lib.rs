@@ -33,7 +33,7 @@ pub use read_model::{ReadModelSlot, TrackReadModel};
 pub use track_command_service::TrackCommandService;
 pub use track_definition::{
     ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry,
-    TrackPreparedDefinition, TrackReadDefinition,
+    TrackPreparedDefinition, TrackReadDefinition, TrackStartupDefinition,
 };
 pub use track_effect_service::TrackEffectService;
 pub use track_effect_store::TrackEffectStore;
