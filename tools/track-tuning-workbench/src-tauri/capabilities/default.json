@@ -3,5 +3,9 @@
   "identifier": "main-capability",
   "description": "Main window capability for the track tuning workbench.",
   "windows": ["main"],
-  "permissions": []
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "clipboard-manager:allow-write-text"
+  ]
 }
