@@ -8,7 +8,9 @@ import {
   solvePriceForTargetExposure,
 } from '@/domain/trackCurve';
 import {
+  type TrackCurrentPriceRiskEdge,
   computeRiskToBandEdge,
+  computeCurrentPriceRiskEdge,
   evaluateTrackRisk,
 } from '@/domain/trackRisk';
 
@@ -22,7 +24,7 @@ export interface TrackMetrics {
     lower: number;
     upper: number;
   };
-  currentPriceRiskEdge: ReturnType<typeof computeRiskToBandEdge>;
+  currentPriceRiskEdge: TrackCurrentPriceRiskEdge;
   zeroTargetPrice: number;
   zeroTargetRiskEdge: ReturnType<typeof computeRiskToBandEdge>;
   minRebalancePriceMove: {
@@ -65,7 +67,7 @@ export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMe
       lower: resolvePriceOrFallback(snapshot, currentTargetExposure + 1, currentPrice),
       upper: resolvePriceOrFallback(snapshot, currentTargetExposure - 1, currentPrice),
     },
-    currentPriceRiskEdge: computeRiskToBandEdge(snapshot, currentPrice),
+    currentPriceRiskEdge: computeCurrentPriceRiskEdge(snapshot, currentPrice),
     zeroTargetPrice,
     zeroTargetRiskEdge: computeRiskToBandEdge(snapshot, zeroTargetPrice),
     minRebalancePriceMove: {

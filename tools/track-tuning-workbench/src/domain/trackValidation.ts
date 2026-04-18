@@ -91,6 +91,10 @@ export function ensureTrackDraftParsed(draft: TrackDraft): TrackDraftParsedSnaps
   return result.parsed;
 }
 
+export function buildTrackDraftSnapshot(draft: TrackDraft): TrackDraftParsedSnapshot {
+  return ensureTrackDraftParsed(draft);
+}
+
 export function parseFiniteNumber(input: string): number | null {
   const trimmed = input.trim();
   if (trimmed.length === 0) {
@@ -130,6 +134,13 @@ function validateStrategySemantics(
     });
   }
 
+  if (numbers.longExposureUnits + numbers.shortExposureUnits <= Number.EPSILON) {
+    issues.push({
+      field: 'longExposureUnits',
+      message: 'long_exposure_units 和 short_exposure_units 不能同时为 0',
+    });
+  }
+
   if (numbers.notionalPerUnit <= 0) {
     issues.push({
       field: 'notionalPerUnit',
@@ -141,6 +152,27 @@ function validateStrategySemantics(
     issues.push({
       field: 'minRebalanceUnits',
       message: 'min_rebalance_units 不能为负数',
+    });
+  }
+
+  if (numbers.maxNotional <= 0) {
+    issues.push({
+      field: 'maxNotional',
+      message: 'max_notional 必须大于 0',
+    });
+  }
+
+  if (numbers.dailyLossLimit <= 0) {
+    issues.push({
+      field: 'dailyLossLimit',
+      message: 'daily_loss_limit 必须大于 0',
+    });
+  }
+
+  if (numbers.totalLossLimit <= 0) {
+    issues.push({
+      field: 'totalLossLimit',
+      message: 'total_loss_limit 必须大于 0',
     });
   }
 }

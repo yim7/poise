@@ -4,12 +4,11 @@ import {
   type TrackDraftNumericFields,
   type TrackDraftParsedSnapshot,
   type TrackDraftUiState,
-  buildTrackDraftSnapshot,
   createTrackDraft,
 } from '@/domain/trackDraft';
 import { sampleTrackCurve } from '@/domain/trackCurve';
-import { computeTrackMetrics } from '@/domain/trackMetrics';
-import { validateTrackDraft } from '@/domain/trackValidation';
+import { computeTrackMetrics, type TrackMetrics } from '@/domain/trackMetrics';
+import { buildTrackDraftSnapshot, validateTrackDraft } from '@/domain/trackValidation';
 
 const SEARCH_TOLERANCE = 1e-4;
 
@@ -35,17 +34,18 @@ function makeNumericFields(
   };
 }
 
-function makeSnapshot(
+function makeDraft(
   overrides: Partial<TrackDraftParsedSnapshot> = {},
   uiOverrides: Partial<TrackDraftUiState> = {},
-): TrackDraftParsedSnapshot {
+) {
   const numericFields = makeNumericFields(overrides.parsedNumbers);
+  const quotePriceInput = uiOverrides.quotePriceInput ?? overrides.ui?.quotePriceInput ?? '100';
 
-  const draft = createTrackDraft({
-    draftId: 'draft-btc-core',
+  return createTrackDraft({
+    draftId: overrides.draftId ?? 'draft-btc-core',
     raw: {
-      trackId: 'btc-core',
-      symbol: 'BTCUSDT',
+      trackId: overrides.additional?.trackId ?? 'btc-core',
+      symbol: overrides.additional?.symbol ?? 'BTCUSDT',
       lowerPrice: String(numericFields.lowerPrice),
       upperPrice: String(numericFields.upperPrice),
       longExposureUnits: String(numericFields.longExposureUnits),
@@ -56,21 +56,70 @@ function makeSnapshot(
       leverage: String(numericFields.leverage),
       dailyLossLimit: String(numericFields.dailyLossLimit),
       totalLossLimit: String(numericFields.totalLossLimit),
+      shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
+      outOfBandPolicy: overrides.enums?.outOfBandPolicy ?? 'freeze',
+    },
+    ui: {
+      quotePriceInput,
+    },
+    parsedNumbers: numericFields,
+    enums: overrides.enums,
+    additional: overrides.additional,
+    attachments: overrides.attachments,
+  });
+}
+
+function makeSnapshot(
+  overrides: Partial<TrackDraftParsedSnapshot> = {},
+  uiOverrides: Partial<TrackDraftUiState> = {},
+): TrackDraftParsedSnapshot {
+  const numericFields = makeNumericFields(overrides.parsedNumbers);
+  const quotePriceInput = uiOverrides.quotePriceInput ?? overrides.ui?.quotePriceInput ?? '100';
+
+  return {
+    draftId: overrides.draftId ?? 'draft-btc-core',
+    additional: overrides.additional ?? {
+      trackId: 'btc-core',
+      symbol: 'BTCUSDT',
+    },
+    parsedNumbers: numericFields,
+    enums: overrides.enums ?? {
       shapeFamily: 'linear',
       outOfBandPolicy: 'freeze',
     },
     ui: {
-      quotePriceInput: '100',
-      ...uiOverrides,
+      quotePriceInput,
+      quotePrice: Number(quotePriceInput),
     },
-    parsedNumbers: numericFields,
-    ...overrides,
-  });
+    attachments: overrides.attachments ?? {},
+  };
+}
 
-  return buildTrackDraftSnapshot(draft);
+function expectSingleRiskEdge(riskEdge: TrackMetrics['currentPriceRiskEdge']) {
+  expect(riskEdge.mode).toBe('single');
+  if (riskEdge.mode !== 'single') {
+    throw new Error('expected single risk edge');
+  }
+  return riskEdge.edge;
+}
+
+function expectDualRiskEdge(riskEdge: TrackMetrics['currentPriceRiskEdge']) {
+  expect(riskEdge.mode).toBe('dual');
+  if (riskEdge.mode !== 'dual') {
+    throw new Error('expected dual risk edge');
+  }
+  return riskEdge;
 }
 
 describe('track domain fixtures', () => {
+  it('builds a parsed snapshot for valid editable drafts', () => {
+    const snapshot = buildTrackDraftSnapshot(makeDraft());
+
+    expectClose(snapshot.ui.quotePrice, 100);
+    expectClose(snapshot.parsedNumbers.lowerPrice, 90);
+    expectClose(snapshot.parsedNumbers.maxNotional, 3000);
+  });
+
   it('surfaces invalid raw numbers even when parsed cache still holds the last valid value', () => {
     const draft = createTrackDraft({
       draftId: 'draft-btc-core',
@@ -106,9 +155,55 @@ describe('track domain fixtures', () => {
     });
   });
 
+  it('rejects strategy configs when long and short capacity are both zero', () => {
+    const result = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({
+          longExposureUnits: 0,
+          shortExposureUnits: 0,
+        }),
+      }),
+    );
+
+    expect(result.isValid).toBe(false);
+    expect(result.parsed).toBeUndefined();
+    expect(result.issues).toContainEqual({
+      field: 'longExposureUnits',
+      message: 'long_exposure_units 和 short_exposure_units 不能同时为 0',
+    });
+  });
+
+  it('rejects invalid risk budget numbers before building a parsed snapshot', () => {
+    const result = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({
+          maxNotional: 0,
+          dailyLossLimit: 0,
+          totalLossLimit: 0,
+        }),
+      }),
+    );
+
+    expect(result.isValid).toBe(false);
+    expect(result.parsed).toBeUndefined();
+    expect(result.issues).toContainEqual({
+      field: 'maxNotional',
+      message: 'max_notional 必须大于 0',
+    });
+    expect(result.issues).toContainEqual({
+      field: 'dailyLossLimit',
+      message: 'daily_loss_limit 必须大于 0',
+    });
+    expect(result.issues).toContainEqual({
+      field: 'totalLossLimit',
+      message: 'total_loss_limit 必须大于 0',
+    });
+  });
+
   it('locks symmetric linear semantics and derived metrics', () => {
     const snapshot = makeSnapshot();
     const metrics = computeTrackMetrics(snapshot);
+    const currentRiskEdge = expectDualRiskEdge(metrics.currentPriceRiskEdge);
 
     expectClose(metrics.currentTargetExposure, 0);
     expectClose(metrics.baseQuantityPerUnit, 3.75);
@@ -116,10 +211,14 @@ describe('track domain fixtures', () => {
     expectClose(metrics.oneUnitPrice.upper, 101.25);
     expectClose(metrics.oneUnitQuantity, 3.75);
 
-    expectClose(metrics.currentPriceRiskEdge.boundaryPrice, 90);
-    expectClose(metrics.currentPriceRiskEdge.priceDistance, 10);
-    expectClose(metrics.currentPriceRiskEdge.theoreticalLoss, -150);
-    expectClose(metrics.currentPriceRiskEdge.closeFeeEstimate, 0);
+    expectClose(currentRiskEdge.lower.boundaryPrice, 90);
+    expectClose(currentRiskEdge.lower.priceDistance, 10);
+    expectClose(currentRiskEdge.lower.theoreticalLoss, -150);
+    expectClose(currentRiskEdge.lower.closeFeeEstimate, 0);
+    expectClose(currentRiskEdge.upper.boundaryPrice, 110);
+    expectClose(currentRiskEdge.upper.priceDistance, 10);
+    expectClose(currentRiskEdge.upper.theoreticalLoss, -150);
+    expectClose(currentRiskEdge.upper.closeFeeEstimate, 0);
 
     expectClose(metrics.zeroTargetPrice, 100);
     expectClose(metrics.zeroTargetRiskEdge.boundaryPrice, 90);
@@ -140,9 +239,11 @@ describe('track domain fixtures', () => {
     });
 
     const metrics = computeTrackMetrics(snapshot);
+    const currentRiskEdge = expectDualRiskEdge(metrics.currentPriceRiskEdge);
 
     expectClose(metrics.currentTargetExposure, 0);
-    expectClose(metrics.currentPriceRiskEdge.theoreticalLoss, 0);
+    expectClose(currentRiskEdge.lower.theoreticalLoss, 0);
+    expectClose(currentRiskEdge.upper.theoreticalLoss, 0);
     expectClose(metrics.zeroTargetRiskEdge.theoreticalLoss, 0);
     expectClose(metrics.oneUnitPrice.lower, 100);
     expectClose(metrics.oneUnitPrice.upper, 100);
@@ -190,9 +291,10 @@ describe('track domain fixtures', () => {
     expectClose(metrics.minRebalancePriceMove.upper, 0.1404454646, SEARCH_TOLERANCE);
   });
 
-  it('treats current price outside the band as clamped target but keeps edge distance at zero', () => {
+  it('keeps out-of-band price distance from the raw current price while clamping only theoretical loss', () => {
     const snapshot = makeSnapshot({}, { quotePriceInput: '125' });
     const metrics = computeTrackMetrics(snapshot);
+    const currentRiskEdge = expectSingleRiskEdge(metrics.currentPriceRiskEdge);
 
     expectClose(metrics.currentTargetExposure, -8);
     expect(metrics.bandStatus.kind).toBe('out_of_band');
@@ -200,9 +302,9 @@ describe('track domain fixtures', () => {
       throw new Error('expected out_of_band band status');
     }
     expect(metrics.bandStatus.boundary).toBe('above');
-    expectClose(metrics.currentPriceRiskEdge.boundaryPrice, 110);
-    expectClose(metrics.currentPriceRiskEdge.priceDistance, 0);
-    expectClose(metrics.currentPriceRiskEdge.theoreticalLoss, 0);
+    expectClose(currentRiskEdge.boundaryPrice, 110);
+    expectClose(currentRiskEdge.priceDistance, 15);
+    expectClose(currentRiskEdge.theoreticalLoss, 0);
   });
 
   it('locks zero-target point when desired exposure crosses zero away from center', () => {
@@ -244,5 +346,28 @@ describe('track domain fixtures', () => {
     expectClose(metrics.oneUnitPrice.upper, 103.0568353281, SEARCH_TOLERANCE);
     expect(metrics.oneUnitPrice.lower).toBeLessThan(snapshot.ui.quotePrice);
     expect(metrics.oneUnitPrice.upper).toBeGreaterThan(snapshot.ui.quotePrice);
+  });
+
+  it('returns dual current-price risk edges when the current target is near zero', () => {
+    const snapshot = makeSnapshot(
+      {
+        enums: {
+          shapeFamily: 'responsive',
+          outOfBandPolicy: 'freeze',
+        },
+      },
+      { quotePriceInput: '101' },
+    );
+
+    const metrics = computeTrackMetrics(snapshot);
+    const currentRiskEdge = expectDualRiskEdge(metrics.currentPriceRiskEdge);
+
+    expectClose(metrics.currentTargetExposure, -0.2009509145, SEARCH_TOLERANCE);
+    expectClose(currentRiskEdge.lower.boundaryPrice, 90);
+    expectClose(currentRiskEdge.lower.priceDistance, 11);
+    expectClose(currentRiskEdge.lower.theoreticalLoss, -115.0947823357, SEARCH_TOLERANCE);
+    expectClose(currentRiskEdge.upper.boundaryPrice, 110);
+    expectClose(currentRiskEdge.upper.priceDistance, 9);
+    expectClose(currentRiskEdge.upper.theoreticalLoss, -115.0947823354, SEARCH_TOLERANCE);
   });
 });

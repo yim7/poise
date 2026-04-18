@@ -45,6 +45,17 @@ export interface TrackRiskEdge {
   edgeQuantity: number;
 }
 
+export type TrackCurrentPriceRiskEdge =
+  | {
+      mode: 'single';
+      edge: TrackRiskEdge;
+    }
+  | {
+      mode: 'dual';
+      lower: TrackRiskEdge;
+      upper: TrackRiskEdge;
+    };
+
 export function validateCapacityBudget(budget: TrackCapacityBudget): string[] {
   const errors: string[] = [];
 
@@ -125,12 +136,36 @@ export function computeRiskToBandEdge(
   return {
     boundary,
     boundaryPrice,
-    priceDistance: Math.abs(boundaryPrice - clampedStartPrice),
+    priceDistance: Math.abs(boundaryPrice - startPrice),
     theoreticalLoss,
     closeFeeRate,
     closeFeeEstimate: Math.abs(edgeQuantity) * boundaryPrice * closeFeeRate,
     edgeTargetExposure,
     edgeQuantity,
+  };
+}
+
+export function computeCurrentPriceRiskEdge(
+  snapshot: TrackDraftParsedSnapshot,
+  startPrice: number,
+): TrackCurrentPriceRiskEdge {
+  const clampedStartPrice = clampPriceToBand(startPrice, snapshot);
+  const currentTargetExposure = desiredExposure(clampedStartPrice, snapshot);
+  const isOutOfBand =
+    startPrice < snapshot.parsedNumbers.lowerPrice - Number.EPSILON
+    || startPrice > snapshot.parsedNumbers.upperPrice + Number.EPSILON;
+
+  if (!isOutOfBand && Math.abs(currentTargetExposure) <= snapshot.parsedNumbers.minRebalanceUnits) {
+    return {
+      mode: 'dual',
+      lower: computeRiskToBandEdge(snapshot, startPrice, { boundary: 'below' }),
+      upper: computeRiskToBandEdge(snapshot, startPrice, { boundary: 'above' }),
+    };
+  }
+
+  return {
+    mode: 'single',
+    edge: computeRiskToBandEdge(snapshot, startPrice),
   };
 }
 

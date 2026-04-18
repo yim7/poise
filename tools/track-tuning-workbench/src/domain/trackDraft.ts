@@ -1,5 +1,3 @@
-import { ensureTrackDraftParsed } from '@/domain/trackValidation';
-
 export type TrackShapeFamily = 'linear' | 'inertial' | 'responsive';
 export type TrackOutOfBandPolicy = 'freeze' | 'hold' | 'flatten' | 'terminate';
 
@@ -134,10 +132,6 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
     },
     attachments: input.attachments ?? {},
   };
-}
-
-export function buildTrackDraftSnapshot(draft: TrackDraft): TrackDraftParsedSnapshot {
-  return ensureTrackDraftParsed(draft);
 }
 
 function extractRawNumbers(
