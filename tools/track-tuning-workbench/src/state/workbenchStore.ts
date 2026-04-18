@@ -19,6 +19,7 @@ export type WorkbenchSnapshot = SessionSnapshot;
 
 export interface WorkbenchState extends WorkbenchSnapshot {
   currentFilePath: string | null;
+  sourceDrafts: TrackDraft[];
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -84,16 +85,11 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
   let persistedSnapshot = cloneSnapshot(committedHistory.state.present);
   let currentFilePath: string | null = null;
   const listeners = new Set<() => void>();
+  let cachedState = createStateSnapshot();
 
   return {
     getState() {
-      return {
-        ...cloneSnapshot(draftSession),
-        currentFilePath,
-        dirty: !snapshotsEqual(draftSession, currentSourceSnapshot),
-        canUndo: committedHistory.canUndo(),
-        canRedo: committedHistory.canRedo(),
-      };
+      return cachedState;
     },
     subscribe(listener) {
       listeners.add(listener);
@@ -280,9 +276,21 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
   }
 
   function emit() {
+    cachedState = createStateSnapshot();
     listeners.forEach((listener) => {
       listener();
     });
+  }
+
+  function createStateSnapshot(): WorkbenchState {
+    return {
+      ...cloneSnapshot(draftSession),
+      currentFilePath,
+      sourceDrafts: cloneSnapshot(currentSourceSnapshot).drafts,
+      dirty: !snapshotsEqual(draftSession, currentSourceSnapshot),
+      canUndo: committedHistory.canUndo(),
+      canRedo: committedHistory.canRedo(),
+    };
   }
 }
 

@@ -1,0 +1,63 @@
+import { InlineNotice } from '@/ui/common/InlineNotice';
+import { commitOnEnter, fieldIssues, type TrackEditorSectionProps } from '@/ui/editor/TrackEditor';
+
+export function CurveSection({
+  draft,
+  issuesByField,
+  onEnumChange,
+  onQuotePriceChange,
+  onCommit,
+}: TrackEditorSectionProps) {
+  const quoteIssues = fieldIssues(issuesByField, 'quotePriceInput');
+
+  return (
+    <section className="editor-section">
+      <div className="editor-section__header">
+        <p className="editor-section__eyebrow">曲线与预览</p>
+        <h3 className="editor-section__title">曲线家族与试算锚点</h3>
+      </div>
+
+      <div className="field-grid field-grid--two">
+        <label className="field">
+          <span className="field__label">曲线家族</span>
+          <select
+            className="field__input"
+            value={draft.enums.shapeFamily}
+            onChange={(event) => {
+              onEnumChange('shapeFamily', event.target.value);
+              onCommit();
+            }}
+          >
+            <option value="linear">linear</option>
+            <option value="inertial">inertial</option>
+            <option value="responsive">responsive</option>
+          </select>
+        </label>
+        <label className="field">
+          <span className="field__label">当前试算价格</span>
+          <input
+            className={quoteIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
+            value={draft.ui.quotePriceInput}
+            onChange={(event) => onQuotePriceChange(event.target.value)}
+            onBlur={onCommit}
+            onKeyDown={(event) => commitOnEnter(event, onCommit)}
+          />
+        </label>
+      </div>
+
+      {quoteIssues.length > 0 ? (
+        <InlineNotice tone="warning" title="价格锚点仍在编辑中">
+          <ul className="inline-notice__list">
+            {quoteIssues.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
+        </InlineNotice>
+      ) : (
+        <InlineNotice title="预览说明">
+          当前价格暂时由前端输入值驱动。Task 7 接上 Binance 命令后，这里会区分实时价格与临时覆盖价格。
+        </InlineNotice>
+      )}
+    </section>
+  );
+}

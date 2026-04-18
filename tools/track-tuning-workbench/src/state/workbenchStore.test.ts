@@ -88,6 +88,22 @@ function createMockStorage(): BrowserStorageLike {
 }
 
 describe('workbench store', () => {
+  it('returns a stable snapshot reference until state changes', () => {
+    const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
+
+    const first = store.getState();
+    const second = store.getState();
+
+    expect(first).toBe(second);
+
+    store.updateDraft('draft-a', (draft) => {
+      draft.rawNumbers.lowerPrice = '91';
+    });
+
+    const third = store.getState();
+    expect(third).not.toBe(first);
+  });
+
   it('restores a deleted track with its editable fields intact', () => {
     const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
 
