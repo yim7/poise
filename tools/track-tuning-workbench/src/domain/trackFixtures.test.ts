@@ -9,6 +9,7 @@ import {
 } from '@/domain/trackDraft';
 import { sampleTrackCurve } from '@/domain/trackCurve';
 import { computeTrackMetrics } from '@/domain/trackMetrics';
+import { validateTrackDraft } from '@/domain/trackValidation';
 
 const SEARCH_TOLERANCE = 1e-4;
 
@@ -38,21 +39,23 @@ function makeSnapshot(
   overrides: Partial<TrackDraftParsedSnapshot> = {},
   uiOverrides: Partial<TrackDraftUiState> = {},
 ): TrackDraftParsedSnapshot {
+  const numericFields = makeNumericFields(overrides.parsedNumbers);
+
   const draft = createTrackDraft({
     draftId: 'draft-btc-core',
     raw: {
       trackId: 'btc-core',
       symbol: 'BTCUSDT',
-      lowerPrice: '90',
-      upperPrice: '110',
-      longExposureUnits: '8',
-      shortExposureUnits: '8',
-      notionalPerUnit: '375',
-      maxNotional: '3000',
-      minRebalanceUnits: '0.5',
-      leverage: '10',
-      dailyLossLimit: '120',
-      totalLossLimit: '500',
+      lowerPrice: String(numericFields.lowerPrice),
+      upperPrice: String(numericFields.upperPrice),
+      longExposureUnits: String(numericFields.longExposureUnits),
+      shortExposureUnits: String(numericFields.shortExposureUnits),
+      notionalPerUnit: String(numericFields.notionalPerUnit),
+      maxNotional: String(numericFields.maxNotional),
+      minRebalanceUnits: String(numericFields.minRebalanceUnits),
+      leverage: String(numericFields.leverage),
+      dailyLossLimit: String(numericFields.dailyLossLimit),
+      totalLossLimit: String(numericFields.totalLossLimit),
       shapeFamily: 'linear',
       outOfBandPolicy: 'freeze',
     },
@@ -60,7 +63,7 @@ function makeSnapshot(
       quotePriceInput: '100',
       ...uiOverrides,
     },
-    parsedNumbers: makeNumericFields(),
+    parsedNumbers: numericFields,
     ...overrides,
   });
 
@@ -68,6 +71,41 @@ function makeSnapshot(
 }
 
 describe('track domain fixtures', () => {
+  it('surfaces invalid raw numbers even when parsed cache still holds the last valid value', () => {
+    const draft = createTrackDraft({
+      draftId: 'draft-btc-core',
+      raw: {
+        trackId: 'btc-core',
+        symbol: 'BTCUSDT',
+        lowerPrice: 'oops',
+        upperPrice: '110',
+        longExposureUnits: '8',
+        shortExposureUnits: '8',
+        notionalPerUnit: '375',
+        maxNotional: '3000',
+        minRebalanceUnits: '0.5',
+        leverage: '10',
+        dailyLossLimit: '120',
+        totalLossLimit: '500',
+        shapeFamily: 'linear',
+        outOfBandPolicy: 'freeze',
+      },
+      ui: {
+        quotePriceInput: '100',
+      },
+      parsedNumbers: makeNumericFields(),
+    });
+
+    const result = validateTrackDraft(draft);
+
+    expect(result.isValid).toBe(false);
+    expect(result.parsed).toBeUndefined();
+    expect(result.issues).toContainEqual({
+      field: 'lowerPrice',
+      message: 'lower_price 必须是有限数字',
+    });
+  });
+
   it('locks symmetric linear semantics and derived metrics', () => {
     const snapshot = makeSnapshot();
     const metrics = computeTrackMetrics(snapshot);
@@ -184,14 +222,27 @@ describe('track domain fixtures', () => {
     expectClose(metrics.zeroTargetRiskEdge.theoreticalLoss, -234.375);
   });
 
-  it('locks asymmetric min step when current price is off center', () => {
-    const snapshot = makeSnapshot({}, { quotePriceInput: '96' });
+  it('locks asymmetric min step with responsive search away from center', () => {
+    const snapshot = makeSnapshot(
+      {
+        enums: {
+          shapeFamily: 'responsive',
+          outOfBandPolicy: 'freeze',
+        },
+      },
+      { quotePriceInput: '101' },
+    );
     const metrics = computeTrackMetrics(snapshot);
 
-    expectClose(metrics.currentTargetExposure, 3.2);
-    expectClose(metrics.minRebalancePriceMove.lower, 0.625);
-    expectClose(metrics.minRebalancePriceMove.upper, 0.625);
-    expectClose(metrics.oneUnitPrice.lower, 94.75);
-    expectClose(metrics.oneUnitPrice.upper, 97.25);
+    expectClose(metrics.currentTargetExposure, -0.2009509145, SEARCH_TOLERANCE);
+    expectClose(metrics.minRebalancePriceMove.lower, 2.2820583964, SEARCH_TOLERANCE);
+    expectClose(metrics.minRebalancePriceMove.upper, 1.1833507633, SEARCH_TOLERANCE);
+    expect(metrics.minRebalancePriceMove.lower).toBeGreaterThan(
+      metrics.minRebalancePriceMove.upper,
+    );
+    expectClose(metrics.oneUnitPrice.lower, 97.6303883854, SEARCH_TOLERANCE);
+    expectClose(metrics.oneUnitPrice.upper, 103.0568353281, SEARCH_TOLERANCE);
+    expect(metrics.oneUnitPrice.lower).toBeLessThan(snapshot.ui.quotePrice);
+    expect(metrics.oneUnitPrice.upper).toBeGreaterThan(snapshot.ui.quotePrice);
   });
 });

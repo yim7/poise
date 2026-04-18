@@ -109,11 +109,6 @@ function resolveNumericField<K extends keyof TrackDraftNumericFields>(
   draft: TrackDraft,
   field: K,
 ): number | null {
-  const parsedValue = draft.parsedNumbers[field];
-  if (typeof parsedValue === 'number' && Number.isFinite(parsedValue)) {
-    return parsedValue;
-  }
-
   return parseFiniteNumber(draft.rawNumbers[field]);
 }
 
