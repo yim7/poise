@@ -5,7 +5,9 @@ edition.workspace = true
 build = "build.rs"
 
 [dependencies]
+anyhow.workspace = true
 tauri = { version = "2" }
+toml_edit.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2" }
