@@ -2976,8 +2976,10 @@ dependencies = [
 name = "poise-track-tuning-workbench"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "tauri",
  "tauri-build",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
