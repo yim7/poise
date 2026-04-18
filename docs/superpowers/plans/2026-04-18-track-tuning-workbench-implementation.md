@@ -177,7 +177,7 @@ Commit SHA: `c585fed`, `0c11f64`
 - Modify: `tools/track-tuning-workbench/src-tauri/src/lib.rs`
 - Modify: `tools/track-tuning-workbench/src-tauri/Cargo.toml`
 
-- [ ] **Step 1: 先写 Rust 单元测试，钉住当前导出边界**
+- [x] **Step 1: 先写 Rust 单元测试，钉住当前导出边界**
   - 至少覆盖：
     - 只导出 `[[tracks]]`，不带顶层 `exchange`
     - 未暴露字段，例如 `tick_timeout_secs`，第一版不会出现在导出结果里
@@ -186,12 +186,12 @@ Commit SHA: `c585fed`, `0c11f64`
     - 新建空白 `track` 时只写当前页面支持的字段
     - 页面已暴露字段即使值等于默认值也仍然显式导出
 
-- [ ] **Step 2: 在 `config_document.rs` 中实现配置读取与 `track` 投影**
+- [x] **Step 2: 在 `config_document.rs` 中实现配置读取与 `track` 投影**
   - 读取 TOML 原文并抽取 `[[tracks]]`
   - 把每个 `track` 投影成前端可编辑的 typed 字段和稳定的内部 `draft_id`
   - 不复用 `server::Config` 反序列化结构，避免 server 边界和工作台边界绑死
 
-- [ ] **Step 3: 在 `config_projection.rs` 中实现导出拼装**
+- [x] **Step 3: 在 `config_projection.rs` 中实现导出拼装**
   - 提供：
     - `export_current_track`
     - `export_all_tracks`
@@ -199,20 +199,20 @@ Commit SHA: `c585fed`, `0c11f64`
   - 顺序规则明确：默认保留当前草稿顺序
   - 页面已暴露字段全部显式写出
 
-- [ ] **Step 4: 运行最小 Rust 测试**
+- [x] **Step 4: 运行最小 Rust 测试**
 
 Run: `cargo test -p poise-track-tuning-workbench config_document::tests:: -- --nocapture`
 
 Expected: 导出范围、字段省略和复制 / 删除语义全部通过
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/track-tuning-workbench/src-tauri
 git commit -m "feat(workbench): add track projection export boundary"
 ```
 
-Commit SHA: 执行后回写
+Commit SHA: `5a67d18`, `7b86a1b`, `fa2c966`
 
 ## Task 3: 实现 Tauri 命令层的文件、行情与会话适配
 
