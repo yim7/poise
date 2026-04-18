@@ -454,46 +454,46 @@ Commit SHA: `17d9e20`, `6abe06a`, `50543ce`
 - Create: `tools/track-tuning-workbench/README.md`
 - Modify: `docs/superpowers/specs/2026-04-18-track-tuning-workbench-design.md` 仅当实现与设计存在已确认偏差
 
-- [ ] **Step 1: 把前端与 Tauri commands 全部接通**
+- [x] **Step 1: 把前端与 Tauri commands 全部接通**
   - 文件选择、配置加载、草稿恢复、Binance 价格刷新、复制文本、保存草稿全部走真实命令层
   - UI 不再依赖假数据
 
-- [ ] **Step 2: 完成复制动作与错误态**
+- [x] **Step 2: 完成复制动作与错误态**
   - `复制当前 Track`
   - `复制全部 Tracks`
   - 文件解析失败、symbol 不支持、网络失败、字段非法时都有明确可读反馈
 
-- [ ] **Step 3: 补齐工具 README**
+- [x] **Step 3: 补齐工具 README**
   - 说明如何启动开发环境
   - 说明工具边界：不回写原文件、只导出 `[[tracks]]`
   - 说明自动保存和撤销 / 重做语义
 
-- [ ] **Step 4: 跑前端最小验收**
+- [x] **Step 4: 跑前端最小验收**
 
 Run: `pnpm --dir tools/track-tuning-workbench test`
 
 Expected: 前端领域测试、状态测试和组件测试全部通过
 
-- [ ] **Step 5: 跑 Rust 最小验收**
+- [x] **Step 5: 跑 Rust 最小验收**
 
 Run: `cargo test -p poise-track-tuning-workbench`
 
 Expected: TOML 边界、命令层和会话测试全部通过
 
-- [ ] **Step 6: 跑桌面开发 smoke**
+- [x] **Step 6: 跑桌面开发 smoke**
 
 Run: `pnpm --dir tools/track-tuning-workbench tauri dev`
 
 Expected: 能打开桌面窗口；可手动完成一次“加载文件 -> 选择 track -> 调参 -> 删除并撤销 -> 复制当前 / 全部 tracks”的流程
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tools/track-tuning-workbench docs/superpowers/specs/2026-04-18-track-tuning-workbench-design.md
 git commit -m "feat(workbench): ship track tuning desktop tool"
 ```
 
-Commit SHA: 执行后回写
+Commit SHA: `7f5194c`
 
 ## Self-Review
 
