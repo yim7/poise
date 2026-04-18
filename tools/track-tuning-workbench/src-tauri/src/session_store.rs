@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -55,7 +56,7 @@ impl SessionStore {
         })?;
 
         let session_file = self.session_file_path(config_path.as_ref())?;
-        let temp_file = session_file.with_extension("json.tmp");
+        let temp_file = temporary_session_file_path(&session_file);
         let serialized = serde_json::to_vec_pretty(value).map_err(|error| {
             CommandError::new(
                 CommandErrorKind::SessionStore,
@@ -69,7 +70,17 @@ impl SessionStore {
                 format!("写入草稿会话失败 `{}`: {error}", temp_file.display()),
             )
         })?;
+        if session_file.exists() {
+            fs::remove_file(&session_file).map_err(|error| {
+                let _ = fs::remove_file(&temp_file);
+                CommandError::new(
+                    CommandErrorKind::SessionStore,
+                    format!("覆盖已有草稿会话失败 `{}`: {error}", session_file.display()),
+                )
+            })?;
+        }
         fs::rename(&temp_file, &session_file).map_err(|error| {
+            let _ = fs::remove_file(&temp_file);
             CommandError::new(
                 CommandErrorKind::SessionStore,
                 format!(
@@ -124,4 +135,16 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf, CommandError> {
     }
 
     Ok(normalized)
+}
+
+fn temporary_session_file_path(session_file: &Path) -> PathBuf {
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = session_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.json");
+    session_file.with_file_name(format!("{file_name}.{unique_suffix}.tmp"))
 }

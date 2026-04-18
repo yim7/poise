@@ -194,6 +194,7 @@ mod tests {
         path::Path,
         sync::mpsc,
         thread,
+        time::Duration,
     };
 
     use crate::binance_quote::QuoteErrorKind;
@@ -299,6 +300,106 @@ total_loss_limit = 200.0
         assert_ne!(restored_a, restored_b);
     }
 
+    #[test]
+    fn saving_draft_twice_to_same_path_overwrites_previous_snapshot() {
+        let temp_dir = tempdir().unwrap();
+        let session_root = temp_dir.path().join("sessions");
+        let config_path = absolute_file(temp_dir.path(), "configs/a.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "").unwrap();
+
+        let first_snapshot = json!({
+            "selected_draft_id": "draft-a",
+            "projected_tracks_toml": "[[tracks]]\ntrack_id = \"alpha\""
+        });
+        let second_snapshot = json!({
+            "selected_draft_id": "draft-b",
+            "projected_tracks_toml": "[[tracks]]\ntrack_id = \"beta\""
+        });
+
+        save_draft_to_store(&session_root, &config_path, &first_snapshot).unwrap();
+        save_draft_to_store(&session_root, &config_path, &second_snapshot).unwrap();
+
+        let restored = load_saved_draft_from_store(&session_root, &config_path).unwrap();
+
+        assert_eq!(restored, Some(second_snapshot));
+    }
+
+    #[test]
+    fn quote_timeout_returns_stable_timeout_error() {
+        let (server_url, _) = spawn_http_server_with_delay(
+            "HTTP/1.1 200 OK",
+            "{\"symbol\":\"BTCUSDT\",\"price\":\"65000.10\"}",
+            Duration::from_millis(200),
+        );
+        let client =
+            BinanceQuoteClient::for_base_url_and_timeout(server_url, Duration::from_millis(50));
+
+        let quote =
+            tauri::async_runtime::block_on(fetch_binance_quote_with_client(&client, "BTCUSDT"));
+
+        assert_eq!(quote.price, None);
+        assert_eq!(quote.error_kind, Some(QuoteErrorKind::TimedOut));
+        assert!(quote.error_message.unwrap().contains("超时"));
+    }
+
+    #[test]
+    fn rate_limited_response_returns_distinct_error_kind() {
+        let (server_url, _) = spawn_http_server(
+            "HTTP/1.1 429 TOO MANY REQUESTS",
+            "{\"code\":-1003,\"msg\":\"Too many requests; please use websocket for live updates.\"}",
+        );
+        let client = BinanceQuoteClient::for_base_url(server_url);
+
+        let quote =
+            tauri::async_runtime::block_on(fetch_binance_quote_with_client(&client, "BTCUSDT"));
+
+        assert_eq!(quote.price, None);
+        assert_eq!(quote.error_kind, Some(QuoteErrorKind::RateLimited));
+        assert!(
+            quote
+                .error_message
+                .unwrap()
+                .contains("Too many requests")
+        );
+    }
+
+    #[test]
+    fn temporarily_unavailable_response_returns_distinct_error_kind() {
+        let (server_url, _) = spawn_http_server(
+            "HTTP/1.1 503 SERVICE UNAVAILABLE",
+            "{\"code\":-1001,\"msg\":\"Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received this message in error.\"}",
+        );
+        let client = BinanceQuoteClient::for_base_url(server_url);
+
+        let quote =
+            tauri::async_runtime::block_on(fetch_binance_quote_with_client(&client, "BTCUSDT"));
+
+        assert_eq!(quote.price, None);
+        assert_eq!(quote.error_kind, Some(QuoteErrorKind::TemporarilyUnavailable));
+    }
+
+    #[test]
+    fn generic_upstream_error_keeps_binance_message() {
+        let (server_url, _) = spawn_http_server(
+            "HTTP/1.1 500 INTERNAL SERVER ERROR",
+            "{\"code\":-1000,\"msg\":\"An unknown error occurred while processing the request.\"}",
+        );
+        let client = BinanceQuoteClient::for_base_url(server_url);
+
+        let quote =
+            tauri::async_runtime::block_on(fetch_binance_quote_with_client(&client, "BTCUSDT"));
+
+        assert_eq!(quote.price, None);
+        assert_eq!(quote.error_kind, Some(QuoteErrorKind::Upstream));
+        assert!(
+            quote
+                .error_message
+                .unwrap()
+                .contains("An unknown error occurred")
+        );
+    }
+
     fn absolute_file(root: &Path, relative: &str) -> std::path::PathBuf {
         root.join(relative)
     }
@@ -306,6 +407,14 @@ total_loss_limit = 200.0
     fn spawn_http_server(
         status_line: &'static str,
         body: &'static str,
+    ) -> (String, mpsc::Receiver<String>) {
+        spawn_http_server_with_delay(status_line, body, Duration::ZERO)
+    }
+
+    fn spawn_http_server_with_delay(
+        status_line: &'static str,
+        body: &'static str,
+        response_delay: Duration,
     ) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -318,6 +427,7 @@ total_loss_limit = 200.0
             let request = String::from_utf8_lossy(&buffer[..read]);
             let first_line = request.lines().next().unwrap().to_string();
             let _ = tx.send(first_line);
+            thread::sleep(response_delay);
             let response = format!(
                 "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
