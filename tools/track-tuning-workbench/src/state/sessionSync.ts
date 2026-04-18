@@ -4,11 +4,13 @@ export interface WorkbenchSnapshot {
   selectedDraftId: string;
   drafts: TrackDraft[];
   temporaryPriceOverrides: Record<string, number>;
+  exportedDrafts?: TrackDraft[];
 }
 
 export interface SessionPersistence {
   loadDraft(configPath: string): Promise<WorkbenchSnapshot | null>;
   saveDraft(configPath: string, snapshot: WorkbenchSnapshot): Promise<void>;
+  saveDraftSync?(configPath: string, snapshot: WorkbenchSnapshot): void;
 }
 
 export interface BrowserStorageLike {
@@ -48,6 +50,7 @@ export function createSessionSync(
       return persistence.loadDraft(configPath);
     },
     scheduleSave(configPath, snapshot) {
+      persistence.saveDraftSync?.(configPath, cloneSnapshot(snapshot));
       pendingPath = configPath;
       pendingSnapshot = cloneSnapshot(snapshot);
 
@@ -116,6 +119,9 @@ export function createBrowserSessionPersistence(
       }
     },
     async saveDraft(configPath, snapshot) {
+      storage.setItem(makeStorageKey(namespace, configPath), JSON.stringify(snapshot));
+    },
+    saveDraftSync(configPath, snapshot) {
       storage.setItem(makeStorageKey(namespace, configPath), JSON.stringify(snapshot));
     },
   };

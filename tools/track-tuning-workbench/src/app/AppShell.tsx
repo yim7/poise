@@ -5,7 +5,7 @@ import {
   type WorkbenchBridge,
 } from '@/app/workbenchBridge';
 import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
-import { parseFiniteNumber } from '@/domain/trackValidation';
+import { clearResolvedLoadIssues, parseFiniteNumber } from '@/domain/trackValidation';
 import { useWorkbenchSnapshot, useWorkbenchStore } from '@/state/workbenchStore';
 import { TrackWorkbenchChart } from '@/ui/chart/TrackWorkbenchChart';
 import { useSelectedTrackWorkbench } from '@/ui/app/useSelectedTrackWorkbench';
@@ -55,10 +55,13 @@ export function AppShell({ bridge }: AppShellProps) {
     let cancelled = false;
 
     const refreshQuote = async () => {
-      store.setRemoteQuote(selectedDraftId, {
-        status: 'loading',
-        symbol: selectedSymbol,
-      });
+      const currentQuote = store.getState().remoteQuotes[selectedDraftId];
+      if (currentQuote?.status !== 'live') {
+        store.setRemoteQuote(selectedDraftId, {
+          status: 'loading',
+          symbol: selectedSymbol,
+        });
+      }
 
       try {
         const quote = await resolvedBridge.fetchBinanceQuote(selectedSymbol);
@@ -181,6 +184,8 @@ export function AppShell({ bridge }: AppShellProps) {
               try {
                 const exported = await resolvedBridge.exportCurrentTrack(selectedDraft);
                 await resolvedBridge.copyText(exported);
+                store.markTrackExported(selectedDraft.draftId);
+                await store.flush();
                 setNotice({
                   tone: 'info',
                   message: '当前 Track 已复制到剪贴板',
@@ -200,6 +205,8 @@ export function AppShell({ bridge }: AppShellProps) {
               try {
                 const exported = await resolvedBridge.exportAllTracks(snapshot.drafts);
                 await resolvedBridge.copyText(exported);
+                store.markAllExported();
+                await store.flush();
                 setNotice({
                   tone: 'info',
                   message: '全部 Tracks 已复制到剪贴板',
@@ -272,6 +279,7 @@ export function AppShell({ bridge }: AppShellProps) {
               }
               store.updateDraft(selectedDraft.draftId, (draft) => {
                 draft.additional[field] = value;
+                clearResolvedLoadIssues(draft, field);
               });
             }}
             onNumericChange={(field, value) => {
@@ -280,6 +288,7 @@ export function AppShell({ bridge }: AppShellProps) {
               }
               store.updateDraft(selectedDraft.draftId, (draft) => {
                 draft.rawNumbers[field] = value;
+                clearResolvedLoadIssues(draft, field);
               });
             }}
             onEnumChange={(field, value) => {
@@ -289,9 +298,10 @@ export function AppShell({ bridge }: AppShellProps) {
               store.updateDraft(selectedDraft.draftId, (draft) => {
                 if (field === 'shapeFamily') {
                   draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
-                  return;
+                } else {
+                  draft.enums.outOfBandPolicy = value as TrackDraft['enums']['outOfBandPolicy'];
                 }
-                draft.enums.outOfBandPolicy = value as TrackDraft['enums']['outOfBandPolicy'];
+                clearResolvedLoadIssues(draft, field);
               });
             }}
             onQuotePriceChange={(value) => {

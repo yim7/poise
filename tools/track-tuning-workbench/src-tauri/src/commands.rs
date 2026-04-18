@@ -8,7 +8,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     binance_quote::{BinanceQuoteClient, BinanceQuotePayload},
-    config_document::{EditableTrackFields, TrackDraft, load_track_document},
+    config_document::{EditableTrackFields, TrackDraft, TrackLoadIssue, load_track_document},
     config_projection,
     error::{CommandError, CommandErrorKind},
     session_store::SessionStore,
@@ -24,6 +24,7 @@ pub struct LoadedConfigFilePayload {
 pub struct TrackDraftPayload {
     pub draft_id: String,
     pub fields: EditableTrackFieldsPayload,
+    pub load_issues: Vec<TrackLoadIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -188,6 +189,7 @@ impl From<&TrackDraft> for TrackDraftPayload {
         Self {
             draft_id: value.draft_id.clone(),
             fields: EditableTrackFieldsPayload::from(&value.fields),
+            load_issues: value.load_issues.clone(),
         }
     }
 }
@@ -220,6 +222,7 @@ impl TryFrom<TrackDraftPayload> for TrackDraft {
         Ok(Self {
             draft_id: value.draft_id,
             fields: EditableTrackFields::try_from(value.fields)?,
+            load_issues: value.load_issues,
         })
     }
 }
@@ -327,6 +330,49 @@ total_loss_limit = 200.0
         assert_eq!(payload.projected_tracks.len(), 1);
         assert_eq!(payload.projected_tracks[0].fields.track_id, "btc-core");
         assert_eq!(payload.projected_tracks[0].fields.symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn load_config_file_keeps_invalid_track_in_the_list() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("grid.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[[tracks]]
+track_id = "good"
+symbol = "BTCUSDT"
+lower_price = 65000.0
+upper_price = 68000.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 250.0
+daily_loss_limit = 100.0
+total_loss_limit = 200.0
+
+[[tracks]]
+track_id = "broken"
+symbol = "ETHUSDT"
+upper_price = 4000.0
+long_exposure_units = 5.0
+short_exposure_units = 5.0
+notional_per_unit = 100.0
+daily_loss_limit = 80.0
+total_loss_limit = 160.0
+"#,
+        )
+        .unwrap();
+
+        let payload = load_config_file_from_path(&config_path).unwrap();
+
+        assert_eq!(payload.projected_tracks.len(), 2);
+        let broken = payload
+            .projected_tracks
+            .iter()
+            .find(|draft| draft.fields.track_id == "broken")
+            .unwrap();
+        assert!(!broken.load_issues.is_empty());
+        assert_eq!(broken.load_issues[0].field_key, "lower_price");
     }
 
     #[test]
@@ -464,6 +510,7 @@ total_loss_limit = 200.0
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
             },
+            load_issues: Vec::new(),
         };
 
         let exported = super::export_current_track_text(track).unwrap();
@@ -493,6 +540,7 @@ total_loss_limit = 200.0
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
             },
+            load_issues: Vec::new(),
         };
         let beta = super::TrackDraftPayload {
             draft_id: "beta-draft".to_string(),
@@ -512,6 +560,7 @@ total_loss_limit = 200.0
                 total_loss_limit: 160.0,
                 shape_family: "responsive".to_string(),
             },
+            load_issues: Vec::new(),
         };
 
         let exported = super::export_all_tracks_text(vec![alpha, beta]).unwrap();
@@ -667,6 +716,7 @@ total_loss_limit = 200.0
                 total_loss_limit: 500.0,
                 shape_family: "linear".to_string(),
             },
+            load_issues: Vec::new(),
         }
     }
 }

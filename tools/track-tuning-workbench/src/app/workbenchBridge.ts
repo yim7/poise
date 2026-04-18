@@ -1,9 +1,18 @@
-import type { SessionPersistence } from '@/state/sessionSync';
+import type {
+  BrowserStorageLike,
+  SessionPersistence,
+} from '@/state/sessionSync';
+import { createBrowserSessionPersistence } from '@/state/sessionSync';
 import type {
   RemoteQuoteErrorKind,
   WorkbenchSnapshot,
 } from '@/state/workbenchStore';
-import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
+import {
+  createTrackDraft,
+  type TrackDraft,
+  type TrackDraftFieldKey,
+  type TrackDraftLoadIssue,
+} from '@/domain/trackDraft';
 
 export interface WorkbenchBridgeCommandError {
   kind: 'config' | 'io' | 'session_store' | 'dialog' | 'clipboard' | 'internal';
@@ -35,25 +44,29 @@ export interface WorkbenchBridge {
 }
 
 interface LoadedConfigFilePayload {
-  configPath: string;
-  projectedTracks: Array<{
-    draftId: string;
+  config_path: string;
+  projected_tracks: Array<{
+    draft_id: string;
     fields: {
-      trackId: string;
+      track_id: string;
       symbol: string;
-      lowerPrice: number;
-      upperPrice: number;
-      longExposureUnits: number;
-      shortExposureUnits: number;
-      notionalPerUnit: number;
-      maxNotional: number;
-      minRebalanceUnits: number;
+      lower_price: number;
+      upper_price: number;
+      long_exposure_units: number;
+      short_exposure_units: number;
+      notional_per_unit: number;
+      max_notional: number;
+      min_rebalance_units: number;
       leverage: number;
-      outOfBandPolicy: string;
-      dailyLossLimit: number;
-      totalLossLimit: number;
-      shapeFamily: string;
+      out_of_band_policy: string;
+      daily_loss_limit: number;
+      total_loss_limit: number;
+      shape_family: string;
     };
+    load_issues: Array<{
+      field_key: string;
+      message: string;
+    }>;
   }>;
 }
 
@@ -75,13 +88,33 @@ export function createWorkbenchBridge(): WorkbenchBridge {
 
 export function createBridgeSessionPersistence(
   bridge: Pick<WorkbenchBridge, 'loadSavedDraft' | 'saveDraft'>,
+  storage?: BrowserStorageLike,
 ): SessionPersistence {
+  const browserMirror = storage
+    ? createBrowserSessionPersistence(storage, {
+        namespace: 'poise.track-tuning-workbench.tauri',
+      })
+    : null;
+
   return {
-    loadDraft(configPath) {
-      return bridge.loadSavedDraft(configPath);
+    async loadDraft(configPath) {
+      const mirrored = browserMirror ? await browserMirror.loadDraft(configPath) : null;
+      if (mirrored) {
+        return mirrored;
+      }
+
+      const snapshot = await bridge.loadSavedDraft(configPath);
+      if (snapshot && browserMirror?.saveDraftSync) {
+        browserMirror.saveDraftSync(configPath, snapshot);
+      }
+      return snapshot;
     },
-    saveDraft(configPath, snapshot) {
-      return bridge.saveDraft(configPath, snapshot);
+    async saveDraft(configPath, snapshot) {
+      browserMirror?.saveDraftSync?.(configPath, snapshot);
+      await bridge.saveDraft(configPath, snapshot);
+    },
+    saveDraftSync(configPath, snapshot) {
+      browserMirror?.saveDraftSync?.(configPath, snapshot);
     },
   };
 }
@@ -107,28 +140,33 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
         configPath,
       });
       return {
-        configPath: payload.configPath,
-        projectedTracks: payload.projectedTracks.map((track) => createTrackDraft({
-          draftId: track.draftId,
+        configPath: payload.config_path,
+        projectedTracks: payload.projected_tracks.map((track) => createTrackDraft({
+          draftId: track.draft_id,
           raw: {
-            trackId: track.fields.trackId,
+            trackId: track.fields.track_id,
             symbol: track.fields.symbol,
-            lowerPrice: formatRawNumber(track.fields.lowerPrice),
-            upperPrice: formatRawNumber(track.fields.upperPrice),
-            longExposureUnits: formatRawNumber(track.fields.longExposureUnits),
-            shortExposureUnits: formatRawNumber(track.fields.shortExposureUnits),
-            notionalPerUnit: formatRawNumber(track.fields.notionalPerUnit),
-            maxNotional: formatRawNumber(track.fields.maxNotional),
-            minRebalanceUnits: formatRawNumber(track.fields.minRebalanceUnits),
+            lowerPrice: formatRawNumber(track.fields.lower_price),
+            upperPrice: formatRawNumber(track.fields.upper_price),
+            longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
+            shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
+            notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
+            maxNotional: formatRawNumber(track.fields.max_notional),
+            minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
             leverage: String(track.fields.leverage),
-            dailyLossLimit: formatRawNumber(track.fields.dailyLossLimit),
-            totalLossLimit: formatRawNumber(track.fields.totalLossLimit),
-            outOfBandPolicy: track.fields.outOfBandPolicy as TrackDraft['enums']['outOfBandPolicy'],
-            shapeFamily: track.fields.shapeFamily as TrackDraft['enums']['shapeFamily'],
+            dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
+            totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
+            outOfBandPolicy: track.fields.out_of_band_policy as TrackDraft['enums']['outOfBandPolicy'],
+            shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
           },
           ui: {
             quotePriceInput: '',
           },
+          attachments: track.load_issues.length > 0
+            ? {
+                loadIssues: track.load_issues.map(normalizeLoadIssue),
+              }
+            : undefined,
         })),
       };
     },
@@ -288,24 +326,67 @@ function isCommandError(error: unknown): error is WorkbenchBridgeCommandError {
 
 function toTrackDraftPayload(draft: TrackDraft) {
   return {
-    draftId: draft.draftId,
+    draft_id: draft.draftId,
     fields: {
-      trackId: draft.additional.trackId,
+      track_id: draft.additional.trackId,
       symbol: draft.additional.symbol,
-      lowerPrice: parseRequiredNumber(draft.rawNumbers.lowerPrice),
-      upperPrice: parseRequiredNumber(draft.rawNumbers.upperPrice),
-      longExposureUnits: parseRequiredNumber(draft.rawNumbers.longExposureUnits),
-      shortExposureUnits: parseRequiredNumber(draft.rawNumbers.shortExposureUnits),
-      notionalPerUnit: parseRequiredNumber(draft.rawNumbers.notionalPerUnit),
-      maxNotional: parseRequiredNumber(draft.rawNumbers.maxNotional),
-      minRebalanceUnits: parseRequiredNumber(draft.rawNumbers.minRebalanceUnits),
+      lower_price: parseRequiredNumber(draft.rawNumbers.lowerPrice),
+      upper_price: parseRequiredNumber(draft.rawNumbers.upperPrice),
+      long_exposure_units: parseRequiredNumber(draft.rawNumbers.longExposureUnits),
+      short_exposure_units: parseRequiredNumber(draft.rawNumbers.shortExposureUnits),
+      notional_per_unit: parseRequiredNumber(draft.rawNumbers.notionalPerUnit),
+      max_notional: parseRequiredNumber(draft.rawNumbers.maxNotional),
+      min_rebalance_units: parseRequiredNumber(draft.rawNumbers.minRebalanceUnits),
       leverage: Math.trunc(parseRequiredNumber(draft.rawNumbers.leverage)),
-      outOfBandPolicy: draft.enums.outOfBandPolicy,
-      dailyLossLimit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
-      totalLossLimit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
-      shapeFamily: draft.enums.shapeFamily,
+      out_of_band_policy: draft.enums.outOfBandPolicy,
+      daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
+      total_loss_limit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
+      shape_family: draft.enums.shapeFamily,
     },
+    load_issues: [],
   };
+}
+
+function normalizeLoadIssue(issue: LoadedConfigFilePayload['projected_tracks'][number]['load_issues'][number]): TrackDraftLoadIssue {
+  return {
+    field: normalizeLoadIssueField(issue.field_key),
+    message: issue.message,
+  };
+}
+
+function normalizeLoadIssueField(fieldKey: string): TrackDraftFieldKey {
+  switch (fieldKey) {
+    case 'track_id':
+      return 'trackId';
+    case 'symbol':
+      return 'symbol';
+    case 'lower_price':
+      return 'lowerPrice';
+    case 'upper_price':
+      return 'upperPrice';
+    case 'long_exposure_units':
+      return 'longExposureUnits';
+    case 'short_exposure_units':
+      return 'shortExposureUnits';
+    case 'notional_per_unit':
+      return 'notionalPerUnit';
+    case 'max_notional':
+      return 'maxNotional';
+    case 'min_rebalance_units':
+      return 'minRebalanceUnits';
+    case 'leverage':
+      return 'leverage';
+    case 'daily_loss_limit':
+      return 'dailyLossLimit';
+    case 'total_loss_limit':
+      return 'totalLossLimit';
+    case 'shape_family':
+      return 'shapeFamily';
+    case 'out_of_band_policy':
+      return 'outOfBandPolicy';
+    default:
+      return 'trackId';
+  }
 }
 
 function parseRequiredNumber(input: string) {

@@ -111,6 +111,10 @@ function resolveVisualSnapshot(
     return null;
   }
 
+  if ((draft.attachments.loadIssues?.length ?? 0) > 0) {
+    return null;
+  }
+
   const fallbackNumbers = completeFallbackParsedNumbers(draft.parsedNumbers);
   const quotePrice = resolveQuotePrice(snapshot, draft);
 

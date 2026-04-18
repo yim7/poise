@@ -218,7 +218,31 @@ describe('workbench store', () => {
     expect(savedSnapshots).toEqual(['draft-a', 'draft-b']);
   });
 
-  it('keeps dirty tied to the original source snapshot instead of the persisted snapshot', async () => {
+  it('writes a synchronous draft mirror as soon as a save is scheduled', () => {
+    const savedSnapshots: string[] = [];
+    const syncMirrorSnapshots: string[] = [];
+    const persistence: SessionPersistence = {
+      async loadDraft() {
+        return null;
+      },
+      async saveDraft(_configPath, snapshot) {
+        savedSnapshots.push(snapshot.selectedDraftId);
+      },
+      saveDraftSync(_configPath, snapshot) {
+        syncMirrorSnapshots.push(snapshot.selectedDraftId);
+      },
+    };
+
+    const sync = createSessionSync(persistence, { debounceMs: 20 });
+    sync.scheduleSave('config/track.json', makeSnapshot({ selectedDraftId: 'draft-a' }));
+
+    expect(syncMirrorSnapshots).toEqual(['draft-a']);
+    expect(savedSnapshots).toEqual([]);
+
+    sync.dispose();
+  });
+
+  it('treats restored drafts as clean until they diverge from the exported baseline', async () => {
     const sourceSnapshot = makeSnapshot();
     const restoredSnapshot = makeSnapshot({
       drafts: [
@@ -238,17 +262,17 @@ describe('workbench store', () => {
 
     await store.load('config/track.json');
 
-    expect(store.isDirty()).toBe(true);
+    expect(store.isDirty()).toBe(false);
 
     await store.flush();
 
-    expect(store.isDirty()).toBe(true);
+    expect(store.isDirty()).toBe(false);
 
     store.updateDraft('draft-a', (draft) => {
       draft.rawNumbers.lowerPrice = '90';
     });
 
-    expect(store.isDirty()).toBe(false);
+    expect(store.isDirty()).toBe(true);
   });
 
   it('rebinds dirty calculation when loading a different source snapshot', async () => {
@@ -310,6 +334,17 @@ describe('workbench store', () => {
     expect(store.getState().drafts.find((draft) => draft.draftId === 'draft-a')?.rawNumbers.upperPrice).toBe('111');
   });
 
+  it('does not treat temporary price input as an unexported track change', () => {
+    const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
+
+    store.updateDraft('draft-a', (draft) => {
+      draft.ui.quotePriceInput = '123.45';
+    });
+    store.setTemporaryPriceOverride('draft-a', 123.45);
+
+    expect(store.isDirty()).toBe(false);
+  });
+
   it('inserts duplicated drafts after the source draft', () => {
     const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
     const duplicate = makeDraft('draft-c');
@@ -353,6 +388,26 @@ describe('workbench store', () => {
       '123.45',
     );
     expect(reopenedStore.getState().temporaryPriceOverrides['draft-a']).toBe(104);
+  });
+
+  it('marks the copied track as exported without clearing other track baselines', () => {
+    const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
+
+    store.updateDraft('draft-a', (draft) => {
+      draft.rawNumbers.lowerPrice = '95';
+    });
+
+    expect(store.isDirty()).toBe(true);
+
+    store.markTrackExported('draft-a');
+
+    expect(store.isDirty()).toBe(false);
+
+    store.updateDraft('draft-b', (draft) => {
+      draft.rawNumbers.lowerPrice = '96';
+    });
+
+    expect(store.isDirty()).toBe(true);
   });
 
   it('persists browser drafts through localStorage keyed by config path', async () => {

@@ -1,12 +1,13 @@
 import type {
   TrackDraft,
+  TrackDraftFieldKey,
   TrackDraftNumericFields,
   TrackDraftParsedSnapshot,
 } from '@/domain/trackDraft';
 import { TRACK_NUMERIC_FIELD_KEYS } from '@/domain/trackDraft';
 
 const FIELD_LABELS: Record<
-  keyof TrackDraftNumericFields | 'quotePriceInput' | 'trackId' | 'symbol',
+  TrackDraftFieldKey,
   string
 > = {
   trackId: 'track_id',
@@ -21,11 +22,13 @@ const FIELD_LABELS: Record<
   leverage: 'leverage',
   dailyLossLimit: 'daily_loss_limit',
   totalLossLimit: 'total_loss_limit',
+  shapeFamily: 'shape_family',
+  outOfBandPolicy: 'out_of_band_policy',
   quotePriceInput: 'quote_price',
 };
 
 export interface TrackDraftIssue {
-  field: keyof TrackDraftNumericFields | 'quotePriceInput' | 'trackId' | 'symbol';
+  field: TrackDraftFieldKey;
   message: string;
 }
 
@@ -38,6 +41,13 @@ export interface TrackDraftValidationResult {
 export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResult {
   const issues: TrackDraftIssue[] = [];
   const parsedNumbers = {} as TrackDraftNumericFields;
+
+  for (const issue of draft.attachments.loadIssues ?? []) {
+    issues.push({
+      field: issue.field,
+      message: issue.message,
+    });
+  }
 
   if (draft.additional.trackId.trim().length === 0) {
     issues.push({
@@ -113,6 +123,15 @@ export function ensureTrackDraftParsed(draft: TrackDraft): TrackDraftParsedSnaps
 
 export function buildTrackDraftSnapshot(draft: TrackDraft): TrackDraftParsedSnapshot {
   return ensureTrackDraftParsed(draft);
+}
+
+export function clearResolvedLoadIssues(draft: TrackDraft, editedField: TrackDraftFieldKey) {
+  const activeIssues = (draft.attachments.loadIssues ?? []).filter((issue) => issue.field !== editedField);
+  if (activeIssues.length === 0) {
+    delete draft.attachments.loadIssues;
+    return;
+  }
+  draft.attachments.loadIssues = activeIssues;
 }
 
 export function parseFiniteNumber(input: string): number | null {

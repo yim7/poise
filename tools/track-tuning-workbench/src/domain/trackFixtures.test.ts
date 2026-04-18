@@ -8,7 +8,11 @@ import {
 } from '@/domain/trackDraft';
 import { sampleTrackCurve } from '@/domain/trackCurve';
 import { computeTrackMetrics, type TrackMetrics } from '@/domain/trackMetrics';
-import { buildTrackDraftSnapshot, validateTrackDraft } from '@/domain/trackValidation';
+import {
+  buildTrackDraftSnapshot,
+  clearResolvedLoadIssues,
+  validateTrackDraft,
+} from '@/domain/trackValidation';
 
 const SEARCH_TOLERANCE = 1e-4;
 
@@ -198,6 +202,25 @@ describe('track domain fixtures', () => {
       field: 'totalLossLimit',
       message: 'total_loss_limit 必须大于 0',
     });
+  });
+
+  it('keeps load issues until the affected field is truly repaired', () => {
+    const draft = makeDraft({}, { quotePriceInput: '' });
+    draft.rawNumbers.lowerPrice = '0';
+    draft.attachments.loadIssues = [
+      {
+        field: 'lowerPrice',
+        message: 'track #1: missing numeric field `lower_price`',
+      },
+    ];
+
+    draft.additional.trackId = 'renamed-track';
+    clearResolvedLoadIssues(draft, 'trackId');
+    expect(draft.attachments.loadIssues).toHaveLength(1);
+
+    draft.rawNumbers.lowerPrice = '95';
+    clearResolvedLoadIssues(draft, 'lowerPrice');
+    expect(draft.attachments.loadIssues).toBeUndefined();
   });
 
   it('locks symmetric linear semantics and derived metrics', () => {

@@ -92,4 +92,42 @@ describe('useSelectedTrackWorkbench', () => {
     expect(model.selectedVisualSnapshot?.ui.quotePrice).toBe(98.5);
     expect(model.priceStatus.badge).toBe('临时价格覆盖');
   });
+
+  it('keeps a load-issue track visible but not trialable', () => {
+    const draft = makeDraft('draft-a', {
+      attachments: {
+        loadIssues: [
+          {
+            field: 'lowerPrice',
+            message: 'track #1: missing numeric field `lower_price`',
+          },
+        ],
+      },
+      ui: {
+        quotePriceInput: '',
+      },
+    });
+
+    const model = useSelectedTrackWorkbench({
+      selectedDraftId: draft.draftId,
+      drafts: [draft],
+      sourceDrafts: [draft],
+      temporaryPriceOverrides: {},
+      remoteQuotes: {
+        [draft.draftId]: {
+          status: 'live',
+          symbol: 'BTCUSDT',
+          price: 101.25,
+          retrievedAt: 1_713_400_000_000,
+        },
+      },
+      currentFilePath: '/tmp/config.toml',
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+    });
+
+    expect(model.trackItems[0]?.hasErrors).toBe(true);
+    expect(model.selectedVisualSnapshot).toBeNull();
+  });
 });

@@ -15,13 +15,13 @@ export function App() {
   const [{ bridge, store }] = useState(() => {
     const nextBridge = createWorkbenchBridge();
     const persistence = nextBridge.isTauriEnvironment()
-      ? createBridgeSessionPersistence(nextBridge)
+      ? createBridgeSessionPersistence(nextBridge, window.localStorage)
       : createBrowserSessionPersistence(window.localStorage);
 
     return {
       bridge: nextBridge,
       store: createWorkbenchStore({
-        sessionSync: createSessionSync(persistence),
+        sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
       }),
     };
   });

@@ -72,6 +72,8 @@ export interface WorkbenchStore {
   setTemporaryPriceOverride(draftId: string, price: number | undefined): void;
   setRemoteQuote(draftId: string, quote: RemoteQuoteState): void;
   clearRemoteQuote(draftId: string): void;
+  markTrackExported(draftId: string): void;
+  markAllExported(): void;
   addDraft(draft: TrackDraft): void;
   duplicateDraft(sourceDraftId: string, draft: TrackDraft): void;
   deleteDraft(draftId: string): void;
@@ -242,6 +244,30 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       remoteQuotes = nextQuotes;
       emit();
     },
+    markTrackExported(draftId) {
+      const currentDraft = draftSession.drafts.find((draft) => draft.draftId === draftId);
+      if (!currentDraft) {
+        return;
+      }
+
+      draftSession = {
+        ...draftSession,
+        exportedDrafts: replaceExportedDraft(
+          draftSession.exportedDrafts ?? [],
+          toExportBaselineDraft(currentDraft),
+        ),
+      };
+      scheduleSave();
+      emit();
+    },
+    markAllExported() {
+      draftSession = {
+        ...draftSession,
+        exportedDrafts: draftSession.drafts.map(toExportBaselineDraft),
+      };
+      scheduleSave();
+      emit();
+    },
     addDraft(draft) {
       commitCurrentDraft();
       draftSession = {
@@ -308,7 +334,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       return committedHistory.canRedo();
     },
     isDirty() {
-      return !snapshotsEqual(draftSession, currentSourceSnapshot);
+      return !exportedDraftsEqual(draftSession.drafts, draftSession.exportedDrafts ?? []);
     },
   };
 
@@ -340,7 +366,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       ...cloneSnapshot(draftSession),
       currentFilePath,
       sourceDrafts: cloneSnapshot(currentSourceSnapshot).drafts,
-      dirty: !snapshotsEqual(draftSession, currentSourceSnapshot),
+      dirty: !exportedDraftsEqual(draftSession.drafts, draftSession.exportedDrafts ?? []),
       canUndo: committedHistory.canUndo(),
       canRedo: committedHistory.canRedo(),
       remoteQuotes: structuredClone(remoteQuotes),
@@ -353,6 +379,7 @@ function createEmptySnapshot(): WorkbenchSnapshot {
     selectedDraftId: '',
     drafts: [],
     temporaryPriceOverrides: {},
+    exportedDrafts: [],
   };
 }
 
@@ -365,12 +392,16 @@ function cloneDraft(draft: TrackDraft): TrackDraft {
 }
 
 function normalizeSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
+  const normalizedDrafts = snapshot.drafts.map((draft) => normalizeDraft(draft));
   return {
     selectedDraftId: snapshot.selectedDraftId,
-    drafts: snapshot.drafts.map((draft) => normalizeDraft(draft)),
+    drafts: normalizedDrafts,
     temporaryPriceOverrides: {
       ...snapshot.temporaryPriceOverrides,
     },
+    exportedDrafts:
+      snapshot.exportedDrafts?.map((draft) => normalizeDraft(draft))
+      ?? normalizedDrafts.map(toExportBaselineDraft),
   };
 }
 
@@ -382,6 +413,11 @@ function normalizeDraft(draft: TrackDraft): TrackDraft {
 
 function snapshotsEqual(left: WorkbenchSnapshot, right: WorkbenchSnapshot): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function exportedDraftsEqual(left: TrackDraft[], right: TrackDraft[]) {
+  return JSON.stringify(left.map(toExportBaselineDraft))
+    === JSON.stringify(right.map(toExportBaselineDraft));
 }
 
 function hasDraft(snapshot: WorkbenchSnapshot, draftId: string): boolean {
@@ -409,6 +445,31 @@ function insertDraftAfter(drafts: TrackDraft[], sourceDraftId: string, draft: Tr
   const nextDrafts = drafts.slice();
   nextDrafts.splice(sourceIndex + 1, 0, draft);
   return nextDrafts;
+}
+
+function replaceExportedDraft(exportedDrafts: TrackDraft[], nextDraft: TrackDraft) {
+  const nextExportedDrafts = exportedDrafts.map((draft) =>
+    draft.draftId === nextDraft.draftId ? nextDraft : draft);
+
+  if (nextExportedDrafts.some((draft) => draft.draftId === nextDraft.draftId)) {
+    return nextExportedDrafts;
+  }
+
+  return [...nextExportedDrafts, nextDraft];
+}
+
+function toExportBaselineDraft(draft: TrackDraft): TrackDraft {
+  return {
+    draftId: draft.draftId,
+    additional: structuredClone(draft.additional),
+    rawNumbers: structuredClone(draft.rawNumbers),
+    parsedNumbers: {},
+    enums: structuredClone(draft.enums),
+    ui: {
+      quotePriceInput: '',
+    },
+    attachments: {},
+  };
 }
 
 function createMemoryPersistence(): SessionPersistence {

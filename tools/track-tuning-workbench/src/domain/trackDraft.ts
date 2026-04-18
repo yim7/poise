@@ -37,6 +37,19 @@ export interface TrackDraftAdditionalFields {
   symbol: string;
 }
 
+export type TrackDraftFieldKey =
+  | keyof TrackDraftNumericFields
+  | 'trackId'
+  | 'symbol'
+  | 'shapeFamily'
+  | 'outOfBandPolicy'
+  | 'quotePriceInput';
+
+export interface TrackDraftLoadIssue {
+  field: TrackDraftFieldKey;
+  message: string;
+}
+
 export interface TrackExchangeRulesDraft {
   priceTick?: number;
   quantityStep?: number;
@@ -56,6 +69,7 @@ export interface TrackDraftAttachments {
   currentExposure?: number;
   exchangeRules?: TrackExchangeRulesDraft;
   lossGuard?: TrackLossGuardDraft;
+  loadIssues?: TrackDraftLoadIssue[];
 }
 
 export interface TrackDraftUiState {

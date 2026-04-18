@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Table};
 
 const DEFAULT_MIN_REBALANCE_UNITS: f64 = 0.5;
@@ -104,6 +105,13 @@ impl Default for EditableTrackFields {
 pub struct TrackDraft {
     pub draft_id: String,
     pub fields: EditableTrackFields,
+    pub load_issues: Vec<TrackLoadIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackLoadIssue {
+    pub field_key: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -140,6 +148,7 @@ impl TrackDocument {
         let duplicate = TrackDraft {
             draft_id: self.allocate_draft_id(&fields),
             fields,
+            load_issues: Vec::new(),
         };
         let insert_at = index + 1;
         self.drafts.insert(insert_at, duplicate);
@@ -151,6 +160,7 @@ impl TrackDocument {
         let draft = TrackDraft {
             draft_id: self.allocate_draft_id(&fields),
             fields,
+            load_issues: Vec::new(),
         };
         self.drafts.push(draft);
         self.drafts.last().expect("blank track was just pushed")
@@ -201,8 +211,7 @@ pub fn parse_track_document(input: &str) -> Result<TrackDocument> {
     let track_tables = read_track_tables(&document)?;
 
     for (index, table) in track_tables.iter().enumerate() {
-        let fields =
-            project_track_fields(table).with_context(|| format!("failed to project track #{}", index + 1))?;
+        let (fields, load_issues) = project_track_fields_lossy(table);
         drafts.push(TrackDraft {
             draft_id: disambiguate_identifier(
                 &stable_draft_id(&fields),
@@ -212,6 +221,13 @@ pub fn parse_track_document(input: &str) -> Result<TrackDocument> {
                     .collect::<Vec<_>>(),
             ),
             fields,
+            load_issues: load_issues
+                .into_iter()
+                .map(|issue| TrackLoadIssue {
+                    field_key: issue.field_key,
+                    message: format!("track #{}: {}", index + 1, issue.message),
+                })
+                .collect(),
         });
     }
 
@@ -233,43 +249,64 @@ fn empty_array_of_tables() -> &'static ArrayOfTables {
     EMPTY.get_or_init(ArrayOfTables::new)
 }
 
-fn project_track_fields(table: &Table) -> Result<EditableTrackFields> {
-    let track_id = required_string(table, "track_id")?;
-    let symbol = required_string(table, "symbol")?;
-    let lower_price = required_f64(table, "lower_price")?;
-    let upper_price = required_f64(table, "upper_price")?;
-    let long_exposure_units = required_f64(table, "long_exposure_units")?;
-    let short_exposure_units = required_f64(table, "short_exposure_units")?;
-    let notional_per_unit = required_f64(table, "notional_per_unit")?;
-    let implied_max_notional = long_exposure_units.max(short_exposure_units) * notional_per_unit;
+fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackLoadIssue>) {
+    let mut issues = Vec::new();
+    let mut fields = EditableTrackFields::default();
 
-    Ok(EditableTrackFields {
-        track_id,
-        symbol,
-        lower_price,
-        upper_price,
-        long_exposure_units,
-        short_exposure_units,
-        notional_per_unit,
-        max_notional: optional_f64(table, "max_notional")?.unwrap_or(implied_max_notional),
-        min_rebalance_units: optional_f64(table, "min_rebalance_units")?
-            .unwrap_or(DEFAULT_MIN_REBALANCE_UNITS),
-        leverage: optional_u32(table, "leverage")?.unwrap_or(DEFAULT_LEVERAGE),
-        out_of_band_policy: optional_string(table, "out_of_band_policy")?
-            .map(|value| TrackOutOfBandPolicy::parse(&value))
-            .transpose()?
-            .unwrap_or(TrackOutOfBandPolicy::Freeze),
-        daily_loss_limit: required_f64(table, "daily_loss_limit")?,
-        total_loss_limit: required_f64(table, "total_loss_limit")?,
-        shape_family: optional_string(table, "shape_family")?
-            .map(|value| TrackShapeFamily::parse(&value))
-            .transpose()?
-            .unwrap_or(TrackShapeFamily::Linear),
-    })
-}
+    fields.track_id = required_string_lossy(table, "track_id", &mut issues);
+    fields.symbol = required_string_lossy(table, "symbol", &mut issues);
 
-fn required_string(table: &Table, key: &str) -> Result<String> {
-    optional_string(table, key)?.ok_or_else(|| anyhow!("missing string field `{key}`"))
+    let lower_price = required_f64_lossy(table, "lower_price", &mut issues);
+    let upper_price = required_f64_lossy(table, "upper_price", &mut issues);
+    fields.lower_price = lower_price.unwrap_or(0.0);
+    fields.upper_price = upper_price.unwrap_or(0.0);
+
+    let long_exposure_units = required_f64_lossy(table, "long_exposure_units", &mut issues);
+    let short_exposure_units = required_f64_lossy(table, "short_exposure_units", &mut issues);
+    fields.long_exposure_units = long_exposure_units.unwrap_or(0.0);
+    fields.short_exposure_units = short_exposure_units.unwrap_or(0.0);
+
+    fields.notional_per_unit =
+        required_f64_lossy(table, "notional_per_unit", &mut issues).unwrap_or(0.0);
+    let implied_max_notional =
+        fields.long_exposure_units.max(fields.short_exposure_units) * fields.notional_per_unit;
+    fields.max_notional = optional_f64_lossy(table, "max_notional", &mut issues)
+        .unwrap_or(implied_max_notional);
+    fields.min_rebalance_units =
+        optional_f64_lossy(table, "min_rebalance_units", &mut issues)
+            .unwrap_or(DEFAULT_MIN_REBALANCE_UNITS);
+    fields.leverage =
+        optional_u32_lossy(table, "leverage", &mut issues).unwrap_or(DEFAULT_LEVERAGE);
+    fields.out_of_band_policy = optional_string_lossy(table, "out_of_band_policy", &mut issues)
+        .and_then(|value| match TrackOutOfBandPolicy::parse(&value) {
+            Ok(policy) => Some(policy),
+            Err(_) => {
+                issues.push(TrackLoadIssue {
+                    field_key: "out_of_band_policy".to_string(),
+                    message: format!("field `out_of_band_policy` has unsupported value `{value}`"),
+                });
+                None
+            }
+        })
+        .unwrap_or(TrackOutOfBandPolicy::Freeze);
+    fields.daily_loss_limit =
+        required_f64_lossy(table, "daily_loss_limit", &mut issues).unwrap_or(0.0);
+    fields.total_loss_limit =
+        required_f64_lossy(table, "total_loss_limit", &mut issues).unwrap_or(0.0);
+    fields.shape_family = optional_string_lossy(table, "shape_family", &mut issues)
+        .and_then(|value| match TrackShapeFamily::parse(&value) {
+            Ok(shape_family) => Some(shape_family),
+            Err(_) => {
+                issues.push(TrackLoadIssue {
+                    field_key: "shape_family".to_string(),
+                    message: format!("field `shape_family` has unsupported value `{value}`"),
+                });
+                None
+            }
+        })
+        .unwrap_or(TrackShapeFamily::Linear);
+
+    (fields, issues)
 }
 
 fn optional_string(table: &Table, key: &str) -> Result<Option<String>> {
@@ -279,10 +316,6 @@ fn optional_string(table: &Table, key: &str) -> Result<Option<String>> {
     item.as_str()
         .map(|value| Some(value.to_string()))
         .ok_or_else(|| anyhow!("field `{key}` must be a string"))
-}
-
-fn required_f64(table: &Table, key: &str) -> Result<f64> {
-    optional_f64(table, key)?.ok_or_else(|| anyhow!("missing numeric field `{key}`"))
 }
 
 fn optional_f64(table: &Table, key: &str) -> Result<Option<f64>> {
@@ -307,6 +340,75 @@ fn optional_u32(table: &Table, key: &str) -> Result<Option<u32>> {
     };
     let value = u32::try_from(value).map_err(|_| anyhow!("field `{key}` must be >= 0"))?;
     Ok(Some(value))
+}
+
+fn required_string_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> String {
+    match optional_string(table, key) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            issues.push(load_issue(key, format!("missing string field `{key}`")));
+            String::new()
+        }
+        Err(_) => {
+            issues.push(load_issue(key, format!("field `{key}` must be a string")));
+            String::new()
+        }
+    }
+}
+
+fn optional_string_lossy(
+    table: &Table,
+    key: &str,
+    issues: &mut Vec<TrackLoadIssue>,
+) -> Option<String> {
+    match optional_string(table, key) {
+        Ok(value) => value,
+        Err(_) => {
+            issues.push(load_issue(key, format!("field `{key}` must be a string")));
+            None
+        }
+    }
+}
+
+fn required_f64_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> Option<f64> {
+    match optional_f64(table, key) {
+        Ok(Some(value)) => Some(value),
+        Ok(None) => {
+            issues.push(load_issue(key, format!("missing numeric field `{key}`")));
+            None
+        }
+        Err(_) => {
+            issues.push(load_issue(key, format!("field `{key}` must be numeric")));
+            None
+        }
+    }
+}
+
+fn optional_f64_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> Option<f64> {
+    match optional_f64(table, key) {
+        Ok(value) => value,
+        Err(_) => {
+            issues.push(load_issue(key, format!("field `{key}` must be numeric")));
+            None
+        }
+    }
+}
+
+fn optional_u32_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> Option<u32> {
+    match optional_u32(table, key) {
+        Ok(value) => value,
+        Err(_) => {
+            issues.push(load_issue(key, format!("field `{key}` must be an integer")));
+            None
+        }
+    }
+}
+
+fn load_issue(key: &str, message: String) -> TrackLoadIssue {
+    TrackLoadIssue {
+        field_key: key.to_string(),
+        message,
+    }
 }
 
 fn stable_draft_id(fields: &EditableTrackFields) -> String {
