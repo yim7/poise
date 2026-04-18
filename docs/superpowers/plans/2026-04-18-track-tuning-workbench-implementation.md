@@ -330,7 +330,7 @@ Commit SHA: `0096277`, `98126a2`, `405e03c`
 - Create: `tools/track-tuning-workbench/src/state/workbenchStore.test.ts`
 - Modify: `tools/track-tuning-workbench/src/app/App.tsx`
 
-- [ ] **Step 1: 先写状态测试，钉住用户明确要求的历史语义**
+- [x] **Step 1: 先写状态测试，钉住用户明确要求的历史语义**
   - 至少覆盖：
     - 删除 `track` 后可撤销回来，之前可编辑字段完整保留
     - 参数输入只有在失焦 / 回车后才入栈
@@ -338,11 +338,11 @@ Commit SHA: `0096277`, `98126a2`, `405e03c`
     - 切换 `track` 不丢本地修改
     - 刷新 / 重新打开同一路径文件可恢复草稿
 
-- [ ] **Step 2: 实现 `history.ts`**
+- [x] **Step 2: 实现 `history.ts`**
   - 维护有上限的历史栈
   - 只记录有意义的草稿变更
 
-- [ ] **Step 3: 实现 `workbenchStore.ts`**
+- [x] **Step 3: 实现 `workbenchStore.ts`**
   - 统一管理：
     - 当前文件
     - 当前草稿
@@ -351,24 +351,24 @@ Commit SHA: `0096277`, `98126a2`, `405e03c`
     - 撤销 / 重做
     - 临时价格覆盖
 
-- [ ] **Step 4: 实现 `sessionSync.ts`**
+- [x] **Step 4: 实现 `sessionSync.ts`**
   - 负责把 store 的稳定快照写回 Tauri `save_draft`
   - 默认节流写盘，避免每次输入都调用命令层
 
-- [ ] **Step 5: 运行最小状态测试**
+- [x] **Step 5: 运行最小状态测试**
 
 Run: `pnpm --dir tools/track-tuning-workbench test -- workbenchStore`
 
 Expected: 撤销 / 重做、删除恢复和自动保存相关测试通过
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/track-tuning-workbench/src/state tools/track-tuning-workbench/src/app/App.tsx
 git commit -m "feat(workbench): add draft history and autosave store"
 ```
 
-Commit SHA: 执行后回写
+Commit SHA: `da0f839`, `271512b`, `a0b3d7b`
 
 ## Task 6: 实现高质量视觉工作台与自绘主图
 
