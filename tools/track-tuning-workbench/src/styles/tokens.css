@@ -1,0 +1,41 @@
+:root {
+  color-scheme: light;
+  --color-bg: #f4efe7;
+  --color-bg-elevated: rgba(255, 255, 255, 0.82);
+  --color-surface: rgba(255, 255, 255, 0.92);
+  --color-surface-strong: #ffffff;
+  --color-border: rgba(15, 23, 42, 0.12);
+  --color-border-strong: rgba(15, 23, 42, 0.18);
+  --color-text: #102030;
+  --color-muted: #5d6b7c;
+  --color-faint: #8091a5;
+  --color-accent: #0f766e;
+  --color-accent-soft: #d9f4f0;
+  --color-accent-deep: #134e4a;
+  --color-warning: #b45309;
+  --shadow-soft: 0 18px 45px rgba(16, 32, 48, 0.08);
+  --shadow-strong: 0 30px 70px rgba(16, 32, 48, 0.15);
+  --radius-lg: 28px;
+  --radius-md: 18px;
+  --radius-sm: 12px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --font-sans: "Avenir Next", "Segoe UI Variable Text", "SF Pro Text", "Noto Sans SC",
+    "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --font-mono: "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", "SF Mono", monospace;
+  --text-xs: 0.78rem;
+  --text-sm: 0.92rem;
+  --text-md: 1rem;
+  --text-lg: 1.15rem;
+  --text-xl: clamp(1.8rem, 2.4vw, 2.5rem);
+  --line-tight: 1.15;
+  --line-normal: 1.45;
+  --line-loose: 1.7;
+}

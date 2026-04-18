@@ -1,0 +1,11 @@
+[package]
+name = "poise-track-tuning-workbench"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+tauri = { version = "2" }
+
+[build-dependencies]
+tauri-build = { version = "2" }

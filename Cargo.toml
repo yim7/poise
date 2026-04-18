@@ -9,6 +9,7 @@ members = [
     "exchanges/bybit",
     "server",
     "tui",
+    "tools/track-tuning-workbench/src-tauri",
 ]
 resolver = "3"
 
