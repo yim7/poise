@@ -109,7 +109,6 @@ pub struct TrackDraft {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TrackDocument {
     drafts: Vec<TrackDraft>,
-    next_draft_number: u64,
 }
 
 impl TrackDocument {
@@ -136,9 +135,11 @@ impl TrackDocument {
         else {
             return Err(anyhow!("draft `{draft_id}` not found"));
         };
+        let mut fields = self.drafts[index].fields.clone();
+        fields.track_id = self.allocate_duplicate_track_id(&fields.track_id);
         let duplicate = TrackDraft {
-            draft_id: self.allocate_draft_id(),
-            fields: self.drafts[index].fields.clone(),
+            draft_id: self.allocate_draft_id(&fields),
+            fields,
         };
         let insert_at = index + 1;
         self.drafts.insert(insert_at, duplicate);
@@ -146,18 +147,42 @@ impl TrackDocument {
     }
 
     pub fn append_blank_track(&mut self) -> &TrackDraft {
+        let fields = EditableTrackFields::default();
         let draft = TrackDraft {
-            draft_id: self.allocate_draft_id(),
-            fields: EditableTrackFields::default(),
+            draft_id: self.allocate_draft_id(&fields),
+            fields,
         };
         self.drafts.push(draft);
         self.drafts.last().expect("blank track was just pushed")
     }
 
-    fn allocate_draft_id(&mut self) -> String {
-        let draft_id = format!("draft-{}", self.next_draft_number);
-        self.next_draft_number += 1;
-        draft_id
+    fn allocate_draft_id(&self, fields: &EditableTrackFields) -> String {
+        let base = stable_draft_id(fields);
+        disambiguate_identifier(
+            &base,
+            self.drafts
+                .iter()
+                .map(|draft| draft.draft_id.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
+    }
+
+    fn allocate_duplicate_track_id(&self, source_track_id: &str) -> String {
+        let source_track_id = if source_track_id.is_empty() {
+            "track"
+        } else {
+            source_track_id
+        };
+        let base = format!("{source_track_id}-copy");
+        disambiguate_identifier(
+            &base,
+            self.drafts
+                .iter()
+                .map(|draft| draft.fields.track_id.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
     }
 }
 
@@ -172,21 +197,25 @@ pub fn parse_track_document(input: &str) -> Result<TrackDocument> {
     let document = input
         .parse::<DocumentMut>()
         .context("failed to parse TOML config")?;
-    let mut drafts = Vec::new();
+    let mut drafts: Vec<TrackDraft> = Vec::new();
     let track_tables = read_track_tables(&document)?;
 
     for (index, table) in track_tables.iter().enumerate() {
+        let fields =
+            project_track_fields(table).with_context(|| format!("failed to project track #{}", index + 1))?;
         drafts.push(TrackDraft {
-            draft_id: format!("draft-{}", index + 1),
-            fields: project_track_fields(table)
-                .with_context(|| format!("failed to project track #{}", index + 1))?,
+            draft_id: disambiguate_identifier(
+                &stable_draft_id(&fields),
+                &drafts
+                    .iter()
+                    .map(|draft| draft.draft_id.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            fields,
         });
     }
 
-    Ok(TrackDocument {
-        next_draft_number: drafts.len() as u64 + 1,
-        drafts,
-    })
+    Ok(TrackDocument { drafts })
 }
 
 fn read_track_tables(document: &DocumentMut) -> Result<&ArrayOfTables> {
@@ -278,6 +307,79 @@ fn optional_u32(table: &Table, key: &str) -> Result<Option<u32>> {
     };
     let value = u32::try_from(value).map_err(|_| anyhow!("field `{key}` must be >= 0"))?;
     Ok(Some(value))
+}
+
+fn stable_draft_id(fields: &EditableTrackFields) -> String {
+    let mut hasher = StableHasher::default();
+    hasher.write_str(&fields.track_id);
+    hasher.write_str(&fields.symbol);
+    hasher.write_u64(fields.lower_price.to_bits());
+    hasher.write_u64(fields.upper_price.to_bits());
+    hasher.write_u64(fields.long_exposure_units.to_bits());
+    hasher.write_u64(fields.short_exposure_units.to_bits());
+    hasher.write_u64(fields.notional_per_unit.to_bits());
+    hasher.write_u64(fields.max_notional.to_bits());
+    hasher.write_u64(fields.min_rebalance_units.to_bits());
+    hasher.write_u32(fields.leverage);
+    hasher.write_str(fields.out_of_band_policy.as_str());
+    hasher.write_u64(fields.daily_loss_limit.to_bits());
+    hasher.write_u64(fields.total_loss_limit.to_bits());
+    hasher.write_str(fields.shape_family.as_str());
+    format!("draft-{:016x}", hasher.finish())
+}
+
+fn disambiguate_identifier(base: &str, existing: &[&str]) -> String {
+    if !existing.contains(&base) {
+        return base.to_string();
+    }
+
+    let mut suffix = 2_u32;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !existing.contains(&candidate.as_str()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StableHasher {
+    state: u64,
+}
+
+impl Default for StableHasher {
+    fn default() -> Self {
+        Self {
+            state: 0xcbf29ce484222325,
+        }
+    }
+}
+
+impl StableHasher {
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.state ^= u64::from(*byte);
+            self.state = self.state.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn write_str(&mut self, value: &str) {
+        self.write_u64(value.len() as u64);
+        self.write_bytes(value.as_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.state
+    }
 }
 
 #[cfg(test)]
@@ -436,10 +538,17 @@ tick_timeout_secs = 30
         let source_draft_id = document.drafts()[0].draft_id.clone();
 
         let duplicate = document.duplicate_track(&source_draft_id).unwrap().clone();
-        let exported = crate::config_projection::export_current_track(&duplicate);
+        let exported = crate::config_projection::export_all_tracks(document.drafts());
 
         assert_ne!(duplicate.draft_id, source_draft_id);
-        assert_eq!(duplicate.fields.track_id, "btc-core");
+        assert_ne!(duplicate.fields.track_id, "btc-core");
+        assert_eq!(exported.matches("track_id = \"btc-core\"").count(), 1);
+        assert_eq!(
+            exported
+                .matches(&format!("track_id = \"{}\"", duplicate.fields.track_id))
+                .count(),
+            1
+        );
         assert!(!exported.contains("tick_timeout_secs"));
         assert!(exported.contains("shape_family = \"linear\""));
     }
@@ -545,5 +654,70 @@ total_loss_limit = 160.0
 
         assert_eq!(document.drafts().len(), 2);
         assert_ne!(document.drafts()[0].draft_id, document.drafts()[1].draft_id);
+    }
+
+    #[test]
+    fn round_trip_keeps_unmodified_track_draft_ids_stable_after_copy_inserts_new_track() {
+        let mut document = parse_track_document(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "alpha"
+symbol = "BTCUSDT"
+lower_price = 100.0
+upper_price = 120.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 100.0
+daily_loss_limit = 100.0
+total_loss_limit = 200.0
+
+[[tracks]]
+track_id = "beta"
+symbol = "ETHUSDT"
+lower_price = 200.0
+upper_price = 240.0
+long_exposure_units = 5.0
+short_exposure_units = 5.0
+notional_per_unit = 50.0
+daily_loss_limit = 80.0
+total_loss_limit = 160.0
+"#,
+        )
+        .unwrap();
+        let alpha_draft_id = document.drafts()[0].draft_id.clone();
+        let beta_draft_id = document.drafts()[1].draft_id.clone();
+        let alpha_source_draft_id = document.drafts()[0].draft_id.clone();
+
+        let duplicate = document.duplicate_track(&alpha_source_draft_id).unwrap().clone();
+        let reloaded =
+            parse_track_document(&crate::config_projection::export_all_tracks(document.drafts()))
+                .unwrap();
+
+        assert_eq!(
+            find_draft_id_by_track_id(&reloaded, "alpha").unwrap(),
+            alpha_draft_id
+        );
+        assert_eq!(
+            find_draft_id_by_track_id(&reloaded, "beta").unwrap(),
+            beta_draft_id
+        );
+        assert_eq!(
+            find_draft_id_by_track_id(&reloaded, &duplicate.fields.track_id).unwrap(),
+            duplicate.draft_id
+        );
+    }
+
+    fn find_draft_id_by_track_id(
+        document: &super::TrackDocument,
+        track_id: &str,
+    ) -> Option<String> {
+        document
+            .drafts()
+            .iter()
+            .find(|draft| draft.fields.track_id == track_id)
+            .map(|draft| draft.draft_id.clone())
     }
 }
