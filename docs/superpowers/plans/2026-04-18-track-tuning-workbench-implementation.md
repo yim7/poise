@@ -280,7 +280,7 @@ Commit SHA: `79d42ca`, `3c20f09`, `952fd96`
 - Create: `tools/track-tuning-workbench/src/domain/trackRisk.ts`
 - Create: `tools/track-tuning-workbench/src/domain/trackFixtures.test.ts`
 
-- [ ] **Step 1: 先写 `Vitest` fixture，钉住当前公式语义**
+- [x] **Step 1: 先写 `Vitest` fixture，钉住当前公式语义**
   - fixture 至少覆盖：
     - 对称 `linear`
     - 纯空 `linear`
@@ -290,11 +290,11 @@ Commit SHA: `79d42ca`, `3c20f09`, `952fd96`
     - `desired_exposure = 0` 的零仓目标点
     - 最小步长上下非对称的情形
 
-- [ ] **Step 2: 实现统一的 typed draft 模型**
+- [x] **Step 2: 实现统一的 typed draft 模型**
   - 把数值字段、枚举字段、附加字段和 UI 临时价格拆开
   - 允许 UI 处于“输入暂时非法但仍可继续编辑”的状态
 
-- [ ] **Step 3: 实现 `trackMetrics.ts` / `trackCurve.ts` / `trackRisk.ts`**
+- [x] **Step 3: 实现 `trackMetrics.ts` / `trackCurve.ts` / `trackRisk.ts`**
   - 输出至少包括：
     - 当前目标仓位
     - `1 unit` 对应价格与数量
@@ -305,20 +305,20 @@ Commit SHA: `79d42ca`, `3c20f09`, `952fd96`
   - `inertial / responsive` 的最小步长按数值搜索实现，不做线性近似
   - 主图曲线采样点直接来自真实公式，不单独维护图表专用近似曲线
 
-- [ ] **Step 4: 运行最小前端领域测试**
+- [x] **Step 4: 运行最小前端领域测试**
 
 Run: `pnpm --dir tools/track-tuning-workbench test -- trackFixtures`
 
 Expected: fixture 全部通过，数值误差在预设容忍范围内
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/track-tuning-workbench/src/domain
 git commit -m "feat(workbench): add track tuning calculation module"
 ```
 
-Commit SHA: 执行后回写
+Commit SHA: `0096277`, `98126a2`, `405e03c`
 
 ## Task 5: 实现草稿状态、撤销 / 重做与自动保存
 
