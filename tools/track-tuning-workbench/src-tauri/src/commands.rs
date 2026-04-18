@@ -365,6 +365,21 @@ total_loss_limit = 200.0
     }
 
     #[test]
+    fn teapot_response_is_also_classified_as_rate_limited() {
+        let (server_url, _) = spawn_http_server(
+            "HTTP/1.1 418 I AM A TEAPOT",
+            "{\"code\":-1003,\"msg\":\"Way too much request weight used; IP banned until 1234567890.\"}",
+        );
+        let client = BinanceQuoteClient::for_base_url(server_url);
+
+        let quote =
+            tauri::async_runtime::block_on(fetch_binance_quote_with_client(&client, "BTCUSDT"));
+
+        assert_eq!(quote.price, None);
+        assert_eq!(quote.error_kind, Some(QuoteErrorKind::RateLimited));
+    }
+
+    #[test]
     fn temporarily_unavailable_response_returns_distinct_error_kind() {
         let (server_url, _) = spawn_http_server(
             "HTTP/1.1 503 SERVICE UNAVAILABLE",

@@ -70,25 +70,9 @@ impl SessionStore {
                 format!("写入草稿会话失败 `{}`: {error}", temp_file.display()),
             )
         })?;
-        if session_file.exists() {
-            fs::remove_file(&session_file).map_err(|error| {
-                let _ = fs::remove_file(&temp_file);
-                CommandError::new(
-                    CommandErrorKind::SessionStore,
-                    format!("覆盖已有草稿会话失败 `{}`: {error}", session_file.display()),
-                )
-            })?;
-        }
-        fs::rename(&temp_file, &session_file).map_err(|error| {
+        replace_file_preserving_existing(&temp_file, &session_file).map_err(|error| {
             let _ = fs::remove_file(&temp_file);
-            CommandError::new(
-                CommandErrorKind::SessionStore,
-                format!(
-                    "落盘草稿会话失败 `{}` -> `{}`: {error}",
-                    temp_file.display(),
-                    session_file.display()
-                ),
-            )
+            error
         })?;
         Ok(())
     }
@@ -147,4 +131,188 @@ fn temporary_session_file_path(session_file: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("session.json");
     session_file.with_file_name(format!("{file_name}.{unique_suffix}.tmp"))
+}
+
+fn backup_session_file_path(session_file: &Path) -> PathBuf {
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = session_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.json");
+    session_file.with_file_name(format!("{file_name}.{unique_suffix}.bak"))
+}
+
+fn replace_file_preserving_existing(temp_file: &Path, session_file: &Path) -> Result<(), CommandError> {
+    replace_file_preserving_existing_with(
+        temp_file,
+        session_file,
+        session_file.exists(),
+        &backup_session_file_path(session_file),
+        |from, to| fs::rename(from, to),
+        |path| fs::remove_file(path),
+    )
+}
+
+fn replace_file_preserving_existing_with<Rename, Remove>(
+    temp_file: &Path,
+    session_file: &Path,
+    had_existing_file: bool,
+    backup_file: &Path,
+    rename: Rename,
+    remove_file: Remove,
+) -> Result<(), CommandError>
+where
+    Rename: Fn(&Path, &Path) -> std::io::Result<()>,
+    Remove: Fn(&Path) -> std::io::Result<()>,
+{
+    if had_existing_file {
+        rename(session_file, backup_file).map_err(|error| {
+            CommandError::new(
+                CommandErrorKind::SessionStore,
+                format!(
+                    "为草稿会话创建备份失败 `{}` -> `{}`: {error}",
+                    session_file.display(),
+                    backup_file.display()
+                ),
+            )
+        })?;
+    }
+
+    match rename(temp_file, session_file) {
+        Ok(()) => {
+            if had_existing_file {
+                remove_file(backup_file).map_err(|error| {
+                    CommandError::new(
+                        CommandErrorKind::SessionStore,
+                        format!("清理草稿备份失败 `{}`: {error}", backup_file.display()),
+                    )
+                })?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if had_existing_file {
+                if let Err(restore_error) = rename(backup_file, session_file) {
+                    return Err(CommandError::new(
+                        CommandErrorKind::SessionStore,
+                        format!(
+                            "落盘草稿会话失败 `{}` -> `{}`: {error}; 恢复旧草稿失败 `{}` -> `{}`: {restore_error}",
+                            temp_file.display(),
+                            session_file.display(),
+                            backup_file.display(),
+                            session_file.display()
+                        ),
+                    ));
+                }
+            }
+            Err(CommandError::new(
+                CommandErrorKind::SessionStore,
+                format!(
+                    "落盘草稿会话失败 `{}` -> `{}`: {error}",
+                    temp_file.display(),
+                    session_file.display()
+                ),
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::RefCell,
+        collections::HashSet,
+        path::PathBuf,
+    };
+
+    use super::replace_file_preserving_existing_with;
+
+    #[test]
+    fn replace_failure_restores_existing_file() {
+        let temp_file = PathBuf::from("/tmp/new.json.tmp");
+        let session_file = PathBuf::from("/tmp/session.json");
+        let backup_file = PathBuf::from("/tmp/session.json.bak");
+        let files = RefCell::new(HashSet::from([
+            temp_file.clone(),
+            session_file.clone(),
+        ]));
+
+        let error = replace_file_preserving_existing_with(
+            &temp_file,
+            &session_file,
+            true,
+            &backup_file,
+            |from, to| {
+                if from == temp_file.as_path() && to == session_file.as_path() {
+                    return Err(std::io::Error::other("simulated rename failure"));
+                }
+                let mut files = files.borrow_mut();
+                if !files.remove(from) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "source missing",
+                    ));
+                }
+                files.insert(to.to_path_buf());
+                Ok(())
+            },
+            |path| {
+                let mut files = files.borrow_mut();
+                files.remove(path);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        let files = files.into_inner();
+        assert!(files.contains(&session_file));
+        assert!(files.contains(&temp_file));
+        assert!(!files.contains(&backup_file));
+        assert!(error.message.contains("simulated rename failure"));
+    }
+
+    #[test]
+    fn replace_success_removes_backup_after_swap() {
+        let temp_file = PathBuf::from("/tmp/new.json.tmp");
+        let session_file = PathBuf::from("/tmp/session.json");
+        let backup_file = PathBuf::from("/tmp/session.json.bak");
+        let files = RefCell::new(HashSet::from([
+            temp_file.clone(),
+            session_file.clone(),
+        ]));
+        let removed = RefCell::new(Vec::<PathBuf>::new());
+
+        replace_file_preserving_existing_with(
+            &temp_file,
+            &session_file,
+            true,
+            &backup_file,
+            |from, to| {
+                let mut files = files.borrow_mut();
+                if !files.remove(from) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "source missing",
+                    ));
+                }
+                files.insert(to.to_path_buf());
+                Ok(())
+            },
+            |path| {
+                removed.borrow_mut().push(path.to_path_buf());
+                let mut files = files.borrow_mut();
+                files.remove(path);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let files = files.into_inner();
+        assert!(files.contains(&session_file));
+        assert!(!files.contains(&backup_file));
+        assert_eq!(removed.into_inner(), vec![backup_file]);
+    }
 }
