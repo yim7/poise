@@ -495,6 +495,59 @@ git commit -m "feat(workbench): ship track tuning desktop tool"
 
 Commit SHA: `7f5194c`
 
+## Task 8: 修复最终验收后发现的 spec blocker
+
+**Files:**
+
+- Modify: `tools/track-tuning-workbench/src-tauri/src/config_document.rs`
+- Modify: `tools/track-tuning-workbench/src-tauri/src/commands.rs`
+- Modify: `tools/track-tuning-workbench/src/app/App.tsx`
+- Modify: `tools/track-tuning-workbench/src/app/AppShell.tsx`
+- Modify: `tools/track-tuning-workbench/src/app/workbenchBridge.ts`
+- Modify: `tools/track-tuning-workbench/src/domain/trackDraft.ts`
+- Modify: `tools/track-tuning-workbench/src/domain/trackValidation.ts`
+- Modify: `tools/track-tuning-workbench/src/domain/trackFixtures.test.ts`
+- Modify: `tools/track-tuning-workbench/src/state/sessionSync.ts`
+- Modify: `tools/track-tuning-workbench/src/state/workbenchStore.ts`
+- Modify: `tools/track-tuning-workbench/src/state/workbenchStore.test.ts`
+- Modify: `tools/track-tuning-workbench/src/ui/app/useSelectedTrackWorkbench.ts`
+- Modify: `tools/track-tuning-workbench/src/ui/app/useSelectedTrackWorkbench.test.tsx`
+
+- [x] **Step 1: 让坏 track 保留在列表中并以结构化字段问题阻止试算**
+  - 单个 `track` 字段缺失或类型错误时，不再让整份配置加载失败
+  - `load issue` 需要带字段信息，且只有用户编辑对应字段后才解除
+
+- [x] **Step 2: 把“未导出草稿”改成导出基线语义，并稳定实时价格刷新**
+  - `复制当前 Track` / `复制全部 Tracks` 成功后更新导出基线
+  - 轮询 Binance 报价时保留最后一个 live price，不在刷新开始时先清空
+
+- [x] **Step 3: 让最近一次草稿修改具备同步镜像，不依赖 unload 异步 flush**
+  - 调参后先同步写本地镜像，再异步落 Tauri 会话文件
+  - 重新打开时优先恢复本地镜像，避免刷新 / 关闭窗口丢最后一步
+
+- [x] **Step 4: 重新运行最小验收**
+
+Run:
+- `pnpm --dir tools/track-tuning-workbench test`
+- `pnpm --dir tools/track-tuning-workbench exec tsc --noEmit`
+- `cargo test -p poise-track-tuning-workbench`
+- `pnpm --dir tools/track-tuning-workbench tauri dev`
+
+Expected:
+- 前端 `37` 个测试全部通过
+- TypeScript 类型检查通过
+- Rust `25` 个测试全部通过
+- 桌面开发 smoke 可以成功启动工作台窗口
+
+- [x] **Step 5: Commit**
+
+```bash
+git add tools/track-tuning-workbench
+git commit -m "fix(workbench): harden draft recovery semantics"
+```
+
+Commit SHA: `b6f3dc5`
+
 ## Self-Review
 
 ### Spec coverage
