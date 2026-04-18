@@ -11,8 +11,10 @@ use poise_application::TrackMutationError;
 use poise_application::TrackStartupDefinition;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
-    AccountPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort, UserDataEvent,
+    AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
+    UserDataEvent,
 };
+use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -30,15 +32,56 @@ pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
 pub(crate) use reconcile::{RecoveryAnomalyDirtyObserver, RecoveryDirtyState};
 
 #[derive(Clone)]
+pub(crate) enum RuntimeStartupCapacityMode {
+    AccountCapacitySnapshot,
+    AvailableBalanceTimesLeverage { leverage: u32 },
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeStartupDefinition {
+    track: TrackStartupDefinition,
+    capacity_mode: RuntimeStartupCapacityMode,
+}
+
+impl RuntimeStartupDefinition {
+    pub(crate) fn new(
+        track: TrackStartupDefinition,
+        capacity_mode: RuntimeStartupCapacityMode,
+    ) -> Self {
+        Self {
+            track,
+            capacity_mode,
+        }
+    }
+
+    pub(crate) fn track_id(&self) -> &TrackId {
+        self.track.track_id()
+    }
+
+    pub(crate) fn instrument(&self) -> &Instrument {
+        self.track.instrument()
+    }
+
+    pub(crate) fn required_additional_notional(&self, position_qty: f64) -> f64 {
+        self.track.required_additional_notional(position_qty)
+    }
+
+    pub(crate) fn startup_capacity_mode(&self) -> &RuntimeStartupCapacityMode {
+        &self.capacity_mode
+    }
+}
+
+#[derive(Clone)]
 pub struct ServerRuntime {
     state: RuntimeState,
     effect_worker_state: EffectWorkerState,
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
     account: Arc<dyn AccountPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     metadata: Arc<dyn MetadataPort>,
     clock: Arc<dyn ClockPort>,
-    startup_definitions: Vec<TrackStartupDefinition>,
+    startup_definitions: Vec<RuntimeStartupDefinition>,
     recovery_retry_interval: Duration,
     audit_interval: Duration,
     account_refresh_interval: Duration,
@@ -52,6 +95,7 @@ pub(crate) struct RuntimePorts {
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
     account: Arc<dyn AccountPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     metadata: Arc<dyn MetadataPort>,
     clock: Arc<dyn ClockPort>,
 }
@@ -60,6 +104,7 @@ impl RuntimePorts {
     pub(crate) fn new(
         execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account_summary: Arc<dyn AccountSummaryPort>,
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
         clock: Arc<dyn ClockPort>,
@@ -68,6 +113,7 @@ impl RuntimePorts {
             execution,
             market_data,
             account,
+            account_summary,
             metadata,
             clock,
         }
@@ -128,7 +174,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        startup_definitions: Vec<TrackStartupDefinition>,
+        startup_definitions: Vec<RuntimeStartupDefinition>,
     ) -> Self {
         Self::with_runtime_options(
             state,
@@ -148,7 +194,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        startup_definitions: Vec<TrackStartupDefinition>,
+        startup_definitions: Vec<RuntimeStartupDefinition>,
         recovery_retry_interval: Duration,
     ) -> Self {
         Self::with_runtime_options(
@@ -170,7 +216,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        startup_definitions: Vec<TrackStartupDefinition>,
+        startup_definitions: Vec<RuntimeStartupDefinition>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
     ) -> Self {
@@ -193,7 +239,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        startup_definitions: Vec<TrackStartupDefinition>,
+        startup_definitions: Vec<RuntimeStartupDefinition>,
         recovery_retry_interval: Duration,
         audit_interval: Duration,
         account_refresh_interval: Duration,
@@ -216,7 +262,7 @@ impl ServerRuntime {
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
         ports: RuntimePorts,
-        startup_definitions: Vec<TrackStartupDefinition>,
+        startup_definitions: Vec<RuntimeStartupDefinition>,
         intervals: RuntimeIntervals,
     ) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
@@ -226,6 +272,7 @@ impl ServerRuntime {
             execution: ports.execution,
             market_data: ports.market_data,
             account: ports.account,
+            account_summary: ports.account_summary,
             metadata: ports.metadata,
             clock: ports.clock,
             startup_definitions,

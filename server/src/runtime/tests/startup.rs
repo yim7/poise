@@ -67,6 +67,52 @@ async fn startup_bootstrap_rejects_insufficient_remaining_margin() {
 }
 
 #[tokio::test]
+async fn startup_bootstrap_uses_startup_leverage_for_bybit_margin_preflight() {
+    let budget = test_budget();
+    let startup_definition = test_runtime_startup_definition(budget.clone(), Venue::Bybit, 10);
+    let instrument = startup_definition.instrument().clone();
+    let fixture = runtime_fixture_with_startup_definition_and_account_capacity(
+        None,
+        Position {
+            instrument: instrument.clone(),
+            qty: 0.0,
+            avg_price: 100.0,
+            unrealized_pnl: 0.0,
+        },
+        vec![],
+        startup_definition,
+        budget,
+        540.9943979,
+        540.9943979,
+    )
+    .await;
+
+    let handles = fixture.runtime.start().await.unwrap();
+    let constraint = fixture
+        .state
+        .account_margin_guard
+        .constraint_for(&instrument);
+
+    assert_eq!(
+        fixture
+            .exchange
+            .get_account_capacity_snapshot_calls
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        fixture
+            .exchange
+            .get_account_summary_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(constraint.max_increase_notional, Some(5_409.943979));
+
+    shutdown(handles).await;
+}
+
+#[tokio::test]
 async fn startup_sync_restores_claimed_live_order_before_replanning() {
     let snapshot = test_snapshot();
     let live_order = btc_exchange_order(
@@ -1335,6 +1381,7 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             account as Arc<dyn AccountPort>,
             exchange.metadata_port(),
             clock.clone() as Arc<dyn ClockPort>,

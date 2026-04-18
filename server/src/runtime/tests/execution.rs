@@ -578,6 +578,7 @@ async fn effect_worker_restores_pending_effect_after_restart() {
         RuntimePorts::new(
             fixture.exchange.execution_port(),
             Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
+            fixture.exchange.account_summary_port(),
             fixture.exchange.account_port(),
             fixture.exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -693,6 +694,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_success() {
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -753,6 +755,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -872,6 +875,7 @@ async fn attempted_submit_tracking_is_cleared_after_submit_failure_or_supersede(
         RuntimePorts::new(
             exchange.execution_port(),
             Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -980,6 +984,7 @@ async fn startup_pending_tracking_is_cleared_on_track_effect_state_changed_notif
         RuntimePorts::new(
             exchange.execution_port(),
             Arc::new(FakeMarketData::new(price_receiver)) as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -1123,6 +1128,7 @@ async fn failed_effect_does_not_roll_back_committed_snapshot() {
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -1187,6 +1193,7 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),

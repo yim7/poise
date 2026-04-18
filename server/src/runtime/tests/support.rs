@@ -48,6 +48,32 @@ pub(crate) async fn runtime_fixture_with_account_capacity(
     fixture
 }
 
+pub(crate) async fn runtime_fixture_with_startup_definition_and_account_capacity(
+    restored_snapshot: Option<TrackRuntimeSnapshot>,
+    position: Position,
+    open_orders: Vec<ExchangeOrder>,
+    startup_definition: RuntimeStartupDefinition,
+    budget: CapacityBudget,
+    max_increase_notional: f64,
+    account_summary_available: f64,
+) -> RuntimeFixture {
+    let fixture = runtime_fixture_with_startup_definition(
+        restored_snapshot,
+        position,
+        open_orders,
+        startup_definition,
+        budget,
+    )
+    .await;
+    fixture
+        .exchange
+        .set_max_increase_notional(max_increase_notional);
+    fixture
+        .exchange
+        .set_account_summary_available(account_summary_available);
+    fixture
+}
+
 pub(crate) async fn runtime_fixture_with_recovery_retry_interval(
     restored_snapshot: Option<TrackRuntimeSnapshot>,
     position: Position,
@@ -138,6 +164,51 @@ pub(crate) async fn runtime_fixture_with_options(
     budget: CapacityBudget,
     options: RuntimeFixtureOptions,
 ) -> RuntimeFixture {
+    let startup_definition = test_startup_definition(budget.clone());
+    runtime_fixture_with_startup_definition_and_options(
+        restored_snapshot,
+        position,
+        open_orders,
+        startup_definition,
+        budget,
+        options,
+    )
+    .await
+}
+
+pub(crate) async fn runtime_fixture_with_startup_definition(
+    restored_snapshot: Option<TrackRuntimeSnapshot>,
+    position: Position,
+    open_orders: Vec<ExchangeOrder>,
+    startup_definition: RuntimeStartupDefinition,
+    budget: CapacityBudget,
+) -> RuntimeFixture {
+    runtime_fixture_with_startup_definition_and_options(
+        restored_snapshot,
+        position,
+        open_orders,
+        startup_definition,
+        budget,
+        RuntimeFixtureOptions {
+            recovery_retry_interval: Duration::from_secs(1),
+            audit_interval: Duration::from_secs(5),
+            account_refresh_interval: Duration::from_secs(5),
+            clock: Arc::new(FixedClock(
+                Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
+            )),
+        },
+    )
+    .await
+}
+
+async fn runtime_fixture_with_startup_definition_and_options(
+    restored_snapshot: Option<TrackRuntimeSnapshot>,
+    position: Position,
+    open_orders: Vec<ExchangeOrder>,
+    startup_definition: RuntimeStartupDefinition,
+    budget: CapacityBudget,
+    options: RuntimeFixtureOptions,
+) -> RuntimeFixture {
     let (user_sender, user_receiver) = mpsc::channel(8);
     let exchange = Arc::new(FakeExchange::with_user_receiver(
         position,
@@ -154,11 +225,10 @@ pub(crate) async fn runtime_fixture_with_options(
 
     let clock = options.clock.clone();
     let mut manager = TrackManager::new(clock.clone());
-    let startup_definition = test_startup_definition(budget.clone());
     manager
         .add_track(
-            TrackId::new("BTCUSDT"),
-            Instrument::new(Venue::Binance, "BTCUSDT"),
+            startup_definition.track_id().clone(),
+            startup_definition.instrument().clone(),
             test_config(),
             budget,
             exchange.exchange_info.rules.clone(),
@@ -175,7 +245,7 @@ pub(crate) async fn runtime_fixture_with_options(
 
     let (events, _) = broadcast::channel(16);
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
-    let account_monitor = build_test_account_monitor(account_summary, events.clone()).await;
+    let account_monitor = build_test_account_monitor(account_summary.clone(), events.clone()).await;
     let services = build_test_application_services(
         manager,
         persistence.clone(),
@@ -198,6 +268,7 @@ pub(crate) async fn runtime_fixture_with_options(
             RuntimePorts::new(
                 execution,
                 market_data as Arc<dyn MarketDataPort>,
+                account_summary,
                 account,
                 metadata,
                 clock,
@@ -489,11 +560,47 @@ pub(crate) fn test_budget() -> CapacityBudget {
     }
 }
 
-pub(crate) fn test_startup_definition(budget: CapacityBudget) -> TrackStartupDefinition {
-    crate::test_support::test_prepared_registry_with_budget("BTCUSDT", "BTCUSDT", budget)
+pub(crate) fn test_startup_definition(budget: CapacityBudget) -> RuntimeStartupDefinition {
+    test_runtime_startup_definition(budget, Venue::Binance, 10)
+}
+
+pub(crate) fn test_runtime_startup_definition(
+    budget: CapacityBudget,
+    venue: Venue,
+    startup_leverage: u32,
+) -> RuntimeStartupDefinition {
+    let configured = poise_application::ConfiguredTrackDefinition::try_from_input(
+        poise_application::ConfiguredTrackInput {
+            track_id: TrackId::new("BTCUSDT"),
+            venue,
+            symbol: "BTCUSDT".into(),
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: Some(0.5),
+            shape_family: Some(ShapeFamily::Linear),
+            out_of_band_policy: Some(OutOfBandPolicy::Freeze),
+            max_notional: Some(budget.max_notional),
+            daily_loss_limit: budget.daily_loss_limit,
+            total_loss_limit: budget.total_loss_limit,
+            tick_timeout_secs: Some(30),
+        },
+    )
+    .unwrap();
+    let registry = poise_application::PreparedTrackRegistry::new(vec![configured]).unwrap();
+    let startup_definition = registry
         .get(&TrackId::new("BTCUSDT"))
         .unwrap()
-        .startup_definition()
+        .startup_definition();
+    let capacity_mode = match venue {
+        Venue::Bybit => RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage {
+            leverage: startup_leverage,
+        },
+        _ => RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+    };
+    RuntimeStartupDefinition::new(startup_definition, capacity_mode)
 }
 
 pub(crate) fn test_server_time() -> chrono::DateTime<Utc> {
@@ -730,6 +837,7 @@ pub(crate) struct FakeExchange {
     cancel_order_error: Mutex<Option<CancelOrderFailure>>,
     cancel_all_error: Mutex<Option<String>>,
     max_increase_notional: Mutex<f64>,
+    account_summary_available: Mutex<f64>,
     server_time: chrono::DateTime<Utc>,
     sequence: AtomicUsize,
     submit_started: Option<Arc<Notify>>,
@@ -787,6 +895,7 @@ impl FakeExchange {
             cancel_order_error: Mutex::new(None),
             cancel_all_error: Mutex::new(None),
             max_increase_notional: Mutex::new(1_000_000.0),
+            account_summary_available: Mutex::new(1_000_000.0),
             server_time: test_server_time(),
             sequence: AtomicUsize::new(1),
             submit_started: None,
@@ -881,6 +990,10 @@ impl FakeExchange {
         *self.max_increase_notional.lock().unwrap() = value;
     }
 
+    pub(crate) fn set_account_summary_available(&self, value: f64) {
+        *self.account_summary_available.lock().unwrap() = value;
+    }
+
     pub(crate) fn account_summary_port(self: &Arc<Self>) -> Arc<dyn AccountSummaryPort> {
         Arc::new(FakeExchangeAccountSummaryPort {
             exchange: Arc::clone(self),
@@ -914,7 +1027,7 @@ impl poise_engine::ports::AccountSummaryPort for FakeExchangeAccountSummaryPort 
             .fetch_add(1, Ordering::SeqCst);
         Ok(poise_engine::ports::AccountSummarySnapshot {
             equity: 1_000_000.0,
-            available: 1_000_000.0,
+            available: *self.exchange.account_summary_available.lock().unwrap(),
             unrealized_pnl: 0.0,
             observed_at: Utc::now(),
         })
@@ -1878,7 +1991,7 @@ pub(crate) async fn build_test_runtime_with_ports(
     );
     let account_monitor = Arc::new(
         AccountMonitor::restore(
-            account_summary,
+            account_summary.clone(),
             Arc::new(poise_storage::sqlite::SqliteStorage::in_memory().unwrap()),
             events,
             AccountMonitorConfig::default(),
@@ -1901,6 +2014,7 @@ pub(crate) async fn build_test_runtime_with_ports(
             RuntimePorts::new(
                 execution,
                 market_data,
+                account_summary.clone(),
                 account.clone(),
                 metadata,
                 Arc::new(FixedClock(test_server_time())),

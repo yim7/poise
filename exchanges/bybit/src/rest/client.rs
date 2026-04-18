@@ -20,7 +20,8 @@ use super::auth::sign_v5_payload;
 use super::models::{
     BybitResponse, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
     CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, OpenOrderListResult,
-    PositionListResult, ServerTimeResult, SetLeverageRequestBody, WalletBalanceResult,
+    PositionListResult, PositionSnapshot, ServerTimeResult, SetLeverageRequestBody,
+    WalletBalanceResult,
 };
 use crate::Deployment;
 use crate::mapper::{
@@ -29,6 +30,7 @@ use crate::mapper::{
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
 const ACTIVE_ORDER_FILTER: &str = "Order";
+const RET_CODE_LEVERAGE_NOT_MODIFIED: i64 = 110_043;
 
 #[derive(Debug, Clone, Copy)]
 enum AuthMode {
@@ -192,9 +194,9 @@ impl BybitRestClient {
 
     pub async fn get_account_capacity_snapshot(
         &self,
-        _symbol: &str,
+        symbol: &str,
     ) -> Result<AccountCapacitySnapshot> {
-        let response: WalletBalanceResult = self
+        let wallet_balance: WalletBalanceResult = self
             .send_request(
                 Method::GET,
                 "/v5/account/wallet-balance",
@@ -203,23 +205,20 @@ impl BybitRestClient {
                 AuthMode::Signed,
             )
             .await?;
-        build_account_capacity_snapshot(&response)
+        let leverage = self
+            .get_linear_position_snapshot(symbol)
+            .await?
+            .and_then(|position| position.leverage)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Bybit account capacity unavailable for `{symbol}`: position leverage missing (portfolio margin mode or stale position snapshot)"
+                )
+            })?;
+        build_account_capacity_snapshot(&wallet_balance, leverage)
     }
 
     pub async fn get_position(&self, symbol: &str) -> Result<Position> {
-        let response: PositionListResult = self
-            .send_request(
-                Method::GET,
-                "/v5/position/list",
-                vec![
-                    ("category", "linear".to_string()),
-                    ("symbol", symbol.to_string()),
-                ],
-                None,
-                AuthMode::Signed,
-            )
-            .await?;
-        match response.list.into_iter().next() {
+        match self.get_linear_position_snapshot(symbol).await? {
             Some(position) => position.try_into(),
             None => build_bybit_position(symbol.to_string(), None, 0.0, Some(0.0), Some(0.0), 0),
         }
@@ -259,8 +258,8 @@ impl BybitRestClient {
             buy_leverage: leverage.to_string(),
             sell_leverage: leverage.to_string(),
         };
-        let _: serde_json::Value = self
-            .send_request(
+        let envelope: BybitResponse<serde_json::Value> = self
+            .send_request_envelope(
                 Method::POST,
                 "/v5/position/set-leverage",
                 Vec::new(),
@@ -268,6 +267,13 @@ impl BybitRestClient {
                 AuthMode::Signed,
             )
             .await?;
+        if envelope.ret_code != 0 && envelope.ret_code != RET_CODE_LEVERAGE_NOT_MODIFIED {
+            return Err(anyhow!(
+                "request POST /v5/position/set-leverage failed with retCode {}: {}",
+                envelope.ret_code,
+                envelope.ret_msg.unwrap_or_default()
+            ));
+        }
         Ok(())
     }
 
@@ -284,6 +290,23 @@ impl BybitRestClient {
         response.try_into()
     }
 
+    async fn get_linear_position_snapshot(&self, symbol: &str) -> Result<Option<PositionSnapshot>> {
+        let response: PositionListResult = self
+            .send_request(
+                Method::GET,
+                "/v5/position/list",
+                vec![
+                    ("category", "linear".to_string()),
+                    ("symbol", symbol.to_string()),
+                ],
+                None,
+                AuthMode::Signed,
+            )
+            .await?;
+
+        Ok(response.list.into_iter().next())
+    }
+
     async fn send_request<T>(
         &self,
         method: Method,
@@ -292,6 +315,33 @@ impl BybitRestClient {
         body: Option<String>,
         auth_mode: AuthMode,
     ) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let envelope = self
+            .send_request_envelope(method.clone(), path, params, body, auth_mode)
+            .await?;
+        if envelope.ret_code != 0 {
+            return Err(anyhow!(
+                "request {} {} failed with retCode {}: {}",
+                method,
+                path,
+                envelope.ret_code,
+                envelope.ret_msg.unwrap_or_default()
+            ));
+        }
+
+        Ok(envelope.result)
+    }
+
+    async fn send_request_envelope<T>(
+        &self,
+        method: Method,
+        path: &str,
+        params: Vec<(&str, String)>,
+        body: Option<String>,
+        auth_mode: AuthMode,
+    ) -> Result<BybitResponse<T>>
     where
         T: DeserializeOwned,
     {
@@ -345,20 +395,9 @@ impl BybitRestClient {
             ));
         }
 
-        let envelope: BybitResponse<T> = serde_json::from_str(&body).with_context(|| {
+        serde_json::from_str(&body).with_context(|| {
             format!("failed to deserialize response for {path} with status {status}: {body}")
-        })?;
-        if envelope.ret_code != 0 {
-            return Err(anyhow!(
-                "request {} {} failed with retCode {}: {}",
-                method,
-                path,
-                envelope.ret_code,
-                envelope.ret_msg.unwrap_or_default()
-            ));
-        }
-
-        Ok(envelope.result)
+        })
     }
 
     fn signed_timestamp_ms(&self) -> i64 {
@@ -549,6 +588,85 @@ mod tests {
         assert!(request.body.contains(r#""symbol":"BTCUSDT""#));
         assert!(request.body.contains(r#""buyLeverage":"10""#));
         assert!(request.body.contains(r#""sellLeverage":"10""#));
+    }
+
+    #[tokio::test]
+    async fn set_leverage_treats_not_modified_as_success() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":110043,"retMsg":"leverage not modified","result":{},"retExtInfo":{},"time":1672281607343}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        client.set_leverage("BTCUSDT", 10).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_capacity_snapshot_scales_available_balance_by_symbol_leverage() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":"10"}]}}"#,
+            ),
+        ])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let snapshot = client
+            .get_account_capacity_snapshot("BTCUSDT")
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.max_increase_notional, 1002.5);
+    }
+
+    #[tokio::test]
+    async fn account_capacity_snapshot_returns_clear_error_when_position_leverage_is_missing() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":""}]}}"#,
+            ),
+        ])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let error = client
+            .get_account_capacity_snapshot("BTCUSDT")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Bybit account capacity unavailable for `BTCUSDT`: position leverage missing (portfolio margin mode or stale position snapshot)"
+        );
     }
 
     #[tokio::test]

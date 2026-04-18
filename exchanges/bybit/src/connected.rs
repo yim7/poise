@@ -250,6 +250,10 @@ mod tests {
             ),
             MockResponse::json(
                 200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":"10"}]}}"#,
+            ),
+            MockResponse::json(
+                200,
                 r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","priceFilter":{"tickSize":"0.10"},"lotSizeFilter":{"qtyStep":"0.001","minOrderQty":"0.001","minNotionalValue":"5"}}]}}"#,
             ),
             MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{"timeSecond":1700000000}}"#),
@@ -288,10 +292,10 @@ mod tests {
         let requests = server.requests();
 
         assert_eq!(summary.available, 100.25);
-        assert_eq!(capacity.max_increase_notional, 100.25);
+        assert_eq!(capacity.max_increase_notional, 1002.5);
         assert_eq!(info.instrument, instrument);
         assert_eq!(server_time.timestamp(), 1_700_000_000);
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 5);
         assert!(
             !requests
                 .iter()

@@ -26,11 +26,12 @@ pub(crate) struct BybitActiveOrder {
 
 pub(crate) fn build_account_capacity_snapshot(
     wallet_balance: &WalletBalanceResult,
+    leverage: f64,
 ) -> Result<AccountCapacitySnapshot> {
     let balance = first_wallet_balance(wallet_balance)?;
     let available = required_value("totalAvailableBalance", balance.total_available_balance)?;
     Ok(AccountCapacitySnapshot {
-        max_increase_notional: available,
+        max_increase_notional: available * leverage,
     })
 }
 
@@ -349,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_account_capacity_snapshot_from_available_balance_only() {
+    fn builds_account_capacity_snapshot_from_available_balance_and_leverage() {
         let balances = WalletBalanceResult {
             list: vec![UnifiedWalletBalance {
                 account_type: Some("UNIFIED".to_string()),
@@ -359,9 +360,9 @@ mod tests {
             }],
         };
 
-        let snapshot = build_account_capacity_snapshot(&balances).unwrap();
+        let snapshot = build_account_capacity_snapshot(&balances, 10.0).unwrap();
 
-        assert_eq!(snapshot.max_increase_notional, 100.25);
+        assert_eq!(snapshot.max_increase_notional, 1002.5);
     }
 
     #[test]
@@ -399,6 +400,7 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             side: Some(Side::Sell),
             size: 0.25,
+            leverage: None,
             avg_price: Some(65000.5),
             unrealised_pnl: Some(-12.5),
             position_idx: 0,
@@ -422,6 +424,7 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             side: None,
             size: 0.0,
+            leverage: None,
             avg_price: None,
             unrealised_pnl: None,
             position_idx: 0,
@@ -445,6 +448,7 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             side: Some(Side::Buy),
             size: 0.25,
+            leverage: None,
             avg_price: Some(65000.5),
             unrealised_pnl: Some(-12.5),
             position_idx: 1,

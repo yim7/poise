@@ -127,6 +127,7 @@ async fn position_update_without_live_quote_does_not_stage_submit_effect() {
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),
@@ -221,6 +222,7 @@ async fn position_update_waits_for_first_tick_before_submitting_reconcile() {
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             exchange.account_port(),
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),

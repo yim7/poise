@@ -8,7 +8,10 @@ use poise_engine::track::Instrument;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-use super::{STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_DELAY, ServerRuntime, exchange_state};
+use super::{
+    RuntimeStartupCapacityMode, RuntimeStartupDefinition, STARTUP_RETRY_ATTEMPTS,
+    STARTUP_RETRY_DELAY, ServerRuntime, exchange_state,
+};
 
 struct TrackStartupSeed {
     track_id: String,
@@ -35,10 +38,7 @@ pub(super) async fn complete_startup(
             runtime.execution.get_open_orders(&instrument)
         })
         .await?;
-        let account_capacity_snapshot = retry_startup_step("get_account_capacity_snapshot", || {
-            runtime.account.get_account_capacity_snapshot(&instrument)
-        })
-        .await?;
+        let account_capacity_snapshot = probe_startup_account_capacity(runtime, track).await?;
 
         let required_additional_notional = track.required_additional_notional(position.qty);
         if required_additional_notional > account_capacity_snapshot.max_increase_notional {
@@ -77,6 +77,30 @@ pub(super) async fn complete_startup(
 
     replay_startup_user_data(runtime, receiver, startup_cutoff).await?;
     seed_startup_pending_submit_effects(runtime).await
+}
+
+async fn probe_startup_account_capacity(
+    runtime: &ServerRuntime,
+    track: &RuntimeStartupDefinition,
+) -> Result<AccountCapacitySnapshot> {
+    match track.startup_capacity_mode() {
+        RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { leverage } => {
+            let summary = retry_startup_step("get_account_summary", || {
+                runtime.account_summary.get_account_summary()
+            })
+            .await?;
+            Ok(AccountCapacitySnapshot {
+                max_increase_notional: summary.available * *leverage as f64,
+            })
+        }
+        RuntimeStartupCapacityMode::AccountCapacitySnapshot => {
+            let instrument = track.instrument().clone();
+            retry_startup_step("get_account_capacity_snapshot", || {
+                runtime.account.get_account_capacity_snapshot(&instrument)
+            })
+            .await
+        }
+    }
 }
 
 pub(super) async fn replay_startup_user_data(

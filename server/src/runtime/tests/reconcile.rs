@@ -796,6 +796,7 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
         RuntimePorts::new(
             exchange.execution_port(),
             market_data as Arc<dyn MarketDataPort>,
+            exchange.account_summary_port(),
             account as Arc<dyn AccountPort>,
             exchange.metadata_port(),
             Arc::new(FixedClock(test_server_time())),

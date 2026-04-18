@@ -17,9 +17,9 @@ use poise_application::{
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{ClockPort, MetadataPort};
 #[cfg(test)]
 use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
+use poise_engine::ports::{ClockPort, MetadataPort};
 use poise_engine::track::{Instrument, TrackId, Venue};
 #[cfg(test)]
 use tokio::sync::RwLock;
@@ -31,12 +31,14 @@ use crate::config::{Config, ExchangeConfig};
 use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::exchange_startup::{
-    apply_track_startup_leverage, build_symbol_leverage_setter, build_track_leverage_index,
+    TrackLeverageIndex, apply_track_startup_leverage, build_symbol_leverage_setter,
+    build_track_leverage_index,
 };
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
-    RuntimePorts, ServerRuntime, TrackReconcileGuards,
+    RuntimePorts, RuntimeStartupCapacityMode, RuntimeStartupDefinition, ServerRuntime,
+    TrackReconcileGuards,
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
@@ -126,6 +128,7 @@ pub async fn assemble(
     prepared_registry: Arc<PreparedTrackRegistry>,
     repositories: StateRepositories,
 ) -> Result<ServerPlatform> {
+    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     validate_unique_instruments(
         prepared_registry
             .iter()
@@ -136,19 +139,33 @@ pub async fn assemble(
             .iter()
             .map(|track| track.track_id().clone()),
     )?;
-    let exchange = build_exchange_and_prepare_startup(config, prepared_registry.as_ref()).await?;
+    let exchange = build_exchange_and_prepare_startup(
+        config,
+        prepared_registry.as_ref(),
+        &track_leverage_index,
+    )
+    .await?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
-    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
+    assemble_with_state_store(
+        config,
+        prepared_registry,
+        exchange,
+        repositories,
+        clock,
+        &track_leverage_index,
+    )
+    .await
 }
 
 async fn build_exchange_and_prepare_startup(
     config: &Config,
     prepared_registry: &PreparedTrackRegistry,
+    track_leverage_index: &TrackLeverageIndex,
 ) -> Result<Exchange> {
     build_exchange_and_prepare_startup_with(
-        config,
         prepared_registry,
+        track_leverage_index,
         || build_exchange(&config.exchange),
         || build_symbol_leverage_setter(&config.exchange),
     )
@@ -156,8 +173,8 @@ async fn build_exchange_and_prepare_startup(
 }
 
 async fn build_exchange_and_prepare_startup_with<BuildExchange, BuildExchangeFuture, BuildSetter>(
-    config: &Config,
     prepared_registry: &PreparedTrackRegistry,
+    track_leverage_index: &TrackLeverageIndex,
     build_exchange_fn: BuildExchange,
     build_symbol_leverage_setter_fn: BuildSetter,
 ) -> Result<Exchange>
@@ -168,10 +185,9 @@ where
 {
     let exchange = build_exchange_fn().await?;
     let symbol_leverage_setter = build_symbol_leverage_setter_fn()?;
-    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     apply_track_startup_leverage(
         prepared_registry,
-        &track_leverage_index,
+        track_leverage_index,
         symbol_leverage_setter.as_ref(),
     )
     .await?;
@@ -214,6 +230,7 @@ pub(crate) async fn assemble_with_exchange_ports(
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
+    let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     let exchange = Exchange::new(
         config.exchange.venue(),
         exchange_ports.execution,
@@ -222,7 +239,15 @@ pub(crate) async fn assemble_with_exchange_ports(
         exchange_ports.account,
         exchange_ports.metadata,
     );
-    assemble_with_state_store(config, prepared_registry, exchange, repositories, clock).await
+    assemble_with_state_store(
+        config,
+        prepared_registry,
+        exchange,
+        repositories,
+        clock,
+        &track_leverage_index,
+    )
+    .await
 }
 
 async fn assemble_with_state_store(
@@ -231,6 +256,7 @@ async fn assemble_with_state_store(
     exchange: Exchange,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
+    track_leverage_index: &TrackLeverageIndex,
 ) -> Result<ServerPlatform> {
     validate_unique_instruments(
         prepared_registry
@@ -249,7 +275,15 @@ async fn assemble_with_state_store(
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
         let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
-        startup_definitions.push(track.startup_definition());
+        let startup_leverage = track_leverage_index
+            .get(&track_id)
+            .copied()
+            .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
+        let startup_capacity_mode = build_startup_capacity_mode(&instrument, startup_leverage);
+        startup_definitions.push(RuntimeStartupDefinition::new(
+            track.startup_definition(),
+            startup_capacity_mode,
+        ));
         manager.add_track_with_tick_timeout_secs(
             track_id.clone(),
             instrument,
@@ -380,6 +414,7 @@ async fn assemble_with_state_store(
             RuntimePorts::new(
                 exchange.execution_port(),
                 exchange.market_data_port(),
+                exchange.account_summary_port(),
                 exchange.account_port(),
                 exchange.metadata_port(),
                 clock,
@@ -388,6 +423,18 @@ async fn assemble_with_state_store(
             Duration::from_secs(1),
         ),
     })
+}
+
+fn build_startup_capacity_mode(
+    instrument: &Instrument,
+    startup_leverage: u32,
+) -> RuntimeStartupCapacityMode {
+    match instrument.venue {
+        Venue::Bybit => RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage {
+            leverage: startup_leverage,
+        },
+        _ => RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+    }
 }
 
 async fn load_exchange_info_with_retry(
@@ -593,7 +640,7 @@ mod tests {
 
     use crate::config::{Config, ExchangeConfig, TrackDefinition, parse_config};
     use crate::exchange::Exchange;
-    use crate::exchange_startup::SymbolLeverageSetter;
+    use crate::exchange_startup::{SymbolLeverageSetter, build_track_leverage_index};
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
@@ -1041,9 +1088,10 @@ total_loss_limit = 600.0
             account_monitor: Default::default(),
         };
         let prepared_registry = test_prepared_registry(&config);
+        let track_leverage_index = build_track_leverage_index(&config.tracks).unwrap();
         let exchange = super::build_exchange_and_prepare_startup_with(
-            &config,
             prepared_registry.as_ref(),
+            &track_leverage_index,
             {
                 let call_log = call_log.clone();
                 let startup_exchange = startup_exchange.clone();
@@ -1082,6 +1130,7 @@ total_loss_limit = 600.0
             exchange,
             StateRepositories::new(repository),
             Arc::new(SystemClock),
+            &track_leverage_index,
         )
         .await
         .unwrap();
@@ -1123,10 +1172,11 @@ total_loss_limit = 600.0
             account_monitor: Default::default(),
         };
         let prepared_registry = test_prepared_registry(&config);
+        let track_leverage_index = build_track_leverage_index(&config.tracks).unwrap();
 
         let result = super::build_exchange_and_prepare_startup_with(
-            &config,
             prepared_registry.as_ref(),
+            &track_leverage_index,
             {
                 let call_log = call_log.clone();
                 move || {
@@ -1553,15 +1603,17 @@ total_loss_limit = 600.0
                         exchange.clone(),
                         market_data,
                         exchange.clone(),
+                        exchange.clone(),
                         exchange,
                         Arc::new(SystemClock),
                     ),
-                    vec![
+                    vec![crate::runtime::RuntimeStartupDefinition::new(
                         crate::test_support::test_prepared_registry("btc-core")
                             .get(&TrackId::new("btc-core"))
                             .unwrap()
                             .startup_definition(),
-                    ],
+                        crate::runtime::RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                    )],
                 ),
             },
             btc_sender,

@@ -127,18 +127,8 @@ impl TickerState {
                 None => return Ok(None),
             },
         };
-        let execution_quote = match (message.data.bid1_price, message.data.ask1_price) {
-            (Some(best_bid), Some(best_ask)) => {
-                let quote = ExecutionQuote { best_bid, best_ask };
-                self.last_quote = Some(quote.clone());
-                Some(quote)
-            }
-            (None, None) => self.last_quote.clone(),
-            _ => {
-                self.last_quote = None;
-                None
-            }
-        };
+        let execution_quote =
+            self.merge_execution_quote(message.data.bid1_price, message.data.ask1_price);
         let timestamp = Utc
             .timestamp_millis_opt(message.ts)
             .single()
@@ -150,6 +140,32 @@ impl TickerState {
             execution_quote,
             timestamp,
         }))
+    }
+
+    fn merge_execution_quote(
+        &mut self,
+        best_bid: Option<f64>,
+        best_ask: Option<f64>,
+    ) -> Option<ExecutionQuote> {
+        let merged = match (best_bid, best_ask, self.last_quote.as_ref()) {
+            (Some(best_bid), Some(best_ask), _) => Some(ExecutionQuote { best_bid, best_ask }),
+            (Some(best_bid), None, Some(previous)) => Some(ExecutionQuote {
+                best_bid,
+                best_ask: previous.best_ask,
+            }),
+            (None, Some(best_ask), Some(previous)) => Some(ExecutionQuote {
+                best_bid: previous.best_bid,
+                best_ask,
+            }),
+            (None, None, Some(previous)) => Some(previous.clone()),
+            _ => None,
+        };
+
+        if let Some(quote) = merged.as_ref() {
+            self.last_quote = Some(quote.clone());
+        }
+
+        merged
     }
 }
 
@@ -251,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_bybit_tick_with_none_quote_when_bid_or_ask_is_missing() {
+    fn emits_bybit_tick_with_none_quote_when_bid_or_ask_is_missing_without_cached_opposite_side() {
         let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
@@ -270,6 +286,48 @@ mod tests {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
                 mark_price: 64010.20,
                 execution_quote: None,
+                timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn ticker_state_merges_partial_quote_update_with_cached_opposite_side() {
+        let mut state = btc_ticker_state();
+        let snapshot = r#"{
+            "topic": "tickers.BTCUSDT",
+            "ts": 1700000000000,
+            "data": {
+                "symbol": "BTCUSDT",
+                "markPrice": "64000.10",
+                "bid1Price": "63999.50",
+                "ask1Price": "64000.50"
+            }
+        }"#;
+        let delta = r#"{
+            "topic": "tickers.BTCUSDT",
+            "ts": 1700000005000,
+            "data": {
+                "markPrice": "64010.20",
+                "bid1Price": "64009.80"
+            }
+        }"#;
+
+        state
+            .parse_linear_ticker_message(snapshot)
+            .unwrap()
+            .unwrap();
+        let tick = state.parse_linear_ticker_message(delta).unwrap().unwrap();
+
+        assert_eq!(
+            tick,
+            PriceTick {
+                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                mark_price: 64010.20,
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 64009.80,
+                    best_ask: 64000.50,
+                }),
                 timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
             }
         );
