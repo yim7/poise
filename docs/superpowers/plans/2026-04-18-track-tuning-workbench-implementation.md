@@ -225,14 +225,14 @@ Commit SHA: `5a67d18`, `7b86a1b`, `fa2c966`
 - Modify: `tools/track-tuning-workbench/src-tauri/src/lib.rs`
 - Modify: `tools/track-tuning-workbench/src-tauri/capabilities/default.json`
 
-- [ ] **Step 1: 先写 Rust 测试，钉住命令层对外契约**
+- [x] **Step 1: 先写 Rust 测试，钉住命令层对外契约**
   - 至少覆盖：
     - 加载外部配置文件会返回 projected tracks
     - 行情查询固定走 Binance 合约
     - 不支持 symbol 时返回可显示错误，不 panic
     - 草稿会按配置文件路径隔离保存和恢复
 
-- [ ] **Step 2: 实现 `binance_quote.rs`**
+- [x] **Step 2: 实现 `binance_quote.rs`**
   - 用 `reqwest` 调 Binance 合约公共接口
   - 返回结构至少包含：
     - `price`
@@ -240,12 +240,12 @@ Commit SHA: `5a67d18`, `7b86a1b`, `fa2c966`
     - `error_kind`
   - 行情失败不应污染其他命令
 
-- [ ] **Step 3: 实现 `session_store.rs`**
+- [x] **Step 3: 实现 `session_store.rs`**
   - 以配置文件绝对路径推导稳定 session key
   - 草稿落盘为 JSON
   - Rust 只做存取，不维护撤销历史
 
-- [ ] **Step 4: 在 `commands.rs` 中暴露窄 Tauri command**
+- [x] **Step 4: 在 `commands.rs` 中暴露窄 Tauri command**
   - 至少包括：
     - `open_config_file`
     - `load_config_file`
@@ -254,20 +254,20 @@ Commit SHA: `5a67d18`, `7b86a1b`, `fa2c966`
     - `copy_text`
     - `fetch_binance_quote`
 
-- [ ] **Step 5: 运行最小 Rust 测试**
+- [x] **Step 5: 运行最小 Rust 测试**
 
 Run: `cargo test -p poise-track-tuning-workbench commands::tests:: -- --nocapture`
 
 Expected: 文件加载、合约行情、会话隔离三个类别全部通过
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/track-tuning-workbench/src-tauri
 git commit -m "feat(workbench): add tauri file quote and session commands"
 ```
 
-Commit SHA: 执行后回写
+Commit SHA: `79d42ca`, `3c20f09`, `952fd96`
 
 ## Task 4: 实现前端统一试算模块与 fixture
 
