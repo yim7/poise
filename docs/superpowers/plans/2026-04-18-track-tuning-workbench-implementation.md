@@ -390,22 +390,22 @@ Commit SHA: `da0f839`, `271512b`, `a0b3d7b`
 - Modify: `tools/track-tuning-workbench/src/styles/base.css`
 - Modify: `tools/track-tuning-workbench/src/app/AppShell.tsx`
 
-- [ ] **Step 1: 先写组件测试，钉住主要交互入口**
+- [x] **Step 1: 先写组件测试，钉住主要交互入口**
   - 至少覆盖：
     - 左栏存在“选择配置文件 / 撤销 / 重做 / 复制当前 Track / 复制全部 Tracks”
     - 指标卡会展示“当前价格 / 最小步长对应价格 / 当前价到风险边缘 / 零仓目标点到风险边缘”
     - 删除 `track` 后有“可撤销”提示
     - 风险字段非法时有即时提示，但编辑不中断
 
-- [ ] **Step 2: 完成左栏与文件操作区**
+- [x] **Step 2: 完成左栏与文件操作区**
   - 左栏显示草稿状态、当前文件路径、Track 列表和新增 / 复制 / 删除操作
   - 当前选中项、已修改项和带错误项有不同视觉状态
 
-- [ ] **Step 3: 完成顶部指标卡**
+- [x] **Step 3: 完成顶部指标卡**
   - 指标卡要有主值、辅值和来源说明
   - Binance 价格来源和失败原因有单独 badge / note
 
-- [ ] **Step 4: 完成主图**
+- [x] **Step 4: 完成主图**
   - 使用 SVG 自绘：
     - 价格带
     - 曲线形状
@@ -416,7 +416,7 @@ Commit SHA: `da0f839`, `271512b`, `a0b3d7b`
   - 保证主图是视觉中心，不退化成小附图
   - 图上曲线必须直接消费 `trackCurve.ts` 的真实采样结果，而不是组件内再推导一套视觉曲线
 
-- [ ] **Step 5: 完成参数编辑器**
+- [x] **Step 5: 完成参数编辑器**
   - 四组区块：
     - 标识
     - 价格带
@@ -425,20 +425,20 @@ Commit SHA: `da0f839`, `271512b`, `a0b3d7b`
     - 曲线与预览
   - 输入提交边界与 store 约定一致
 
-- [ ] **Step 6: 运行最小组件测试**
+- [x] **Step 6: 运行最小组件测试**
 
 Run: `pnpm --dir tools/track-tuning-workbench test -- AppShell`
 
 Expected: 关键入口和风险提示相关测试通过
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tools/track-tuning-workbench/src/ui tools/track-tuning-workbench/src/styles tools/track-tuning-workbench/src/app/AppShell.tsx
 git commit -m "feat(workbench): build visual tuning workspace"
 ```
 
-Commit SHA: 执行后回写
+Commit SHA: `17d9e20`, `6abe06a`, `50543ce`
 
 ## Task 7: 联通命令层、复制导出与最终验收
 
