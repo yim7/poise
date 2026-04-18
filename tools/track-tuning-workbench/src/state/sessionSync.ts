@@ -11,6 +11,12 @@ export interface SessionPersistence {
   saveDraft(configPath: string, snapshot: WorkbenchSnapshot): Promise<void>;
 }
 
+export interface BrowserStorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
 export interface SessionSync {
   loadDraft(configPath: string): Promise<WorkbenchSnapshot | null>;
   scheduleSave(configPath: string, snapshot: WorkbenchSnapshot): void;
@@ -20,6 +26,10 @@ export interface SessionSync {
 
 export interface SessionSyncOptions {
   debounceMs?: number;
+}
+
+export interface BrowserSessionPersistenceOptions {
+  namespace?: string;
 }
 
 export function createSessionSync(
@@ -83,6 +93,35 @@ export function createSessionSync(
   }
 }
 
+export function createBrowserSessionPersistence(
+  storage: BrowserStorageLike,
+  options: BrowserSessionPersistenceOptions = {},
+): SessionPersistence {
+  const namespace = options.namespace ?? 'poise.track-tuning-workbench';
+
+  return {
+    async loadDraft(configPath) {
+      const raw = storage.getItem(makeStorageKey(namespace, configPath));
+      if (!raw) {
+        return null;
+      }
+
+      try {
+        return JSON.parse(raw) as WorkbenchSnapshot;
+      } catch {
+        return null;
+      }
+    },
+    async saveDraft(configPath, snapshot) {
+      storage.setItem(makeStorageKey(namespace, configPath), JSON.stringify(snapshot));
+    },
+  };
+}
+
 function cloneSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
   return structuredClone(snapshot);
+}
+
+function makeStorageKey(namespace: string, configPath: string): string {
+  return `${namespace}:${configPath}`;
 }

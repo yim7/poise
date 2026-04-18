@@ -20,7 +20,7 @@ export interface History<T> {
   reset(next: T): void;
 }
 
-const DEFAULT_LIMIT = 50;
+const DEFAULT_LIMIT = 100;
 
 export function createHistory<T>(
   initialPresent: T,

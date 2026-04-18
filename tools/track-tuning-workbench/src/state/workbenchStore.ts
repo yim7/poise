@@ -73,14 +73,15 @@ export function useWorkbenchSnapshot(): WorkbenchState {
 export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): WorkbenchStore {
   const sessionSync = options.sessionSync ?? createSessionSync(createMemoryPersistence());
   const initialSnapshot = cloneSnapshot(options.initialSnapshot ?? createEmptySnapshot());
+  const sourceSnapshot = cloneSnapshot(initialSnapshot);
 
   const committedHistory = createHistory(cloneSnapshot(initialSnapshot), {
-    limit: 50,
+    limit: 100,
     equals: snapshotsEqual,
   });
 
   let draftSession = cloneSnapshot(committedHistory.state.present);
-  let savedSnapshot = cloneSnapshot(committedHistory.state.present);
+  let persistedSnapshot = cloneSnapshot(committedHistory.state.present);
   let currentFilePath: string | null = null;
   const listeners = new Set<() => void>();
 
@@ -89,7 +90,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       return {
         ...cloneSnapshot(draftSession),
         currentFilePath,
-        dirty: !snapshotsEqual(draftSession, savedSnapshot),
+        dirty: !snapshotsEqual(draftSession, sourceSnapshot),
         canUndo: committedHistory.canUndo(),
         canRedo: committedHistory.canRedo(),
       };
@@ -103,23 +104,27 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
     async load(configPath) {
       currentFilePath = configPath;
       const loaded = await sessionSync.loadDraft(configPath);
-      const nextSnapshot = cloneSnapshot(loaded ?? initialSnapshot);
+      const nextSnapshot = cloneSnapshot(loaded ?? sourceSnapshot);
 
       committedHistory.reset(cloneSnapshot(nextSnapshot));
       draftSession = cloneSnapshot(nextSnapshot);
-      savedSnapshot = cloneSnapshot(nextSnapshot);
+      persistedSnapshot = cloneSnapshot(nextSnapshot);
       emit();
     },
     async flush() {
       if (!currentFilePath) {
-        savedSnapshot = cloneSnapshot(draftSession);
+        persistedSnapshot = cloneSnapshot(draftSession);
         emit();
+        return;
+      }
+
+      if (snapshotsEqual(draftSession, persistedSnapshot)) {
         return;
       }
 
       sessionSync.scheduleSave(currentFilePath, cloneSnapshot(draftSession));
       await sessionSync.flush();
-      savedSnapshot = cloneSnapshot(draftSession);
+      persistedSnapshot = cloneSnapshot(draftSession);
       emit();
     },
     selectDraft(draftId) {
@@ -231,7 +236,6 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       }
 
       draftSession = cloneSnapshot(committedHistory.state.present);
-      savedSnapshot = cloneSnapshot(committedHistory.state.present);
       scheduleSave();
       emit();
     },
@@ -241,7 +245,6 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       }
 
       draftSession = cloneSnapshot(committedHistory.state.present);
-      savedSnapshot = cloneSnapshot(committedHistory.state.present);
       scheduleSave();
       emit();
     },
@@ -252,23 +255,20 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       return committedHistory.canRedo();
     },
     isDirty() {
-      return !snapshotsEqual(draftSession, savedSnapshot);
+      return !snapshotsEqual(draftSession, sourceSnapshot);
     },
   };
 
   function commitCurrentDraft() {
     const nextCommitted = cloneSnapshot(draftSession);
-    const pushed = committedHistory.push(nextCommitted);
+    committedHistory.push(nextCommitted);
     committedHistory.replacePresent(cloneSnapshot(nextCommitted));
-    if (pushed) {
-      savedSnapshot = cloneSnapshot(nextCommitted);
-    }
     scheduleSave();
     emit();
   }
 
   function scheduleSave() {
-    if (!currentFilePath) {
+    if (!currentFilePath || snapshotsEqual(draftSession, persistedSnapshot)) {
       return;
     }
 
