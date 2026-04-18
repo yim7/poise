@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
 import {
@@ -377,5 +377,40 @@ describe('workbench store', () => {
 
     expect(await persistence.loadDraft('config/a.json')).toEqual(storedSnapshot);
     expect(await persistence.loadDraft('config/b.json')).toBeNull();
+  });
+
+  it('keeps live Binance quotes outside dirty tracking and autosave snapshots', async () => {
+    const saveDraft = vi.fn(async () => {});
+    const store = createWorkbenchStore({
+      initialSnapshot: makeSnapshot(),
+      sessionSync: createSessionSync(
+        {
+          async loadDraft() {
+            return null;
+          },
+          saveDraft,
+        },
+        { debounceMs: 0 },
+      ),
+    });
+
+    await store.load('config/track.json', makeSnapshot());
+    store.setRemoteQuote('draft-a', {
+      status: 'live',
+      symbol: 'DRAFT-AUSDT',
+      price: 101.5,
+      retrievedAt: 1_713_400_000_000,
+    });
+
+    const remoteQuote = store.getState().remoteQuotes['draft-a'];
+    expect(remoteQuote?.status).toBe('live');
+    if (remoteQuote?.status === 'live') {
+      expect(remoteQuote.price).toBe(101.5);
+    }
+    expect(store.isDirty()).toBe(false);
+
+    await store.flush();
+
+    expect(saveDraft).not.toHaveBeenCalled();
   });
 });

@@ -9,7 +9,6 @@ export function CurveSection({
   onQuotePriceChange,
   onCommit,
 }: CurveSectionProps) {
-
   return (
     <section className="editor-section">
       <div className="editor-section__header">
@@ -34,7 +33,7 @@ export function CurveSection({
           </select>
         </label>
         <label className="field">
-          <span className="field__label">当前试算价格</span>
+          <span className="field__label">临时覆盖价格</span>
           <input
             className={quoteIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
             value={quotePriceInput}
@@ -55,7 +54,7 @@ export function CurveSection({
         </InlineNotice>
       ) : (
         <InlineNotice title="预览说明">
-          当前价格暂时由前端输入值驱动。Task 7 接上 Binance 命令后，这里会区分实时价格与临时覆盖价格。
+          默认使用 Binance 合约实时价格；这里填入数字后，会只在本地试算里临时覆盖当前价格，不会写进导出配置。
         </InlineNotice>
       )}
     </section>

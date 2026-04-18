@@ -7,6 +7,9 @@ export interface FilePanelProps {
   canRedo: boolean;
   hasDrafts: boolean;
   hasSelection: boolean;
+  priceBadge: string;
+  priceBadgeTone: 'accent' | 'warning' | 'danger';
+  priceNote: string;
   onChooseFile(): void;
   onUndo(): void;
   onRedo(): void;
@@ -21,6 +24,9 @@ export function FilePanel({
   canRedo,
   hasDrafts,
   hasSelection,
+  priceBadge,
+  priceBadgeTone,
+  priceNote,
   onChooseFile,
   onUndo,
   onRedo,
@@ -85,10 +91,8 @@ export function FilePanel({
       </div>
 
       <div className="file-panel__footer">
-        <StatusBadge tone="accent">Binance 待接通</StatusBadge>
-        <p className="file-panel__note">
-          当前价格与复制命令会在 Task 7 接真实命令层；这一轮先把工作台结构和交互边界钉住。
-        </p>
+        <StatusBadge tone={priceBadgeTone}>{priceBadge}</StatusBadge>
+        <p className="file-panel__note">{priceNote}</p>
       </div>
     </section>
   );

@@ -1,11 +1,12 @@
 import '@testing-library/jest-dom/vitest';
 
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '@/app/AppShell';
 import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
 import { WorkbenchStoreProvider, createWorkbenchStore } from '@/state/workbenchStore';
+import type { WorkbenchBridge } from '@/app/workbenchBridge';
 
 interface DraftOverrides {
   additional?: TrackDraft['additional'];
@@ -92,6 +93,28 @@ async function renderShell() {
   return { store };
 }
 
+function createMockBridge(
+  overrides: Partial<WorkbenchBridge> = {},
+): WorkbenchBridge {
+  return {
+    isTauriEnvironment: () => false,
+    openConfigFile: vi.fn(async () => null),
+    loadConfigFile: vi.fn(),
+    loadSavedDraft: vi.fn(async () => null),
+    saveDraft: vi.fn(async () => {}),
+    exportCurrentTrack: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"'),
+    exportAllTracks: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"\n\n[[tracks]]\ntrack_id = "gold"'),
+    copyText: vi.fn(async () => {}),
+    fetchBinanceQuote: vi.fn(async () => ({
+      price: '101.25',
+      retrievedAt: 1_713_400_000_000,
+      errorKind: null,
+      errorMessage: null,
+    })),
+    ...overrides,
+  };
+}
+
 describe('AppShell', () => {
   it('renders the primary actions and metric cards for the selected track', async () => {
     await renderShell();
@@ -136,5 +159,76 @@ describe('AppShell', () => {
     expect(
       within(screen.getByRole('region', { name: '关键指标区' })).getByText('当前价格'),
     ).toBeInTheDocument();
+  });
+
+  it('copies current track through the export bridge and only writes [[tracks]] text', async () => {
+    const bridge = createMockBridge();
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-silver',
+        drafts: [makeDraft('draft-silver')],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      await store.load('/tmp/strategies/metals.toml', store.getState());
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '复制当前 Track' }));
+    });
+
+    expect(bridge.exportCurrentTrack).toHaveBeenCalledTimes(1);
+    expect(bridge.copyText).toHaveBeenCalledWith('[[tracks]]\ntrack_id = "silver"');
+    expect(screen.getByText('当前 Track 已复制到剪贴板')).toBeInTheDocument();
+  });
+
+  it('shows a readable quote error when Binance does not support the symbol', async () => {
+    const bridge = createMockBridge({
+      fetchBinanceQuote: vi.fn(async () => ({
+        price: null,
+        retrievedAt: 1_713_400_000_000,
+        errorKind: 'unsupported_symbol' as const,
+        errorMessage: 'Binance 合约不支持 symbol `BADPAIR`',
+      })),
+    });
+
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-bad',
+        drafts: [
+          makeDraft('draft-bad', {
+            additional: {
+              trackId: 'bad',
+              symbol: 'BADPAIR',
+            },
+            ui: {
+              quotePriceInput: '',
+            },
+          }),
+        ],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      await store.load('/tmp/strategies/bad.toml', store.getState());
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+
+    expect(await screen.findByText('Binance 合约不支持 symbol `BADPAIR`')).toBeInTheDocument();
+    expect(screen.getByText('symbol 不支持')).toBeInTheDocument();
   });
 });

@@ -5,7 +5,12 @@ import type {
 } from '@/domain/trackDraft';
 import { TRACK_NUMERIC_FIELD_KEYS } from '@/domain/trackDraft';
 
-const FIELD_LABELS: Record<keyof TrackDraftNumericFields | 'quotePriceInput', string> = {
+const FIELD_LABELS: Record<
+  keyof TrackDraftNumericFields | 'quotePriceInput' | 'trackId' | 'symbol',
+  string
+> = {
+  trackId: 'track_id',
+  symbol: 'symbol',
   lowerPrice: 'lower_price',
   upperPrice: 'upper_price',
   longExposureUnits: 'long_exposure_units',
@@ -20,7 +25,7 @@ const FIELD_LABELS: Record<keyof TrackDraftNumericFields | 'quotePriceInput', st
 };
 
 export interface TrackDraftIssue {
-  field: keyof TrackDraftNumericFields | 'quotePriceInput';
+  field: keyof TrackDraftNumericFields | 'quotePriceInput' | 'trackId' | 'symbol';
   message: string;
 }
 
@@ -34,6 +39,20 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
   const issues: TrackDraftIssue[] = [];
   const parsedNumbers = {} as TrackDraftNumericFields;
 
+  if (draft.additional.trackId.trim().length === 0) {
+    issues.push({
+      field: 'trackId',
+      message: `${FIELD_LABELS.trackId} 不能为空`,
+    });
+  }
+
+  if (draft.additional.symbol.trim().length === 0) {
+    issues.push({
+      field: 'symbol',
+      message: `${FIELD_LABELS.symbol} 不能为空`,
+    });
+  }
+
   for (const field of TRACK_NUMERIC_FIELD_KEYS) {
     const value = resolveNumericField(draft, field);
     if (value === null) {
@@ -46,8 +65,9 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
     parsedNumbers[field] = value;
   }
 
+  const hasQuoteInput = draft.ui.quotePriceInput.trim().length > 0;
   const quotePrice = parseFiniteNumber(draft.ui.quotePriceInput);
-  if (quotePrice === null) {
+  if (hasQuoteInput && quotePrice === null) {
     issues.push({
       field: 'quotePriceInput',
       message: `${FIELD_LABELS.quotePriceInput} 必须是有限数字`,

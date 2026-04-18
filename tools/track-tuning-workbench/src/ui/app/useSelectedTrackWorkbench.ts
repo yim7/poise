@@ -1,5 +1,3 @@
-import { useEffect, useMemo, useRef } from 'react';
-
 import {
   TRACK_NUMERIC_FIELD_KEYS,
   type TrackDraft,
@@ -8,7 +6,10 @@ import {
 } from '@/domain/trackDraft';
 import { computeTrackMetrics } from '@/domain/trackMetrics';
 import { parseFiniteNumber, validateTrackDraft } from '@/domain/trackValidation';
-import type { WorkbenchState } from '@/state/workbenchStore';
+import type {
+  RemoteQuoteState,
+  WorkbenchState,
+} from '@/state/workbenchStore';
 import type { TrackListItem } from '@/ui/sidebar/TrackList';
 
 export interface SelectedTrackWorkbenchModel {
@@ -28,68 +29,27 @@ export interface SelectedTrackWorkbenchModel {
 export function useSelectedTrackWorkbench(
   snapshot: WorkbenchState,
 ): SelectedTrackWorkbenchModel {
-  const lastValidSnapshotsRef = useRef(new Map<string, TrackDraftParsedSnapshot>());
+  const selectedDraft = resolveSelectedDraft(snapshot);
+  const selectedValidation = selectedDraft ? validateTrackDraft(selectedDraft) : null;
 
-  const selectedDraft = useMemo(() => resolveSelectedDraft(snapshot), [snapshot]);
-  const selectedValidation = useMemo(
-    () => (selectedDraft ? validateTrackDraft(selectedDraft) : null),
-    [selectedDraft],
+  const issuesByDraftId = new Map(
+    snapshot.drafts.map((draft) => [draft.draftId, validateTrackDraft(draft).issues]),
   );
 
-  useEffect(() => {
-    if (!selectedDraft || !selectedValidation?.parsed) {
-      return;
-    }
-    lastValidSnapshotsRef.current.set(selectedDraft.draftId, selectedValidation.parsed);
-  }, [selectedDraft, selectedValidation]);
-
-  const selectedVisualSnapshot = useMemo(
-    () =>
-      resolveVisualSnapshot(
-        selectedDraft,
-        selectedValidation?.parsed,
-        lastValidSnapshotsRef.current.get(selectedDraft?.draftId ?? ''),
-      ),
-    [selectedDraft, selectedValidation],
+  const trackItems = buildTrackItems(snapshot, selectedDraft, issuesByDraftId);
+  const selectedVisualSnapshot = resolveVisualSnapshot(
+    snapshot,
+    selectedDraft,
+    selectedValidation?.parsed,
   );
-
-  const selectedMetrics = useMemo(
-    () => (selectedVisualSnapshot ? computeTrackMetrics(selectedVisualSnapshot) : null),
-    [selectedVisualSnapshot],
-  );
-
-  const issuesByDraftId = useMemo(
-    () =>
-      new Map(
-        snapshot.drafts.map((draft) => [draft.draftId, validateTrackDraft(draft).issues]),
-      ),
-    [snapshot.drafts],
-  );
-
-  const trackItems = useMemo(() => {
-    const sourceDraftsById = new Map(
-      snapshot.sourceDrafts.map((draft) => [draft.draftId, draft]),
-    );
-
-    return snapshot.drafts.map((draft) => ({
-      draftId: draft.draftId,
-      trackId: draft.additional.trackId,
-      symbol: draft.additional.symbol,
-      isSelected: selectedDraft?.draftId === draft.draftId,
-      isDirty: draftChanged(draft, sourceDraftsById.get(draft.draftId)),
-      hasErrors: (issuesByDraftId.get(draft.draftId)?.length ?? 0) > 0,
-    }));
-  }, [issuesByDraftId, selectedDraft, snapshot.drafts, snapshot.sourceDrafts]);
-
-  const priceStatus = useMemo(
-    () =>
-      resolvePriceStatus(
-        selectedValidation?.issues ?? [],
-        selectedDraft,
-        selectedVisualSnapshot,
-        selectedValidation?.parsed ?? null,
-      ),
-    [selectedDraft, selectedValidation, selectedVisualSnapshot],
+  const selectedMetrics = selectedVisualSnapshot
+    ? computeTrackMetrics(selectedVisualSnapshot)
+    : null;
+  const priceStatus = resolvePriceStatus(
+    snapshot,
+    selectedDraft,
+    selectedValidation?.issues ?? [],
+    selectedVisualSnapshot,
   );
 
   return {
@@ -103,15 +63,32 @@ export function useSelectedTrackWorkbench(
   };
 }
 
+function buildTrackItems(
+  snapshot: WorkbenchState,
+  selectedDraft: TrackDraft | null,
+  issuesByDraftId: Map<string, ReturnType<typeof validateTrackDraft>['issues']>,
+) {
+  const sourceDraftsById = new Map(
+    snapshot.sourceDrafts.map((draft) => [draft.draftId, draft]),
+  );
+
+  return snapshot.drafts.map((draft) => ({
+    draftId: draft.draftId,
+    trackId: draft.additional.trackId,
+    symbol: draft.additional.symbol,
+    isSelected: selectedDraft?.draftId === draft.draftId,
+    isDirty: draftChanged(draft, sourceDraftsById.get(draft.draftId)),
+    hasErrors: (issuesByDraftId.get(draft.draftId)?.length ?? 0) > 0,
+  }));
+}
+
 function resolveSelectedDraft(snapshot: WorkbenchState) {
   if (snapshot.drafts.length === 0) {
     return null;
   }
 
-  return (
-    snapshot.drafts.find((draft) => draft.draftId === snapshot.selectedDraftId)
-    ?? snapshot.drafts[0]
-  );
+  return snapshot.drafts.find((draft) => draft.draftId === snapshot.selectedDraftId)
+    ?? snapshot.drafts[0];
 }
 
 function draftChanged(current: TrackDraft, source?: TrackDraft) {
@@ -121,55 +98,13 @@ function draftChanged(current: TrackDraft, source?: TrackDraft) {
   return JSON.stringify(current) !== JSON.stringify(source);
 }
 
-function resolvePriceStatus(
-  issues: Array<{ field: string; message: string }>,
-  selectedDraft: TrackDraft | null,
-  visualSnapshot: TrackDraftParsedSnapshot | null,
-  currentParsedSnapshot: TrackDraftParsedSnapshot | null,
-) {
-  const quoteIssue = issues.find((issue) => issue.field === 'quotePriceInput');
-  if (quoteIssue) {
-    return {
-      tone: 'danger' as const,
-      badge: '价格不可用',
-      note: quoteIssue.message,
-    };
-  }
-
-  if (issues.length > 0 && visualSnapshot && !currentParsedSnapshot) {
-    return {
-      tone: 'warning' as const,
-      badge: '沿用最近可用结果',
-      note: '当前输入有误，主图和指标先保留最近一次合法试算结果。',
-    };
-  }
-
-  if (!selectedDraft) {
-    return {
-      tone: 'warning' as const,
-      badge: '等待 Track',
-      note: '先从左栏选择一个可编辑的 Track。',
-    };
-  }
-
-  return {
-    tone: 'accent' as const,
-    badge: 'Binance 待接通',
-    note: '当前用本地输入价格试算；Task 7 接命令后再显示来源和失败原因。',
-  };
-}
-
 function resolveVisualSnapshot(
+  snapshot: WorkbenchState,
   draft: TrackDraft | null,
   currentParsedSnapshot: TrackDraftParsedSnapshot | undefined,
-  lastValidSnapshot: TrackDraftParsedSnapshot | undefined,
 ): TrackDraftParsedSnapshot | null {
   if (currentParsedSnapshot) {
     return currentParsedSnapshot;
-  }
-
-  if (lastValidSnapshot) {
-    return lastValidSnapshot;
   }
 
   if (!draft) {
@@ -177,7 +112,7 @@ function resolveVisualSnapshot(
   }
 
   const fallbackNumbers = completeFallbackParsedNumbers(draft.parsedNumbers);
-  const quotePrice = parseFiniteNumber(draft.ui.quotePriceInput);
+  const quotePrice = resolveQuotePrice(snapshot, draft);
 
   if (!fallbackNumbers || quotePrice === null) {
     return null;
@@ -196,6 +131,25 @@ function resolveVisualSnapshot(
   };
 }
 
+function resolveQuotePrice(snapshot: WorkbenchState, draft: TrackDraft): number | null {
+  const override = snapshot.temporaryPriceOverrides[draft.draftId];
+  if (typeof override === 'number' && Number.isFinite(override)) {
+    return override;
+  }
+
+  const quoteText = draft.ui.quotePriceInput.trim();
+  if (quoteText.length > 0) {
+    return parseFiniteNumber(draft.ui.quotePriceInput);
+  }
+
+  const remoteQuote = snapshot.remoteQuotes[draft.draftId];
+  if (remoteQuote?.status === 'live') {
+    return remoteQuote.price;
+  }
+
+  return null;
+}
+
 function completeFallbackParsedNumbers(
   parsedNumbers: Partial<TrackDraftNumericFields>,
 ): TrackDraftNumericFields | null {
@@ -210,4 +164,122 @@ function completeFallbackParsedNumbers(
   }
 
   return complete;
+}
+
+function resolvePriceStatus(
+  snapshot: WorkbenchState,
+  selectedDraft: TrackDraft | null,
+  issues: Array<{ field: string; message: string }>,
+  visualSnapshot: TrackDraftParsedSnapshot | null,
+) {
+  if (!selectedDraft) {
+    return {
+      tone: 'warning' as const,
+      badge: '等待 Track',
+      note: '先从左栏选择一个可编辑的 Track。',
+    };
+  }
+
+  const quoteIssue = issues.find((issue) => issue.field === 'quotePriceInput');
+  if (quoteIssue) {
+    return {
+      tone: 'danger' as const,
+      badge: '价格不可用',
+      note: quoteIssue.message,
+    };
+  }
+
+  const override = snapshot.temporaryPriceOverrides[selectedDraft.draftId];
+  if (typeof override === 'number' && Number.isFinite(override)) {
+    return {
+      tone: 'accent' as const,
+      badge: '临时价格覆盖',
+      note: '当前试算优先使用临时输入价格；清空输入框后会恢复 Binance 自动报价。',
+    };
+  }
+
+  const quoteText = selectedDraft.ui.quotePriceInput.trim();
+  if (quoteText.length > 0) {
+    return {
+      tone: 'accent' as const,
+      badge: '临时价格覆盖',
+      note: '当前试算优先使用临时输入价格；清空输入框后会恢复 Binance 自动报价。',
+    };
+  }
+
+  const remoteQuote = snapshot.remoteQuotes[selectedDraft.draftId];
+  if (remoteQuote?.status === 'live') {
+    return {
+      tone: 'accent' as const,
+      badge: 'Binance 实时',
+      note: `最新合约报价已接通，更新时间 ${formatRetrievedAt(remoteQuote.retrievedAt)}。`,
+    };
+  }
+
+  if (remoteQuote?.status === 'error') {
+    return describeRemoteQuoteError(remoteQuote);
+  }
+
+  if (remoteQuote?.status === 'loading') {
+    return {
+      tone: 'warning' as const,
+      badge: '等待 Binance',
+      note: `正在刷新 ${remoteQuote.symbol} 的合约报价。`,
+    };
+  }
+
+  if (issues.length > 0 && visualSnapshot) {
+    return {
+      tone: 'warning' as const,
+      badge: '沿用最近可用结果',
+      note: '当前输入有误，主图和指标先保留最近一次可用的试算结果。',
+    };
+  }
+
+  return {
+    tone: 'warning' as const,
+    badge: '等待 Binance',
+    note: '当前还没有可用的 Binance 合约报价。',
+  };
+}
+
+function describeRemoteQuoteError(remoteQuote: Extract<RemoteQuoteState, { status: 'error' }>) {
+  if (remoteQuote.errorKind === 'unsupported_symbol') {
+    return {
+      tone: 'danger' as const,
+      badge: 'symbol 不支持',
+      note: remoteQuote.message,
+    };
+  }
+
+  if (remoteQuote.errorKind === 'rate_limited') {
+    return {
+      tone: 'warning' as const,
+      badge: 'Binance 限流',
+      note: remoteQuote.message,
+    };
+  }
+
+  if (remoteQuote.errorKind === 'temporarily_unavailable') {
+    return {
+      tone: 'warning' as const,
+      badge: '暂时不可用',
+      note: remoteQuote.message,
+    };
+  }
+
+  return {
+    tone: 'danger' as const,
+    badge: '报价失败',
+    note: remoteQuote.message,
+  };
+}
+
+function formatRetrievedAt(retrievedAt: number) {
+  return new Date(retrievedAt).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
 }

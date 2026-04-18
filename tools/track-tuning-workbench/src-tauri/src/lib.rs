@@ -15,7 +15,9 @@ pub fn run() -> tauri::Result<()> {
             commands::load_saved_draft,
             commands::save_draft,
             commands::copy_text,
-            commands::fetch_binance_quote
+            commands::fetch_binance_quote,
+            commands::export_current_track,
+            commands::export_all_tracks
         ])
         .run(tauri::generate_context!())
 }

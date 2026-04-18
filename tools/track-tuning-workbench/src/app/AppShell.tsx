@@ -1,6 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
+import {
+  createSourceSnapshot,
+  type WorkbenchBridge,
+} from '@/app/workbenchBridge';
 import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
+import { parseFiniteNumber } from '@/domain/trackValidation';
 import { useWorkbenchSnapshot, useWorkbenchStore } from '@/state/workbenchStore';
 import { TrackWorkbenchChart } from '@/ui/chart/TrackWorkbenchChart';
 import { useSelectedTrackWorkbench } from '@/ui/app/useSelectedTrackWorkbench';
@@ -15,7 +20,13 @@ interface NoticeState {
   message: string;
 }
 
-export function AppShell() {
+export interface AppShellProps {
+  bridge?: WorkbenchBridge;
+}
+
+const QUOTE_REFRESH_INTERVAL_MS = 15_000;
+
+export function AppShell({ bridge }: AppShellProps) {
   const store = useWorkbenchStore();
   const snapshot = useWorkbenchSnapshot();
   const [notice, setNotice] = useState<NoticeState | null>(null);
@@ -27,6 +38,79 @@ export function AppShell() {
     trackItems,
     priceStatus,
   } = useSelectedTrackWorkbench(snapshot);
+  const resolvedBridge = bridge;
+  const selectedDraftId = selectedDraft?.draftId ?? null;
+  const selectedSymbol = selectedDraft?.additional.symbol.trim().toUpperCase() ?? '';
+
+  useEffect(() => {
+    if (!resolvedBridge || !selectedDraftId) {
+      return;
+    }
+
+    if (!selectedSymbol) {
+      store.clearRemoteQuote(selectedDraftId);
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshQuote = async () => {
+      store.setRemoteQuote(selectedDraftId, {
+        status: 'loading',
+        symbol: selectedSymbol,
+      });
+
+      try {
+        const quote = await resolvedBridge.fetchBinanceQuote(selectedSymbol);
+        if (cancelled) {
+          return;
+        }
+
+        if (quote.price !== null && quote.errorKind === null) {
+          const price = Number(quote.price);
+          if (Number.isFinite(price)) {
+            store.setRemoteQuote(selectedDraftId, {
+              status: 'live',
+              symbol: selectedSymbol,
+              price,
+              retrievedAt: quote.retrievedAt,
+            });
+            return;
+          }
+        }
+
+        store.setRemoteQuote(selectedDraftId, {
+          status: 'error',
+          symbol: selectedSymbol,
+          errorKind: quote.errorKind ?? 'invalid_response',
+          message: quote.errorMessage ?? 'Binance 合约报价不可用',
+          retrievedAt: quote.retrievedAt,
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        store.setRemoteQuote(selectedDraftId, {
+          status: 'error',
+          symbol: selectedSymbol,
+          errorKind: 'network',
+          message: error instanceof Error ? error.message : String(error),
+          retrievedAt: Date.now(),
+        });
+      }
+    };
+
+    void refreshQuote();
+    const timer = window.setInterval(() => {
+      void refreshQuote();
+    }, QUOTE_REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [resolvedBridge, selectedDraftId, selectedSymbol, store]);
 
   return (
     <div className="app-shell">
@@ -36,7 +120,7 @@ export function AppShell() {
           <h1 className="app-shell__headline">Track Tuning Workbench</h1>
         </div>
         <p className="app-shell__summary">
-          主图是参数判断中心，指标卡和编辑器围绕它组织；当前这轮先把高质量视觉工作台与交互边界落稳。
+          主图负责把价格带、仓位曲线和风险边缘放到同一个判断面里；左侧管理文件和 Track，右侧直接围绕真实试算结果调参。
         </p>
       </header>
 
@@ -55,11 +139,31 @@ export function AppShell() {
             canRedo={snapshot.canRedo}
             hasDrafts={snapshot.drafts.length > 0}
             hasSelection={Boolean(selectedDraft)}
-            onChooseFile={() => {
-              setNotice({
-                tone: 'info',
-                message: '选择配置文件会在 Task 7 接通真实命令层。',
-              });
+            priceBadge={priceStatus.badge}
+            priceBadgeTone={priceStatus.tone}
+            priceNote={priceStatus.note}
+            onChooseFile={async () => {
+              if (!resolvedBridge) {
+                return;
+              }
+
+              try {
+                const configPath = await resolvedBridge.openConfigFile();
+                if (!configPath) {
+                  return;
+                }
+                const loadedConfig = await resolvedBridge.loadConfigFile(configPath);
+                await store.load(loadedConfig.configPath, createSourceSnapshot(loadedConfig));
+                setNotice({
+                  tone: 'info',
+                  message: `已加载 ${loadedConfig.projectedTracks.length} 条 Track`,
+                });
+              } catch (error) {
+                setNotice({
+                  tone: 'warning',
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              }
             }}
             onUndo={() => {
               store.undo();
@@ -69,17 +173,43 @@ export function AppShell() {
               store.redo();
               setNotice(null);
             }}
-            onCopyCurrent={() => {
-              setNotice({
-                tone: 'info',
-                message: '复制当前 Track 会在 Task 7 接通真实导出命令。',
-              });
+            onCopyCurrent={async () => {
+              if (!resolvedBridge || !selectedDraft) {
+                return;
+              }
+
+              try {
+                const exported = await resolvedBridge.exportCurrentTrack(selectedDraft);
+                await resolvedBridge.copyText(exported);
+                setNotice({
+                  tone: 'info',
+                  message: '当前 Track 已复制到剪贴板',
+                });
+              } catch (error) {
+                setNotice({
+                  tone: 'warning',
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              }
             }}
-            onCopyAll={() => {
-              setNotice({
-                tone: 'info',
-                message: '复制全部 Tracks 会在 Task 7 接通真实导出命令。',
-              });
+            onCopyAll={async () => {
+              if (!resolvedBridge || snapshot.drafts.length === 0) {
+                return;
+              }
+
+              try {
+                const exported = await resolvedBridge.exportAllTracks(snapshot.drafts);
+                await resolvedBridge.copyText(exported);
+                setNotice({
+                  tone: 'info',
+                  message: '全部 Tracks 已复制到剪贴板',
+                });
+              } catch (error) {
+                setNotice({
+                  tone: 'warning',
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              }
             }}
           />
 
@@ -171,6 +301,11 @@ export function AppShell() {
               store.updateDraft(selectedDraft.draftId, (draft) => {
                 draft.ui.quotePriceInput = value;
               });
+              const trimmed = value.trim();
+              store.setTemporaryPriceOverride(
+                selectedDraft.draftId,
+                trimmed.length === 0 ? undefined : parseFiniteNumber(value) ?? undefined,
+              );
             }}
             onCommit={() => {
               store.commit();
@@ -203,7 +338,7 @@ function createBlankDraft(index: number) {
       outOfBandPolicy: 'freeze',
     },
     ui: {
-      quotePriceInput: '100',
+      quotePriceInput: '',
     },
   });
 }

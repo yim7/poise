@@ -1,6 +1,10 @@
 import { useState } from 'react';
 
 import { AppShell } from '@/app/AppShell';
+import {
+  createBridgeSessionPersistence,
+  createWorkbenchBridge,
+} from '@/app/workbenchBridge';
 import { WorkbenchStoreProvider, createWorkbenchStore } from '@/state/workbenchStore';
 import {
   createBrowserSessionPersistence,
@@ -8,15 +12,23 @@ import {
 } from '@/state/sessionSync';
 
 export function App() {
-  const [store] = useState(() =>
-    createWorkbenchStore({
-      sessionSync: createSessionSync(createBrowserSessionPersistence(window.localStorage)),
-    }),
-  );
+  const [{ bridge, store }] = useState(() => {
+    const nextBridge = createWorkbenchBridge();
+    const persistence = nextBridge.isTauriEnvironment()
+      ? createBridgeSessionPersistence(nextBridge)
+      : createBrowserSessionPersistence(window.localStorage);
+
+    return {
+      bridge: nextBridge,
+      store: createWorkbenchStore({
+        sessionSync: createSessionSync(persistence),
+      }),
+    };
+  });
 
   return (
     <WorkbenchStoreProvider store={store}>
-      <AppShell />
+      <AppShell bridge={bridge} />
     </WorkbenchStoreProvider>
   );
 }

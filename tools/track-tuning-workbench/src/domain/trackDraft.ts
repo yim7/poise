@@ -122,7 +122,7 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
       symbol: input.raw.symbol,
     },
     rawNumbers,
-    parsedNumbers: input.parsedNumbers ?? {},
+    parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
     enums: input.enums ?? {
       shapeFamily: input.raw.shapeFamily,
       outOfBandPolicy: input.raw.outOfBandPolicy,
@@ -139,4 +139,41 @@ function extractRawNumbers(
 ): TrackDraftRawNumericFields {
   const entries = TRACK_NUMERIC_FIELD_KEYS.map((key) => [key, raw[key]]);
   return Object.fromEntries(entries) as Record<TrackNumericFieldKey, string>;
+}
+
+export function refreshTrackDraftParsedNumbers(draft: TrackDraft) {
+  draft.parsedNumbers = {
+    ...draft.parsedNumbers,
+    ...parseTrackDraftRawNumbers(draft.rawNumbers),
+  };
+}
+
+export function parseTrackDraftRawNumbers(
+  rawNumbers: TrackDraftRawNumericFields,
+): Partial<TrackDraftNumericFields> {
+  const parsed: Partial<TrackDraftNumericFields> = {};
+
+  for (const field of TRACK_NUMERIC_FIELD_KEYS) {
+    const value = parseFiniteNumber(rawNumbers[field]);
+    if (value === null) {
+      continue;
+    }
+    parsed[field] = value;
+  }
+
+  return parsed;
+}
+
+function parseFiniteNumber(input: string): number | null {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const value = Number(trimmed);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return value;
 }

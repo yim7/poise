@@ -10,7 +10,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.7.0"
 toml_edit.workspace = true
@@ -19,4 +19,4 @@ toml_edit.workspace = true
 tempfile.workspace = true
 
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }

@@ -9,6 +9,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::{
     binance_quote::{BinanceQuoteClient, BinanceQuotePayload},
     config_document::{EditableTrackFields, TrackDraft, load_track_document},
+    config_projection,
     error::{CommandError, CommandErrorKind},
     session_store::SessionStore,
 };
@@ -86,6 +87,22 @@ pub(crate) fn save_draft_to_store(
     SessionStore::new(session_root).save_json(config_path, draft_snapshot)
 }
 
+pub(crate) fn export_current_track_text(draft: TrackDraftPayload) -> Result<String, CommandError> {
+    Ok(config_projection::export_current_track(
+        &TrackDraft::try_from(draft)?,
+    ))
+}
+
+pub(crate) fn export_all_tracks_text(
+    drafts: Vec<TrackDraftPayload>,
+) -> Result<String, CommandError> {
+    let drafts = drafts
+        .into_iter()
+        .map(TrackDraft::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(config_projection::export_all_tracks(&drafts))
+}
+
 #[tauri::command]
 pub fn open_config_file(app: AppHandle) -> Result<Option<String>, CommandError> {
     let selection = app
@@ -146,6 +163,16 @@ pub async fn fetch_binance_quote(symbol: String) -> BinanceQuotePayload {
     fetch_binance_quote_with_client(&BinanceQuoteClient::default(), &symbol).await
 }
 
+#[tauri::command]
+pub fn export_current_track(draft: TrackDraftPayload) -> Result<String, CommandError> {
+    export_current_track_text(draft)
+}
+
+#[tauri::command]
+pub fn export_all_tracks(drafts: Vec<TrackDraftPayload>) -> Result<String, CommandError> {
+    export_all_tracks_text(drafts)
+}
+
 fn session_root_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
     let config_dir = app.path().app_config_dir().map_err(|error| {
         CommandError::new(
@@ -186,6 +213,72 @@ impl From<&EditableTrackFields> for EditableTrackFieldsPayload {
     }
 }
 
+impl TryFrom<TrackDraftPayload> for TrackDraft {
+    type Error = CommandError;
+
+    fn try_from(value: TrackDraftPayload) -> Result<Self, Self::Error> {
+        Ok(Self {
+            draft_id: value.draft_id,
+            fields: EditableTrackFields::try_from(value.fields)?,
+        })
+    }
+}
+
+impl TryFrom<EditableTrackFieldsPayload> for EditableTrackFields {
+    type Error = CommandError;
+
+    fn try_from(value: EditableTrackFieldsPayload) -> Result<Self, Self::Error> {
+        Ok(Self {
+            track_id: validate_non_empty(value.track_id, "track_id")?,
+            symbol: validate_non_empty(value.symbol, "symbol")?,
+            lower_price: value.lower_price,
+            upper_price: value.upper_price,
+            long_exposure_units: value.long_exposure_units,
+            short_exposure_units: value.short_exposure_units,
+            notional_per_unit: value.notional_per_unit,
+            max_notional: value.max_notional,
+            min_rebalance_units: value.min_rebalance_units,
+            leverage: value.leverage,
+            out_of_band_policy: match value.out_of_band_policy.as_str() {
+                "freeze" => crate::config_document::TrackOutOfBandPolicy::Freeze,
+                "hold" => crate::config_document::TrackOutOfBandPolicy::Hold,
+                "flatten" => crate::config_document::TrackOutOfBandPolicy::Flatten,
+                "terminate" => crate::config_document::TrackOutOfBandPolicy::Terminate,
+                other => {
+                    return Err(CommandError::new(
+                        CommandErrorKind::Config,
+                        format!("不支持的 out_of_band_policy: `{other}`"),
+                    ));
+                }
+            },
+            daily_loss_limit: value.daily_loss_limit,
+            total_loss_limit: value.total_loss_limit,
+            shape_family: match value.shape_family.as_str() {
+                "linear" => crate::config_document::TrackShapeFamily::Linear,
+                "inertial" => crate::config_document::TrackShapeFamily::Inertial,
+                "responsive" => crate::config_document::TrackShapeFamily::Responsive,
+                other => {
+                    return Err(CommandError::new(
+                        CommandErrorKind::Config,
+                        format!("不支持的 shape_family: `{other}`"),
+                    ));
+                }
+            },
+        })
+    }
+}
+
+fn validate_non_empty(value: String, field: &str) -> Result<String, CommandError> {
+    if value.trim().is_empty() {
+        return Err(CommandError::new(
+            CommandErrorKind::Config,
+            format!("{field} 不能为空"),
+        ));
+    }
+
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -202,7 +295,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BinanceQuoteClient, fetch_binance_quote_with_client, load_config_file_from_path,
+        BinanceQuoteClient, EditableTrackFieldsPayload, export_all_tracks_text,
+        export_current_track_text, fetch_binance_quote_with_client, load_config_file_from_path,
         load_saved_draft_from_store, save_draft_to_store,
     };
 
@@ -326,6 +420,108 @@ total_loss_limit = 200.0
     }
 
     #[test]
+    fn export_current_track_only_returns_tracks_table() {
+        let text = export_current_track_text(sample_track_payload("btc-core")).unwrap();
+
+        assert!(text.starts_with("[[tracks]]"));
+        assert!(text.contains("track_id = \"btc-core\""));
+        assert!(!text.contains("exchange"));
+    }
+
+    #[test]
+    fn export_all_tracks_keeps_input_order() {
+        let text = export_all_tracks_text(vec![
+            sample_track_payload("first"),
+            sample_track_payload("second"),
+        ])
+        .unwrap();
+
+        assert!(text.contains("[[tracks]]\ntrack_id = \"first\""));
+        assert!(text.contains("[[tracks]]\ntrack_id = \"second\""));
+        assert!(
+            text.find("track_id = \"first\"").unwrap()
+                < text.find("track_id = \"second\"").unwrap()
+        );
+    }
+
+    #[test]
+    fn export_current_track_text_only_contains_the_selected_track() {
+        let track = super::TrackDraftPayload {
+            draft_id: "alpha-draft".to_string(),
+            fields: EditableTrackFieldsPayload {
+                track_id: "alpha".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                lower_price: 100.0,
+                upper_price: 120.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 200.0,
+                max_notional: 1600.0,
+                min_rebalance_units: 0.5,
+                leverage: 10,
+                out_of_band_policy: "freeze".to_string(),
+                daily_loss_limit: 100.0,
+                total_loss_limit: 200.0,
+                shape_family: "linear".to_string(),
+            },
+        };
+
+        let exported = super::export_current_track_text(track).unwrap();
+
+        assert!(exported.contains("[[tracks]]"));
+        assert!(exported.contains("track_id = \"alpha\""));
+        assert_eq!(exported.matches("[[tracks]]").count(), 1);
+    }
+
+    #[test]
+    fn export_all_tracks_text_keeps_each_track_block() {
+        let alpha = super::TrackDraftPayload {
+            draft_id: "alpha-draft".to_string(),
+            fields: EditableTrackFieldsPayload {
+                track_id: "alpha".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                lower_price: 100.0,
+                upper_price: 120.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 200.0,
+                max_notional: 1600.0,
+                min_rebalance_units: 0.5,
+                leverage: 10,
+                out_of_band_policy: "freeze".to_string(),
+                daily_loss_limit: 100.0,
+                total_loss_limit: 200.0,
+                shape_family: "linear".to_string(),
+            },
+        };
+        let beta = super::TrackDraftPayload {
+            draft_id: "beta-draft".to_string(),
+            fields: EditableTrackFieldsPayload {
+                track_id: "beta".to_string(),
+                symbol: "ETHUSDT".to_string(),
+                lower_price: 200.0,
+                upper_price: 240.0,
+                long_exposure_units: 5.0,
+                short_exposure_units: 5.0,
+                notional_per_unit: 100.0,
+                max_notional: 500.0,
+                min_rebalance_units: 1.0,
+                leverage: 5,
+                out_of_band_policy: "hold".to_string(),
+                daily_loss_limit: 80.0,
+                total_loss_limit: 160.0,
+                shape_family: "responsive".to_string(),
+            },
+        };
+
+        let exported = super::export_all_tracks_text(vec![alpha, beta]).unwrap();
+
+        assert_eq!(exported.matches("[[tracks]]").count(), 2);
+        assert!(exported.contains("track_id = \"alpha\""));
+        assert!(exported.contains("track_id = \"beta\""));
+    }
+
+    #[test]
     fn quote_timeout_returns_stable_timeout_error() {
         let (server_url, _) = spawn_http_server_with_delay(
             "HTTP/1.1 200 OK",
@@ -356,12 +552,7 @@ total_loss_limit = 200.0
 
         assert_eq!(quote.price, None);
         assert_eq!(quote.error_kind, Some(QuoteErrorKind::RateLimited));
-        assert!(
-            quote
-                .error_message
-                .unwrap()
-                .contains("Too many requests")
-        );
+        assert!(quote.error_message.unwrap().contains("Too many requests"));
     }
 
     #[test]
@@ -391,7 +582,10 @@ total_loss_limit = 200.0
             tauri::async_runtime::block_on(fetch_binance_quote_with_client(&client, "BTCUSDT"));
 
         assert_eq!(quote.price, None);
-        assert_eq!(quote.error_kind, Some(QuoteErrorKind::TemporarilyUnavailable));
+        assert_eq!(
+            quote.error_kind,
+            Some(QuoteErrorKind::TemporarilyUnavailable)
+        );
     }
 
     #[test]
@@ -452,5 +646,27 @@ total_loss_limit = 200.0
         });
 
         (format!("http://{address}"), rx)
+    }
+
+    fn sample_track_payload(track_id: &str) -> super::TrackDraftPayload {
+        super::TrackDraftPayload {
+            draft_id: format!("{track_id}-draft"),
+            fields: EditableTrackFieldsPayload {
+                track_id: track_id.to_string(),
+                symbol: "BTCUSDT".to_string(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                max_notional: 3000.0,
+                min_rebalance_units: 0.5,
+                leverage: 10,
+                out_of_band_policy: "freeze".to_string(),
+                daily_loss_limit: 120.0,
+                total_loss_limit: 500.0,
+                shape_family: "linear".to_string(),
+            },
+        }
     }
 }

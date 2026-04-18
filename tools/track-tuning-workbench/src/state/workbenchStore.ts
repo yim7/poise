@@ -13,9 +13,40 @@ import type {
   WorkbenchSnapshot as SessionSnapshot,
 } from '@/state/sessionSync';
 import { createSessionSync } from '@/state/sessionSync';
-import type { TrackDraft } from '@/domain/trackDraft';
+import {
+  refreshTrackDraftParsedNumbers,
+  type TrackDraft,
+} from '@/domain/trackDraft';
 
 export type WorkbenchSnapshot = SessionSnapshot;
+
+export type RemoteQuoteErrorKind =
+  | 'unsupported_symbol'
+  | 'rate_limited'
+  | 'temporarily_unavailable'
+  | 'timed_out'
+  | 'network'
+  | 'upstream'
+  | 'invalid_response';
+
+export type RemoteQuoteState =
+  | {
+      status: 'loading';
+      symbol: string;
+    }
+  | {
+      status: 'live';
+      symbol: string;
+      price: number;
+      retrievedAt: number;
+    }
+  | {
+      status: 'error';
+      symbol: string;
+      errorKind: RemoteQuoteErrorKind;
+      message: string;
+      retrievedAt: number;
+    };
 
 export interface WorkbenchState extends WorkbenchSnapshot {
   currentFilePath: string | null;
@@ -23,6 +54,7 @@ export interface WorkbenchState extends WorkbenchSnapshot {
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  remoteQuotes: Record<string, RemoteQuoteState>;
 }
 
 export interface WorkbenchStoreOptions {
@@ -38,6 +70,8 @@ export interface WorkbenchStore {
   selectDraft(draftId: string): void;
   updateDraft(draftId: string, updater: (draft: TrackDraft) => void): void;
   setTemporaryPriceOverride(draftId: string, price: number | undefined): void;
+  setRemoteQuote(draftId: string, quote: RemoteQuoteState): void;
+  clearRemoteQuote(draftId: string): void;
   addDraft(draft: TrackDraft): void;
   duplicateDraft(sourceDraftId: string, draft: TrackDraft): void;
   deleteDraft(draftId: string): void;
@@ -73,7 +107,7 @@ export function useWorkbenchSnapshot(): WorkbenchState {
 
 export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): WorkbenchStore {
   const sessionSync = options.sessionSync ?? createSessionSync(createMemoryPersistence());
-  const initialSnapshot = cloneSnapshot(options.initialSnapshot ?? createEmptySnapshot());
+  const initialSnapshot = normalizeSnapshot(options.initialSnapshot ?? createEmptySnapshot());
   let currentSourceSnapshot = cloneSnapshot(initialSnapshot);
 
   const committedHistory = createHistory(cloneSnapshot(initialSnapshot), {
@@ -84,6 +118,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
   let draftSession = cloneSnapshot(committedHistory.state.present);
   let persistedSnapshot = cloneSnapshot(committedHistory.state.present);
   let currentFilePath: string | null = null;
+  let remoteQuotes: Record<string, RemoteQuoteState> = {};
   const listeners = new Set<() => void>();
   let cachedState = createStateSnapshot();
 
@@ -100,15 +135,16 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
     async load(configPath, sourceSnapshot) {
       currentFilePath = configPath;
       if (sourceSnapshot) {
-        currentSourceSnapshot = cloneSnapshot(sourceSnapshot);
+        currentSourceSnapshot = normalizeSnapshot(sourceSnapshot);
       }
 
       const loaded = await sessionSync.loadDraft(configPath);
-      const nextSnapshot = cloneSnapshot(loaded ?? currentSourceSnapshot);
+      const nextSnapshot = normalizeSnapshot(loaded ?? currentSourceSnapshot);
 
       committedHistory.reset(cloneSnapshot(nextSnapshot));
       draftSession = cloneSnapshot(nextSnapshot);
       persistedSnapshot = cloneSnapshot(nextSnapshot);
+      remoteQuotes = {};
       emit();
     },
     async flush() {
@@ -152,7 +188,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
         touched = true;
         const nextDraft = cloneDraft(draft);
         updater(nextDraft);
-        return nextDraft;
+        return normalizeDraft(nextDraft);
       });
 
       if (!touched) {
@@ -189,11 +225,28 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       scheduleSave();
       emit();
     },
+    setRemoteQuote(draftId, quote) {
+      remoteQuotes = {
+        ...remoteQuotes,
+        [draftId]: structuredClone(quote),
+      };
+      emit();
+    },
+    clearRemoteQuote(draftId) {
+      if (!(draftId in remoteQuotes)) {
+        return;
+      }
+
+      const nextQuotes = { ...remoteQuotes };
+      delete nextQuotes[draftId];
+      remoteQuotes = nextQuotes;
+      emit();
+    },
     addDraft(draft) {
       commitCurrentDraft();
       draftSession = {
         ...draftSession,
-        drafts: [...draftSession.drafts, cloneDraft(draft)],
+        drafts: [...draftSession.drafts, normalizeDraft(draft)],
         selectedDraftId: draft.draftId,
       };
       commitCurrentDraft();
@@ -202,7 +255,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       commitCurrentDraft();
       draftSession = {
         ...draftSession,
-        drafts: insertDraftAfter(draftSession.drafts, sourceDraftId, cloneDraft(draft)),
+        drafts: insertDraftAfter(draftSession.drafts, sourceDraftId, normalizeDraft(draft)),
         selectedDraftId: draft.draftId,
       };
       commitCurrentDraft();
@@ -290,6 +343,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       dirty: !snapshotsEqual(draftSession, currentSourceSnapshot),
       canUndo: committedHistory.canUndo(),
       canRedo: committedHistory.canRedo(),
+      remoteQuotes: structuredClone(remoteQuotes),
     };
   }
 }
@@ -308,6 +362,22 @@ function cloneSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
 
 function cloneDraft(draft: TrackDraft): TrackDraft {
   return structuredClone(draft);
+}
+
+function normalizeSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
+  return {
+    selectedDraftId: snapshot.selectedDraftId,
+    drafts: snapshot.drafts.map((draft) => normalizeDraft(draft)),
+    temporaryPriceOverrides: {
+      ...snapshot.temporaryPriceOverrides,
+    },
+  };
+}
+
+function normalizeDraft(draft: TrackDraft): TrackDraft {
+  const nextDraft = cloneDraft(draft);
+  refreshTrackDraftParsedNumbers(nextDraft);
+  return nextDraft;
 }
 
 function snapshotsEqual(left: WorkbenchSnapshot, right: WorkbenchSnapshot): boolean {
@@ -349,7 +419,7 @@ function createMemoryPersistence(): SessionPersistence {
       return snapshot ? cloneSnapshot(snapshot) : null;
     },
     async saveDraft(_configPath, nextSnapshot) {
-      snapshot = cloneSnapshot(nextSnapshot);
+      snapshot = normalizeSnapshot(nextSnapshot);
     },
   };
 }
