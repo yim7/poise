@@ -1,16 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useState } from 'react';
 
-import {
-  createTrackDraft,
-  TRACK_NUMERIC_FIELD_KEYS,
-  type TrackDraft,
-  type TrackDraftNumericFields,
-  type TrackDraftParsedSnapshot,
-} from '@/domain/trackDraft';
-import { computeTrackMetrics } from '@/domain/trackMetrics';
-import { parseFiniteNumber, validateTrackDraft } from '@/domain/trackValidation';
+import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
 import { useWorkbenchSnapshot, useWorkbenchStore } from '@/state/workbenchStore';
 import { TrackWorkbenchChart } from '@/ui/chart/TrackWorkbenchChart';
+import { useSelectedTrackWorkbench } from '@/ui/app/useSelectedTrackWorkbench';
 import { InlineNotice } from '@/ui/common/InlineNotice';
 import { TrackEditor } from '@/ui/editor/TrackEditor';
 import { MetricCards } from '@/ui/metrics/MetricCards';
@@ -26,41 +19,14 @@ export function AppShell() {
   const store = useWorkbenchStore();
   const snapshot = useWorkbenchSnapshot();
   const [notice, setNotice] = useState<NoticeState | null>(null);
-  const lastValidSnapshotsRef = useRef(new Map<string, TrackDraftParsedSnapshot>());
-
-  const selectedDraft = resolveSelectedDraft(snapshot);
-  const selectedValidation = selectedDraft ? validateTrackDraft(selectedDraft) : null;
-  const selectedVisualSnapshot = useMemo(
-    () =>
-      resolveVisualSnapshot(
-        selectedDraft,
-        selectedValidation?.parsed,
-        lastValidSnapshotsRef.current.get(selectedDraft?.draftId ?? ''),
-      ),
-    [selectedDraft, selectedValidation],
-  );
-  const selectedMetrics = selectedVisualSnapshot ? computeTrackMetrics(selectedVisualSnapshot) : null;
-
-  useEffect(() => {
-    if (!selectedDraft || !selectedValidation?.parsed) {
-      return;
-    }
-    lastValidSnapshotsRef.current.set(selectedDraft.draftId, selectedValidation.parsed);
-  }, [selectedDraft, selectedValidation]);
-
-  const issuesByDraftId = new Map(
-    snapshot.drafts.map((draft) => [draft.draftId, validateTrackDraft(draft).issues]),
-  );
-  const sourceDraftsById = new Map(snapshot.sourceDrafts.map((draft) => [draft.draftId, draft]));
-
-  const trackItems = snapshot.drafts.map((draft) => ({
-    draftId: draft.draftId,
-    trackId: draft.additional.trackId,
-    symbol: draft.additional.symbol,
-    isSelected: selectedDraft?.draftId === draft.draftId,
-    isDirty: draftChanged(draft, sourceDraftsById.get(draft.draftId)),
-    hasErrors: (issuesByDraftId.get(draft.draftId)?.length ?? 0) > 0,
-  }));
+  const {
+    selectedDraft,
+    selectedValidation,
+    selectedVisualSnapshot,
+    selectedMetrics,
+    trackItems,
+    priceStatus,
+  } = useSelectedTrackWorkbench(snapshot);
 
   return (
     <div className="app-shell">
@@ -161,12 +127,7 @@ export function AppShell() {
           <MetricCards
             snapshot={selectedVisualSnapshot}
             metrics={selectedMetrics}
-            priceStatus={resolvePriceStatus(
-              selectedValidation?.issues ?? [],
-              selectedDraft,
-              selectedVisualSnapshot,
-              selectedValidation?.parsed ?? null,
-            )}
+            priceStatus={priceStatus}
           />
           <TrackWorkbenchChart
             snapshot={selectedVisualSnapshot}
@@ -221,24 +182,6 @@ export function AppShell() {
   );
 }
 
-function resolveSelectedDraft(snapshot: ReturnType<typeof useWorkbenchSnapshot>) {
-  if (snapshot.drafts.length === 0) {
-    return null;
-  }
-
-  return (
-    snapshot.drafts.find((draft) => draft.draftId === snapshot.selectedDraftId)
-    ?? snapshot.drafts[0]
-  );
-}
-
-function draftChanged(current: TrackDraft, source?: TrackDraft) {
-  if (!source) {
-    return true;
-  }
-  return JSON.stringify(current) !== JSON.stringify(source);
-}
-
 function createBlankDraft(index: number) {
   const suffix = index + 1;
   return createTrackDraft({
@@ -271,95 +214,4 @@ function duplicateDraft(source: TrackDraft) {
   duplicate.draftId = `${source.draftId}-${suffix}`;
   duplicate.additional.trackId = `${source.additional.trackId}-copy`;
   return duplicate;
-}
-
-function resolvePriceStatus(
-  issues: Array<{ field: string; message: string }>,
-  selectedDraft: TrackDraft | null,
-  visualSnapshot: TrackDraftParsedSnapshot | null,
-  currentParsedSnapshot: TrackDraftParsedSnapshot | null,
-) {
-  const quoteIssue = issues.find((issue) => issue.field === 'quotePriceInput');
-  if (quoteIssue) {
-    return {
-      tone: 'danger' as const,
-      badge: '价格不可用',
-      note: quoteIssue.message,
-    };
-  }
-
-  if (issues.length > 0 && visualSnapshot && !currentParsedSnapshot) {
-    return {
-      tone: 'warning' as const,
-      badge: '沿用最近可用结果',
-      note: '当前输入有误，主图和指标先保留最近一次合法试算结果。',
-    };
-  }
-
-  if (!selectedDraft) {
-    return {
-      tone: 'warning' as const,
-      badge: '等待 Track',
-      note: '先从左栏选择一个可编辑的 Track。',
-    };
-  }
-
-  return {
-    tone: 'accent' as const,
-    badge: 'Binance 待接通',
-    note: '当前用本地输入价格试算；Task 7 接命令后再显示来源和失败原因。',
-  };
-}
-
-function resolveVisualSnapshot(
-  draft: TrackDraft | null,
-  currentParsedSnapshot: TrackDraftParsedSnapshot | undefined,
-  lastValidSnapshot: TrackDraftParsedSnapshot | undefined,
-): TrackDraftParsedSnapshot | null {
-  if (currentParsedSnapshot) {
-    return currentParsedSnapshot;
-  }
-
-  if (lastValidSnapshot) {
-    return lastValidSnapshot;
-  }
-
-  if (!draft) {
-    return null;
-  }
-
-  const fallbackNumbers = completeFallbackParsedNumbers(draft.parsedNumbers);
-  const quotePrice = parseFiniteNumber(draft.ui.quotePriceInput);
-
-  if (!fallbackNumbers || quotePrice === null) {
-    return null;
-  }
-
-  return {
-    draftId: draft.draftId,
-    additional: draft.additional,
-    parsedNumbers: fallbackNumbers,
-    enums: draft.enums,
-    ui: {
-      quotePriceInput: draft.ui.quotePriceInput,
-      quotePrice,
-    },
-    attachments: draft.attachments,
-  };
-}
-
-function completeFallbackParsedNumbers(
-  parsedNumbers: Partial<TrackDraftNumericFields>,
-): TrackDraftNumericFields | null {
-  const complete = {} as TrackDraftNumericFields;
-
-  for (const field of TRACK_NUMERIC_FIELD_KEYS) {
-    const value = parsedNumbers[field];
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      return null;
-    }
-    complete[field] = value;
-  }
-
-  return complete;
 }

@@ -1,17 +1,17 @@
 import {
   commitOnEnter,
-  fieldIssues,
-  type TrackEditorSectionProps,
+  type IdentitySectionProps,
 } from '@/ui/editor/TrackEditor';
 
 export function IdentitySection({
-  draft,
-  issuesByField,
-  onAdditionalChange,
+  trackId,
+  symbol,
+  trackIdIssues,
+  symbolIssues,
+  onTrackIdChange,
+  onSymbolChange,
   onCommit,
-}: TrackEditorSectionProps) {
-  const trackIdIssues = fieldIssues(issuesByField, 'trackId');
-  const symbolIssues = fieldIssues(issuesByField, 'symbol');
+}: IdentitySectionProps) {
 
   return (
     <section className="editor-section">
@@ -26,8 +26,8 @@ export function IdentitySection({
           <input
             className={trackIdIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
             name="trackId"
-            value={draft.additional.trackId}
-            onChange={(event) => onAdditionalChange('trackId', event.target.value)}
+            value={trackId}
+            onChange={(event) => onTrackIdChange(event.target.value)}
             onBlur={onCommit}
             onKeyDown={(event) => commitOnEnter(event, onCommit)}
           />
@@ -37,8 +37,8 @@ export function IdentitySection({
           <input
             className={symbolIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
             name="symbol"
-            value={draft.additional.symbol}
-            onChange={(event) => onAdditionalChange('symbol', event.target.value)}
+            value={symbol}
+            onChange={(event) => onSymbolChange(event.target.value)}
             onBlur={onCommit}
             onKeyDown={(event) => commitOnEnter(event, onCommit)}
           />

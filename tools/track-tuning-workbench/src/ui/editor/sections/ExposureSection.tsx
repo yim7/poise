@@ -1,4 +1,4 @@
-import { commitOnEnter, fieldIssues, type TrackEditorSectionProps } from '@/ui/editor/TrackEditor';
+import { commitOnEnter, type ExposureSectionProps } from '@/ui/editor/TrackEditor';
 
 const FIELDS = [
   { key: 'longExposureUnits', label: '多头容量' },
@@ -10,11 +10,11 @@ const FIELDS = [
 ] as const;
 
 export function ExposureSection({
-  draft,
+  values,
   issuesByField,
   onNumericChange,
   onCommit,
-}: TrackEditorSectionProps) {
+}: ExposureSectionProps) {
   return (
     <section className="editor-section">
       <div className="editor-section__header">
@@ -24,13 +24,13 @@ export function ExposureSection({
 
       <div className="field-grid field-grid--three">
         {FIELDS.map((field) => {
-          const issues = fieldIssues(issuesByField, field.key);
+          const issues = issuesByField[field.key];
           return (
             <label className="field" key={field.key}>
               <span className="field__label">{field.label}</span>
               <input
                 className={issues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
-                value={draft.rawNumbers[field.key]}
+                value={values[field.key]}
                 onChange={(event) => onNumericChange(field.key, event.target.value)}
                 onBlur={onCommit}
                 onKeyDown={(event) => commitOnEnter(event, onCommit)}

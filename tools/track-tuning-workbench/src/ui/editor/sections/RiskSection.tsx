@@ -1,15 +1,17 @@
 import { InlineNotice } from '@/ui/common/InlineNotice';
-import { commitOnEnter, fieldIssues, type TrackEditorSectionProps } from '@/ui/editor/TrackEditor';
+import { commitOnEnter, type RiskSectionProps } from '@/ui/editor/TrackEditor';
 
 export function RiskSection({
-  draft,
-  issuesByField,
-  onEnumChange,
-  onNumericChange,
+  outOfBandPolicy,
+  dailyLossLimit,
+  totalLossLimit,
+  dailyLossIssues,
+  totalLossIssues,
+  onOutOfBandPolicyChange,
+  onDailyLossLimitChange,
+  onTotalLossLimitChange,
   onCommit,
-}: TrackEditorSectionProps) {
-  const dailyLossIssues = fieldIssues(issuesByField, 'dailyLossLimit');
-  const totalLossIssues = fieldIssues(issuesByField, 'totalLossLimit');
+}: RiskSectionProps) {
 
   return (
     <section className="editor-section">
@@ -23,9 +25,9 @@ export function RiskSection({
           <span className="field__label">带外策略</span>
           <select
             className="field__input"
-            value={draft.enums.outOfBandPolicy}
+            value={outOfBandPolicy}
             onChange={(event) => {
-              onEnumChange('outOfBandPolicy', event.target.value);
+              onOutOfBandPolicyChange(event.target.value as RiskSectionProps['outOfBandPolicy']);
               onCommit();
             }}
           >
@@ -39,8 +41,8 @@ export function RiskSection({
           <span className="field__label">日内止损</span>
           <input
             className={dailyLossIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
-            value={draft.rawNumbers.dailyLossLimit}
-            onChange={(event) => onNumericChange('dailyLossLimit', event.target.value)}
+            value={dailyLossLimit}
+            onChange={(event) => onDailyLossLimitChange(event.target.value)}
             onBlur={onCommit}
             onKeyDown={(event) => commitOnEnter(event, onCommit)}
           />
@@ -49,8 +51,8 @@ export function RiskSection({
           <span className="field__label">累计止损</span>
           <input
             className={totalLossIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
-            value={draft.rawNumbers.totalLossLimit}
-            onChange={(event) => onNumericChange('totalLossLimit', event.target.value)}
+            value={totalLossLimit}
+            onChange={(event) => onTotalLossLimitChange(event.target.value)}
             onBlur={onCommit}
             onKeyDown={(event) => commitOnEnter(event, onCommit)}
           />

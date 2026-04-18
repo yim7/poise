@@ -19,12 +19,66 @@ export interface TrackEditorProps {
   onCommit(): void;
 }
 
-export interface TrackEditorSectionProps {
-  draft: TrackDraft;
-  issuesByField: Map<string, string[]>;
-  onAdditionalChange(field: 'trackId' | 'symbol', value: string): void;
-  onNumericChange(field: keyof TrackDraftRawNumericFields, value: string): void;
-  onEnumChange(field: 'shapeFamily' | 'outOfBandPolicy', value: string): void;
+export interface IdentitySectionProps {
+  trackId: string;
+  symbol: string;
+  trackIdIssues: string[];
+  symbolIssues: string[];
+  onTrackIdChange(value: string): void;
+  onSymbolChange(value: string): void;
+  onCommit(): void;
+}
+
+export interface PriceBandSectionProps {
+  lowerPrice: string;
+  upperPrice: string;
+  lowerIssues: string[];
+  upperIssues: string[];
+  onLowerPriceChange(value: string): void;
+  onUpperPriceChange(value: string): void;
+  onCommit(): void;
+}
+
+export interface ExposureSectionProps {
+  values: Pick<
+    TrackDraft['rawNumbers'],
+    | 'longExposureUnits'
+    | 'shortExposureUnits'
+    | 'notionalPerUnit'
+    | 'maxNotional'
+    | 'minRebalanceUnits'
+    | 'leverage'
+  >;
+  issuesByField: Record<
+    | 'longExposureUnits'
+    | 'shortExposureUnits'
+    | 'notionalPerUnit'
+    | 'maxNotional'
+    | 'minRebalanceUnits'
+    | 'leverage',
+    string[]
+  >;
+  onNumericChange(field: keyof ExposureSectionProps['values'], value: string): void;
+  onCommit(): void;
+}
+
+export interface RiskSectionProps {
+  outOfBandPolicy: TrackDraft['enums']['outOfBandPolicy'];
+  dailyLossLimit: string;
+  totalLossLimit: string;
+  dailyLossIssues: string[];
+  totalLossIssues: string[];
+  onOutOfBandPolicyChange(value: TrackDraft['enums']['outOfBandPolicy']): void;
+  onDailyLossLimitChange(value: string): void;
+  onTotalLossLimitChange(value: string): void;
+  onCommit(): void;
+}
+
+export interface CurveSectionProps {
+  shapeFamily: TrackDraft['enums']['shapeFamily'];
+  quotePriceInput: string;
+  quoteIssues: string[];
+  onShapeFamilyChange(value: TrackDraft['enums']['shapeFamily']): void;
   onQuotePriceChange(value: string): void;
   onCommit(): void;
 }
@@ -79,47 +133,59 @@ export function TrackEditor({
 
       <div className="editor-sections">
         <IdentitySection
-          draft={draft}
-          issuesByField={issuesByField}
-          onAdditionalChange={onAdditionalChange}
-          onNumericChange={onNumericChange}
-          onEnumChange={onEnumChange}
-          onQuotePriceChange={onQuotePriceChange}
+          trackId={draft.additional.trackId}
+          symbol={draft.additional.symbol}
+          trackIdIssues={fieldIssues(issuesByField, 'trackId')}
+          symbolIssues={fieldIssues(issuesByField, 'symbol')}
+          onTrackIdChange={(value) => onAdditionalChange('trackId', value)}
+          onSymbolChange={(value) => onAdditionalChange('symbol', value)}
           onCommit={onCommit}
         />
         <PriceBandSection
-          draft={draft}
-          issuesByField={issuesByField}
-          onAdditionalChange={onAdditionalChange}
-          onNumericChange={onNumericChange}
-          onEnumChange={onEnumChange}
-          onQuotePriceChange={onQuotePriceChange}
+          lowerPrice={draft.rawNumbers.lowerPrice}
+          upperPrice={draft.rawNumbers.upperPrice}
+          lowerIssues={fieldIssues(issuesByField, 'lowerPrice')}
+          upperIssues={fieldIssues(issuesByField, 'upperPrice')}
+          onLowerPriceChange={(value) => onNumericChange('lowerPrice', value)}
+          onUpperPriceChange={(value) => onNumericChange('upperPrice', value)}
           onCommit={onCommit}
         />
         <ExposureSection
-          draft={draft}
-          issuesByField={issuesByField}
-          onAdditionalChange={onAdditionalChange}
+          values={{
+            longExposureUnits: draft.rawNumbers.longExposureUnits,
+            shortExposureUnits: draft.rawNumbers.shortExposureUnits,
+            notionalPerUnit: draft.rawNumbers.notionalPerUnit,
+            maxNotional: draft.rawNumbers.maxNotional,
+            minRebalanceUnits: draft.rawNumbers.minRebalanceUnits,
+            leverage: draft.rawNumbers.leverage,
+          }}
+          issuesByField={{
+            longExposureUnits: fieldIssues(issuesByField, 'longExposureUnits'),
+            shortExposureUnits: fieldIssues(issuesByField, 'shortExposureUnits'),
+            notionalPerUnit: fieldIssues(issuesByField, 'notionalPerUnit'),
+            maxNotional: fieldIssues(issuesByField, 'maxNotional'),
+            minRebalanceUnits: fieldIssues(issuesByField, 'minRebalanceUnits'),
+            leverage: fieldIssues(issuesByField, 'leverage'),
+          }}
           onNumericChange={onNumericChange}
-          onEnumChange={onEnumChange}
-          onQuotePriceChange={onQuotePriceChange}
           onCommit={onCommit}
         />
         <RiskSection
-          draft={draft}
-          issuesByField={issuesByField}
-          onAdditionalChange={onAdditionalChange}
-          onNumericChange={onNumericChange}
-          onEnumChange={onEnumChange}
-          onQuotePriceChange={onQuotePriceChange}
+          outOfBandPolicy={draft.enums.outOfBandPolicy}
+          dailyLossLimit={draft.rawNumbers.dailyLossLimit}
+          totalLossLimit={draft.rawNumbers.totalLossLimit}
+          dailyLossIssues={fieldIssues(issuesByField, 'dailyLossLimit')}
+          totalLossIssues={fieldIssues(issuesByField, 'totalLossLimit')}
+          onOutOfBandPolicyChange={(value) => onEnumChange('outOfBandPolicy', value)}
+          onDailyLossLimitChange={(value) => onNumericChange('dailyLossLimit', value)}
+          onTotalLossLimitChange={(value) => onNumericChange('totalLossLimit', value)}
           onCommit={onCommit}
         />
         <CurveSection
-          draft={draft}
-          issuesByField={issuesByField}
-          onAdditionalChange={onAdditionalChange}
-          onNumericChange={onNumericChange}
-          onEnumChange={onEnumChange}
+          shapeFamily={draft.enums.shapeFamily}
+          quotePriceInput={draft.ui.quotePriceInput}
+          quoteIssues={fieldIssues(issuesByField, 'quotePriceInput')}
+          onShapeFamilyChange={(value) => onEnumChange('shapeFamily', value)}
           onQuotePriceChange={onQuotePriceChange}
           onCommit={onCommit}
         />

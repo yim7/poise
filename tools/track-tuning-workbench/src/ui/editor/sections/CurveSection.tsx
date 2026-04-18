@@ -1,14 +1,14 @@
 import { InlineNotice } from '@/ui/common/InlineNotice';
-import { commitOnEnter, fieldIssues, type TrackEditorSectionProps } from '@/ui/editor/TrackEditor';
+import { commitOnEnter, type CurveSectionProps } from '@/ui/editor/TrackEditor';
 
 export function CurveSection({
-  draft,
-  issuesByField,
-  onEnumChange,
+  shapeFamily,
+  quotePriceInput,
+  quoteIssues,
+  onShapeFamilyChange,
   onQuotePriceChange,
   onCommit,
-}: TrackEditorSectionProps) {
-  const quoteIssues = fieldIssues(issuesByField, 'quotePriceInput');
+}: CurveSectionProps) {
 
   return (
     <section className="editor-section">
@@ -22,9 +22,9 @@ export function CurveSection({
           <span className="field__label">曲线家族</span>
           <select
             className="field__input"
-            value={draft.enums.shapeFamily}
+            value={shapeFamily}
             onChange={(event) => {
-              onEnumChange('shapeFamily', event.target.value);
+              onShapeFamilyChange(event.target.value as CurveSectionProps['shapeFamily']);
               onCommit();
             }}
           >
@@ -37,7 +37,7 @@ export function CurveSection({
           <span className="field__label">当前试算价格</span>
           <input
             className={quoteIssues.length > 0 ? 'field__input field__input--invalid' : 'field__input'}
-            value={draft.ui.quotePriceInput}
+            value={quotePriceInput}
             onChange={(event) => onQuotePriceChange(event.target.value)}
             onBlur={onCommit}
             onKeyDown={(event) => commitOnEnter(event, onCommit)}
