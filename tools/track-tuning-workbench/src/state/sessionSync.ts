@@ -87,7 +87,10 @@ export function createSessionSync(
     pendingPath = null;
     pendingSnapshot = null;
 
-    inFlight = persistence.saveDraft(path, cloneSnapshot(snapshot));
+    inFlight = inFlight.then(
+      () => persistence.saveDraft(path, cloneSnapshot(snapshot)),
+      () => persistence.saveDraft(path, cloneSnapshot(snapshot)),
+    );
     await inFlight;
     return inFlight;
   }

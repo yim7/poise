@@ -32,7 +32,7 @@ export interface WorkbenchStoreOptions {
 export interface WorkbenchStore {
   getState(): WorkbenchState;
   subscribe(listener: () => void): () => void;
-  load(configPath: string): Promise<void>;
+  load(configPath: string, sourceSnapshot?: WorkbenchSnapshot): Promise<void>;
   flush(): Promise<void>;
   selectDraft(draftId: string): void;
   updateDraft(draftId: string, updater: (draft: TrackDraft) => void): void;
@@ -73,7 +73,7 @@ export function useWorkbenchSnapshot(): WorkbenchState {
 export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): WorkbenchStore {
   const sessionSync = options.sessionSync ?? createSessionSync(createMemoryPersistence());
   const initialSnapshot = cloneSnapshot(options.initialSnapshot ?? createEmptySnapshot());
-  const sourceSnapshot = cloneSnapshot(initialSnapshot);
+  let currentSourceSnapshot = cloneSnapshot(initialSnapshot);
 
   const committedHistory = createHistory(cloneSnapshot(initialSnapshot), {
     limit: 100,
@@ -90,7 +90,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       return {
         ...cloneSnapshot(draftSession),
         currentFilePath,
-        dirty: !snapshotsEqual(draftSession, sourceSnapshot),
+        dirty: !snapshotsEqual(draftSession, currentSourceSnapshot),
         canUndo: committedHistory.canUndo(),
         canRedo: committedHistory.canRedo(),
       };
@@ -101,10 +101,14 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
         listeners.delete(listener);
       };
     },
-    async load(configPath) {
+    async load(configPath, sourceSnapshot) {
       currentFilePath = configPath;
+      if (sourceSnapshot) {
+        currentSourceSnapshot = cloneSnapshot(sourceSnapshot);
+      }
+
       const loaded = await sessionSync.loadDraft(configPath);
-      const nextSnapshot = cloneSnapshot(loaded ?? sourceSnapshot);
+      const nextSnapshot = cloneSnapshot(loaded ?? currentSourceSnapshot);
 
       committedHistory.reset(cloneSnapshot(nextSnapshot));
       draftSession = cloneSnapshot(nextSnapshot);
@@ -198,11 +202,11 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       };
       commitCurrentDraft();
     },
-    duplicateDraft(_sourceDraftId, draft) {
+    duplicateDraft(sourceDraftId, draft) {
       commitCurrentDraft();
       draftSession = {
         ...draftSession,
-        drafts: [...draftSession.drafts, cloneDraft(draft)],
+        drafts: insertDraftAfter(draftSession.drafts, sourceDraftId, cloneDraft(draft)),
         selectedDraftId: draft.draftId,
       };
       commitCurrentDraft();
@@ -255,7 +259,7 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
       return committedHistory.canRedo();
     },
     isDirty() {
-      return !snapshotsEqual(draftSession, sourceSnapshot);
+      return !snapshotsEqual(draftSession, currentSourceSnapshot);
     },
   };
 
@@ -316,6 +320,17 @@ function resolveNextSelectedDraftId(
   }
 
   return nextDrafts[0]?.draftId ?? '';
+}
+
+function insertDraftAfter(drafts: TrackDraft[], sourceDraftId: string, draft: TrackDraft): TrackDraft[] {
+  const sourceIndex = drafts.findIndex((item) => item.draftId === sourceDraftId);
+  if (sourceIndex < 0) {
+    return [...drafts, draft];
+  }
+
+  const nextDrafts = drafts.slice();
+  nextDrafts.splice(sourceIndex + 1, 0, draft);
+  return nextDrafts;
 }
 
 function createMemoryPersistence(): SessionPersistence {

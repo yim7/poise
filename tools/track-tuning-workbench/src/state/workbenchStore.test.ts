@@ -159,6 +159,49 @@ describe('workbench store', () => {
     expect(store.getState().temporaryPriceOverrides['draft-a']).toBeUndefined();
   });
 
+  it('serializes session saves so the latest draft wins', async () => {
+    const saveResolvers: Array<() => void> = [];
+    const savedSnapshots: string[] = [];
+    const persistence: SessionPersistence = {
+      async loadDraft() {
+        return null;
+      },
+      async saveDraft(_configPath, snapshot) {
+        savedSnapshots.push(snapshot.selectedDraftId);
+        await new Promise<void>((resolve) => {
+          saveResolvers.push(resolve);
+        });
+      },
+    };
+
+    const sync = createSessionSync(persistence, { debounceMs: 0 });
+
+    sync.scheduleSave('config/track.json', makeSnapshot({ selectedDraftId: 'draft-a' }));
+    const firstFlush = sync.flush();
+    sync.scheduleSave(
+      'config/track.json',
+      makeSnapshot({
+        selectedDraftId: 'draft-b',
+        temporaryPriceOverrides: { 'draft-b': 111 },
+      }),
+    );
+    const secondFlush = sync.flush();
+
+    await Promise.resolve();
+    expect(savedSnapshots).toEqual(['draft-a']);
+
+    saveResolvers[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(savedSnapshots).toEqual(['draft-a', 'draft-b']);
+    expect(saveResolvers).toHaveLength(2);
+
+    saveResolvers[1]?.();
+    await firstFlush;
+    await secondFlush;
+
+    expect(savedSnapshots).toEqual(['draft-a', 'draft-b']);
+  });
+
   it('keeps dirty tied to the original source snapshot instead of the persisted snapshot', async () => {
     const sourceSnapshot = makeSnapshot();
     const restoredSnapshot = makeSnapshot({
@@ -192,6 +235,33 @@ describe('workbench store', () => {
     expect(store.isDirty()).toBe(false);
   });
 
+  it('rebinds dirty calculation when loading a different source snapshot', async () => {
+    const sourceSnapshotA = makeSnapshot({
+      drafts: [makeDraft('draft-a', { rawNumbers: { lowerPrice: '90' } }), makeDraft('draft-b')],
+    });
+    const sourceSnapshotB = makeSnapshot({
+      selectedDraftId: 'draft-b',
+      drafts: [makeDraft('draft-a'), makeDraft('draft-b', { rawNumbers: { lowerPrice: '95' } })],
+    });
+    const persistence = makePersistence();
+    const store = createWorkbenchStore({
+      initialSnapshot: sourceSnapshotA,
+      sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
+    });
+
+    await store.load('config/a.json', sourceSnapshotA);
+    store.updateDraft('draft-a', (draft) => {
+      draft.rawNumbers.lowerPrice = '91';
+    });
+    expect(store.isDirty()).toBe(true);
+
+    await store.load('config/b.json', sourceSnapshotB);
+
+    expect(store.isDirty()).toBe(false);
+    expect(store.getState().selectedDraftId).toBe('draft-b');
+    expect(store.getState().drafts.find((draft) => draft.draftId === 'draft-b')?.rawNumbers.lowerPrice).toBe('95');
+  });
+
   it('caps undo history at 100 committed snapshots', () => {
     const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
 
@@ -222,6 +292,19 @@ describe('workbench store', () => {
 
     expect(store.getState().selectedDraftId).toBe('draft-a');
     expect(store.getState().drafts.find((draft) => draft.draftId === 'draft-a')?.rawNumbers.upperPrice).toBe('111');
+  });
+
+  it('inserts duplicated drafts after the source draft', () => {
+    const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
+    const duplicate = makeDraft('draft-c');
+
+    store.duplicateDraft('draft-a', duplicate);
+
+    expect(store.getState().drafts.map((draft) => draft.draftId)).toEqual([
+      'draft-a',
+      'draft-c',
+      'draft-b',
+    ]);
   });
 
   it('restores the same draft snapshot after reopening the same path', async () => {
