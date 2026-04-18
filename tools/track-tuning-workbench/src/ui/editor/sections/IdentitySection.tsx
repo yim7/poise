@@ -1,4 +1,8 @@
-import { fieldIssues, type TrackEditorSectionProps } from '@/ui/editor/TrackEditor';
+import {
+  commitOnEnter,
+  fieldIssues,
+  type TrackEditorSectionProps,
+} from '@/ui/editor/TrackEditor';
 
 export function IdentitySection({
   draft,
@@ -25,6 +29,7 @@ export function IdentitySection({
             value={draft.additional.trackId}
             onChange={(event) => onAdditionalChange('trackId', event.target.value)}
             onBlur={onCommit}
+            onKeyDown={(event) => commitOnEnter(event, onCommit)}
           />
         </label>
         <label className="field">
@@ -35,6 +40,7 @@ export function IdentitySection({
             value={draft.additional.symbol}
             onChange={(event) => onAdditionalChange('symbol', event.target.value)}
             onBlur={onCommit}
+            onKeyDown={(event) => commitOnEnter(event, onCommit)}
           />
         </label>
       </div>

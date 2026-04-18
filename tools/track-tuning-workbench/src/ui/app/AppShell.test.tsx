@@ -132,5 +132,9 @@ describe('AppShell', () => {
 
     expect(screen.getByText('daily_loss_limit 必须大于 0')).toBeInTheDocument();
     expect(screen.getByDisplayValue('0')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Track 调参主图' })).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('region', { name: '关键指标区' })).getByText('当前价格'),
+    ).toBeInTheDocument();
   });
 });
