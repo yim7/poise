@@ -17,10 +17,9 @@ export function RiskSection({
     <section className="editor-section">
       <div className="editor-section__header">
         <p className="editor-section__eyebrow">止损与带外策略</p>
-        <h3 className="editor-section__title">风险预算</h3>
       </div>
 
-      <div className="field-grid field-grid--three">
+      <div className="field-grid field-grid--two field-grid--editor">
         <label className="field">
           <span className="field__label">带外策略</span>
           <select

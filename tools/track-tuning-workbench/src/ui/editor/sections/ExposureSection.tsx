@@ -19,10 +19,9 @@ export function ExposureSection({
     <section className="editor-section">
       <div className="editor-section__header">
         <p className="editor-section__eyebrow">仓位与调仓</p>
-        <h3 className="editor-section__title">容量、名义与最小步长</h3>
       </div>
 
-      <div className="field-grid field-grid--three">
+      <div className="field-grid field-grid--two field-grid--editor">
         {FIELDS.map((field) => {
           const issues = issuesByField[field.key];
           return (

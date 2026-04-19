@@ -261,66 +261,71 @@ export function AppShell({ bridge }: AppShellProps) {
         </aside>
 
         <div className="app-shell__main">
-          <MetricCards
-            snapshot={selectedVisualSnapshot}
-            metrics={selectedMetrics}
-            priceStatus={priceStatus}
-          />
-          <TrackWorkbenchChart
-            snapshot={selectedVisualSnapshot}
-            metrics={selectedMetrics}
-          />
-          <TrackEditor
-            draft={selectedDraft}
-            issues={selectedValidation?.issues ?? []}
-            onAdditionalChange={(field, value) => {
-              if (!selectedDraft) {
-                return;
-              }
-              store.updateDraft(selectedDraft.draftId, (draft) => {
-                draft.additional[field] = value;
-                clearResolvedLoadIssues(draft, field);
-              });
-            }}
-            onNumericChange={(field, value) => {
-              if (!selectedDraft) {
-                return;
-              }
-              store.updateDraft(selectedDraft.draftId, (draft) => {
-                draft.rawNumbers[field] = value;
-                clearResolvedLoadIssues(draft, field);
-              });
-            }}
-            onEnumChange={(field, value) => {
-              if (!selectedDraft) {
-                return;
-              }
-              store.updateDraft(selectedDraft.draftId, (draft) => {
-                if (field === 'shapeFamily') {
-                  draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
-                } else {
-                  draft.enums.outOfBandPolicy = value as TrackDraft['enums']['outOfBandPolicy'];
+          <div className="app-shell__analysis">
+            <MetricCards
+              snapshot={selectedVisualSnapshot}
+              metrics={selectedMetrics}
+              priceStatus={priceStatus}
+            />
+            <TrackWorkbenchChart
+              snapshot={selectedVisualSnapshot}
+              metrics={selectedMetrics}
+            />
+          </div>
+
+          <div className="app-shell__editor-rail">
+            <TrackEditor
+              draft={selectedDraft}
+              issues={selectedValidation?.issues ?? []}
+              onAdditionalChange={(field, value) => {
+                if (!selectedDraft) {
+                  return;
                 }
-                clearResolvedLoadIssues(draft, field);
-              });
-            }}
-            onQuotePriceChange={(value) => {
-              if (!selectedDraft) {
-                return;
-              }
-              store.updateDraft(selectedDraft.draftId, (draft) => {
-                draft.ui.quotePriceInput = value;
-              });
-              const trimmed = value.trim();
-              store.setTemporaryPriceOverride(
-                selectedDraft.draftId,
-                trimmed.length === 0 ? undefined : parseFiniteNumber(value) ?? undefined,
-              );
-            }}
-            onCommit={() => {
-              store.commit();
-            }}
-          />
+                store.updateDraft(selectedDraft.draftId, (draft) => {
+                  draft.additional[field] = value;
+                  clearResolvedLoadIssues(draft, field);
+                });
+              }}
+              onNumericChange={(field, value) => {
+                if (!selectedDraft) {
+                  return;
+                }
+                store.updateDraft(selectedDraft.draftId, (draft) => {
+                  draft.rawNumbers[field] = value;
+                  clearResolvedLoadIssues(draft, field);
+                });
+              }}
+              onEnumChange={(field, value) => {
+                if (!selectedDraft) {
+                  return;
+                }
+                store.updateDraft(selectedDraft.draftId, (draft) => {
+                  if (field === 'shapeFamily') {
+                    draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
+                  } else {
+                    draft.enums.outOfBandPolicy = value as TrackDraft['enums']['outOfBandPolicy'];
+                  }
+                  clearResolvedLoadIssues(draft, field);
+                });
+              }}
+              onQuotePriceChange={(value) => {
+                if (!selectedDraft) {
+                  return;
+                }
+                store.updateDraft(selectedDraft.draftId, (draft) => {
+                  draft.ui.quotePriceInput = value;
+                });
+                const trimmed = value.trim();
+                store.setTemporaryPriceOverride(
+                  selectedDraft.draftId,
+                  trimmed.length === 0 ? undefined : parseFiniteNumber(value) ?? undefined,
+                );
+              }}
+              onCommit={() => {
+                store.commit();
+              }}
+            />
+          </div>
         </div>
       </main>
     </div>

@@ -20,6 +20,34 @@ export interface TrackMetrics {
   approvedTargetExposure: number;
   baseQuantityPerUnit: number;
   oneUnitQuantity: number;
+  minStepRoundTrip: {
+    exposureUnits: number;
+    quantity: number;
+    triggerPrice: {
+      lower: number;
+      upper: number;
+    };
+    priceMove: {
+      lower: number;
+      upper: number;
+    };
+    grossProfit: {
+      lower: number;
+      upper: number;
+    };
+    feeRates: {
+      open: number;
+      close: number;
+    };
+    feeEstimate: {
+      lower: number;
+      upper: number;
+    };
+    netProfit: {
+      lower: number;
+      upper: number;
+    };
+  };
   oneUnitPrice: {
     lower: number;
     upper: number;
@@ -27,10 +55,6 @@ export interface TrackMetrics {
   currentPriceRiskEdge: TrackCurrentPriceRiskEdge;
   zeroTargetPrice: number;
   zeroTargetRiskEdge: ReturnType<typeof computeRiskToBandEdge>;
-  minRebalancePriceMove: {
-    lower: number;
-    upper: number;
-  };
   curve: ReturnType<typeof sampleTrackCurve>;
 }
 
@@ -38,6 +62,34 @@ export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMe
   const currentPrice = snapshot.ui.quotePrice;
   const currentTargetExposure = desiredExposure(currentPrice, snapshot);
   const oneUnitQuantity = baseQuantityPerUnit(snapshot);
+  const stepExposureUnits = snapshot.parsedNumbers.minRebalanceUnits;
+  const lowerTriggerPrice = resolvePriceOrFallback(
+    snapshot,
+    currentTargetExposure + stepExposureUnits,
+    currentPrice,
+  );
+  const upperTriggerPrice = resolvePriceOrFallback(
+    snapshot,
+    currentTargetExposure - stepExposureUnits,
+    currentPrice,
+  );
+  const lowerStepPriceMove = Math.abs(currentPrice - lowerTriggerPrice);
+  const upperStepPriceMove = Math.abs(currentPrice - upperTriggerPrice);
+  const stepQuantity = Math.abs(stepExposureUnits * oneUnitQuantity);
+  const openFeeRate =
+    snapshot.attachments.exchangeRules?.makerFeeRate
+    ?? snapshot.attachments.exchangeRules?.takerFeeRate
+    ?? 0;
+  const closeFeeRate =
+    snapshot.attachments.exchangeRules?.takerFeeRate
+    ?? snapshot.attachments.exchangeRules?.makerFeeRate
+    ?? 0;
+  const lowerStepFeeEstimate =
+    stepQuantity * (lowerTriggerPrice * openFeeRate + currentPrice * closeFeeRate);
+  const upperStepFeeEstimate =
+    stepQuantity * (upperTriggerPrice * openFeeRate + currentPrice * closeFeeRate);
+  const lowerStepGrossProfit = stepQuantity * lowerStepPriceMove;
+  const upperStepGrossProfit = stepQuantity * upperStepPriceMove;
   const zeroTargetPrice = resolveZeroTargetPrice(snapshot);
   const riskDecision = evaluateTrackRisk(
     {
@@ -63,6 +115,34 @@ export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMe
     approvedTargetExposure: riskDecision.targetExposure,
     baseQuantityPerUnit: oneUnitQuantity,
     oneUnitQuantity,
+    minStepRoundTrip: {
+      exposureUnits: stepExposureUnits,
+      quantity: stepQuantity,
+      triggerPrice: {
+        lower: lowerTriggerPrice,
+        upper: upperTriggerPrice,
+      },
+      priceMove: {
+        lower: lowerStepPriceMove,
+        upper: upperStepPriceMove,
+      },
+      grossProfit: {
+        lower: lowerStepGrossProfit,
+        upper: upperStepGrossProfit,
+      },
+      feeRates: {
+        open: openFeeRate,
+        close: closeFeeRate,
+      },
+      feeEstimate: {
+        lower: lowerStepFeeEstimate,
+        upper: upperStepFeeEstimate,
+      },
+      netProfit: {
+        lower: lowerStepGrossProfit - lowerStepFeeEstimate,
+        upper: upperStepGrossProfit - upperStepFeeEstimate,
+      },
+    },
     oneUnitPrice: {
       lower: resolvePriceOrFallback(snapshot, currentTargetExposure + 1, currentPrice),
       upper: resolvePriceOrFallback(snapshot, currentTargetExposure - 1, currentPrice),
@@ -70,24 +150,6 @@ export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMe
     currentPriceRiskEdge: computeCurrentPriceRiskEdge(snapshot, currentPrice),
     zeroTargetPrice,
     zeroTargetRiskEdge: computeRiskToBandEdge(snapshot, zeroTargetPrice),
-    minRebalancePriceMove: {
-      lower: Math.abs(
-        currentPrice -
-          resolvePriceOrFallback(
-            snapshot,
-            currentTargetExposure + snapshot.parsedNumbers.minRebalanceUnits,
-            currentPrice,
-          ),
-      ),
-      upper: Math.abs(
-        currentPrice -
-          resolvePriceOrFallback(
-            snapshot,
-            currentTargetExposure - snapshot.parsedNumbers.minRebalanceUnits,
-            currentPrice,
-          ),
-      ),
-    },
     curve: sampleTrackCurve(snapshot),
   };
 }

@@ -390,6 +390,27 @@ describe('workbench store', () => {
     expect(reopenedStore.getState().temporaryPriceOverrides['draft-a']).toBe(104);
   });
 
+  it('backfills default Binance futures fee rates when restoring an older saved snapshot', async () => {
+    const legacySnapshot = makeSnapshot({
+      drafts: [
+        makeDraft('draft-a', {
+          attachments: {},
+        }),
+      ],
+    });
+    const persistence = makePersistence(legacySnapshot);
+    const reopenedStore = createWorkbenchStore({
+      sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
+    });
+
+    await reopenedStore.load('config/track.json');
+
+    expect(reopenedStore.getState().drafts[0]?.attachments.exchangeRules).toEqual({
+      makerFeeRate: 0.0002,
+      takerFeeRate: 0.0005,
+    });
+  });
+
   it('marks the copied track as exported without clearing other track baselines', () => {
     const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
 

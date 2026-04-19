@@ -7,9 +7,9 @@ export interface TrackWorkbenchChartProps {
 }
 
 const VIEWBOX_WIDTH = 920;
-const VIEWBOX_HEIGHT = 420;
+const VIEWBOX_HEIGHT = 372;
 const PADDING_X = 52;
-const PADDING_Y = 34;
+const PADDING_Y = 28;
 
 export function TrackWorkbenchChart({
   snapshot,
@@ -58,8 +58,8 @@ export function TrackWorkbenchChart({
   const zeroLineY = toY(0);
   const currentPriceX = toX(snapshot.ui.quotePrice);
   const zeroTargetX = toX(metrics.zeroTargetPrice);
-  const minStepLeftX = toX(snapshot.ui.quotePrice - metrics.minRebalancePriceMove.lower);
-  const minStepRightX = toX(snapshot.ui.quotePrice + metrics.minRebalancePriceMove.upper);
+  const minStepLeftX = toX(metrics.minStepRoundTrip.triggerPrice.lower);
+  const minStepRightX = toX(metrics.minStepRoundTrip.triggerPrice.upper);
   const riskStartX = currentPriceX;
   const riskEndX = resolveRiskEdgeX(metrics, toX);
 

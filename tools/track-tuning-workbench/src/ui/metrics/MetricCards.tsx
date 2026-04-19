@@ -46,8 +46,8 @@ export function MetricCards({
     );
   }
 
-  const minStepDownPrice = snapshot.ui.quotePrice - metrics.minRebalancePriceMove.lower;
-  const minStepUpPrice = snapshot.ui.quotePrice + metrics.minRebalancePriceMove.upper;
+  const minStepDownPrice = metrics.minStepRoundTrip.triggerPrice.lower;
+  const minStepUpPrice = metrics.minStepRoundTrip.triggerPrice.upper;
 
   const cards: MetricCardDefinition[] = [
     {
@@ -59,10 +59,24 @@ export function MetricCards({
     {
       title: '最小步长对应价格',
       primary: `下 ${formatPrice(minStepDownPrice)} / 上 ${formatPrice(minStepUpPrice)}`,
-      secondary: `最小位移 ${formatSigned(metrics.minRebalancePriceMove.lower)} / ${formatSigned(
-        metrics.minRebalancePriceMove.upper,
+      secondary: `最小位移 ${formatSigned(metrics.minStepRoundTrip.priceMove.lower)} / ${formatSigned(
+        metrics.minStepRoundTrip.priceMove.upper,
       )}`,
       source: '按 min_rebalance_units 反推',
+    },
+    {
+      title: '每步理论净利',
+      primary: `下 ${formatCurrency(metrics.minStepRoundTrip.netProfit.lower)} / 上 ${formatCurrency(
+        metrics.minStepRoundTrip.netProfit.upper,
+      )}`,
+      secondary: `毛利 ${formatCurrency(metrics.minStepRoundTrip.grossProfit.lower)} / ${formatCurrency(
+        metrics.minStepRoundTrip.grossProfit.upper,
+      )} · 费 ${formatCurrency(metrics.minStepRoundTrip.feeEstimate.lower)} / ${formatCurrency(
+        metrics.minStepRoundTrip.feeEstimate.upper,
+      )}`,
+      source: `当前价 ↔ 下一格，Δ仓位 ${formatSigned(metrics.minStepRoundTrip.exposureUnits)} unit · 数量 ${formatQuantity(
+        metrics.minStepRoundTrip.quantity,
+      )}`,
     },
     {
       title: '当前价到风险边缘',
@@ -95,7 +109,7 @@ export function MetricCards({
         </div>
       </div>
 
-      <div className="metric-cards">
+      <div className="metric-cards metric-cards--compact">
         {cards.map((card) => (
           <article className="metric-card" key={card.title}>
             <p className="metric-card__title">{card.title}</p>
@@ -107,7 +121,7 @@ export function MetricCards({
       </div>
 
       <InlineNotice title="口径说明">
-        当前价格、最小步长、风险边缘与零仓目标点全部来自同一套前端领域试算结果，没有为图表单独维护另一套曲线。
+        当前价格、最小步长、风险边缘与零仓目标点全部来自同一套前端领域试算结果；每步理论净利已扣除开平仓手续费估算。
       </InlineNotice>
     </section>
   );
@@ -149,4 +163,15 @@ function formatCurrency(value: number) {
 
 function formatSigned(value: number) {
   return value.toFixed(2);
+}
+
+function formatQuantity(value: number) {
+  const absolute = Math.abs(value);
+  if (absolute >= 1) {
+    return value.toFixed(4);
+  }
+  if (absolute >= 0.01) {
+    return value.toFixed(5);
+  }
+  return value.toFixed(6);
 }

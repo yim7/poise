@@ -14,7 +14,6 @@ export function PriceBandSection({
     <section className="editor-section">
       <div className="editor-section__header">
         <p className="editor-section__eyebrow">价格带</p>
-        <h3 className="editor-section__title">带宽与边界</h3>
       </div>
 
       <div className="field-grid field-grid--two">

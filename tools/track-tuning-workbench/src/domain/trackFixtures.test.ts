@@ -204,6 +204,32 @@ describe('track domain fixtures', () => {
     });
   });
 
+  it('computes min rebalance round-trip metrics including fee-adjusted net profit', () => {
+    const metrics = computeTrackMetrics(
+      makeSnapshot({
+        attachments: {
+          exchangeRules: {
+            makerFeeRate: 0.0002,
+            takerFeeRate: 0.0005,
+          },
+        },
+      }),
+    );
+
+    expectClose(metrics.minStepRoundTrip.exposureUnits, 0.5);
+    expectClose(metrics.minStepRoundTrip.quantity, 1.875);
+    expectClose(metrics.minStepRoundTrip.priceMove.lower, 0.625);
+    expectClose(metrics.minStepRoundTrip.priceMove.upper, 0.625);
+    expectClose(metrics.minStepRoundTrip.triggerPrice.lower, 99.375);
+    expectClose(metrics.minStepRoundTrip.triggerPrice.upper, 100.625);
+    expectClose(metrics.minStepRoundTrip.grossProfit.lower, 1.171875);
+    expectClose(metrics.minStepRoundTrip.grossProfit.upper, 1.171875);
+    expectClose(metrics.minStepRoundTrip.feeEstimate.lower, 0.131015625);
+    expectClose(metrics.minStepRoundTrip.feeEstimate.upper, 0.131484375);
+    expectClose(metrics.minStepRoundTrip.netProfit.lower, 1.040859375);
+    expectClose(metrics.minStepRoundTrip.netProfit.upper, 1.040390625);
+  });
+
   it('keeps load issues until the affected field is truly repaired', () => {
     const draft = makeDraft({}, { quotePriceInput: '' });
     draft.rawNumbers.lowerPrice = '0';
@@ -248,8 +274,8 @@ describe('track domain fixtures', () => {
     expectClose(metrics.zeroTargetRiskEdge.priceDistance, 10);
     expectClose(metrics.zeroTargetRiskEdge.theoreticalLoss, -150);
 
-    expectClose(metrics.minRebalancePriceMove.lower, 0.625);
-    expectClose(metrics.minRebalancePriceMove.upper, 0.625);
+    expectClose(metrics.minStepRoundTrip.priceMove.lower, 0.625);
+    expectClose(metrics.minStepRoundTrip.priceMove.upper, 0.625);
   });
 
   it('locks empty linear semantics', () => {
@@ -286,8 +312,8 @@ describe('track domain fixtures', () => {
     expectClose(metrics.currentTargetExposure, 0);
     expectClose(metrics.oneUnitPrice.lower, 97.2737306683, SEARCH_TOLERANCE);
     expectClose(metrics.oneUnitPrice.upper, 102.7262693317, SEARCH_TOLERANCE);
-    expectClose(metrics.minRebalancePriceMove.lower, 1.767766953, SEARCH_TOLERANCE);
-    expectClose(metrics.minRebalancePriceMove.upper, 1.767766953, SEARCH_TOLERANCE);
+    expectClose(metrics.minStepRoundTrip.priceMove.lower, 1.767766953, SEARCH_TOLERANCE);
+    expectClose(metrics.minStepRoundTrip.priceMove.upper, 1.767766953, SEARCH_TOLERANCE);
 
     expect(curve.points).toHaveLength(5);
     expectClose(curve.points[0]!.price, 90);
@@ -310,8 +336,8 @@ describe('track domain fixtures', () => {
 
     expectClose(metrics.oneUnitPrice.lower, 99.5920275945, SEARCH_TOLERANCE);
     expectClose(metrics.oneUnitPrice.upper, 100.4079724055, SEARCH_TOLERANCE);
-    expectClose(metrics.minRebalancePriceMove.lower, 0.1404454646, SEARCH_TOLERANCE);
-    expectClose(metrics.minRebalancePriceMove.upper, 0.1404454646, SEARCH_TOLERANCE);
+    expectClose(metrics.minStepRoundTrip.priceMove.lower, 0.1404454646, SEARCH_TOLERANCE);
+    expectClose(metrics.minStepRoundTrip.priceMove.upper, 0.1404454646, SEARCH_TOLERANCE);
   });
 
   it('keeps out-of-band price distance from the raw current price while clamping only theoretical loss', () => {
@@ -360,10 +386,10 @@ describe('track domain fixtures', () => {
     const metrics = computeTrackMetrics(snapshot);
 
     expectClose(metrics.currentTargetExposure, -0.2009509145, SEARCH_TOLERANCE);
-    expectClose(metrics.minRebalancePriceMove.lower, 2.2820583964, SEARCH_TOLERANCE);
-    expectClose(metrics.minRebalancePriceMove.upper, 1.1833507633, SEARCH_TOLERANCE);
-    expect(metrics.minRebalancePriceMove.lower).toBeGreaterThan(
-      metrics.minRebalancePriceMove.upper,
+    expectClose(metrics.minStepRoundTrip.priceMove.lower, 2.2820583964, SEARCH_TOLERANCE);
+    expectClose(metrics.minStepRoundTrip.priceMove.upper, 1.1833507633, SEARCH_TOLERANCE);
+    expect(metrics.minStepRoundTrip.priceMove.lower).toBeGreaterThan(
+      metrics.minStepRoundTrip.priceMove.upper,
     );
     expectClose(metrics.oneUnitPrice.lower, 97.6303883854, SEARCH_TOLERANCE);
     expectClose(metrics.oneUnitPrice.upper, 103.0568353281, SEARCH_TOLERANCE);

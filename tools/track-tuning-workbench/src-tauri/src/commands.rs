@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     binance_quote::{BinanceQuoteClient, BinanceQuotePayload},
@@ -102,27 +101,6 @@ pub(crate) fn export_all_tracks_text(
         .map(TrackDraft::try_from)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(config_projection::export_all_tracks(&drafts))
-}
-
-#[tauri::command]
-pub fn open_config_file(app: AppHandle) -> Result<Option<String>, CommandError> {
-    let selection = app
-        .dialog()
-        .file()
-        .add_filter("TOML", &["toml"])
-        .blocking_pick_file();
-
-    selection
-        .map(|path| {
-            path.into_path().map_err(|error| {
-                CommandError::new(
-                    CommandErrorKind::Dialog,
-                    format!("所选文件路径无法转换为本地路径: {error}"),
-                )
-            })
-        })
-        .transpose()
-        .map(|path| path.map(|path| path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]

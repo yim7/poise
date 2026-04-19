@@ -17,7 +17,6 @@ export function IdentitySection({
     <section className="editor-section">
       <div className="editor-section__header">
         <p className="editor-section__eyebrow">标识</p>
-        <h3 className="editor-section__title">Track 基本信息</h3>
       </div>
 
       <div className="field-grid field-grid--two">

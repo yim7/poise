@@ -134,8 +134,57 @@ describe('AppShell', () => {
     const metricRegion = screen.getByRole('region', { name: '关键指标区' });
     expect(within(metricRegion).getByText('当前价格')).toBeInTheDocument();
     expect(within(metricRegion).getByText('最小步长对应价格')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('每步理论净利')).toBeInTheDocument();
     expect(within(metricRegion).getByText('当前价到风险边缘')).toBeInTheDocument();
     expect(within(metricRegion).getByText('零仓目标点到风险边缘')).toBeInTheDocument();
+  });
+
+  it('keeps analysis panels and the editor in separate workspace rails', async () => {
+    await renderShell();
+
+    const analysisRail = document.querySelector('.app-shell__analysis');
+    const editorRail = document.querySelector('.app-shell__editor-rail');
+
+    expect(analysisRail).not.toBeNull();
+    expect(editorRail).not.toBeNull();
+    expect(
+      analysisRail?.querySelector('[aria-label="关键指标区"]'),
+    ).not.toBeNull();
+    expect(
+      analysisRail?.querySelector('[aria-label="主图区"]'),
+    ).not.toBeNull();
+    expect(
+      editorRail?.querySelector('[aria-label="参数编辑区"]'),
+    ).not.toBeNull();
+  });
+
+  it('uses compact metric cards and avoids three-column editor grids', async () => {
+    await renderShell();
+
+    const metricRegion = screen.getByRole('region', { name: '关键指标区' });
+    const editorRegion = screen.getByRole('region', { name: '参数编辑区' });
+
+    expect(metricRegion.querySelector('.metric-cards--compact')).not.toBeNull();
+    expect(editorRegion.querySelector('.field-grid--three')).toBeNull();
+    expect(editorRegion.querySelector('.field-grid--two')).not.toBeNull();
+  });
+
+  it('keeps section eyebrow labels but removes large editor section titles', async () => {
+    await renderShell();
+
+    const editorRegion = screen.getByRole('region', { name: '参数编辑区' });
+
+    expect(editorRegion.querySelector('.editor-section__header')).not.toBeNull();
+    expect(within(editorRegion).getByText('标识')).toBeInTheDocument();
+    expect(within(editorRegion).getByText('价格带')).toBeInTheDocument();
+    expect(within(editorRegion).getByText('仓位与调仓')).toBeInTheDocument();
+    expect(within(editorRegion).getByText('止损与带外策略')).toBeInTheDocument();
+    expect(within(editorRegion).getByText('曲线与预览')).toBeInTheDocument();
+    expect(within(editorRegion).queryByText('Track 基本信息')).toBeNull();
+    expect(within(editorRegion).queryByText('带宽与边界')).toBeNull();
+    expect(within(editorRegion).queryByText('容量、名义与最小步长')).toBeNull();
+    expect(within(editorRegion).queryByText('风险预算')).toBeNull();
+    expect(within(editorRegion).queryByText('曲线家族与试算锚点')).toBeNull();
   });
 
   it('shows an undo notice after deleting a track', async () => {
@@ -159,6 +208,25 @@ describe('AppShell', () => {
     expect(
       within(screen.getByRole('region', { name: '关键指标区' })).getByText('当前价格'),
     ).toBeInTheDocument();
+  });
+
+  it('recomputes min rebalance metrics when the min rebalance units field changes', async () => {
+    await renderShell();
+
+    const metricRegion = screen.getByRole('region', { name: '关键指标区' });
+    expect(within(metricRegion).getByText('最小位移 0.63 / 0.63')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('下 1.04 / 上 1.04')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('毛利 1.17 / 1.17 · 费 0.13 / 0.13')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('最小调仓单位'), {
+      target: { value: '1.0' },
+    });
+
+    expect(screen.getByDisplayValue('1.0')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('最小位移 1.25 / 1.25')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('下 98.75 / 上 101.25')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('下 4.43 / 上 4.42')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('毛利 4.69 / 4.69 · 费 0.26 / 0.26')).toBeInTheDocument();
   });
 
   it('copies current track through the export bridge and only writes [[tracks]] text', async () => {

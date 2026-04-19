@@ -17,6 +17,7 @@ import {
   refreshTrackDraftParsedNumbers,
   type TrackDraft,
 } from '@/domain/trackDraft';
+import { withBinanceFuturesDefaults } from '@/domain/binanceFuturesDefaults';
 
 export type WorkbenchSnapshot = SessionSnapshot;
 
@@ -406,7 +407,7 @@ function normalizeSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
 }
 
 function normalizeDraft(draft: TrackDraft): TrackDraft {
-  const nextDraft = cloneDraft(draft);
+  const nextDraft = withBinanceFuturesDefaults(cloneDraft(draft));
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
 }

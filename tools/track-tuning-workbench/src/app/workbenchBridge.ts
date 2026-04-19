@@ -13,6 +13,7 @@ import {
   type TrackDraftFieldKey,
   type TrackDraftLoadIssue,
 } from '@/domain/trackDraft';
+import { withBinanceFuturesDefaults } from '@/domain/binanceFuturesDefaults';
 
 export interface WorkbenchBridgeCommandError {
   kind: 'config' | 'io' | 'session_store' | 'dialog' | 'clipboard' | 'internal';
@@ -133,7 +134,24 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
   return {
     isTauriEnvironment,
     async openConfigFile() {
-      return tauriInvoke<string | null>('open_config_file');
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selection = await open({
+        title: '选择 Track 配置文件',
+        directory: false,
+        multiple: false,
+        filters: [
+          {
+            name: 'TOML',
+            extensions: ['toml'],
+          },
+        ],
+      });
+
+      if (Array.isArray(selection)) {
+        return selection[0] ?? null;
+      }
+
+      return selection;
     },
     async loadConfigFile(configPath) {
       const payload = await tauriInvoke<LoadedConfigFilePayload>('load_config_file', {
@@ -141,33 +159,37 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
       });
       return {
         configPath: payload.config_path,
-        projectedTracks: payload.projected_tracks.map((track) => createTrackDraft({
-          draftId: track.draft_id,
-          raw: {
-            trackId: track.fields.track_id,
-            symbol: track.fields.symbol,
-            lowerPrice: formatRawNumber(track.fields.lower_price),
-            upperPrice: formatRawNumber(track.fields.upper_price),
-            longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
-            shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
-            notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
-            maxNotional: formatRawNumber(track.fields.max_notional),
-            minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
-            leverage: String(track.fields.leverage),
-            dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
-            totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
-            outOfBandPolicy: track.fields.out_of_band_policy as TrackDraft['enums']['outOfBandPolicy'],
-            shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
-          },
-          ui: {
-            quotePriceInput: '',
-          },
-          attachments: track.load_issues.length > 0
-            ? {
-                loadIssues: track.load_issues.map(normalizeLoadIssue),
-              }
-            : undefined,
-        })),
+        projectedTracks: payload.projected_tracks.map((track) =>
+          withBinanceFuturesDefaults(
+            createTrackDraft({
+              draftId: track.draft_id,
+              raw: {
+                trackId: track.fields.track_id,
+                symbol: track.fields.symbol,
+                lowerPrice: formatRawNumber(track.fields.lower_price),
+                upperPrice: formatRawNumber(track.fields.upper_price),
+                longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
+                shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
+                notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
+                maxNotional: formatRawNumber(track.fields.max_notional),
+                minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
+                leverage: String(track.fields.leverage),
+                dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
+                totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
+                outOfBandPolicy: track.fields.out_of_band_policy as TrackDraft['enums']['outOfBandPolicy'],
+                shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
+              },
+              ui: {
+                quotePriceInput: '',
+              },
+              attachments: track.load_issues.length > 0
+                ? {
+                    loadIssues: track.load_issues.map(normalizeLoadIssue),
+                  }
+                : undefined,
+            }),
+          ),
+        ),
       };
     },
     async loadSavedDraft(configPath) {

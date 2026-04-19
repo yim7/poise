@@ -13,7 +13,6 @@ export function CurveSection({
     <section className="editor-section">
       <div className="editor-section__header">
         <p className="editor-section__eyebrow">曲线与预览</p>
-        <h3 className="editor-section__title">曲线家族与试算锚点</h3>
       </div>
 
       <div className="field-grid field-grid--two">
