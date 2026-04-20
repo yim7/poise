@@ -215,6 +215,15 @@ impl MutationExecutor {
         Arc::clone(&self.manager)
     }
 
+    pub(crate) async fn restore_persisted_track_state(&self, id: &str) -> Result<bool> {
+        let Some(snapshot) = self.mutation_store.load_track_state(id).await? else {
+            return Ok(false);
+        };
+        let mut manager = self.manager.write().await;
+        manager.restore_track_state(&snapshot)?;
+        Ok(true)
+    }
+
     pub(crate) fn emit_internal_notification(&self, notification: ApplicationNotification) {
         let _ = self.notifications.send(notification);
     }

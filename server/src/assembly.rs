@@ -11,8 +11,8 @@ use chrono::Utc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
-    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackMutationStore,
-    TrackObservationService, TrackQueryService, TrackServiceSet,
+    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackObservationService,
+    TrackQueryService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
@@ -292,9 +292,6 @@ async fn assemble_with_state_store(
             info.rules,
             track.tick_timeout_secs(),
         )?;
-        if let Some(snapshot) = repositories.load_track_state(track_id.as_str()).await? {
-            manager.restore_track_state(&snapshot)?;
-        }
     }
 
     let (notifications, _) = broadcast::channel(256);
@@ -318,6 +315,11 @@ async fn assemble_with_state_store(
     let observation_service = Arc::new(write_services.observation);
     let effect_service = Arc::new(write_services.effect);
     let submit_effect_service = Arc::new(write_services.submit_effect);
+    for track in prepared_registry.iter() {
+        command_service
+            .restore_persisted_track_state(track.track_id().as_str())
+            .await?;
+    }
     #[cfg(test)]
     let manager = observation_service.manager();
     let query_service = Arc::new(TrackQueryService::new_with_observation(
@@ -349,7 +351,7 @@ async fn assemble_with_state_store(
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_state = build_reconcile_state(
         observation_service.clone(),
-        mutation_store.clone(),
+        query_service.clone(),
         effect_store.clone(),
         exchange_freshness.clone(),
         reconcile_guards.clone(),
@@ -560,7 +562,7 @@ pub(crate) fn build_websocket_state(
 
 pub(crate) fn build_reconcile_state(
     observation_service: Arc<TrackObservationService>,
-    mutation_store: Arc<dyn TrackMutationStore>,
+    query_service: Arc<TrackQueryService>,
     effect_store: Arc<dyn TrackEffectStore>,
     exchange_freshness: Arc<ExchangeFreshness>,
     reconcile_guards: Arc<TrackReconcileGuards>,
@@ -569,7 +571,7 @@ pub(crate) fn build_reconcile_state(
 ) -> ReconcileState {
     ReconcileState {
         observation_service,
-        mutation_store,
+        query_service,
         effect_store,
         exchange_freshness,
         reconcile_guards,
@@ -1593,7 +1595,7 @@ total_loss_limit = 600.0
         let (runtime_test_context, effect_worker_test_context) =
             build_runtime_and_effect_worker_test_contexts(
                 &services,
-                mutation_store,
+                repository.clone() as Arc<dyn TrackQueryStore>,
                 effect_store,
                 account_monitor.clone(),
                 projector.clone(),

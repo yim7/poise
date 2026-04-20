@@ -3,8 +3,7 @@ use std::sync::Arc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
-    TrackEffectService, TrackEffectStore, TrackMutationStore, TrackObservationService,
-    TrackQueryService,
+    TrackEffectService, TrackEffectStore, TrackObservationService, TrackQueryService,
 };
 use tokio::sync::broadcast;
 
@@ -41,7 +40,7 @@ pub struct WebSocketState {
 #[derive(Clone)]
 pub struct ReconcileState {
     pub observation_service: Arc<TrackObservationService>,
-    pub mutation_store: Arc<dyn TrackMutationStore>,
+    pub query_service: Arc<TrackQueryService>,
     pub effect_store: Arc<dyn TrackEffectStore>,
     pub exchange_freshness: Arc<ExchangeFreshness>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,

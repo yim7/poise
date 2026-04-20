@@ -179,12 +179,6 @@ impl StateRepositories {
     pub fn effect_store(&self) -> Arc<dyn TrackEffectStore> {
         Arc::clone(&self.effect_store)
     }
-    pub async fn load_track_state(
-        &self,
-        track_id: &str,
-    ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
-        self.mutation_store.load_track_state(track_id).await
-    }
 }
 
 impl StateBackup {

@@ -5,7 +5,8 @@ use std::time::Duration;
 use anyhow::Context;
 use poise_application::{RecoveryAnomalyObserver, TrackInstrument, TrackMutationError};
 use poise_engine::manager::ExchangeSyncMode;
-use poise_engine::ports::{ExchangeOrder, ExecutionPort};
+use poise_engine::ports::ExecutionPort;
+use poise_engine::track::TrackId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -210,9 +211,9 @@ pub(super) async fn sync_exchange_state_from_exchange(
     let state = state.reconcile_state_view();
     let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
     let sync_token = state.exchange_freshness.prepare_sync(track_id).await;
-    let snapshot = state
-        .mutation_store
-        .load_track_state(track_id)
+    let recovery_view = state
+        .query_service
+        .load_track_recovery_view(&TrackId::new(track_id))
         .await
         .map_err(TrackMutationError::Persistence)?;
     let mut position = execution
@@ -224,7 +225,11 @@ pub(super) async fn sync_exchange_state_from_exchange(
         .await
         .map_err(TrackMutationError::Persistence)?;
 
-    if should_cancel_unknown_live_orders(snapshot.as_ref(), &open_orders) {
+    if recovery_view.as_ref().is_some_and(|view| {
+        view.recovery_anomaly == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
+            && !view.has_working_orders
+    }) && !open_orders.is_empty()
+    {
         for order in &open_orders {
             execution
                 .cancel_order(instrument, &order.order_id)
@@ -278,22 +283,6 @@ pub(super) async fn sync_exchange_state_from_exchange(
     Ok(())
 }
 
-fn should_cancel_unknown_live_orders(
-    snapshot: Option<&poise_engine::snapshot::TrackRuntimeSnapshot>,
-    open_orders: &[ExchangeOrder],
-) -> bool {
-    !open_orders.is_empty()
-        && snapshot.is_some_and(|snapshot| {
-            snapshot.executor_state.diagnostics.recovery_anomaly
-                == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
-                && snapshot
-                    .executor_state
-                    .slots
-                    .iter()
-                    .all(|slot| slot.working_order.is_none())
-        })
-}
-
 fn update_recovery_tracking(
     tracked: &mut HashMap<String, RecoveryTrackedTrack>,
     instruments: &[TrackInstrument],
@@ -329,18 +318,18 @@ async fn seed_recovery_tracking(
 ) -> HashMap<String, RecoveryTrackedTrack> {
     let mut tracked = HashMap::new();
     for track in instruments {
-        let Ok(Some(snapshot)) = state.mutation_store.load_track_state(&track.id).await else {
+        let Ok(Some(recovery_view)) = state
+            .query_service
+            .load_track_recovery_view(&TrackId::new(&track.id))
+            .await
+        else {
             continue;
         };
         update_recovery_tracking(
             &mut tracked,
             instruments,
             &track.id,
-            snapshot
-                .executor_state
-                .diagnostics
-                .recovery_anomaly
-                .is_some(),
+            recovery_view.recovery_anomaly.is_some(),
             retry_interval,
         );
     }

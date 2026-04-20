@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use poise_engine::executor::RecoveryAnomaly;
 use poise_engine::track::TrackId;
 
 use crate::{
@@ -11,6 +12,12 @@ use crate::{
 const LIST_EFFECTS_LIMIT: usize = 20;
 const DETAIL_EVENTS_LIMIT: usize = 20;
 const DETAIL_EFFECTS_LIMIT: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackRecoveryView {
+    pub recovery_anomaly: Option<RecoveryAnomaly>,
+    pub has_working_orders: bool,
+}
 
 pub struct TrackQueryService {
     repository: Arc<dyn TrackQueryStore>,
@@ -97,6 +104,26 @@ impl TrackQueryService {
         )))
     }
 
+    pub async fn load_track_recovery_view(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<TrackRecoveryView>> {
+        let Some(snapshot) = self.repository.load_track_snapshot(track_id).await? else {
+            return Ok(None);
+        };
+        let runtime = self
+            .runtime_from_snapshot(track_id.clone(), snapshot.snapshot)
+            .await?;
+        Ok(Some(TrackRecoveryView {
+            recovery_anomaly: runtime.executor_state.diagnostics.recovery_anomaly.clone(),
+            has_working_orders: runtime
+                .executor_state
+                .slots
+                .iter()
+                .any(|slot| slot.working_order.is_some()),
+        }))
+    }
+
     async fn read_source_from_snapshot(
         &self,
         track_id: TrackId,
@@ -115,13 +142,7 @@ impl TrackQueryService {
                 )
             })?
             .read_definition();
-        let runtime = match &self.observation {
-            Some(observation) => {
-                let live_view = observation.track_live_view(track_id.as_str()).await?;
-                TrackRuntimeReadState::from_parts(snapshot, live_view)
-            }
-            None => TrackRuntimeReadState::from_snapshot(snapshot),
-        };
+        let runtime = self.runtime_from_snapshot(track_id, snapshot).await?;
 
         Ok(TrackReadSource {
             definition,
@@ -129,6 +150,20 @@ impl TrackQueryService {
             updated_at,
             recent_track_events,
             recent_effects,
+        })
+    }
+
+    async fn runtime_from_snapshot(
+        &self,
+        track_id: TrackId,
+        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
+    ) -> Result<TrackRuntimeReadState> {
+        Ok(match &self.observation {
+            Some(observation) => {
+                let live_view = observation.track_live_view(track_id.as_str()).await?;
+                TrackRuntimeReadState::from_parts(snapshot, live_view)
+            }
+            None => TrackRuntimeReadState::from_snapshot(snapshot),
         })
     }
 }
@@ -144,7 +179,7 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::ExecutionQuote;
@@ -255,6 +290,31 @@ mod tests {
         assert_eq!(source.best_bid, Some(94.5));
         assert_eq!(source.best_ask, Some(95.5));
         assert_eq!(source.strategy_price, Some(95.0));
+    }
+
+    #[tokio::test]
+    async fn load_track_recovery_view_projects_runtime_recovery_summary() {
+        let mut repository = FakeReadRepository::new();
+        let snapshot = repository.snapshots.get_mut("btc-core").unwrap();
+        snapshot
+            .snapshot
+            .executor_state
+            .diagnostics
+            .recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+        snapshot.snapshot.executor_state.slots.clear();
+        let service = TrackQueryService::new(Arc::new(repository), test_prepared_registry());
+
+        let recovery_view = service
+            .load_track_recovery_view(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            recovery_view.recovery_anomaly,
+            Some(RecoveryAnomaly::UnknownLiveOrder)
+        );
+        assert!(!recovery_view.has_working_orders);
     }
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {

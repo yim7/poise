@@ -370,13 +370,9 @@ where
         account_margin_guard.clone(),
     );
     let account_monitor = build_test_account_monitor(account_summary, events).await;
-    let _ = Arc::new(TrackQueryService::new(
-        persistence as Arc<dyn TrackQueryStore>,
-        crate::test_support::test_prepared_registry("BTCUSDT"),
-    ));
     build_runtime_and_effect_worker_test_contexts(
         &services,
-        mutation_store,
+        persistence as Arc<dyn TrackQueryStore>,
         effect_store,
         account_monitor,
         Arc::new(TrackProjector::new()),

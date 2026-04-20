@@ -34,7 +34,7 @@ async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
     let account_summary = Arc::new(FakeExchange::new(btc_position(0.0, 0.0), vec![]));
     let state = build_runtime_test_context(
         &services,
-        persistence.clone() as Arc<dyn TrackMutationStore>,
+        persistence.clone() as Arc<dyn TrackQueryStore>,
         persistence.clone() as Arc<dyn TrackEffectStore>,
         build_test_account_monitor(account_summary.account_summary_port(), events).await,
         Arc::new(TrackProjector::new()),

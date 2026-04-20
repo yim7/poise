@@ -4,7 +4,8 @@ use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
     ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectService,
-    TrackEffectStore, TrackMutationStore, TrackObservationService, TrackServiceSet,
+    TrackEffectStore, TrackMutationStore, TrackObservationService, TrackQueryService,
+    TrackQueryStore, TrackServiceSet,
 };
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
@@ -309,14 +310,14 @@ pub(crate) fn build_websocket_state(
 
 pub(crate) fn build_runtime_test_context(
     services: &TestApplicationServices,
-    mutation_store: Arc<dyn TrackMutationStore>,
+    query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     account_monitor: Arc<AccountMonitor>,
     projector: Arc<TrackProjector>,
 ) -> RuntimeTestContext {
     build_runtime_and_effect_worker_test_contexts(
         services,
-        mutation_store,
+        query_store,
         effect_store,
         account_monitor,
         projector,
@@ -326,7 +327,7 @@ pub(crate) fn build_runtime_test_context(
 
 pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     services: &TestApplicationServices,
-    mutation_store: Arc<dyn TrackMutationStore>,
+    query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     account_monitor: Arc<AccountMonitor>,
     projector: Arc<TrackProjector>,
@@ -334,9 +335,14 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
+    let query_service = Arc::new(TrackQueryService::new_with_observation(
+        query_store,
+        test_prepared_registry("BTCUSDT"),
+        Some(Arc::clone(&services.observation_service)),
+    ));
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
-        mutation_store,
+        query_service,
         effect_store,
         exchange_freshness.clone(),
         reconcile_guards,
@@ -418,14 +424,19 @@ pub(crate) fn build_test_contexts_from_runtime_states(
 
 pub(crate) fn build_effect_worker_test_context(
     services: &TestApplicationServices,
-    mutation_store: Arc<dyn TrackMutationStore>,
+    query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
 ) -> EffectWorkerTestContext {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
+    let query_service = Arc::new(TrackQueryService::new_with_observation(
+        query_store,
+        test_prepared_registry("BTCUSDT"),
+        Some(Arc::clone(&services.observation_service)),
+    ));
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
-        mutation_store,
+        query_service,
         effect_store,
         exchange_freshness.clone(),
         Arc::new(TrackReconcileGuards::default()),

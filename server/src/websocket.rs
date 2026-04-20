@@ -933,7 +933,7 @@ mod tests {
         notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
     ) -> crate::server_context::EffectWorkerState {
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
-        let effect_store = repository as Arc<dyn TrackEffectStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             test_manager(),
@@ -943,8 +943,12 @@ mod tests {
             account_margin_guard,
         );
 
-        build_effect_worker_test_context(&services, mutation_store, effect_store)
-            .effect_worker_state
+        build_effect_worker_test_context(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            effect_store,
+        )
+        .effect_worker_state
     }
 
     async fn recv_event(stream: &mut ClientStream) -> StreamEvent {
