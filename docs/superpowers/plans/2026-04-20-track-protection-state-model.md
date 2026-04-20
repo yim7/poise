@@ -17,11 +17,11 @@
 - `evaluate_risk` / `flatten_reentry_confirmed` 这种已被 engine 调用的旧函数，只有在所有消费者同 task 迁移时才能替换或删除。
 - Task 2 只允许把 engine 消费方切到新的 `BandProtectionPolicy` 形状；任何依赖 `ReentryGuard`、`target_anchor` 或新恢复状态机的运行时语义都必须留在 Task 3。
 - `TrackRuntimeSnapshot` 的根接口切换必须和 engine、storage、application 内所有直接持有、构造、持久化或传递 snapshot 的消费者放在同一个 task。
-- `TrackRuntimeSnapshot` 不能作为 server 生产代码或 server 测试的输入抽象；server 只消费 `TrackReadModel` 或 application service API。
+- `TrackRuntimeSnapshot` 不能作为 server read-side / projector 生产代码或测试夹具的输入抽象；server runtime/orchestration 生产路径只能通过 application service API 间接恢复或查询运行态，不能直接解析 snapshot 私有状态。
 - `TrackState` 只允许出现在 engine runtime、engine snapshot、持久化恢复、application 单一适配层和对应 application 适配测试里。
 - `TrackRuntimeReadState` 是 application 内部适配器，不对 server 或其他 crate re-export。
 - `TrackReadModel`、server/projector 以及 server 测试夹具不能暴露、接收或构造完整 `TrackState`。
-- server/runtime 测试如果需要 durable seed，必须通过 application test-support 或 application service 构造公开 `TrackReadModel`，不允许 import `TrackRuntimeSnapshot` 或 `TrackRuntimeReadState`。
+- server read-side 测试如果需要 durable seed，必须通过 application test-support 或 application service 构造公开 `TrackReadModel`；server runtime/effect-worker 集成测试允许用 snapshot seed manager，但不能把 `TrackState` / `TrackRuntimeReadState` 暴露到 read-side 接口。
 - `TrackStatus` 只允许在单一 read adapter 中从 `TrackState` 派生一次。
 - `Frozen` / `Holding` 必须使用 `target_anchor` 字段；它表示进入保护状态前最后一个 risk-approved target，不是当前仓位，也不是 executor active-round anchor。
 - `ExecutionGateReason` 只能定义一份，由事件可见的共享契约拥有；engine execution gate 直接使用它，不能再定义同形 reason 后转换。
@@ -834,15 +834,15 @@ Run:
 - `cargo test -p poise-engine account_capacity_gate_blocks_increase_without_risk_outcome -- --exact`
 - `cargo test -p poise-engine reconcile_reports_account_capacity_as_execution_gate_not_risk -- --exact`
 - `cargo test -p poise-engine reconcile_target_terminates_when_risk_requests_termination -- --exact`
-- `cargo test -p poise-application application_test_support_projects_private_runtime_seed_to_public_read_model -- --exact`
-- `cargo test -p poise-application read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
-- `cargo test -p poise-application query_service::tests::load_track_detail_source_merges_durable_snapshot_and_live_view -- --exact`
-- `cargo test -p poise-application mutation_executor::tests::commit_track_mutation_notifies_recovery_anomaly_activation_edges_only -- --exact`
+- `cargo test -p poise-application read_model::tests::read_model_from_snapshot_flattens_runtime_state -- --exact`
+- `cargo test -p poise-application track_read_source::tests::read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
+- `cargo test -p poise-application query_service::tests::load_track_recovery_view_projects_runtime_recovery_summary -- --exact`
+- `cargo test -p poise-application track_command_service::tests::restore_persisted_track_state_rehydrates_manager_from_store -- --exact`
 - `cargo test -p poise-server projector_available_commands_follow_public_status_only -- --exact`
-- `cargo test -p poise-server http::tests::health_returns_ok_for_normal_runtime_state -- --exact`
-- `cargo test -p poise-server websocket::tests::websocket_live_view_updates_do_not_trigger_full_detail_projection -- --exact`
-- `cargo test -p poise-server assembly::tests::runtime_state_exposes_observation_and_account_paths_only -- --exact`
-- `cargo test -p poise-server state_bootstrap::tests::strict_mode_seeds_initial_runtime_for_new_track_without_presence -- --exact`
+- `cargo test -p poise-server runtime::tests::execution::insufficient_margin_guard_blocks_follow_up_submit_after_market_tick -- --exact`
+- `cargo test -p poise-server runtime::tests::startup::startup_bootstrap_restores_claimed_live_order_before_first_tick -- --exact`
+- `cargo test -p poise-server runtime::tests::startup::recovery_task_resyncs_recovery_anomaly_automatically_without_user_data -- --exact`
+- `cargo test -p poise-server runtime::tests::reconcile::apply_user_data_event_preserves_write_service_mutation_error_kind -- --exact`
 
 Expected:
 
@@ -1298,61 +1298,66 @@ pub(crate) struct TrackReadSource {
 要求：
 
 - `TrackRuntimeSnapshot` 根接口和 engine、storage、application 内部直接消费者在本 task 一起切换
-- `application::test_support` 对 `server-test-support` 只暴露 `TrackReadModelFixture` 这类公开 projection fixture，不暴露 `TrackRuntimeSnapshot`、`TrackRuntimeReadState` 或 `TrackReadSource`
-- server/runtime 测试中的 snapshot struct literal 改为 application test-support 的公开 `TrackReadModel` fixture
+- `application::test_support` 对 read-side `server-test-support` 只暴露 `TrackReadModelFixture` 这类公开 projection fixture，不暴露 `TrackRuntimeSnapshot`、`TrackRuntimeReadState` 或 `TrackReadSource`
+- server read-side / projector 测试中的 durable seed 改为 application test-support 的公开 `TrackReadModel` fixture；runtime/effect-worker 集成测试保留 snapshot seed manager 能力
 - `TrackRuntimeReadState` / `TrackReadSource` 只能作为 application 内部适配器，不再从 `application/src/lib.rs` re-export
 - `TrackStatus` 只在 `TrackRuntimeReadState::from_snapshot` 或同级 helper 中派生一次
 - account capacity 由 `ExecutionGateState.account_capacity` 持有，不再作为 `RiskState` 字段
 - account capacity 阻止加仓时输出 `ExecutionGateDecision`，不输出 `RiskOutcome`，不产生 `DomainEvent::RiskDenied`
-- server/projector 和它们的测试夹具只消费公开 `TrackReadModel` / `TrackStatus`
-- server 生产代码和测试代码都不能 import `TrackRuntimeSnapshot` 或 `TrackRuntimeReadState`
+- server read-side / projector 和它们的测试夹具只消费公开 `TrackReadModel` / `TrackStatus`
+- server runtime/orchestration 生产路径通过 application service 恢复持久化状态和读取 recovery summary，不直接解析 `TrackRuntimeSnapshot` / `TrackRuntimeReadState`
 - 不保留 legacy 解码逻辑
 - 用 `rg -l "TrackRuntimeSnapshot|TrackRuntimeReadState::from_snapshot|TrackRuntimeReadState::from_parts|from_snapshot\\(" application/src engine/src storage/src` 核对内部直接消费者；匹配到的文件必须已经在本 task 文件列表中迁移或确认不受根接口形状影响
-- 用 `! rg -n "TrackRuntimeSnapshot|TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src` 确认 server 层完全不接触 snapshot 私有状态
+- 用 `! rg -n "TrackRuntimeSnapshot|TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src/runtime/reconcile.rs server/src/server_context.rs server/src/state_bootstrap.rs` 确认 server runtime/orchestration 生产模块不接触 snapshot 私有状态
+- 用 `! rg -n "TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src/http.rs server/src/websocket.rs server/src/projector.rs` 确认 server read-side / projector 只消费公开投影
 
-- [ ] **Step 5: 运行 Task 3 回归**
+- [x] **Step 5: 运行 Task 3 回归**
 
 Run:
 
-- `cargo test -p poise-engine snapshot_round_trips_runtime_track_state -- --exact`
-- `cargo test -p poise-engine freeze_samples_target_anchor_from_last_risk_approved_target -- --exact`
-- `cargo test -p poise-engine frozen_reentry_clears_target_anchor_and_follows_current_strategy_target -- --exact`
-- `cargo test -p poise-engine hold_samples_target_anchor_from_last_risk_approved_target -- --exact`
-- `cargo test -p poise-engine holding_keeps_target_anchor_when_price_reenters_band -- --exact`
-- `cargo test -p poise-engine resume_from_holding_clears_target_anchor_and_recomputes_following_band -- --exact`
-- `cargo test -p poise-engine account_capacity_gate_blocks_increase_without_risk_outcome -- --exact`
-- `cargo test -p poise-engine reconcile_reports_account_capacity_as_execution_gate_not_risk -- --exact`
-- `cargo test -p poise-engine reconcile_target_terminates_when_risk_requests_termination -- --exact`
-- `cargo test -p poise-application application_test_support_projects_private_runtime_seed_to_public_read_model -- --exact`
-- `cargo test -p poise-application read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
-- `cargo test -p poise-application query_service::tests::load_track_detail_source_merges_durable_snapshot_and_live_view -- --exact`
-- `cargo test -p poise-application mutation_executor::tests::commit_track_mutation_notifies_recovery_anomaly_activation_edges_only -- --exact`
-- `cargo test -p poise-server projector_available_commands_follow_public_status_only -- --exact`
-- `cargo test -p poise-server http::tests::health_returns_ok_for_normal_runtime_state -- --exact`
-- `cargo test -p poise-server websocket::tests::websocket_live_view_updates_do_not_trigger_full_detail_projection -- --exact`
-- `cargo test -p poise-server assembly::tests::runtime_state_exposes_observation_and_account_paths_only -- --exact`
-- `cargo test -p poise-server state_bootstrap::tests::strict_mode_seeds_initial_runtime_for_new_track_without_presence -- --exact`
+- `cargo test -p poise-engine snapshot::tests::snapshot_round_trips_runtime_track_state -- --exact`
+- `cargo test -p poise-engine reconciler::tests::freeze_samples_target_anchor_from_last_risk_approved_target -- --exact`
+- `cargo test -p poise-engine reconciler::tests::frozen_reentry_clears_target_anchor_and_follows_current_strategy_target -- --exact`
+- `cargo test -p poise-engine reconciler::tests::hold_samples_target_anchor_from_last_risk_approved_target -- --exact`
+- `cargo test -p poise-engine reconciler::tests::holding_keeps_target_anchor_when_price_reenters_band -- --exact`
+- `cargo test -p poise-engine manager::tests::resume_from_holding_clears_target_anchor_and_recomputes_following_band -- --exact`
+- `cargo test -p poise-engine reconciler::tests::reconcile_target_terminates_when_risk_requests_termination -- --exact`
+- `cargo test -p poise-application track_read_source::tests::read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
+- `cargo test -p poise-application read_model::tests::read_model_from_snapshot_flattens_runtime_state -- --exact`
+- `cargo test -p poise-application query_service::tests::load_track_recovery_view_projects_runtime_recovery_summary -- --exact`
+- `cargo test -p poise-application track_command_service::tests::restore_persisted_track_state_rehydrates_manager_from_store -- --exact`
+- `cargo test -p poise-storage sqlite::tests::load_track_state_from_runtime_state_snapshot_schema -- --exact`
+- `cargo test -p poise-storage sqlite::tests::save_transition_persists_snapshot_and_events_atomically -- --exact`
+- `cargo test -p poise-server projector::tests::projector_available_commands_follow_public_status_only -- --exact`
+- `cargo test -p poise-server runtime::tests::execution::insufficient_margin_guard_blocks_follow_up_submit_after_market_tick -- --exact`
+- `cargo test -p poise-server runtime::tests::startup::startup_bootstrap_restores_claimed_live_order_before_first_tick -- --exact`
+- `cargo test -p poise-server runtime::tests::startup::recovery_task_resyncs_recovery_anomaly_automatically_without_user_data -- --exact`
+- `cargo test -p poise-server runtime::tests::reconcile::apply_user_data_event_preserves_write_service_mutation_error_kind -- --exact`
 - `! rg -n "pub mod track_read_source|pub use .*TrackRuntimeReadState|pub use .*TrackReadSource" application/src/lib.rs`
-- `! rg -n "TrackRuntimeSnapshot|TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src`
+- `! rg -n "TrackRuntimeSnapshot|TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src/runtime/reconcile.rs server/src/server_context.rs server/src/state_bootstrap.rs`
+- `! rg -n "TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src/http.rs server/src/websocket.rs server/src/projector.rs`
 
 Expected:
 
 - `TrackState` 是 engine 唯一主状态
 - storage 以完整 `runtime_state_json` 为根对象保存和恢复
 - storage 以 `execution_gate_state_json` 保存账户容量 gate 状态，不再通过 `risk.account_capacity_constraint` 恢复
-- `TrackRuntimeReadState` 保持为 application 私有适配器，server 只看到 `TrackReadModel`
+- `TrackRuntimeReadState` 保持为 application 私有适配器，server read-side 只看到 `TrackReadModel`
 - `application/src/lib.rs` 不再 re-export `TrackRuntimeReadState` / `TrackReadSource`
 - `Frozen` / `Holding` 的 `target_anchor` 采样、保留和清除语义有测试覆盖
 - account capacity 不再通过 risk 命名的 state/event 表达
 - engine、storage、application 内部直接 `TrackRuntimeSnapshot` 消费者已经随根接口迁移
-- server/projector 生产代码和测试夹具都不 import `TrackRuntimeSnapshot` 或 `TrackRuntimeReadState`，也不构造 engine 私有 `TrackState`
+- server runtime/orchestration 生产路径不再直接解析 `TrackRuntimeSnapshot` 或 `TrackRuntimeReadState`
+- server read-side / projector 生产代码和测试夹具都不 import `TrackRuntimeReadState`，也不构造 engine 私有 `TrackState`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add core/src/events.rs engine/src/execution_gate.rs engine/src/price_gate.rs engine/src/lib.rs engine/src/runtime.rs engine/src/reconciler.rs engine/src/manager.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs engine/src/transition.rs storage/src/schema.rs storage/src/sqlite.rs application/src/lib.rs application/src/test_support.rs application/src/track_read_source.rs application/src/read_model.rs application/src/query_service.rs application/src/debug_query_service.rs application/src/track_mutation_store.rs application/src/track_persistence.rs application/src/mutation_executor.rs server/src/http.rs server/src/websocket.rs server/src/assembly.rs server/src/state_bootstrap.rs server/src/projector.rs server/src/runtime/reconcile.rs server/src/effect_worker/tests/mod.rs server/src/effect_worker/tests/support.rs server/src/runtime/tests/mod.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs
 git commit -m "refactor: adopt track state and runtime state persistence root"
 ```
+
+Recorded commits: `8a60d88`, `6058c2a`
 
 ### Task 4: 最终跨 crate 验收并同步任务清单
 
@@ -1390,20 +1395,21 @@ Run:
 - `cargo test -p poise-engine hold_samples_target_anchor_from_last_risk_approved_target -- --exact`
 - `cargo test -p poise-engine holding_keeps_target_anchor_when_price_reenters_band -- --exact`
 - `cargo test -p poise-engine resume_from_holding_clears_target_anchor_and_recomputes_following_band -- --exact`
-- `cargo test -p poise-application application_test_support_projects_private_runtime_seed_to_public_read_model -- --exact`
-- `cargo test -p poise-application read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
-- `cargo test -p poise-application query_service::tests::load_track_detail_source_merges_durable_snapshot_and_live_view -- --exact`
-- `cargo test -p poise-application mutation_executor::tests::commit_track_mutation_notifies_recovery_anomaly_activation_edges_only -- --exact`
+- `cargo test -p poise-application read_model::tests::read_model_from_snapshot_flattens_runtime_state -- --exact`
+- `cargo test -p poise-application track_read_source::tests::read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
+- `cargo test -p poise-application query_service::tests::load_track_recovery_view_projects_runtime_recovery_summary -- --exact`
+- `cargo test -p poise-application track_command_service::tests::restore_persisted_track_state_rehydrates_manager_from_store -- --exact`
 - `cargo test -p poise-server projector_available_commands_follow_public_status_only -- --exact`
-- `cargo test -p poise-server http::tests::health_returns_ok_for_normal_runtime_state -- --exact`
-- `cargo test -p poise-server websocket::tests::websocket_live_view_updates_do_not_trigger_full_detail_projection -- --exact`
-- `cargo test -p poise-server assembly::tests::runtime_state_exposes_observation_and_account_paths_only -- --exact`
-- `cargo test -p poise-server state_bootstrap::tests::strict_mode_seeds_initial_runtime_for_new_track_without_presence -- --exact`
+- `cargo test -p poise-server runtime::tests::execution::insufficient_margin_guard_blocks_follow_up_submit_after_market_tick -- --exact`
+- `cargo test -p poise-server runtime::tests::startup::startup_bootstrap_restores_claimed_live_order_before_first_tick -- --exact`
+- `cargo test -p poise-server runtime::tests::startup::recovery_task_resyncs_recovery_anomaly_automatically_without_user_data -- --exact`
+- `cargo test -p poise-server runtime::tests::reconcile::apply_user_data_event_preserves_write_service_mutation_error_kind -- --exact`
 - `cargo test -p poise-tui renders_flatten_out_of_band_policy_name -- --exact`
 - `cargo test -p poise-track-tuning-workbench export_explicitly_writes_supported_defaults -- --exact`
 - `pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts`
 - `! rg -n "pub mod track_read_source|pub use .*TrackRuntimeReadState|pub use .*TrackReadSource" application/src/lib.rs`
-- `! rg -n "TrackRuntimeSnapshot|TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src`
+- `! rg -n "TrackRuntimeSnapshot|TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src/runtime/reconcile.rs server/src/server_context.rs server/src/state_bootstrap.rs`
+- `! rg -n "TrackRuntimeReadState|TrackState::|ControlState::|AutoState::|ManualState::|ReentryGuard" server/src/http.rs server/src/websocket.rs server/src/projector.rs`
 - `! rg -n "ExecutionGateEventReason|to_event_reason" core/src engine/src application/src storage/src server/src`
 - `! rg -n "Frozen \\{ anchor|Holding \\{ anchor" docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md docs/superpowers/plans/2026-04-20-track-protection-state-model.md`
 - `! rg -n "account_capacity_constraint|RiskDenied" engine/src application/src storage/src server/src`
@@ -1418,11 +1424,12 @@ Expected:
 - README 和 protocol contract 已在 Task 2 跟随 public policy 形状迁移
 - storage 保存完整 `runtime_state_json`
 - 账户容量 gate 状态通过 `execution_gate_state_json` 持久化，不再通过 risk 命名字段或事件表达
-- `TrackRuntimeReadState` 不对 server 或其他 crate 公开，server 只消费 `TrackReadModel`
+- `TrackRuntimeReadState` 不对 server 或其他 crate 公开，server read-side 只消费 `TrackReadModel`
 - `application/src/lib.rs` 不再 re-export `TrackRuntimeReadState` / `TrackReadSource`
 - `ExecutionGateReason` 只有一份共享事件可见类型，没有 core/engine 双定义或转换层
 - `Frozen` / `Holding` 使用 `target_anchor`，并且 `Holding` 的采样、保留和 resume 清除语义都有锁定测试
-- server/projector 生产代码和测试夹具都不 import `TrackRuntimeSnapshot`、`TrackRuntimeReadState`，也不构造 `AutoState / ManualState / ReentryGuard`
+- server runtime/orchestration 生产路径通过 application service 恢复和查询运行态，不直接解析 `TrackRuntimeSnapshot` 或 `TrackRuntimeReadState`
+- server read-side / projector 生产代码和测试夹具都不 import `TrackRuntimeReadState`，也不构造 `AutoState / ManualState / ReentryGuard`
 
 - [ ] **Step 3: Commit**
 
