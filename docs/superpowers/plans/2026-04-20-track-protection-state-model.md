@@ -115,7 +115,7 @@
 - Test: `core/src/strategy.rs`
 - Test: `core/src/risk.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住新增契约**
+- [x] **Step 1: 先写失败测试，锁住新增契约**
 
 ```rust
 #[test]
@@ -151,7 +151,7 @@ fn band_reentry_price_confirmation_is_boundary_specific() {
         &BandRecoverPolicy::PriceConfirm { bps: 500 },
         75_000.0,
         80_800.0,
-        BandBoundary::Below,
+        BandBoundary::Above,
     ));
 }
 
@@ -182,13 +182,13 @@ fn evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
-- `cargo test -p poise-core band_protection_policy_parses_flatten_with_price_confirm -- --exact`
-- `cargo test -p poise-core band_reentry_price_confirmation_is_boundary_specific -- --exact`
-- `cargo test -p poise-core evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached -- --exact`
+- `cargo test -p poise-core strategy::tests::band_protection_policy_parses_flatten_with_price_confirm -- --exact`
+- `cargo test -p poise-core strategy::tests::band_reentry_price_confirmation_is_boundary_specific -- --exact`
+- `cargo test -p poise-core risk::tests::evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached -- --exact`
 
 Expected:
 
@@ -196,7 +196,7 @@ Expected:
 - `band_reentry_price_confirmed` 和 `evaluate_risk_outcome` 尚不存在
 - 旧 `TrackConfig.out_of_band_policy`、`flatten_reentry_confirmed`、`evaluate_risk` 不变，因此不会触发跨 crate 半迁移
 
-- [ ] **Step 3: 新增 core 类型和新 helper，不修改旧共享函数**
+- [x] **Step 3: 新增 core 类型和新 helper，不修改旧共享函数**
 
 `core/src/strategy.rs`：
 
@@ -287,13 +287,13 @@ pub fn evaluate_risk_outcome(intent: &ExposureIntent, budget: &CapacityBudget) -
 - 不修改 engine 消费方
 - 不在第一版 `RiskOutcome` 增加账户容量不足分支；账户容量不足的 owner 在 Task 3 明确迁移到 `ExecutionGate / AccountCapacityGate`
 
-- [ ] **Step 4: 运行 Task 1 回归**
+- [x] **Step 4: 运行 Task 1 回归**
 
 Run:
 
-- `cargo test -p poise-core band_protection_policy_parses_flatten_with_price_confirm -- --exact`
-- `cargo test -p poise-core band_reentry_price_confirmation_is_boundary_specific -- --exact`
-- `cargo test -p poise-core evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached -- --exact`
+- `cargo test -p poise-core strategy::tests::band_protection_policy_parses_flatten_with_price_confirm -- --exact`
+- `cargo test -p poise-core strategy::tests::band_reentry_price_confirmation_is_boundary_specific -- --exact`
+- `cargo test -p poise-core risk::tests::evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached -- --exact`
 
 Expected:
 
@@ -301,12 +301,14 @@ Expected:
 - 旧共享函数仍可被现有 engine 调用
 - Task 1 结束时没有半迁移共享边界
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/src/strategy.rs core/src/risk.rs
 git commit -m "refactor: introduce band policy and risk outcome contracts"
 ```
+
+Recorded commit: `7caa270`
 
 ### Task 2: 迁移 `BandProtectionPolicy` 配置边界和全部消费者
 
