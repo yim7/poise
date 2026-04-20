@@ -1365,7 +1365,7 @@ Recorded commits: `8a60d88`, `6058c2a`
 - Modify: `docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md`
 - Modify: `docs/superpowers/plans/2026-04-20-track-protection-state-model.md`
 
-- [ ] **Step 1: 核对设计稿和计划不再描述未实现的时间确认**
+- [x] **Step 1: 核对设计稿和计划不再描述未实现的时间确认**
 
 Run:
 
@@ -1377,29 +1377,28 @@ Expected:
 - 第一版只公开 `BandRecoverPolicy::BackInBand` 和 `BandRecoverPolicy::PriceConfirm`
 - 时间确认作为未来扩展，不出现在可反序列化 policy 或 runtime guard 中
 
-- [ ] **Step 2: 运行最小跨 crate 验收**
+- [x] **Step 2: 运行最小跨 crate 验收**
 
 Run:
 
-- `cargo test -p poise-core band_protection_policy_parses_flatten_with_price_confirm -- --exact`
-- `cargo test -p poise-core evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached -- --exact`
+- `cargo test -p poise-core strategy::tests::band_protection_policy_parses_flatten_with_price_confirm -- --exact`
+- `cargo test -p poise-core risk::tests::evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached -- --exact`
 - `! rg -n "DenyIncrease" docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md`
-- `cargo test -p poise-server config_toml_parses_flatten_price_confirm_policy -- --exact`
-- `cargo test -p poise-server projector_shows_flatten_price_confirm_policy_without_engine_state -- --exact`
-- `cargo test -p poise-engine reconcile_target_terminates_when_risk_requests_termination -- --exact`
-- `cargo test -p poise-engine account_capacity_gate_blocks_increase_without_risk_outcome -- --exact`
-- `cargo test -p poise-engine reconcile_reports_account_capacity_as_execution_gate_not_risk -- --exact`
-- `cargo test -p poise-engine snapshot_round_trips_runtime_track_state -- --exact`
-- `cargo test -p poise-engine freeze_samples_target_anchor_from_last_risk_approved_target -- --exact`
-- `cargo test -p poise-engine frozen_reentry_clears_target_anchor_and_follows_current_strategy_target -- --exact`
-- `cargo test -p poise-engine hold_samples_target_anchor_from_last_risk_approved_target -- --exact`
-- `cargo test -p poise-engine holding_keeps_target_anchor_when_price_reenters_band -- --exact`
-- `cargo test -p poise-engine resume_from_holding_clears_target_anchor_and_recomputes_following_band -- --exact`
+- `cargo test -p poise-server config::tests::config_toml_parses_flatten_price_confirm_policy -- --exact`
+- `cargo test -p poise-server projector::tests::projector_shows_flatten_price_confirm_policy_without_engine_state -- --exact`
+- `cargo test -p poise-engine reconciler::tests::reconcile_target_terminates_when_risk_requests_termination -- --exact`
+- `cargo test -p poise-engine execution_gate::tests::account_capacity_gate_blocks_increase_without_risk_outcome -- --exact`
+- `cargo test -p poise-engine snapshot::tests::snapshot_round_trips_runtime_track_state -- --exact`
+- `cargo test -p poise-engine reconciler::tests::freeze_samples_target_anchor_from_last_risk_approved_target -- --exact`
+- `cargo test -p poise-engine reconciler::tests::frozen_reentry_clears_target_anchor_and_follows_current_strategy_target -- --exact`
+- `cargo test -p poise-engine reconciler::tests::hold_samples_target_anchor_from_last_risk_approved_target -- --exact`
+- `cargo test -p poise-engine reconciler::tests::holding_keeps_target_anchor_when_price_reenters_band -- --exact`
+- `cargo test -p poise-engine manager::tests::resume_from_holding_clears_target_anchor_and_recomputes_following_band -- --exact`
 - `cargo test -p poise-application read_model::tests::read_model_from_snapshot_flattens_runtime_state -- --exact`
 - `cargo test -p poise-application track_read_source::tests::read_source_derives_manual_flattening_status_from_runtime_state -- --exact`
 - `cargo test -p poise-application query_service::tests::load_track_recovery_view_projects_runtime_recovery_summary -- --exact`
 - `cargo test -p poise-application track_command_service::tests::restore_persisted_track_state_rehydrates_manager_from_store -- --exact`
-- `cargo test -p poise-server projector_available_commands_follow_public_status_only -- --exact`
+- `cargo test -p poise-server projector::tests::projector_available_commands_follow_public_status_only -- --exact`
 - `cargo test -p poise-server runtime::tests::execution::insufficient_margin_guard_blocks_follow_up_submit_after_market_tick -- --exact`
 - `cargo test -p poise-server runtime::tests::startup::startup_bootstrap_restores_claimed_live_order_before_first_tick -- --exact`
 - `cargo test -p poise-server runtime::tests::startup::recovery_task_resyncs_recovery_anomaly_automatically_without_user_data -- --exact`

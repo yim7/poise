@@ -539,7 +539,7 @@ impl MutationExecutor {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            self.sync_account_capacity_constraint(&mut manager, id)
+            self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let transition = if mode.allows_follow_up_reconcile() {
                 manager
@@ -893,7 +893,7 @@ impl MutationExecutor {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            self.sync_account_capacity_constraint(&mut manager, id)
+            self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let plan = manager
                 .recover_submit_effect(
@@ -955,7 +955,7 @@ impl MutationExecutor {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            self.sync_account_capacity_constraint(&mut manager, id)
+            self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let result = mutate(&mut manager).map_err(|error| {
                 manager
@@ -1021,7 +1021,7 @@ impl MutationExecutor {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            self.sync_account_capacity_constraint(&mut manager, id)
+            self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let result = mutate(&mut manager).map_err(|error| {
                 manager
@@ -1059,7 +1059,7 @@ impl MutationExecutor {
         let previous_snapshot = manager
             .snapshot(id)
             .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-        self.sync_account_capacity_constraint(&mut manager, id)
+        self.sync_account_capacity_gate_state(&mut manager, id)
             .map_err(TrackMutationError::Mutation)?;
         mutate(&mut manager).map_err(|error| {
             manager
@@ -1073,7 +1073,7 @@ impl MutationExecutor {
         self.mutation_guards.lock(id).await
     }
 
-    fn sync_account_capacity_constraint(&self, manager: &mut TrackManager, id: &str) -> Result<()> {
+    fn sync_account_capacity_gate_state(&self, manager: &mut TrackManager, id: &str) -> Result<()> {
         let Some(mut snapshot) = manager.snapshot(id) else {
             return Ok(());
         };

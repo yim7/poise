@@ -327,12 +327,7 @@ mod tests {
                 "realized_pnl_day": "2026-03-29",
                 "realized_pnl_today": -20.0,
                 "realized_pnl_cumulative": -30.0,
-                "unrealized_pnl": -5.0,
-                "account_capacity_constraint": {
-                    "increase_blocked": false,
-                    "blocked_reason": null,
-                    "max_increase_notional": null
-                }
+                "unrealized_pnl": -5.0
             },
             "observed": {
                 "strategy_price": 95.0,
