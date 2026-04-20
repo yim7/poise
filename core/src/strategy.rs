@@ -34,6 +34,22 @@ pub enum OutOfBandPolicy {
     Terminate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandProtectionPolicy {
+    Freeze { recover: BandRecoverPolicy },
+    Hold,
+    Flatten { recover: BandRecoverPolicy },
+    Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandRecoverPolicy {
+    BackInBand,
+    PriceConfirm { bps: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BandStatus {
     InBand {
@@ -130,6 +146,36 @@ pub fn band_status(price: f64, config: &TrackConfig) -> BandStatus {
     } else {
         BandStatus::InBand {
             target: desired_exposure(price, config),
+        }
+    }
+}
+
+pub fn band_reentry_price_confirmed(
+    price: f64,
+    recover: &BandRecoverPolicy,
+    lower_price: f64,
+    upper_price: f64,
+    boundary: BandBoundary,
+) -> bool {
+    match recover {
+        BandRecoverPolicy::BackInBand => {
+            price >= lower_price - f64::EPSILON && price <= upper_price + f64::EPSILON
+        }
+        BandRecoverPolicy::PriceConfirm { bps } => {
+            let band_width = upper_price - lower_price;
+            if !band_width.is_finite() || band_width <= f64::EPSILON {
+                return false;
+            }
+
+            let confirmation_distance = band_width * f64::from(*bps) / 10_000.0;
+            match boundary {
+                BandBoundary::Below => {
+                    price >= lower_price + confirmation_distance - f64::EPSILON
+                }
+                BandBoundary::Above => {
+                    price <= upper_price - confirmation_distance + f64::EPSILON
+                }
+            }
         }
     }
 }
@@ -236,6 +282,43 @@ mod tests {
         let policy: OutOfBandPolicy = serde_json::from_str("\"flatten\"").unwrap();
 
         assert_eq!(serde_json::to_string(&policy).unwrap(), "\"flatten\"");
+    }
+
+    #[test]
+    fn band_protection_policy_parses_flatten_with_price_confirm() {
+        let policy: BandProtectionPolicy = serde_json::from_value(serde_json::json!({
+            "flatten": {
+                "recover": {
+                    "price_confirm": { "bps": 500 }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            policy,
+            BandProtectionPolicy::Flatten {
+                recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
+            }
+        ));
+    }
+
+    #[test]
+    fn band_reentry_price_confirmation_is_boundary_specific() {
+        assert!(band_reentry_price_confirmed(
+            75_290.0,
+            &BandRecoverPolicy::PriceConfirm { bps: 500 },
+            75_000.0,
+            80_800.0,
+            BandBoundary::Below,
+        ));
+        assert!(!band_reentry_price_confirmed(
+            80_700.0,
+            &BandRecoverPolicy::PriceConfirm { bps: 500 },
+            75_000.0,
+            80_800.0,
+            BandBoundary::Above,
+        ));
     }
 
     #[test]

@@ -31,6 +31,19 @@ pub enum RiskDecision {
     Deny { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum RiskOutcome {
+    Allow { target: Exposure },
+    Cap { target: Exposure },
+    Terminate(RiskTerminationCause),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RiskTerminationCause {
+    DailyLossLimit,
+    TotalLossLimit,
+}
+
 pub fn validate_capacity_budget(budget: &CapacityBudget) -> Result<(), String> {
     if !budget.max_notional.is_finite() || budget.max_notional <= 0.0 {
         return Err("max_notional must be finite and > 0".to_string());
@@ -68,6 +81,34 @@ pub fn evaluate_risk(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskDe
     }
 
     RiskDecision::Allow(intent.target.clone())
+}
+
+pub fn evaluate_risk_outcome(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskOutcome {
+    let daily_loss_amount =
+        (-(intent.loss_guard.net_realized_pnl_today + intent.loss_guard.unrealized_pnl)).max(0.0);
+    let total_loss_amount = (-(intent.loss_guard.net_realized_pnl_cumulative
+        + intent.loss_guard.unrealized_pnl))
+        .max(0.0);
+
+    if daily_loss_amount >= budget.daily_loss_limit {
+        return RiskOutcome::Terminate(RiskTerminationCause::DailyLossLimit);
+    }
+    if total_loss_amount >= budget.total_loss_limit {
+        return RiskOutcome::Terminate(RiskTerminationCause::TotalLossLimit);
+    }
+
+    if budget.max_notional > 0.0 && intent.unit_notional > 0.0 {
+        let max_abs_exposure = budget.max_notional / intent.unit_notional;
+        if intent.target.0.abs() > max_abs_exposure {
+            return RiskOutcome::Cap {
+                target: Exposure(intent.target.0.signum() * max_abs_exposure),
+            };
+        }
+    }
+
+    RiskOutcome::Allow {
+        target: intent.target.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +197,32 @@ mod tests {
         let decision = evaluate_risk(&intent, &budget());
 
         assert_eq!(decision, RiskDecision::Cap(Exposure(0.0)));
+    }
+
+    #[test]
+    fn evaluate_risk_outcome_terminates_when_daily_loss_limit_is_breached() {
+        let decision = evaluate_risk_outcome(
+            &ExposureIntent {
+                current: Exposure(4.0),
+                target: Exposure(8.0),
+                unit_notional: 375.0,
+                loss_guard: LossGuardSnapshot {
+                    net_realized_pnl_today: -90.0,
+                    net_realized_pnl_cumulative: -90.0,
+                    unrealized_pnl: -35.0,
+                },
+            },
+            &CapacityBudget {
+                max_notional: 3_000.0,
+                daily_loss_limit: 120.0,
+                total_loss_limit: 500.0,
+            },
+        );
+
+        assert_eq!(
+            decision,
+            RiskOutcome::Terminate(RiskTerminationCause::DailyLossLimit)
+        );
     }
 
     #[test]
