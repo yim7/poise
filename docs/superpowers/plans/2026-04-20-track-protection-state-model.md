@@ -1430,9 +1430,11 @@ Expected:
 - server runtime/orchestration 生产路径通过 application service 恢复和查询运行态，不直接解析 `TrackRuntimeSnapshot` 或 `TrackRuntimeReadState`
 - server read-side / projector 生产代码和测试夹具都不 import `TrackRuntimeReadState`，也不构造 `AutoState / ManualState / ReentryGuard`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md docs/superpowers/plans/2026-04-20-track-protection-state-model.md
 git commit -m "docs: sync track state model semantics and rollout plan"
 ```
+
+Recorded commit: `358b9a8`
