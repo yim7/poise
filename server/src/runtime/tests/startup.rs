@@ -1185,7 +1185,11 @@ async fn background_health_check_marks_market_data_stale_without_follow_up_event
     let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
     let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
     let mut snapshot = test_snapshot();
-    snapshot.status = TrackStatus::Paused;
+    snapshot.runtime_state = poise_engine::runtime::TrackState::Paused {
+        suspended: poise_engine::runtime::ControlState::Automatic(
+            poise_engine::runtime::AutoState::FollowingBand,
+        ),
+    };
     snapshot.desired_exposure = None;
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     let fixture = runtime_fixture_with_options(
@@ -1233,7 +1237,11 @@ async fn fresh_tick_resets_market_data_health_deadline_before_timeout() {
     let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
     let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
     let mut snapshot = test_snapshot();
-    snapshot.status = TrackStatus::Paused;
+    snapshot.runtime_state = poise_engine::runtime::TrackState::Paused {
+        suspended: poise_engine::runtime::ControlState::Automatic(
+            poise_engine::runtime::AutoState::FollowingBand,
+        ),
+    };
     snapshot.desired_exposure = None;
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     let fixture = runtime_fixture_with_options(

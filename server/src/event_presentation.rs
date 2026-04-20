@@ -53,7 +53,15 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
         DomainEvent::RiskCapApplied { intended, capped } => {
             format!("risk cap {:.4} -> {:.4}", intended.0, capped.0)
         }
-        DomainEvent::RiskDenied { reason } => format!("risk denied: {reason}"),
+        DomainEvent::ExecutionGateApplied { reason } => match reason {
+            poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
+                required_notional,
+                available_notional,
+            } => format!(
+                "execution gate: account capacity insufficient {:.4} > {:.4}",
+                required_notional, available_notional
+            ),
+        },
         DomainEvent::ReplacementGateApplied { reason } => match reason {
             poise_core::events::ReplacementGateReason::RoundedMatch => {
                 "replacement gate: candidate matches working order after rounding".into()
@@ -71,7 +79,7 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
 
 fn project_domain_event_level(event: &DomainEvent) -> ActivityLevelView {
     match event {
-        DomainEvent::RiskDenied { .. } => ActivityLevelView::Warn,
+        DomainEvent::ExecutionGateApplied { .. } => ActivityLevelView::Warn,
         _ => ActivityLevelView::Info,
     }
 }

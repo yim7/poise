@@ -1350,7 +1350,7 @@ total_loss_limit = 600.0
         let manager = manager_handle.read().await;
         let track = manager.get_track("btc-core").unwrap();
 
-        assert_eq!(track.status(), &poise_engine::runtime::TrackStatus::Paused);
+        assert_eq!(track.status(), poise_engine::runtime::TrackStatus::Paused);
     }
 
     #[tokio::test]
@@ -1473,7 +1473,10 @@ total_loss_limit = 600.0
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.status, poise_engine::runtime::TrackStatus::Frozen);
+        assert_eq!(
+            snapshot.status(),
+            poise_engine::runtime::TrackStatus::Frozen
+        );
         assert_eq!(snapshot.observed.strategy_price, None);
     }
 

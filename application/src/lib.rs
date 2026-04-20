@@ -16,7 +16,7 @@ pub mod track_mutation_store;
 pub mod track_observation_service;
 pub mod track_persistence;
 pub mod track_query_store;
-pub mod track_read_source;
+mod track_read_source;
 
 pub use account_monitor::{AccountMonitor, AccountMonitorConfig};
 pub use account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
@@ -44,4 +44,3 @@ pub use track_persistence::{
     PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
 };
 pub use track_query_store::TrackQueryStore;
-pub use track_read_source::{TrackReadSource, TrackRuntimeReadState};

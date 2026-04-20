@@ -73,7 +73,7 @@ mod tests {
                 .await
                 .snapshot("btc-core")
                 .unwrap()
-                .status,
+                .status(),
             poise_engine::runtime::TrackStatus::Paused
         );
     }

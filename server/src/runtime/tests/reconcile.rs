@@ -157,7 +157,11 @@ async fn recovery_task_does_not_refresh_market_data_health() {
     let started_at = Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap();
     let clock = Arc::new(MutableClock(Arc::new(Mutex::new(started_at))));
     let mut snapshot = test_snapshot();
-    snapshot.status = TrackStatus::Paused;
+    snapshot.runtime_state = poise_engine::runtime::TrackState::Paused {
+        suspended: poise_engine::runtime::ControlState::Automatic(
+            poise_engine::runtime::AutoState::FollowingBand,
+        ),
+    };
     snapshot.desired_exposure = None;
     snapshot.executor_state = ExecutorState::empty(test_server_time());
     snapshot.observed.last_tick_at = Some(started_at);

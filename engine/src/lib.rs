@@ -1,4 +1,5 @@
 pub mod command;
+pub mod execution_gate;
 pub mod execution_plan;
 pub mod executor;
 pub mod ledger;

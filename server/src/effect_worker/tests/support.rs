@@ -66,10 +66,13 @@ pub(crate) fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
     TrackRuntimeSnapshot {
         track_id: TrackId::new("btc-core"),
         restore_revision: snapshot_restore_revision(&config),
-        status: TrackStatus::Active,
+        runtime_state: poise_engine::runtime::TrackState::Running(
+            poise_engine::runtime::ControlState::Automatic(
+                poise_engine::runtime::AutoState::FollowingBand,
+            ),
+        ),
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(6.0)),
-        manual_target_override: None,
         executor_state: ExecutorState {
             active_round: Some(poise_engine::runtime::ExecutionRound {
                 desired_exposure: Exposure(6.0),
@@ -97,7 +100,7 @@ pub(crate) fn snapshot_with_recovery_anomaly() -> TrackRuntimeSnapshot {
             },
         },
         replacement_gate_reason: None,
-        price_execution_block_reason: None,
+        execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: ObservedState {
@@ -118,10 +121,13 @@ pub(crate) fn snapshot_with_working_order() -> TrackRuntimeSnapshot {
     TrackRuntimeSnapshot {
         track_id: TrackId::new("btc-core"),
         restore_revision: snapshot_restore_revision(&config),
-        status: TrackStatus::Active,
+        runtime_state: poise_engine::runtime::TrackState::Running(
+            poise_engine::runtime::ControlState::Automatic(
+                poise_engine::runtime::AutoState::FollowingBand,
+            ),
+        ),
         current_exposure: Exposure(2.0),
         desired_exposure: Some(Exposure(6.0)),
-        manual_target_override: None,
         executor_state: ExecutorState {
             active_round: Some(poise_engine::runtime::ExecutionRound {
                 desired_exposure: Exposure(6.0),
@@ -157,7 +163,7 @@ pub(crate) fn snapshot_with_working_order() -> TrackRuntimeSnapshot {
             },
         },
         replacement_gate_reason: None,
-        price_execution_block_reason: None,
+        execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: ObservedState {
@@ -181,13 +187,16 @@ pub(crate) fn snapshot_with_submit_pending_order(
     TrackRuntimeSnapshot {
         track_id: TrackId::new("btc-core"),
         restore_revision: snapshot_restore_revision(&config),
-        status: TrackStatus::Active,
+        runtime_state: poise_engine::runtime::TrackState::Running(
+            poise_engine::runtime::ControlState::Automatic(
+                poise_engine::runtime::AutoState::FollowingBand,
+            ),
+        ),
         current_exposure: Exposure(0.0),
         desired_exposure: Some(poise_core::strategy::desired_exposure(
             reference_price,
             &config,
         )),
-        manual_target_override: None,
         executor_state: ExecutorState {
             active_round: Some(poise_engine::runtime::ExecutionRound {
                 desired_exposure: poise_core::strategy::desired_exposure(reference_price, &config),
@@ -217,7 +226,7 @@ pub(crate) fn snapshot_with_submit_pending_order(
             },
         },
         replacement_gate_reason: None,
-        price_execution_block_reason: None,
+        execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: ObservedState {

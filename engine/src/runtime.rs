@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use poise_core::events::ReplacementGateReason;
 use poise_core::risk::{
-    CapacityBudget, ExposureIntent, LossGuardSnapshot, RiskDecision, evaluate_risk,
+    CapacityBudget, ExposureIntent, LossGuardSnapshot, RiskOutcome, RiskTerminationCause,
+    evaluate_risk_outcome,
 };
-use poise_core::strategy::TrackConfig;
+use poise_core::strategy::{BandBoundary, TrackConfig};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
+use crate::execution_gate::ExecutionGateState;
 use crate::executor::{
     ExecutionMode, ExecutionReason, INVENTORY_CORE_SLOT, OrderRole, OrderSlot, RecoveryAnomaly,
 };
@@ -44,22 +46,116 @@ pub enum StrategyPriceStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct AccountCapacityConstraint {
-    pub increase_blocked: bool,
-    pub blocked_reason: Option<String>,
-    pub max_increase_notional: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RiskState {
     pub unrealized_pnl: f64,
-    pub account_capacity_constraint: AccountCapacityConstraint,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppliedRiskCap {
     pub intended: Exposure,
     pub capped: Exposure,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TrackState {
+    WaitingMarketData,
+    Running(ControlState),
+    Paused { suspended: ControlState },
+    Terminated { cause: TerminationCause },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ControlState {
+    Automatic(AutoState),
+    Manual(ManualState),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AutoState {
+    FollowingBand,
+    Frozen {
+        target_anchor: Exposure,
+        guard: ReentryGuard,
+    },
+    Holding {
+        target_anchor: Exposure,
+    },
+    Flattening {
+        guard: ReentryGuard,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ManualState {
+    Flattened,
+    TargetOverride { target: Exposure },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReentryGuard {
+    pub boundary: BandBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TerminationCause {
+    ManualCommand,
+    Band(BandTerminationCause),
+    Risk(RiskTerminationCause),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BandTerminationCause {
+    OutOfRange,
+}
+
+impl TrackState {
+    pub fn status(&self) -> TrackStatus {
+        match self {
+            Self::WaitingMarketData => TrackStatus::WaitingMarketData,
+            Self::Running(ControlState::Automatic(AutoState::FollowingBand)) => TrackStatus::Active,
+            Self::Running(ControlState::Automatic(AutoState::Frozen { .. })) => TrackStatus::Frozen,
+            Self::Running(ControlState::Automatic(AutoState::Holding { .. })) => {
+                TrackStatus::Holding
+            }
+            Self::Running(ControlState::Automatic(AutoState::Flattening { .. })) => {
+                TrackStatus::Flattening
+            }
+            Self::Running(ControlState::Manual(ManualState::Flattened)) => {
+                TrackStatus::ManualFlattening
+            }
+            Self::Running(ControlState::Manual(ManualState::TargetOverride { .. })) => {
+                TrackStatus::Active
+            }
+            Self::Paused { .. } => TrackStatus::Paused,
+            Self::Terminated { .. } => TrackStatus::Terminated,
+        }
+    }
+
+    pub fn manual_target_override(&self) -> Option<Exposure> {
+        match self {
+            Self::Running(ControlState::Manual(ManualState::Flattened)) => Some(Exposure(0.0)),
+            Self::Running(ControlState::Manual(ManualState::TargetOverride { target })) => {
+                Some(target.clone())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn suspended_control_state(&self) -> Option<&ControlState> {
+        match self {
+            Self::Running(control) => Some(control),
+            Self::Paused { suspended } => Some(suspended),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminated(&self) -> bool {
+        matches!(self, Self::Terminated { .. })
+    }
+
+    pub fn is_paused(&self) -> bool {
+        matches!(self, Self::Paused { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -216,16 +312,16 @@ pub struct TrackRuntime {
     pub(crate) config: TrackConfig,
     pub(crate) budget: CapacityBudget,
     pub(crate) exchange_rules: ExchangeRules,
-    pub(crate) status: TrackStatus,
+    pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
     // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) active_risk_cap: Option<AppliedRiskCap>,
-    pub(crate) manual_target_override: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
     pub(crate) ledger_state: TrackLedgerState,
     pub(crate) risk_state: RiskState,
+    pub(crate) execution_gate_state: ExecutionGateState,
     pub(crate) strategy_price: Option<f64>,
     pub(crate) strategy_price_status: StrategyPriceStatus,
     pub(crate) mark_price: Option<f64>,
@@ -284,15 +380,15 @@ impl TrackRuntime {
             config,
             budget,
             exchange_rules,
-            status: TrackStatus::WaitingMarketData,
+            track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
             desired_exposure: None,
             active_risk_cap: None,
-            manual_target_override: None,
             executor_state: ExecutorState::empty(started_at),
             replacement_gate_reason: None,
             ledger_state: TrackLedgerState::default(),
             risk_state: RiskState::default(),
+            execution_gate_state: ExecutionGateState::open(),
             strategy_price: None,
             strategy_price_status: StrategyPriceStatus::Stale,
             mark_price: None,
@@ -320,8 +416,12 @@ impl TrackRuntime {
         &self.instrument
     }
 
-    pub fn status(&self) -> &TrackStatus {
-        &self.status
+    pub fn status(&self) -> TrackStatus {
+        self.track_state.status()
+    }
+
+    pub fn manual_target_override(&self) -> Option<Exposure> {
+        self.track_state.manual_target_override()
     }
 
     pub fn budget(&self) -> &CapacityBudget {
@@ -363,13 +463,12 @@ impl TrackRuntime {
         TrackRuntimeSnapshot {
             track_id: self.id.clone(),
             restore_revision: TrackRestoreRevision::for_track(&self.instrument, &self.config),
-            status: self.status.clone(),
+            runtime_state: self.track_state.clone(),
             current_exposure: self.current_exposure.clone(),
             desired_exposure: self.desired_exposure.clone(),
-            manual_target_override: self.manual_target_override.clone(),
             executor_state: self.executor_state.clone(),
             replacement_gate_reason: self.replacement_gate_reason.clone(),
-            price_execution_block_reason: None,
+            execution_gate_state: self.execution_gate_state.clone(),
             ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
             observed: ObservedState {
@@ -402,15 +501,15 @@ impl TrackRuntime {
         }
         validate_snapshot_invariants(snapshot)?;
 
-        self.status = snapshot.status.clone();
+        self.track_state = snapshot.runtime_state.clone();
         self.current_exposure = snapshot.current_exposure.clone();
         self.desired_exposure = snapshot.desired_exposure.clone();
         self.active_risk_cap = None;
-        self.manual_target_override = snapshot.manual_target_override.clone();
         self.executor_state = snapshot.executor_state.clone();
         self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.ledger_state = snapshot.ledger_state.clone();
         self.risk_state = snapshot.risk.clone();
+        self.execution_gate_state = snapshot.execution_gate_state.clone();
         self.strategy_price = None;
         self.strategy_price_status = StrategyPriceStatus::Stale;
         self.mark_price = None;
@@ -423,7 +522,6 @@ impl TrackRuntime {
         self.last_tick_at = None;
         self.market_data_stale_since = snapshot.observed.market_data_stale_since;
         let mut expected_snapshot = snapshot.clone();
-        expected_snapshot.price_execution_block_reason = None;
         expected_snapshot.observed.strategy_price = None;
         expected_snapshot.observed.strategy_price_status = StrategyPriceStatus::Stale;
         expected_snapshot.observed.mark_price = None;
@@ -494,7 +592,7 @@ impl TrackRuntime {
     }
 
     fn live_desired_exposure(&self) -> Option<Exposure> {
-        if matches!(self.status, TrackStatus::Paused) {
+        if self.track_state.is_paused() {
             return None;
         }
 
@@ -510,7 +608,7 @@ impl TrackRuntime {
         self.tick_timeout_secs = constraints.tick_timeout_secs;
 
         if let Some(target) = self.desired_exposure.clone() {
-            let decision = evaluate_risk(
+            let decision = evaluate_risk_outcome(
                 &ExposureIntent {
                     current: self.current_exposure.clone(),
                     target,
@@ -526,8 +624,8 @@ impl TrackRuntime {
                 &self.budget,
             );
             self.desired_exposure = Some(match decision {
-                RiskDecision::Allow(exposure) | RiskDecision::Cap(exposure) => exposure,
-                RiskDecision::Deny { .. } => Exposure(0.0),
+                RiskOutcome::Allow { target } | RiskOutcome::Cap { target } => target,
+                RiskOutcome::Terminate(_) => Exposure(0.0),
             });
             return;
         }
@@ -542,8 +640,10 @@ impl TrackRuntime {
 }
 
 fn validate_snapshot_invariants(snapshot: &TrackRuntimeSnapshot) -> Result<()> {
-    if matches!(snapshot.status, TrackStatus::ManualFlattening)
-        && snapshot.manual_target_override != Some(Exposure(0.0))
+    if matches!(
+        snapshot.runtime_state,
+        TrackState::Running(ControlState::Manual(ManualState::Flattened))
+    ) && snapshot.runtime_state.manual_target_override() != Some(Exposure(0.0))
     {
         anyhow::bail!("manual_flattening requires manual_target_override = 0");
     }
@@ -558,7 +658,9 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{
+        BandBoundary, BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig,
+    };
     use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
@@ -571,9 +673,10 @@ mod tests {
     use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
-        AccountCapacityConstraint, ExecutionRound, ExecutionSlot, ExecutionStats,
-        ExecutorDiagnostics, ExecutorState, QuoteHealthView, RiskState, SlotState,
-        StrategyPriceStatus, TrackRuntime, TrackStatus, WorkingOrder,
+        AutoState, ControlState, ExecutionRound, ExecutionSlot, ExecutionStats,
+        ExecutorDiagnostics, ExecutorState, ManualState, QuoteHealthView, ReentryGuard, RiskState,
+        SlotState, StrategyPriceStatus, TerminationCause, TrackRuntime, TrackState, TrackStatus,
+        WorkingOrder,
     };
     use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate};
 
@@ -685,6 +788,59 @@ mod tests {
         }
     }
 
+    fn runtime_state_from_status(runtime: &TrackRuntime, status: TrackStatus) -> TrackState {
+        let target_anchor = runtime
+            .desired_exposure
+            .clone()
+            .unwrap_or_else(|| runtime.current_exposure.clone());
+        match status {
+            TrackStatus::WaitingMarketData => TrackState::WaitingMarketData,
+            TrackStatus::Active => {
+                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
+            }
+            TrackStatus::Frozen => {
+                TrackState::Running(ControlState::Automatic(AutoState::Frozen {
+                    target_anchor,
+                    guard: ReentryGuard {
+                        boundary: BandBoundary::Below,
+                    },
+                }))
+            }
+            TrackStatus::Holding => {
+                TrackState::Running(ControlState::Automatic(AutoState::Holding {
+                    target_anchor,
+                }))
+            }
+            TrackStatus::Flattening => {
+                TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+                    guard: ReentryGuard {
+                        boundary: BandBoundary::Below,
+                    },
+                }))
+            }
+            TrackStatus::ManualFlattening => {
+                TrackState::Running(ControlState::Manual(ManualState::Flattened))
+            }
+            TrackStatus::Terminated => TrackState::Terminated {
+                cause: TerminationCause::ManualCommand,
+            },
+            TrackStatus::Paused => TrackState::Paused {
+                suspended: ControlState::Automatic(AutoState::FollowingBand),
+            },
+        }
+    }
+
+    fn set_runtime_status(runtime: &mut TrackRuntime, status: TrackStatus) {
+        runtime.track_state = runtime_state_from_status(runtime, status);
+    }
+
+    fn following_band_state_json() -> serde_json::Value {
+        serde_json::to_value(TrackState::Running(ControlState::Automatic(
+            AutoState::FollowingBand,
+        )))
+        .unwrap()
+    }
+
     #[test]
     fn initial_from_seed_uses_engine_defaults_for_fresh_runtime() {
         let started_at = Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap();
@@ -703,7 +859,7 @@ mod tests {
 
         assert_eq!(runtime.id().as_str(), "track-1");
         assert_eq!(runtime.instrument().symbol, "BTCUSDT");
-        assert_eq!(runtime.status(), &TrackStatus::WaitingMarketData);
+        assert_eq!(runtime.status(), TrackStatus::WaitingMarketData);
         assert_eq!(runtime.budget().max_notional, 6_000.0);
         assert_eq!(runtime.tick_timeout_secs, 45);
         assert_eq!(runtime.snapshot().current_exposure, Exposure(0.0));
@@ -712,7 +868,7 @@ mod tests {
     #[test]
     fn apply_post_restore_constraints_clears_desired_exposure_when_total_loss_limit_is_breached() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
+        set_runtime_status(&mut runtime, TrackStatus::Active);
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
         runtime.ledger_state.gross_realized_pnl_cumulative = -1_050.0;
@@ -734,7 +890,7 @@ mod tests {
     #[test]
     fn prepare_bootstrap_snapshot_restores_and_applies_constraints_without_exchange_rules_input() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
+        set_runtime_status(&mut runtime, TrackStatus::Active);
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
         runtime.ledger_state.gross_realized_pnl_cumulative = -1_050.0;
@@ -761,12 +917,11 @@ mod tests {
     }
 
     #[test]
-    fn margin_guard_snapshot_round_trips_executor_state() {
+    fn runtime_snapshot_round_trips_executor_and_execution_gate_state() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
+        set_runtime_status(&mut runtime, TrackStatus::ManualFlattening);
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
-        runtime.manual_target_override = Some(Exposure(0.0));
         runtime.last_tick_at = Some(
             DateTime::parse_from_rfc3339("2026-03-29T08:00:00Z")
                 .unwrap()
@@ -781,13 +936,11 @@ mod tests {
         runtime.replacement_gate_reason = Some(ReplacementGateReason::RoundedMatch);
         runtime.risk_state = RiskState {
             unrealized_pnl: -0.5,
-            account_capacity_constraint: AccountCapacityConstraint {
-                increase_blocked: true,
-                blocked_reason: Some("insufficient_margin".into()),
-                max_increase_notional: Some(1_500.0),
-            },
-            ..RiskState::default()
         };
+        runtime
+            .execution_gate_state
+            .account_capacity
+            .available_notional = Some(1_500.0);
         runtime.ledger_state = TrackLedgerState {
             gross_realized_pnl_today: 1.0,
             gross_realized_pnl_cumulative: 2.0,
@@ -820,10 +973,10 @@ mod tests {
         restored.tick_timeout_secs = 45;
         restored.restore_from_snapshot(&snapshot).unwrap();
 
-        assert_eq!(restored.status, TrackStatus::Active);
+        assert_eq!(restored.status(), TrackStatus::Active);
         assert_eq!(restored.current_exposure, Exposure(4.0));
         assert_eq!(restored.desired_exposure, Some(Exposure(6.0)));
-        assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(restored.manual_target_override(), Some(Exposure(0.0)));
         assert_eq!(restored.last_tick_at, None);
         assert_eq!(
             restored.market_data_stale_since,
@@ -835,10 +988,7 @@ mod tests {
             restored.executor_state.stats.started_at,
             runtime.executor_state.stats.started_at
         );
-        assert_eq!(
-            restored.risk_state.account_capacity_constraint,
-            runtime.risk_state.account_capacity_constraint
-        );
+        assert_eq!(restored.execution_gate_state, runtime.execution_gate_state);
     }
 
     #[test]
@@ -875,7 +1025,7 @@ mod tests {
     #[test]
     fn snapshot_round_trips_active_round_and_diagnostics() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
+        set_runtime_status(&mut runtime, TrackStatus::Active);
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
         runtime.executor_state = test_executor_state();
@@ -904,7 +1054,7 @@ mod tests {
     #[test]
     fn restore_from_snapshot_detects_missing_field_via_round_trip() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
+        set_runtime_status(&mut runtime, TrackStatus::Active);
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
         runtime.active_risk_cap = Some(super::AppliedRiskCap {
@@ -926,7 +1076,7 @@ mod tests {
     #[test]
     fn restore_from_snapshot_restores_durable_desired_exposure_but_not_live_quote_or_live_target() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::Active;
+        set_runtime_status(&mut runtime, TrackStatus::Active);
         runtime.current_exposure = Exposure(4.0);
         runtime.desired_exposure = Some(Exposure(6.0));
         runtime.strategy_price = Some(96.0);
@@ -973,49 +1123,33 @@ mod tests {
     }
 
     #[test]
-    fn restore_from_snapshot_rejects_manual_flattening_without_zero_override() {
+    fn execution_gate_state_round_trips_account_capacity_json() {
         let mut runtime = test_runtime();
-        runtime.status = TrackStatus::ManualFlattening;
-        runtime.desired_exposure = Some(Exposure(0.0));
-        runtime.manual_target_override = None;
-
-        let snapshot = runtime.snapshot();
-        let mut fresh = test_runtime();
-        let error = fresh.restore_from_snapshot(&snapshot).unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("manual_flattening requires manual_target_override = 0"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn margin_guard_snapshot_round_trips_account_capacity_constraint_json() {
-        let mut runtime = test_runtime();
-        runtime.risk_state.account_capacity_constraint = AccountCapacityConstraint {
-            increase_blocked: true,
-            blocked_reason: Some("insufficient_margin".into()),
-            max_increase_notional: Some(900.0),
-        };
+        runtime
+            .execution_gate_state
+            .account_capacity
+            .available_notional = Some(900.0);
 
         let snapshot = runtime.snapshot();
         let serialized = serde_json::to_value(&snapshot).unwrap();
 
         assert_eq!(
-            serialized["risk"]["account_capacity_constraint"],
+            serialized["execution_gate_state"]["account_capacity"],
             json!({
-                "increase_blocked": true,
-                "blocked_reason": "insufficient_margin",
-                "max_increase_notional": 900.0
+                "available_notional": 900.0
             })
         );
 
         let restored: TrackRuntimeSnapshot = serde_json::from_value(serialized).unwrap();
         assert_eq!(
-            restored.risk.account_capacity_constraint,
-            snapshot.risk.account_capacity_constraint
+            restored
+                .execution_gate_state
+                .account_capacity
+                .available_notional,
+            snapshot
+                .execution_gate_state
+                .account_capacity
+                .available_notional
         );
     }
 
@@ -1023,18 +1157,13 @@ mod tests {
     fn margin_guard_snapshot_rejects_legacy_snapshot_without_restore_revision() {
         let legacy_snapshot = json!({
             "track_id": "track-1",
-            "status": "active",
+            "runtime_state": following_band_state_json(),
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
             "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
             "risk": {
-                "unrealized_pnl": 0.0,
-                "account_capacity_constraint": {
-                    "increase_blocked": false,
-                    "blocked_reason": null,
-                    "max_increase_notional": null
-                }
+                "unrealized_pnl": 0.0
             },
             "observed": {
                 "strategy_price": 96.0,
@@ -1059,7 +1188,7 @@ mod tests {
     fn restore_from_legacy_snapshot_with_realized_fields_is_rejected() {
         let legacy_snapshot = json!({
             "track_id": "track-1",
-            "status": "active",
+            "runtime_state": following_band_state_json(),
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
             "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
@@ -1076,12 +1205,7 @@ mod tests {
                 "realized_pnl_day": "2026-04-08",
                 "realized_pnl_today": 120.0,
                 "realized_pnl_cumulative": 300.0,
-                "unrealized_pnl": -30.0,
-                "account_capacity_constraint": {
-                    "increase_blocked": false,
-                    "blocked_reason": null,
-                    "max_increase_notional": null
-                }
+                "unrealized_pnl": -30.0
             },
             "observed": {}
         });
@@ -1104,19 +1228,14 @@ mod tests {
                 &Instrument::new(Venue::Binance, "BTCUSDT"),
                 &test_runtime_seed().track_config
             ).as_str(),
-            "status": "active",
+            "runtime_state": following_band_state_json(),
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
             "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
             "ledger_state": TrackLedgerState::default(),
             "risk": {
-                "unrealized_pnl": 0.0,
-                "account_capacity_constraint": {
-                    "increase_blocked": false,
-                    "blocked_reason": null,
-                    "max_increase_notional": null
-                }
+                "unrealized_pnl": 0.0
             },
             "observed": {
                 "strategy_price": 96.0,
@@ -1139,18 +1258,13 @@ mod tests {
                 &Instrument::new(Venue::Binance, "BTCUSDT"),
                 &test_runtime_seed().track_config
             ).as_str(),
-            "status": "active",
+            "runtime_state": following_band_state_json(),
             "current_exposure": 4.0,
             "desired_exposure": 6.0,
             "executor_state": serde_json::to_value(test_executor_state()).unwrap(),
             "replacement_gate_reason": null,
             "risk": {
-                "unrealized_pnl": -0.5,
-                "account_capacity_constraint": {
-                    "increase_blocked": false,
-                    "blocked_reason": null,
-                    "max_increase_notional": null
-                }
+                "unrealized_pnl": -0.5
             },
             "ledger_state": {
                 "realized_pnl_day": "2026-03-29",

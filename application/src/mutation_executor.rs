@@ -18,9 +18,7 @@ use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
-use poise_engine::runtime::{
-    AccountCapacityConstraint, QuoteHealthView, StrategyTargetView, TrackLiveView,
-};
+use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView};
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
@@ -35,7 +33,7 @@ pub struct TrackServiceSet {
 }
 
 pub trait AccountCapacityGuard: Send + Sync {
-    fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint;
+    fn available_notional_for(&self, instrument: &Instrument) -> Option<f64>;
 }
 
 pub trait RecoveryAnomalyObserver: Send + Sync {
@@ -1073,15 +1071,21 @@ impl MutationExecutor {
         let Some(track) = manager.get_track(id) else {
             return Ok(());
         };
-        let constraint = self.account_margin_guard.constraint_for(track.instrument());
-        if snapshot.risk.account_capacity_constraint == constraint {
+        let available_notional = self
+            .account_margin_guard
+            .available_notional_for(track.instrument());
+        if snapshot
+            .execution_gate_state
+            .account_capacity
+            .available_notional
+            == available_notional
+        {
             return Ok(());
         }
-        snapshot.risk.account_capacity_constraint = AccountCapacityConstraint {
-            increase_blocked: constraint.increase_blocked,
-            blocked_reason: constraint.blocked_reason,
-            max_increase_notional: constraint.max_increase_notional,
-        };
+        snapshot
+            .execution_gate_state
+            .account_capacity
+            .available_notional = available_notional;
         manager.restore_track_state(&snapshot)
     }
 
@@ -1257,11 +1261,8 @@ pub(crate) mod test_support {
     pub(crate) struct NoopGuard;
 
     impl AccountCapacityGuard for NoopGuard {
-        fn constraint_for(
-            &self,
-            _instrument: &Instrument,
-        ) -> poise_engine::runtime::AccountCapacityConstraint {
-            poise_engine::runtime::AccountCapacityConstraint::default()
+        fn available_notional_for(&self, _instrument: &Instrument) -> Option<f64> {
+            None
         }
     }
 
@@ -1573,6 +1574,7 @@ mod tests {
     use poise_engine::executor::RecoveryAnomaly;
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
+    use poise_engine::runtime::{AutoState, ControlState, TrackState};
     use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::TrackId;
     use tokio::sync::broadcast;
@@ -1727,7 +1729,8 @@ mod tests {
                 .cloned()
                 .expect("seeded track should exist");
             let mut updated = track.snapshot();
-            updated.status = poise_engine::runtime::TrackStatus::Active;
+            updated.runtime_state =
+                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
             updated.current_exposure = poise_core::types::Exposure(2.0);
             updated.desired_exposure = Some(poise_core::types::Exposure(2.0));
             manager

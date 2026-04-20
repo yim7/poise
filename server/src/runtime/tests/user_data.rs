@@ -423,13 +423,16 @@ async fn terminal_order_update_broadcasts_snapshot_updated_when_reconcile_emits_
             &Instrument::new(Venue::Binance, "BTCUSDT"),
             &config,
         ),
-        status: TrackStatus::Active,
+        runtime_state: poise_engine::runtime::TrackState::Running(
+            poise_engine::runtime::ControlState::Automatic(
+                poise_engine::runtime::AutoState::FollowingBand,
+            ),
+        ),
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(0.0)),
-        manual_target_override: None,
         executor_state: ExecutorState::empty(test_server_time()),
         replacement_gate_reason: None,
-        price_execution_block_reason: None,
+        execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: poise_engine::snapshot::ObservedState {

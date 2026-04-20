@@ -1218,13 +1218,18 @@ async fn insufficient_margin_guard_blocks_follow_up_submit_after_market_tick() {
         transition
             .events
             .iter()
-            .any(|event| matches!(event, DomainEvent::RiskDenied { .. }))
+            .any(|event| matches!(event, DomainEvent::ExecutionGateApplied { .. }))
     );
     assert_eq!(transition.effects, vec![ExecutionAction::NoOp]);
     assert_eq!(exchange.submitted_orders.lock().unwrap().len(), 1);
 
     let instance = current_instance(&state).await;
-    assert!(instance.risk.account_capacity_constraint.increase_blocked);
+    assert!(matches!(
+        instance.execution_gate_state.last_decision,
+        poise_engine::execution_gate::ExecutionGateDecision::NoSubmit {
+            reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient { .. },
+        }
+    ));
     let source = TrackQueryService::new(
         persistence.clone() as Arc<dyn TrackQueryStore>,
         crate::test_support::test_prepared_registry("BTCUSDT"),

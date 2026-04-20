@@ -764,13 +764,16 @@ pub(crate) fn test_snapshot_with_config(config: TrackConfig) -> TrackRuntimeSnap
     let mut snapshot = TrackRuntimeSnapshot {
         track_id: TrackId::new("BTCUSDT"),
         restore_revision: snapshot_restore_revision(&config),
-        status: TrackStatus::Active,
+        runtime_state: poise_engine::runtime::TrackState::Running(
+            poise_engine::runtime::ControlState::Automatic(
+                poise_engine::runtime::AutoState::FollowingBand,
+            ),
+        ),
         current_exposure: Exposure(0.0),
         desired_exposure: Some(Exposure(6.0)),
-        manual_target_override: None,
         executor_state: ExecutorState::empty(test_server_time()),
         replacement_gate_reason: None,
-        price_execution_block_reason: None,
+        execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
         ledger_state: Default::default(),
         risk: RiskState::default(),
         observed: poise_engine::snapshot::ObservedState {

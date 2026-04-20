@@ -8,8 +8,8 @@ use poise_engine::ledger::TrackLedgerState;
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{SlotState, StrategyPriceStatus, TrackStatus};
 
-use crate::TrackReadSource;
 use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent};
+use crate::track_read_source::TrackReadSource;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackReadModel {
@@ -164,16 +164,17 @@ mod tests {
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, StrategyPriceStatus,
-        TrackLiveView, TrackStatus, WorkingOrder,
+        AutoState, ControlState, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
+        SlotState, StrategyPriceStatus, TrackLiveView, TrackState, TrackStatus, WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
     use super::TrackReadModel;
+    use crate::TrackReadDefinition;
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
-    use crate::{TrackReadDefinition, TrackReadSource, TrackRuntimeReadState};
+    use crate::track_read_source::{TrackReadSource, TrackRuntimeReadState};
 
     fn test_track_config() -> TrackConfig {
         TrackConfig {
@@ -188,6 +189,10 @@ mod tests {
                 recover: BandRecoverPolicy::BackInBand,
             },
         }
+    }
+
+    fn active_runtime_state() -> TrackState {
+        TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
     }
 
     #[test]
@@ -210,10 +215,9 @@ mod tests {
                     &Instrument::new(Venue::Binance, "BTCUSDT"),
                     &track_config,
                 ),
-                status: TrackStatus::Active,
+                runtime_state: active_runtime_state(),
                 current_exposure: Exposure(3.5),
                 desired_exposure: Some(Exposure(4.0)),
-                manual_target_override: None,
                 executor_state: ExecutorState {
                     active_round: Some(poise_engine::runtime::ExecutionRound {
                         desired_exposure: Exposure(4.0),
@@ -250,7 +254,7 @@ mod tests {
                 },
                 ledger_state: Default::default(),
                 replacement_gate_reason: None,
-                price_execution_block_reason: None,
+                execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
                 risk: RiskState {
                     unrealized_pnl: 0.0,
                     ..RiskState::default()
@@ -386,10 +390,9 @@ mod tests {
                         &Instrument::new(Venue::Binance, "BTCUSDT"),
                         &track_config,
                     ),
-                    status: TrackStatus::Active,
+                    runtime_state: active_runtime_state(),
                     current_exposure: Exposure(1.0),
                     desired_exposure: Some(Exposure(4.0)),
-                    manual_target_override: None,
                     executor_state: ExecutorState {
                         active_round: None,
                         diagnostics: poise_engine::runtime::ExecutorDiagnostics::empty(),
@@ -403,7 +406,7 @@ mod tests {
                     },
                     ledger_state: Default::default(),
                     replacement_gate_reason: None,
-                    price_execution_block_reason: None,
+                    execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
                     risk: RiskState {
                         unrealized_pnl: 0.0,
                         ..RiskState::default()

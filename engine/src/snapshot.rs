@@ -5,9 +5,9 @@ use crate::persisted_runtime::TrackRestoreRevision;
 use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 
+use crate::execution_gate::ExecutionGateState;
 use crate::ledger::TrackLedgerState;
-use crate::price_gate::PriceExecutionBlockReason;
-use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackStatus};
+use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackState};
 use crate::track::TrackId;
 
 fn strategy_price_status_is_stale(status: &StrategyPriceStatus) -> bool {
@@ -37,19 +37,27 @@ pub struct ObservedState {
 pub struct TrackRuntimeSnapshot {
     pub track_id: TrackId,
     pub restore_revision: TrackRestoreRevision,
-    pub status: TrackStatus,
+    pub runtime_state: TrackState,
     pub current_exposure: Exposure,
     pub desired_exposure: Option<Exposure>,
-    #[serde(default)]
-    pub manual_target_override: Option<Exposure>,
     pub executor_state: ExecutorState,
     #[serde(default)]
     pub replacement_gate_reason: Option<ReplacementGateReason>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
+    #[serde(default)]
+    pub execution_gate_state: ExecutionGateState,
     pub ledger_state: TrackLedgerState,
     pub risk: RiskState,
     pub observed: ObservedState,
+}
+
+impl TrackRuntimeSnapshot {
+    pub fn status(&self) -> crate::runtime::TrackStatus {
+        self.runtime_state.status()
+    }
+
+    pub fn manual_target_override(&self) -> Option<Exposure> {
+        self.runtime_state.manual_target_override()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,9 +69,12 @@ pub struct PersistedTrackState {
 #[cfg(test)]
 mod tests {
     use crate::persisted_runtime::PersistedRuntimeCodec;
-    use crate::runtime::{StrategyPriceStatus, TrackRuntime};
+    use crate::runtime::{
+        AutoState, ControlState, ReentryGuard, StrategyPriceStatus, TrackRuntime, TrackState,
+    };
     use crate::track::{Instrument, TrackId, Venue};
     use poise_core::risk::CapacityBudget;
+    use poise_core::strategy::BandBoundary;
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure};
 
@@ -206,17 +217,65 @@ mod tests {
             chrono::Utc::now(),
             45,
         );
-        runtime.status = serde_json::from_str("\"manual_flattening\"").unwrap();
-        runtime.manual_target_override = Some(Exposure(0.0));
+        runtime.track_state =
+            TrackState::Running(ControlState::Manual(crate::runtime::ManualState::Flattened));
 
         let snapshot = runtime.snapshot();
         let json = PersistedRuntimeCodec::encode_snapshot(&snapshot).unwrap();
         let restored = PersistedRuntimeCodec::decode(json).unwrap();
 
         assert_eq!(
-            serde_json::to_string(&restored.status).unwrap(),
+            serde_json::to_string(&restored.status()).unwrap(),
             "\"manual_flattening\""
         );
-        assert_eq!(restored.manual_target_override, Some(Exposure(0.0)));
+        assert_eq!(restored.manual_target_override(), Some(Exposure(0.0)));
+    }
+
+    #[test]
+    fn snapshot_round_trips_runtime_track_state() {
+        let mut runtime = TrackRuntime::with_tick_timeout_secs(
+            TrackId::new("track-1"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze {
+                    recover: BandRecoverPolicy::BackInBand,
+                },
+            },
+            CapacityBudget {
+                max_notional: 6_000.0,
+                daily_loss_limit: 500.0,
+                total_loss_limit: 1_000.0,
+            },
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.01,
+                min_qty: 0.01,
+                min_notional: 5.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+            chrono::Utc::now(),
+            45,
+        );
+        runtime.track_state = TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+            guard: ReentryGuard {
+                boundary: BandBoundary::Below,
+            },
+        }));
+
+        let snapshot = runtime.snapshot();
+        let restored = PersistedRuntimeCodec::decode(
+            PersistedRuntimeCodec::encode_snapshot(&snapshot).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(restored.runtime_state, snapshot.runtime_state);
     }
 }

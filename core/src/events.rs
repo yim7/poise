@@ -15,6 +15,15 @@ pub enum ReplacementGateReason {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ExecutionGateReason {
+    AccountCapacityInsufficient {
+        required_notional: f64,
+        available_notional: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DomainEvent {
     ExposureTargetChanged {
         from: Exposure,
@@ -34,8 +43,8 @@ pub enum DomainEvent {
         intended: Exposure,
         capped: Exposure,
     },
-    RiskDenied {
-        reason: String,
+    ExecutionGateApplied {
+        reason: ExecutionGateReason,
     },
     ReplacementGateApplied {
         reason: ReplacementGateReason,

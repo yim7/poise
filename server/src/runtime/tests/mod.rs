@@ -30,7 +30,7 @@ use poise_engine::ports::{
     OrderStatus, Position, PriceTick, TrackLedgerUpdate, UserDataEvent, UserDataPayload,
 };
 use poise_engine::runtime::{
-    ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus, WorkingOrder,
+    ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, WorkingOrder,
 };
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 use poise_engine::track::{Instrument, TrackId, Venue};

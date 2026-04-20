@@ -324,8 +324,8 @@ impl SqliteStorage {
         effects: Vec<TrackEffect>,
         effect_status_update: Option<EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite> {
-        let status_json =
-            serde_json::to_string(&state.status).context("failed to serialize track status")?;
+        let runtime_state_json = serde_json::to_string(&state.runtime_state)
+            .context("failed to serialize runtime state")?;
         let executor_state_json = serde_json::to_string(&state.executor_state)
             .context("failed to serialize executor state")?;
         let replacement_gate_reason_json = state
@@ -334,7 +334,8 @@ impl SqliteStorage {
             .map(serde_json::to_string)
             .transpose()
             .context("failed to serialize replacement gate reason")?;
-        let price_execution_block_reason: Option<&str> = None;
+        let execution_gate_state_json = serde_json::to_string(&state.execution_gate_state)
+            .context("failed to serialize execution gate state")?;
         let ledger_state = state.ledger_state.clone();
         let ledger_state_json =
             serde_json::to_string(&ledger_state).context("failed to serialize ledger state")?;
@@ -362,13 +363,12 @@ impl SqliteStorage {
             "INSERT OR REPLACE INTO track_snapshots (
                 track_id,
                 restore_revision,
-                status,
+                runtime_state_json,
                 current_exposure,
                 desired_exposure,
-                manual_target_override,
                 executor_state_json,
                 replacement_gate_reason_json,
-                price_execution_block_reason,
+                execution_gate_state_json,
                 ledger_state_json,
                 unrealized_pnl,
                 strategy_price,
@@ -380,20 +380,16 @@ impl SqliteStorage {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 id,
                 state.restore_revision.as_str(),
-                status_json,
+                runtime_state_json,
                 state.current_exposure.0,
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
-                state
-                    .manual_target_override
-                    .as_ref()
-                    .map(|exposure| exposure.0),
                 executor_state_json,
                 replacement_gate_reason_json,
-                price_execution_block_reason,
+                execution_gate_state_json,
                 ledger_state_json,
                 state.risk.unrealized_pnl,
                 Option::<f64>::None,
@@ -522,10 +518,9 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT track_id, status, current_exposure, desired_exposure,
+                "SELECT track_id, runtime_state_json, current_exposure, desired_exposure,
                         restore_revision,
-                        manual_target_override,
-                        executor_state_json, replacement_gate_reason_json, price_execution_block_reason, ledger_state_json,
+                        executor_state_json, replacement_gate_reason_json, execution_gate_state_json, ledger_state_json,
                         unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
                         out_of_band_since, last_tick_at, market_data_stale_since
                  FROM track_snapshots
@@ -546,10 +541,9 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let snapshot = conn
             .query_row(
-                "SELECT track_id, status, current_exposure, desired_exposure,
+                "SELECT track_id, runtime_state_json, current_exposure, desired_exposure,
                         restore_revision,
-                        manual_target_override,
-                        executor_state_json, replacement_gate_reason_json, price_execution_block_reason, ledger_state_json,
+                        executor_state_json, replacement_gate_reason_json, execution_gate_state_json, ledger_state_json,
                         unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
                         out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
@@ -566,24 +560,23 @@ impl SqliteStorage {
     fn track_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRuntimeSnapshot> {
         let runtime = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
             track_id: TrackId::new(row.get::<_, String>(0)?),
-            status_json: row.get(1)?,
+            runtime_state_json: row.get(1)?,
             current_exposure: row.get(2)?,
             desired_exposure: row.get(3)?,
             restore_revision: row.get(4)?,
-            manual_target_override: row.get(5)?,
-            executor_state_json: row.get(6)?,
-            replacement_gate_reason_json: row.get(7)?,
-            price_execution_block_reason: row.get(8)?,
-            ledger_state_json: row.get(9)?,
-            unrealized_pnl: row.get(10)?,
-            strategy_price: row.get(11)?,
-            strategy_price_status: row.get(12)?,
-            mark_price: row.get(13)?,
-            best_bid: row.get(14)?,
-            best_ask: row.get(15)?,
-            out_of_band_since: row.get(16)?,
-            last_tick_at: row.get(17)?,
-            market_data_stale_since: row.get(18)?,
+            executor_state_json: row.get(5)?,
+            replacement_gate_reason_json: row.get(6)?,
+            execution_gate_state_json: row.get(7)?,
+            ledger_state_json: row.get(8)?,
+            unrealized_pnl: row.get(9)?,
+            strategy_price: row.get(10)?,
+            strategy_price_status: row.get(11)?,
+            mark_price: row.get(12)?,
+            best_bid: row.get(13)?,
+            best_ask: row.get(14)?,
+            out_of_band_since: row.get(15)?,
+            last_tick_at: row.get(16)?,
+            market_data_stale_since: row.get(17)?,
         })
         .map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -602,7 +595,7 @@ impl SqliteStorage {
     fn stored_track_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredTrackSnapshot> {
-        let updated_at: String = row.get(19)?;
+        let updated_at: String = row.get(18)?;
 
         Ok(StoredTrackSnapshot {
             snapshot: Self::track_snapshot_from_row(row)?,
@@ -616,10 +609,9 @@ impl SqliteStorage {
         let conn = Self::lock_connection(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT track_id, status, current_exposure, desired_exposure,
+                "SELECT track_id, runtime_state_json, current_exposure, desired_exposure,
                         restore_revision,
-                        manual_target_override,
-                        executor_state_json, replacement_gate_reason_json, price_execution_block_reason, ledger_state_json,
+                        executor_state_json, replacement_gate_reason_json, execution_gate_state_json, ledger_state_json,
                         unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
                         out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
@@ -1208,8 +1200,9 @@ mod tests {
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
-        ExecutionRound, ExecutionSlot, ExecutionStats, ExecutorDiagnostics, ExecutorState,
-        RiskState, SlotState, TrackStatus, WorkingOrder,
+        AutoState, ControlState, ExecutionRound, ExecutionSlot, ExecutionStats,
+        ExecutorDiagnostics, ExecutorState, RiskState, SlotState, TrackState, TrackStatus,
+        WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -1242,12 +1235,11 @@ mod tests {
         TrackRuntimeSnapshot {
             track_id: TrackId::new("test-1"),
             restore_revision: TrackRestoreRevision::for_track(&instrument, &config),
-            status: TrackStatus::Active,
+            runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
             current_exposure: Exposure(4.0),
             desired_exposure: Some(Exposure(6.0)),
-            manual_target_override: Some(Exposure(0.0)),
             replacement_gate_reason: None,
-            price_execution_block_reason: None,
+            execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
             ledger_state: TrackLedgerState {
                 realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
                 gross_realized_pnl_today: 12.5,
@@ -1661,7 +1653,7 @@ mod tests {
             loaded.restore_revision,
             TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
         );
-        assert_eq!(loaded.status, TrackStatus::Active);
+        assert_eq!(loaded.status(), TrackStatus::Active);
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(
@@ -2465,21 +2457,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_track_state_from_runtime_only_snapshot_schema() {
+    async fn load_track_state_from_runtime_state_snapshot_schema() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE track_snapshots (
                 track_id TEXT PRIMARY KEY,
                 restore_revision TEXT,
-                status TEXT NOT NULL,
+                runtime_state_json TEXT NOT NULL,
                 current_exposure REAL NOT NULL,
                 desired_exposure REAL,
-                manual_target_override REAL,
                 executor_state_json TEXT,
                 replacement_gate_reason_json TEXT,
+                execution_gate_state_json TEXT,
                 ledger_state_json TEXT,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,
-                reference_price REAL,
+                strategy_price REAL,
+                strategy_price_status TEXT NOT NULL,
+                mark_price REAL,
+                best_bid REAL,
+                best_ask REAL,
                 out_of_band_since TEXT,
                 last_tick_at TEXT,
                 market_data_stale_since TEXT,
@@ -2491,32 +2487,44 @@ mod tests {
             "INSERT INTO track_snapshots (
                 track_id,
                 restore_revision,
-                status,
+                runtime_state_json,
                 current_exposure,
                 desired_exposure,
-                manual_target_override,
                 executor_state_json,
                 replacement_gate_reason_json,
+                execution_gate_state_json,
                 ledger_state_json,
                 unrealized_pnl,
-                reference_price,
+                strategy_price,
+                strategy_price_status,
+                mark_price,
+                best_bid,
+                best_ask,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, 0, ?7, NULL, NULL, NULL, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6, ?7, 0, ?8, ?9, NULL, NULL, NULL, NULL, NULL, NULL, ?10)",
             params![
                 "test-1",
                 TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
                     .as_str(),
-                "\"active\"",
+                serde_json::to_string(&poise_engine::runtime::TrackState::Running(
+                    poise_engine::runtime::ControlState::Automatic(
+                        poise_engine::runtime::AutoState::FollowingBand,
+                    ),
+                ))
+                .unwrap(),
                 1.0,
                 serde_json::to_string(&ExecutorState::empty(
                     Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap()
                 ))
                 .unwrap(),
+                serde_json::to_string(&poise_engine::execution_gate::ExecutionGateState::open())
+                    .unwrap(),
                 serde_json::to_string(&TrackLedgerState::default()).unwrap(),
                 95.0,
+                "live",
                 "2026-03-25T00:00:00Z"
             ],
         )
@@ -2530,7 +2538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_migrates_legacy_reference_price_into_stale_price_state() {
+    async fn sqlite_rejects_legacy_reference_price_schema() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE track_snapshots (
@@ -2587,33 +2595,15 @@ mod tests {
         )
         .unwrap();
 
-        let storage = SqliteStorage::from_connection(conn).unwrap();
-        let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
-        let conn = storage.conn.lock().unwrap();
-        let columns = schema::table_columns(&conn, "track_snapshots").unwrap();
-
-        assert!(!columns.iter().any(|column| column == "reference_price"));
-        assert!(columns.iter().any(|column| column == "strategy_price"));
-        assert!(
-            columns
-                .iter()
-                .any(|column| column == "strategy_price_status")
-        );
-        assert!(columns.iter().any(|column| column == "mark_price"));
-        assert!(columns.iter().any(|column| column == "best_bid"));
-        assert!(columns.iter().any(|column| column == "best_ask"));
-        assert_eq!(loaded.observed.strategy_price, None);
-        assert_eq!(
-            loaded.observed.strategy_price_status,
-            poise_engine::runtime::StrategyPriceStatus::Stale
-        );
-        assert_eq!(loaded.observed.mark_price, None);
-        assert_eq!(loaded.observed.best_bid, None);
-        assert_eq!(loaded.observed.best_ask, None);
+        let error = match SqliteStorage::from_connection(conn) {
+            Ok(_) => panic!("legacy reference_price schema should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("runtime_state_json"));
     }
 
     #[tokio::test]
-    async fn sqlite_migration_preserves_existing_price_execution_block_reason() {
+    async fn sqlite_rejects_legacy_price_execution_block_reason_schema() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE track_snapshots (
@@ -2680,13 +2670,11 @@ mod tests {
         )
         .unwrap();
 
-        let storage = SqliteStorage::from_connection(conn).unwrap();
-        let loaded = storage.load_track_state("test-1").await.unwrap().unwrap();
-
-        assert_eq!(
-            loaded.price_execution_block_reason,
-            Some(poise_engine::price_gate::PriceExecutionBlockReason::MarkBookDivergence)
-        );
+        let error = match SqliteStorage::from_connection(conn) {
+            Ok(_) => panic!("legacy price_execution_block_reason schema should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("runtime_state_json"));
     }
 
     #[tokio::test]

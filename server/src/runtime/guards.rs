@@ -2,9 +2,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use poise_engine::ports::AccountCapacitySnapshot;
-use poise_engine::runtime::AccountCapacityConstraint;
 use poise_engine::track::Instrument;
 use tokio::sync::{Mutex, OwnedMutexGuard};
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AccountCapacityConstraint {
+    pub increase_blocked: bool,
+    pub blocked_reason: Option<String>,
+    pub max_increase_notional: Option<f64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct AccountMarginBlock {
@@ -72,8 +78,13 @@ impl AccountMarginGuardStore {
 }
 
 impl poise_application::AccountCapacityGuard for AccountMarginGuardStore {
-    fn constraint_for(&self, instrument: &Instrument) -> AccountCapacityConstraint {
-        self.constraint_for(instrument)
+    fn available_notional_for(&self, instrument: &Instrument) -> Option<f64> {
+        let constraint = self.constraint_for(instrument);
+        if constraint.increase_blocked {
+            Some(0.0)
+        } else {
+            constraint.max_increase_notional
+        }
     }
 }
 

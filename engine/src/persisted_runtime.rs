@@ -8,11 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::execution_gate::ExecutionGateState;
 use crate::ledger::TrackLedgerState;
-use crate::price_gate::PriceExecutionBlockReason;
-use crate::runtime::{
-    AccountCapacityConstraint, ExecutorState, RiskState, StrategyPriceStatus, TrackStatus,
-};
+use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackState};
 use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
 
@@ -58,13 +56,12 @@ pub struct PostRestoreConstraints {
 pub struct PersistedRuntimeRow {
     pub track_id: TrackId,
     pub restore_revision: Option<String>,
-    pub status_json: String,
+    pub runtime_state_json: String,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
-    pub manual_target_override: Option<f64>,
     pub executor_state_json: Option<String>,
     pub replacement_gate_reason_json: Option<String>,
-    pub price_execution_block_reason: Option<String>,
+    pub execution_gate_state_json: Option<String>,
     pub ledger_state_json: Option<String>,
     pub unrealized_pnl: f64,
     pub strategy_price: Option<f64>,
@@ -89,8 +86,8 @@ impl PersistedRuntimeCodec {
     }
 
     pub fn decode_row(row: PersistedRuntimeRow) -> Result<TrackRuntimeSnapshot> {
-        let status = serde_json::from_str::<TrackStatus>(&row.status_json)
-            .context("failed to deserialize persisted track status")?;
+        let runtime_state = serde_json::from_str::<TrackState>(&row.runtime_state_json)
+            .context("failed to deserialize persisted runtime state")?;
         let executor_state = row
             .executor_state_json
             .as_deref()
@@ -109,14 +106,12 @@ impl PersistedRuntimeCodec {
             .map(serde_json::from_str::<TrackLedgerState>)
             .transpose()
             .context("failed to deserialize ledger state")?;
-        let price_execution_block_reason = row
-            .price_execution_block_reason
+        let execution_gate_state = row
+            .execution_gate_state_json
             .as_deref()
-            .map(|reason| {
-                serde_json::from_str::<PriceExecutionBlockReason>(&format!("\"{reason}\""))
-            })
+            .map(serde_json::from_str::<ExecutionGateState>)
             .transpose()
-            .context("failed to deserialize price execution block reason")?;
+            .context("failed to deserialize execution gate state")?;
         let out_of_band_since = row
             .out_of_band_since
             .as_deref()
@@ -148,17 +143,15 @@ impl PersistedRuntimeCodec {
         Ok(TrackRuntimeSnapshot {
             track_id: row.track_id,
             restore_revision,
-            status,
+            runtime_state,
             current_exposure: Exposure(row.current_exposure),
             desired_exposure: row.desired_exposure.map(Exposure),
-            manual_target_override: row.manual_target_override.map(Exposure),
             executor_state,
             replacement_gate_reason,
-            price_execution_block_reason,
+            execution_gate_state: execution_gate_state.unwrap_or_else(ExecutionGateState::open),
             ledger_state: ledger_state.unwrap_or_default(),
             risk: RiskState {
                 unrealized_pnl: row.unrealized_pnl,
-                account_capacity_constraint: AccountCapacityConstraint::default(),
             },
             observed: crate::snapshot::ObservedState {
                 strategy_price: row.strategy_price,
@@ -189,12 +182,31 @@ mod tests {
     use poise_core::types::Exposure;
     use serde_json::json;
 
-    use crate::runtime::TrackRuntime;
+    use crate::execution_gate::ExecutionGateState;
+    use crate::runtime::{AutoState, ControlState, ReentryGuard, TrackRuntime, TrackState};
     use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
         PersistedRuntimeCodec, PersistedRuntimeRow, PostRestoreConstraints, TrackRestoreRevision,
     };
+
+    fn following_band_state_json() -> String {
+        serde_json::to_string(&TrackState::Running(ControlState::Automatic(
+            AutoState::FollowingBand,
+        )))
+        .unwrap()
+    }
+
+    fn flattening_state_json() -> String {
+        serde_json::to_string(&TrackState::Running(ControlState::Automatic(
+            AutoState::Flattening {
+                guard: ReentryGuard {
+                    boundary: poise_core::strategy::BandBoundary::Below,
+                },
+            },
+        )))
+        .unwrap()
+    }
 
     #[test]
     fn track_restore_revision_is_stable_for_same_instrument_and_track_config() {
@@ -363,10 +375,9 @@ mod tests {
                 .as_str()
                 .to_string(),
             ),
-            status_json: "\"active\"".into(),
+            runtime_state_json: following_band_state_json(),
             current_exposure: 4.0,
             desired_exposure: Some(6.0),
-            manual_target_override: None,
             executor_state_json: Some(
                 json!({
                     "active_round": null,
@@ -393,7 +404,9 @@ mod tests {
                 .to_string(),
             ),
             replacement_gate_reason_json: None,
-            price_execution_block_reason: None,
+            execution_gate_state_json: Some(
+                serde_json::to_string(&ExecutionGateState::open()).unwrap(),
+            ),
             ledger_state_json: None,
             unrealized_pnl: -3.0,
             strategy_price: Some(95.0),
@@ -436,10 +449,9 @@ mod tests {
                 .as_str()
                 .to_string(),
             ),
-            status_json: "\"flattening\"".into(),
+            runtime_state_json: flattening_state_json(),
             current_exposure: 0.0,
             desired_exposure: Some(0.0),
-            manual_target_override: None,
             executor_state_json: Some(
                 json!({
                     "active_round": null,
@@ -466,7 +478,9 @@ mod tests {
                 .to_string(),
             ),
             replacement_gate_reason_json: None,
-            price_execution_block_reason: None,
+            execution_gate_state_json: Some(
+                serde_json::to_string(&ExecutionGateState::open()).unwrap(),
+            ),
             ledger_state_json: None,
             unrealized_pnl: 0.0,
             strategy_price: Some(95.0),
@@ -481,7 +495,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            serde_json::to_string(&snapshot.status).unwrap(),
+            serde_json::to_string(&snapshot.status()).unwrap(),
             "\"flattening\""
         );
     }
@@ -491,10 +505,9 @@ mod tests {
         let error = PersistedRuntimeCodec::decode_row(PersistedRuntimeRow {
             track_id: TrackId::new("btc-core"),
             restore_revision: None,
-            status_json: "\"active\"".into(),
+            runtime_state_json: following_band_state_json(),
             current_exposure: 4.0,
             desired_exposure: Some(6.0),
-            manual_target_override: None,
             executor_state_json: Some(
                 json!({
                     "active_round": null,
@@ -521,7 +534,9 @@ mod tests {
                 .to_string(),
             ),
             replacement_gate_reason_json: None,
-            price_execution_block_reason: None,
+            execution_gate_state_json: Some(
+                serde_json::to_string(&ExecutionGateState::open()).unwrap(),
+            ),
             ledger_state_json: None,
             unrealized_pnl: -3.0,
             strategy_price: Some(95.0),

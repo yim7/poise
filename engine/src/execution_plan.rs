@@ -56,10 +56,10 @@ impl ExecutionPlan {
         }
     }
 
-    pub fn hold(reason: String) -> Self {
+    pub fn hold(_reason: String) -> Self {
         Self {
             actions: vec![ExecutionAction::NoOp],
-            events: vec![DomainEvent::RiskDenied { reason }],
+            events: vec![],
         }
     }
 

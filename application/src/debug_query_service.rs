@@ -62,8 +62,8 @@ mod tests {
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::runtime::{
-        ExecutionSlot, ExecutionStats, ExecutorState, RiskState, SlotState, TrackStatus,
-        WorkingOrder,
+        AutoState, ControlState, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
+        SlotState, TrackState, WorkingOrder,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -265,10 +265,9 @@ mod tests {
                 &Instrument::new(Venue::Binance, "BTCUSDT"),
                 &config,
             ),
-            status: TrackStatus::Active,
+            runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
             current_exposure: Exposure(3.5),
             desired_exposure: Some(Exposure(4.0)),
-            manual_target_override: None,
             executor_state: ExecutorState {
                 active_round: Some(poise_engine::runtime::ExecutionRound {
                     desired_exposure: Exposure(4.0),
@@ -304,7 +303,7 @@ mod tests {
                 },
             },
             replacement_gate_reason: None,
-            price_execution_block_reason: None,
+            execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
             ledger_state: Default::default(),
             risk: RiskState {
                 unrealized_pnl: 0.0,

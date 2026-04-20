@@ -1,21 +1,26 @@
 use poise_core::events::DomainEvent;
-use poise_core::risk::{self, ExposureIntent, RiskDecision};
-use poise_core::strategy::{self, BandProtectionPolicy, BandStatus};
+use poise_core::risk::{self, ExposureIntent, RiskOutcome};
+use poise_core::strategy::{self, BandBoundary, BandProtectionPolicy, BandStatus};
 use poise_core::types::Exposure;
 
+use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision};
 use crate::loss_guard::build_loss_guard_snapshot;
-use crate::runtime::{AccountCapacityConstraint, AppliedRiskCap, TrackRuntime, TrackStatus};
+use crate::runtime::{
+    AppliedRiskCap, AutoState, BandTerminationCause, ControlState, ManualState, ReentryGuard,
+    TerminationCause, TrackRuntime, TrackState,
+};
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
     pub desired_exposure: Exposure,
     pub applied_risk_cap: Option<AppliedRiskCap>,
-    pub new_status: Option<TrackStatus>,
+    pub new_runtime_state: Option<TrackState>,
+    pub execution_gate_decision: ExecutionGateDecision,
     pub suppress_execution: bool,
 }
 
 pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReconcileResult {
-    if matches!(track.status, TrackStatus::Terminated) {
+    if let TrackState::Terminated { .. } = &track.track_state {
         let target = Exposure(0.0);
         let delta = track.current_exposure.delta(&target);
         return TargetReconcileResult {
@@ -24,12 +29,17 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 .collect(),
             desired_exposure: target,
             applied_risk_cap: None,
-            new_status: Some(TrackStatus::Terminated),
+            new_runtime_state: Some(track.track_state.clone()),
+            execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
         };
     }
 
-    if let Some(target_override) = track.manual_target_override.clone() {
+    if let TrackState::Running(ControlState::Manual(manual_state)) = &track.track_state {
+        let target_override = match manual_state {
+            ManualState::Flattened => Exposure(0.0),
+            ManualState::TargetOverride { target } => target.clone(),
+        };
         let delta = track.current_exposure.delta(&target_override);
         return TargetReconcileResult {
             events: exposure_target_change_event(track, &target_override)
@@ -37,19 +47,20 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 .collect(),
             desired_exposure: target_override,
             applied_risk_cap: None,
-            new_status: Some(TrackStatus::ManualFlattening),
+            new_runtime_state: Some(track.track_state.clone()),
+            execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
         };
     }
 
     let band = strategy::band_status(strategy_price, &track.config);
 
-    let (target, new_status) = match &band {
+    let (target, mut new_runtime_state) = match &band {
         BandStatus::InBand { target } => (
             resolve_in_band_target(track, target),
-            resolve_in_band_status(track),
+            resolve_in_band_state(track, strategy_price),
         ),
-        BandStatus::OutOfBand { policy, .. } => apply_out_of_band(track, *policy),
+        BandStatus::OutOfBand { policy, boundary } => apply_out_of_band(track, *policy, *boundary),
     };
 
     let intent = ExposureIntent {
@@ -59,11 +70,11 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         loss_guard: build_loss_guard_snapshot(&track.ledger_state, &track.risk_state),
     };
 
-    let decision = risk::evaluate_risk(&intent, &track.budget);
+    let decision = risk::evaluate_risk_outcome(&intent, &track.budget);
 
     let (approved_target, applied_risk_cap, mut events) = match decision {
-        RiskDecision::Allow(target) => (target, None, vec![]),
-        RiskDecision::Cap(capped) => {
+        RiskOutcome::Allow { target } => (target, None, vec![]),
+        RiskOutcome::Cap { target: capped } => {
             let applied_risk_cap = AppliedRiskCap {
                 intended: target.clone(),
                 capped: capped.clone(),
@@ -71,47 +82,70 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             let event = risk_cap_applied_event(track, &applied_risk_cap);
             (capped, Some(applied_risk_cap), event.into_iter().collect())
         }
-        RiskDecision::Deny { reason } => {
+        RiskOutcome::Terminate(cause) => {
+            let target = Exposure(0.0);
+            let delta = track.current_exposure.delta(&target);
             return TargetReconcileResult {
-                events: vec![DomainEvent::RiskDenied { reason }],
-                desired_exposure: track.current_exposure.clone(),
+                events: exposure_target_change_event(track, &target)
+                    .into_iter()
+                    .collect(),
+                desired_exposure: target,
                 applied_risk_cap: None,
-                new_status: None,
-                suppress_execution: true,
+                new_runtime_state: Some(TrackState::Terminated {
+                    cause: TerminationCause::Risk(cause),
+                }),
+                execution_gate_decision: ExecutionGateDecision::Open,
+                suppress_execution: delta.is_zero(),
             };
         }
     };
 
-    let would_increase_risk_out_of_band = matches!(
-        band,
-        BandStatus::OutOfBand {
-            policy: BandProtectionPolicy::Freeze { .. } | BandProtectionPolicy::Hold,
-            ..
+    if let Some(runtime_state) = new_runtime_state.as_mut() {
+        match runtime_state {
+            TrackState::Running(ControlState::Automatic(AutoState::Frozen {
+                target_anchor,
+                ..
+            }))
+            | TrackState::Running(ControlState::Automatic(AutoState::Holding { target_anchor })) => {
+                *target_anchor = approved_target.clone();
+            }
+            _ => {}
         }
-    ) && approved_target.0.abs()
-        > track.current_exposure.0.abs();
+    }
 
-    if would_increase_risk_out_of_band {
+    if should_suppress_protected_risk_increase(track, &new_runtime_state, &approved_target) {
         return TargetReconcileResult {
             events,
             desired_exposure: approved_target,
             applied_risk_cap,
-            new_status,
+            new_runtime_state,
+            execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: true,
         };
     }
 
-    if let Some(reason) = account_capacity_denial_reason(
-        &track.current_exposure,
-        &approved_target,
-        track.config.notional_per_unit,
-        &track.risk_state.account_capacity_constraint,
-    ) {
+    let execution_gate_decision = AccountCapacityGate::evaluate(AccountCapacityGateInput {
+        current: track.current_exposure.clone(),
+        approved_target: approved_target.clone(),
+        unit_notional: track.config.notional_per_unit,
+        available_notional: track
+            .execution_gate_state
+            .account_capacity
+            .available_notional,
+    });
+
+    if let ExecutionGateDecision::NoSubmit { reason } = &execution_gate_decision {
+        if track.execution_gate_state.last_decision != execution_gate_decision {
+            events.push(DomainEvent::ExecutionGateApplied {
+                reason: reason.clone(),
+            });
+        }
         return TargetReconcileResult {
-            events: vec![DomainEvent::RiskDenied { reason }],
-            desired_exposure: track.current_exposure.clone(),
-            applied_risk_cap: None,
-            new_status: None,
+            events,
+            desired_exposure: approved_target,
+            applied_risk_cap,
+            new_runtime_state,
+            execution_gate_decision,
             suppress_execution: true,
         };
     }
@@ -122,7 +156,8 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             events,
             desired_exposure: approved_target,
             applied_risk_cap,
-            new_status,
+            new_runtime_state,
+            execution_gate_decision,
             suppress_execution: true,
         };
     }
@@ -135,7 +170,8 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         events,
         desired_exposure: approved_target,
         applied_risk_cap,
-        new_status,
+        new_runtime_state,
+        execution_gate_decision,
         suppress_execution: false,
     }
 }
@@ -166,95 +202,170 @@ fn risk_cap_applied_event(
     )
 }
 
-fn resolve_in_band_status(track: &TrackRuntime) -> Option<TrackStatus> {
-    match track.status {
-        TrackStatus::WaitingMarketData | TrackStatus::Flattening => Some(TrackStatus::Active),
-        TrackStatus::Frozen => Some(TrackStatus::Active),
-        TrackStatus::Holding => None,
-        _ => None,
+fn resolve_in_band_target(track: &TrackRuntime, target: &Exposure) -> Exposure {
+    match &track.track_state {
+        TrackState::Running(ControlState::Automatic(AutoState::Frozen {
+            target_anchor, ..
+        }))
+        | TrackState::Running(ControlState::Automatic(AutoState::Holding { target_anchor })) => {
+            target_anchor.clone()
+        }
+        TrackState::Running(ControlState::Automatic(AutoState::Flattening { .. })) => Exposure(0.0),
+        _ => target.clone(),
     }
 }
 
-fn resolve_in_band_target(track: &TrackRuntime, target: &Exposure) -> Exposure {
-    if matches!(track.status, TrackStatus::Holding) {
-        track
-            .desired_exposure
-            .clone()
-            .unwrap_or_else(|| track.current_exposure.clone())
-    } else {
-        target.clone()
+fn resolve_in_band_state(track: &TrackRuntime, strategy_price: f64) -> Option<TrackState> {
+    match &track.track_state {
+        TrackState::WaitingMarketData => Some(TrackState::Running(ControlState::Automatic(
+            AutoState::FollowingBand,
+        ))),
+        TrackState::Running(ControlState::Automatic(AutoState::Frozen { guard, .. })) => {
+            let BandProtectionPolicy::Freeze { recover } = track.config.out_of_band_policy else {
+                return Some(TrackState::Running(ControlState::Automatic(
+                    AutoState::FollowingBand,
+                )));
+            };
+            strategy::band_reentry_price_confirmed(
+                strategy_price,
+                &recover,
+                track.config.lower_price,
+                track.config.upper_price,
+                guard.boundary,
+            )
+            .then_some(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand,
+            )))
+        }
+        TrackState::Running(ControlState::Automatic(AutoState::Holding { .. })) => None,
+        TrackState::Running(ControlState::Automatic(AutoState::Flattening { guard })) => {
+            let BandProtectionPolicy::Flatten { recover } = track.config.out_of_band_policy else {
+                return Some(TrackState::Running(ControlState::Automatic(
+                    AutoState::FollowingBand,
+                )));
+            };
+            strategy::band_reentry_price_confirmed(
+                strategy_price,
+                &recover,
+                track.config.lower_price,
+                track.config.upper_price,
+                guard.boundary,
+            )
+            .then_some(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand,
+            )))
+        }
+        _ => None,
     }
 }
 
 fn apply_out_of_band(
     track: &TrackRuntime,
     policy: BandProtectionPolicy,
-) -> (Exposure, Option<TrackStatus>) {
-    let frozen_target = track
+    boundary: BandBoundary,
+) -> (Exposure, Option<TrackState>) {
+    match policy {
+        BandProtectionPolicy::Freeze { .. } => freeze_with_reentry_guard(track, boundary),
+        BandProtectionPolicy::Hold => hold_with_target_anchor(track),
+        BandProtectionPolicy::Flatten { .. } => flatten_with_reentry_guard(track, boundary),
+        BandProtectionPolicy::Terminate => (
+            Exposure(0.0),
+            Some(TrackState::Terminated {
+                cause: TerminationCause::Band(BandTerminationCause::OutOfRange),
+            }),
+        ),
+    }
+}
+
+fn freeze_with_reentry_guard(
+    track: &TrackRuntime,
+    boundary: BandBoundary,
+) -> (Exposure, Option<TrackState>) {
+    let target_anchor = protection_target_anchor(track);
+    if matches!(
+        track.track_state,
+        TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. }))
+    ) {
+        return (target_anchor, None);
+    }
+    (
+        target_anchor.clone(),
+        Some(TrackState::Running(ControlState::Automatic(
+            AutoState::Frozen {
+                target_anchor,
+                guard: ReentryGuard { boundary },
+            },
+        ))),
+    )
+}
+
+fn hold_with_target_anchor(track: &TrackRuntime) -> (Exposure, Option<TrackState>) {
+    let target_anchor = protection_target_anchor(track);
+    if matches!(
+        track.track_state,
+        TrackState::Running(ControlState::Automatic(AutoState::Holding { .. }))
+    ) {
+        return (target_anchor, None);
+    }
+    (
+        target_anchor.clone(),
+        Some(TrackState::Running(ControlState::Automatic(
+            AutoState::Holding { target_anchor },
+        ))),
+    )
+}
+
+fn flatten_with_reentry_guard(
+    track: &TrackRuntime,
+    boundary: BandBoundary,
+) -> (Exposure, Option<TrackState>) {
+    if matches!(
+        track.track_state,
+        TrackState::Running(ControlState::Automatic(AutoState::Flattening { .. }))
+    ) {
+        return (Exposure(0.0), None);
+    }
+    (
+        Exposure(0.0),
+        Some(TrackState::Running(ControlState::Automatic(
+            AutoState::Flattening {
+                guard: ReentryGuard { boundary },
+            },
+        ))),
+    )
+}
+
+fn protection_target_anchor(track: &TrackRuntime) -> Exposure {
+    track
         .desired_exposure
         .clone()
-        .unwrap_or_else(|| track.current_exposure.clone());
-
-    match policy {
-        BandProtectionPolicy::Freeze { .. } => (frozen_target, Some(TrackStatus::Frozen)),
-        BandProtectionPolicy::Hold => (frozen_target, Some(TrackStatus::Holding)),
-        BandProtectionPolicy::Flatten { .. } => (Exposure(0.0), Some(TrackStatus::Flattening)),
-        BandProtectionPolicy::Terminate => (Exposure(0.0), Some(TrackStatus::Terminated)),
-    }
+        .unwrap_or_else(|| track.current_exposure.clone())
 }
 
-fn account_capacity_denial_reason(
-    current: &Exposure,
-    target: &Exposure,
-    unit_notional: f64,
-    constraint: &AccountCapacityConstraint,
-) -> Option<String> {
-    let required_increase_notional =
-        additional_increase_notional_required(current, target, unit_notional);
-    if required_increase_notional <= f64::EPSILON {
-        return None;
-    }
-
-    if constraint.increase_blocked {
-        return Some(
-            constraint
-                .blocked_reason
-                .clone()
-                .unwrap_or_else(|| "insufficient account margin".to_string()),
-        );
-    }
-
-    if let Some(max_increase_notional) = constraint.max_increase_notional
-        && required_increase_notional > max_increase_notional + f64::EPSILON
-    {
-        return Some("insufficient account margin".to_string());
-    }
-
-    None
+fn effective_runtime_state(track: &TrackRuntime, next: &Option<TrackState>) -> TrackState {
+    next.clone().unwrap_or_else(|| track.track_state.clone())
 }
 
-fn additional_increase_notional_required(
-    current: &Exposure,
-    target: &Exposure,
-    unit_notional: f64,
-) -> f64 {
-    if !unit_notional.is_finite() || unit_notional <= 0.0 {
-        return 0.0;
-    }
-
-    let current_abs = current.0.abs();
-    let target_abs = target.0.abs();
-    if target_abs <= current_abs {
-        return 0.0;
-    }
-
-    (target_abs - current_abs) * unit_notional
+fn should_suppress_protected_risk_increase(
+    track: &TrackRuntime,
+    next_state: &Option<TrackState>,
+    approved_target: &Exposure,
+) -> bool {
+    matches!(
+        effective_runtime_state(track, next_state),
+        TrackState::Running(ControlState::Automatic(
+            AutoState::Frozen { .. } | AutoState::Holding { .. }
+        ))
+    ) && approved_target.0.abs() > track.current_exposure.0.abs()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::AccountCapacityConstraint;
+    use crate::runtime::{
+        AutoState, ControlState, ManualState, ReentryGuard, TerminationCause, TrackState,
+        TrackStatus,
+    };
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::*;
@@ -296,10 +407,70 @@ mod tests {
         }
     }
 
+    fn runtime_state_from_status(track: &TrackRuntime, status: TrackStatus) -> TrackState {
+        let target_anchor = track
+            .desired_exposure
+            .clone()
+            .unwrap_or_else(|| track.current_exposure.clone());
+        match status {
+            TrackStatus::WaitingMarketData => TrackState::WaitingMarketData,
+            TrackStatus::Active => {
+                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
+            }
+            TrackStatus::Frozen => {
+                TrackState::Running(ControlState::Automatic(AutoState::Frozen {
+                    target_anchor,
+                    guard: ReentryGuard {
+                        boundary: BandBoundary::Below,
+                    },
+                }))
+            }
+            TrackStatus::Holding => {
+                TrackState::Running(ControlState::Automatic(AutoState::Holding {
+                    target_anchor,
+                }))
+            }
+            TrackStatus::Flattening => {
+                TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+                    guard: ReentryGuard {
+                        boundary: BandBoundary::Below,
+                    },
+                }))
+            }
+            TrackStatus::ManualFlattening => {
+                TrackState::Running(ControlState::Manual(ManualState::Flattened))
+            }
+            TrackStatus::Terminated => TrackState::Terminated {
+                cause: TerminationCause::ManualCommand,
+            },
+            TrackStatus::Paused => TrackState::Paused {
+                suspended: ControlState::Automatic(AutoState::FollowingBand),
+            },
+        }
+    }
+
+    fn set_runtime_status(track: &mut TrackRuntime, status: TrackStatus) {
+        track.track_state = runtime_state_from_status(track, status);
+    }
+
+    fn test_runtime_with_strategy_target(target: Exposure) -> TrackRuntime {
+        let mut track = test_runtime();
+        track.desired_exposure = Some(target);
+        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+        track
+    }
+
+    fn strategy_target_at(price: f64) -> Exposure {
+        match strategy::band_status(price, &test_runtime().config) {
+            BandStatus::InBand { target } => target,
+            BandStatus::OutOfBand { .. } => panic!("price {price} should be in band"),
+        }
+    }
+
     #[test]
     fn reconcile_target_suppresses_execution_when_exposure_unchanged() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
 
         let result = reconcile_target(&track, 100.0);
@@ -309,9 +480,114 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_target_terminates_when_risk_requests_termination() {
+        let mut track = test_runtime();
+        track.current_exposure = Exposure(4.0);
+        track.ledger_state.realized_pnl_day =
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap());
+        track.ledger_state.gross_realized_pnl_today = -90.0;
+        track.risk_state.unrealized_pnl = -35.0;
+        track.ledger_state.gross_realized_pnl_cumulative = -90.0;
+        track.ledger_state.trading_fee_cumulative = 0.0;
+
+        let result = reconcile_target(&track, 95.0);
+
+        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Terminated {
+                cause: TerminationCause::Risk(
+                    poise_core::risk::RiskTerminationCause::DailyLossLimit,
+                ),
+            }),
+        );
+    }
+
+    #[test]
+    fn freeze_samples_target_anchor_from_last_risk_approved_target() {
+        let mut track = test_runtime_with_strategy_target(Exposure(4.0));
+        track.current_exposure = Exposure(1.0);
+        track.config.out_of_band_policy = BandProtectionPolicy::Freeze {
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
+
+        let result = reconcile_target(&track, 89.0);
+
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::Frozen {
+                    target_anchor: Exposure(4.0),
+                    guard: ReentryGuard {
+                        boundary: BandBoundary::Below,
+                    },
+                }
+            ))),
+        );
+        assert_eq!(result.desired_exposure, Exposure(4.0));
+    }
+
+    #[test]
+    fn frozen_reentry_clears_target_anchor_and_follows_current_strategy_target() {
+        let mut track = test_runtime();
+        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Frozen {
+            target_anchor: Exposure(4.0),
+            guard: ReentryGuard {
+                boundary: BandBoundary::Below,
+            },
+        }));
+        track.config.out_of_band_policy = BandProtectionPolicy::Freeze {
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
+
+        let result = reconcile_target(&track, 95.0);
+
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand,
+            ))),
+        );
+        assert_eq!(result.desired_exposure, strategy_target_at(95.0));
+    }
+
+    #[test]
+    fn hold_samples_target_anchor_from_last_risk_approved_target() {
+        let mut track = test_runtime_with_strategy_target(Exposure(4.0));
+        track.current_exposure = Exposure(1.0);
+        track.config.out_of_band_policy = BandProtectionPolicy::Hold;
+
+        let result = reconcile_target(&track, 89.0);
+
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::Holding {
+                    target_anchor: Exposure(4.0),
+                }
+            ))),
+        );
+        assert_eq!(result.desired_exposure, Exposure(4.0));
+    }
+
+    #[test]
+    fn holding_keeps_target_anchor_when_price_reenters_band() {
+        let mut track = test_runtime_with_strategy_target(Exposure(2.0));
+        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Holding {
+            target_anchor: Exposure(4.0),
+        }));
+        track.config.out_of_band_policy = BandProtectionPolicy::Hold;
+
+        let result = reconcile_target(&track, 95.0);
+
+        assert_eq!(result.new_runtime_state, None);
+        assert_eq!(result.desired_exposure, Exposure(4.0));
+    }
+
+    #[test]
     fn reconcile_target_emits_event_when_exposure_changes() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
 
         let result = reconcile_target(&track, 90.0);
@@ -329,7 +605,7 @@ mod tests {
     #[test]
     fn reconcile_target_does_not_repeat_event_when_desired_exposure_is_unchanged() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.desired_exposure = Some(Exposure(8.0));
 
@@ -348,12 +624,18 @@ mod tests {
     #[test]
     fn reconcile_target_freezes_when_out_of_band() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 85.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::Frozen));
+        assert_eq!(
+            result
+                .new_runtime_state
+                .as_ref()
+                .map(|state| state.status()),
+            Some(TrackStatus::Frozen),
+        );
         assert!(result.suppress_execution);
     }
 
@@ -363,43 +645,61 @@ mod tests {
 
         let result = reconcile_target(&track, 100.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::Active));
+        assert_eq!(
+            result
+                .new_runtime_state
+                .as_ref()
+                .map(|state| state.status()),
+            Some(TrackStatus::Active),
+        );
         assert!(result.suppress_execution);
     }
 
     #[test]
     fn reconcile_target_reactivates_after_reenter() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Frozen;
+        set_runtime_status(&mut track, TrackStatus::Frozen);
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 100.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::Active));
+        assert_eq!(
+            result
+                .new_runtime_state
+                .as_ref()
+                .map(|state| state.status()),
+            Some(TrackStatus::Active),
+        );
         assert!(!result.suppress_execution);
     }
 
     #[test]
     fn frozen_recovers_to_active_when_price_returns_in_band() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Frozen;
+        set_runtime_status(&mut track, TrackStatus::Frozen);
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 100.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::Active));
+        assert_eq!(
+            result
+                .new_runtime_state
+                .as_ref()
+                .map(|state| state.status()),
+            Some(TrackStatus::Active),
+        );
     }
 
     #[test]
     fn holding_stays_holding_when_price_returns_in_band() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Holding;
+        set_runtime_status(&mut track, TrackStatus::Holding);
         track.current_exposure = Exposure(8.0);
         track.desired_exposure = Some(Exposure(3.0));
 
         let result = reconcile_target(&track, 100.0);
 
-        assert_eq!(result.new_status, None);
+        assert_eq!(result.new_runtime_state, None);
         assert_eq!(result.desired_exposure, Exposure(3.0));
     }
 
@@ -407,14 +707,14 @@ mod tests {
     fn reconcile_target_flatten_policy_enters_flattening() {
         let mut track = test_runtime();
         track.config.out_of_band_policy = serde_json::from_str("\"flatten\"").unwrap();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 85.0);
 
         assert_eq!(result.desired_exposure, Exposure(0.0));
         assert_eq!(
-            serde_json::to_string(&result.new_status.unwrap()).unwrap(),
+            serde_json::to_string(&result.new_runtime_state.unwrap().status()).unwrap(),
             "\"flattening\""
         );
     }
@@ -425,12 +725,18 @@ mod tests {
         track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
             recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
         };
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 85.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::Flattening));
+        assert_eq!(
+            result
+                .new_runtime_state
+                .as_ref()
+                .map(|state| state.status()),
+            Some(TrackStatus::Flattening),
+        );
         assert!(result.desired_exposure.0.abs() < 0.001);
     }
 
@@ -438,19 +744,25 @@ mod tests {
     fn reconcile_target_terminate_targets_zero() {
         let mut track = test_runtime();
         track.config.out_of_band_policy = BandProtectionPolicy::Terminate;
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
         let result = reconcile_target(&track, 85.0);
 
-        assert_eq!(result.new_status, Some(TrackStatus::Terminated));
+        assert_eq!(
+            result
+                .new_runtime_state
+                .as_ref()
+                .map(|state| state.status()),
+            Some(TrackStatus::Terminated),
+        );
         assert!(result.desired_exposure.0.abs() < 0.001);
     }
 
     #[test]
     fn reconcile_target_emits_risk_cap_event_when_budget_caps_target() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.budget = CapacityBudget {
             max_notional: 1500.0,
@@ -470,7 +782,7 @@ mod tests {
     #[test]
     fn reconcile_target_keeps_risk_cap_event_when_cap_matches_current_exposure() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(4.0);
         track.budget = CapacityBudget {
             max_notional: 1500.0,
@@ -498,7 +810,7 @@ mod tests {
     fn reconcile_target_emits_risk_cap_event_when_cap_is_new_even_if_capped_target_matches_desired()
     {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.desired_exposure = Some(Exposure(4.0));
         track.budget = CapacityBudget {
@@ -533,7 +845,7 @@ mod tests {
     #[test]
     fn reconcile_target_does_not_repeat_risk_cap_event_when_same_cap_is_already_active() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.desired_exposure = Some(Exposure(4.0));
         track.active_risk_cap = Some(AppliedRiskCap {
@@ -561,7 +873,7 @@ mod tests {
     #[test]
     fn reconcile_builds_loss_guard_snapshot_from_ledger_accessors() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(2.0);
         track.ledger_state.realized_pnl_day =
             Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap());
@@ -588,7 +900,7 @@ mod tests {
     #[test]
     fn freeze_keeps_last_in_band_target_instead_of_current_exposure() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(4.0);
         track.desired_exposure = Some(Exposure(6.0));
         track.config.out_of_band_policy = BandProtectionPolicy::Freeze {
@@ -604,7 +916,7 @@ mod tests {
     #[test]
     fn reconcile_target_uses_budget_from_runtime() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.budget = CapacityBudget {
             max_notional: 1500.0,
@@ -624,22 +936,32 @@ mod tests {
     #[test]
     fn margin_guard_reconcile_denies_risk_increase_when_guard_is_active() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(1.0);
-        track.risk_state.account_capacity_constraint = AccountCapacityConstraint {
-            increase_blocked: true,
-            blocked_reason: Some("insufficient_margin".into()),
-            max_increase_notional: Some(1_000.0),
-        };
+        track
+            .execution_gate_state
+            .account_capacity
+            .available_notional = Some(0.0);
 
         let result = reconcile_target(&track, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.desired_exposure, track.current_exposure);
+        assert_eq!(
+            result.execution_gate_decision,
+            ExecutionGateDecision::NoSubmit {
+                reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 2_625.0,
+                    available_notional: 0.0,
+                },
+            }
+        );
         assert_eq!(
             result.events,
-            vec![DomainEvent::RiskDenied {
-                reason: "insufficient_margin".into()
+            vec![DomainEvent::ExecutionGateApplied {
+                reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 2_625.0,
+                    available_notional: 0.0,
+                },
             }]
         );
     }
@@ -647,37 +969,40 @@ mod tests {
     #[test]
     fn margin_guard_reconcile_denies_when_required_notional_exceeds_available_capacity() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(1.0);
-        track.risk_state.account_capacity_constraint = AccountCapacityConstraint {
-            increase_blocked: false,
-            blocked_reason: None,
-            max_increase_notional: Some(500.0),
-        };
+        track
+            .execution_gate_state
+            .account_capacity
+            .available_notional = Some(500.0);
 
         let result = reconcile_target(&track, 90.0);
 
         assert!(result.suppress_execution);
-        assert_eq!(result.desired_exposure, track.current_exposure);
         assert_eq!(
-            result.events,
-            vec![DomainEvent::RiskDenied {
-                reason: "insufficient account margin".into()
-            }]
+            result.execution_gate_decision,
+            ExecutionGateDecision::NoSubmit {
+                reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 2_625.0,
+                    available_notional: 500.0,
+                },
+            }
         );
     }
 
     #[test]
     fn margin_guard_reconcile_allows_reduce_only_target() {
         let mut track = test_runtime();
-        track.status = TrackStatus::Active;
+        set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(5.0);
-        track.manual_target_override = Some(Exposure(2.0));
-        track.risk_state.account_capacity_constraint = AccountCapacityConstraint {
-            increase_blocked: true,
-            blocked_reason: Some("insufficient_margin".into()),
-            max_increase_notional: Some(0.0),
-        };
+        track.track_state =
+            TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
+                target: Exposure(2.0),
+            }));
+        track
+            .execution_gate_state
+            .account_capacity
+            .available_notional = Some(0.0);
 
         let result = reconcile_target(&track, 100.0);
 

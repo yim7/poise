@@ -742,6 +742,21 @@ mod tests {
     }
 
     #[test]
+    fn projector_available_commands_follow_public_status_only() {
+        let mut read_model = source_with_failed_effect_and_recent_event();
+        read_model.status = TrackStatus::Paused;
+
+        let detail = TrackProjector::new().project_detail(&read_model);
+
+        assert!(
+            detail
+                .available_commands
+                .iter()
+                .any(|command| command.command == TrackCommandType::Resume && command.enabled)
+        );
+    }
+
+    #[test]
     fn stale_market_data_projects_attention_required() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.has_stale_market_data = true;
