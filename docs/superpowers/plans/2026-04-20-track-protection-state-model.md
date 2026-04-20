@@ -82,15 +82,6 @@
 - Modify: `tui/src/views/instance.rs`
 - Modify: `tui/tests/fixtures/track_detail_view.json`
 - Modify: `tui/tests/fixtures/ws_track_detail_changed.json`
-- Modify: `tools/track-tuning-workbench/src/domain/trackDraft.ts`
-- Modify: `tools/track-tuning-workbench/src/domain/trackValidation.ts`
-- Modify: `tools/track-tuning-workbench/src/app/workbenchBridge.ts`
-- Modify: `tools/track-tuning-workbench/src/app/workbenchBridge.test.ts`
-- Modify: `tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx`
-- Modify: `tools/track-tuning-workbench/src/ui/editor/sections/RiskSection.tsx`
-- Modify: `tools/track-tuning-workbench/src-tauri/src/config_document.rs`
-- Modify: `tools/track-tuning-workbench/src-tauri/src/config_projection.rs`
-- Modify: `tools/track-tuning-workbench/src-tauri/src/commands.rs`
 - Modify: `storage/src/schema.rs`
 - Modify: `docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md`
 - Modify: `docs/superpowers/plans/2026-04-20-track-protection-state-model.md`
@@ -352,9 +343,16 @@ Recorded commit: `7caa270`
 - Modify: `tui/tests/fixtures/track_detail_view.json`
 - Modify: `tui/tests/fixtures/ws_track_detail_changed.json`
 - Modify: `tools/track-tuning-workbench/src/domain/trackDraft.ts`
+- Modify: `tools/track-tuning-workbench/src/domain/trackCurve.ts`
 - Modify: `tools/track-tuning-workbench/src/domain/trackValidation.ts`
+- Modify: `tools/track-tuning-workbench/src/domain/trackCurvePath.test.ts`
+- Modify: `tools/track-tuning-workbench/src/domain/trackFixtures.test.ts`
+- Modify: `tools/track-tuning-workbench/src/app/AppShell.tsx`
 - Modify: `tools/track-tuning-workbench/src/app/workbenchBridge.ts`
 - Modify: `tools/track-tuning-workbench/src/app/workbenchBridge.test.ts`
+- Modify: `tools/track-tuning-workbench/src/state/workbenchStore.test.ts`
+- Modify: `tools/track-tuning-workbench/src/ui/app/AppShell.test.tsx`
+- Modify: `tools/track-tuning-workbench/src/ui/app/useSelectedTrackWorkbench.test.tsx`
 - Modify: `tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx`
 - Modify: `tools/track-tuning-workbench/src/ui/editor/sections/RiskSection.tsx`
 - Modify: `tools/track-tuning-workbench/src-tauri/src/config_document.rs`
@@ -370,7 +368,7 @@ Recorded commit: `7caa270`
 - Test: `tools/track-tuning-workbench/src-tauri/src/commands.rs`
 - Test: `tools/track-tuning-workbench/src/app/workbenchBridge.test.ts`
 
-- [ ] **Step 1: 写失败测试，锁住配置边界一次性迁移**
+- [x] **Step 1: 写失败测试，锁住配置边界一次性迁移**
 
 ```rust
 #[test]
@@ -422,7 +420,8 @@ out_of_band_policy = { flatten = { recover = { price_confirm = { bps = 500 } } }
 
 #[test]
 fn projector_shows_flatten_price_confirm_policy_without_engine_state() {
-    let mut source = test_read_model_with_status(TrackStatus::Active);
+    let mut source = source_with_failed_effect_and_recent_event();
+    source.status = TrackStatus::Active;
     source.out_of_band_policy = BandProtectionPolicy::Flatten {
         recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
     };
@@ -436,15 +435,15 @@ fn projector_shows_flatten_price_confirm_policy_without_engine_state() {
 }
 ```
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
-- `cargo test -p poise-core track_config_accepts_flatten_price_confirm_policy -- --exact`
-- `cargo test -p poise-server config_toml_parses_flatten_price_confirm_policy -- --exact`
-- `cargo test -p poise-server projector_shows_flatten_price_confirm_policy_without_engine_state -- --exact`
-- `cargo test -p poise-tui renders_flatten_out_of_band_policy_name -- --exact`
-- `cargo test -p poise-track-tuning-workbench export_explicitly_writes_supported_defaults -- --exact`
+- `cargo test -p poise-core strategy::tests::track_config_accepts_flatten_price_confirm_policy -- --exact`
+- `cargo test -p poise-server config::tests::config_toml_parses_flatten_price_confirm_policy -- --exact`
+- `cargo test -p poise-server projector::tests::projector_shows_flatten_price_confirm_policy_without_engine_state -- --exact`
+- `cargo test -p poise-tui views::instance::tests::renders_flatten_out_of_band_policy_name -- --exact`
+- `cargo test -p poise-track-tuning-workbench config_document::tests::export_explicitly_writes_supported_defaults -- --exact`
 - `pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts`
 
 Expected:
@@ -453,7 +452,7 @@ Expected:
 - protocol / config / projector / TUI / workbench 仍只支持 `"freeze" | "hold" | "flatten" | "terminate"`
 - engine 还没有切到新的 `BandProtectionPolicy` 形状
 
-- [ ] **Step 3: 一次性迁移 `OutOfBandPolicy` 直接消费者**
+- [x] **Step 3: 一次性迁移 `OutOfBandPolicy` 直接消费者**
 
 `core/src/strategy.rs`：
 
@@ -524,16 +523,16 @@ fn apply_out_of_band(
 - `docs/protocol-contract.md` 中 `strategy.out_of_band_policy` 的稳定形状改为嵌套 policy object，不再写成 `"freeze" | "hold" | "flatten" | "terminate"` 字符串枚举；Task 2 只描述公开字段形状，不在这里提前承诺 `target_anchor` / `ReentryGuard` 运行时语义
 - 用 `rg -n 'OutOfBandPolicy|TrackOutOfBandPolicy|out_of_band_policy = "|outOfBandPolicy.*freeze|outOfBandPolicy.*flatten' core protocol application engine storage server tui tools configs` 确认旧类型、旧字符串配置和旧字符串 union 已迁移；不要把仍然合法的字段名 `out_of_band_policy` 当成失败
 
-- [ ] **Step 4: 运行 Task 2 回归**
+- [x] **Step 4: 运行 Task 2 回归**
 
 Run:
 
-- `cargo test -p poise-core track_config_accepts_flatten_price_confirm_policy -- --exact`
-- `cargo test -p poise-server config_toml_parses_flatten_price_confirm_policy -- --exact`
-- `cargo test -p poise-server projector_shows_flatten_price_confirm_policy_without_engine_state -- --exact`
+- `cargo test -p poise-core strategy::tests::track_config_accepts_flatten_price_confirm_policy -- --exact`
+- `cargo test -p poise-server config::tests::config_toml_parses_flatten_price_confirm_policy -- --exact`
+- `cargo test -p poise-server projector::tests::projector_shows_flatten_price_confirm_policy_without_engine_state -- --exact`
 - `cargo test -p poise-engine flattening -- --nocapture`
-- `cargo test -p poise-tui renders_flatten_out_of_band_policy_name -- --exact`
-- `cargo test -p poise-track-tuning-workbench export_explicitly_writes_supported_defaults -- --exact`
+- `cargo test -p poise-tui views::instance::tests::renders_flatten_out_of_band_policy_name -- --exact`
+- `cargo test -p poise-track-tuning-workbench config_document::tests::export_explicitly_writes_supported_defaults -- --exact`
 - `pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts`
 
 Expected:
@@ -545,12 +544,14 @@ Expected:
 - engine 已经能消费新的 `BandProtectionPolicy`，但仍只按外层变体兼容旧带外行为
 - `recover` 配置、`ReentryGuard` 和记忆化 `target_anchor` 的运行时语义尚未在 Task 2 落地，它们由 Task 3 一次性接手
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add core/src/strategy.rs core/src/events.rs protocol/src/lib.rs application/src/track_definition.rs application/src/read_model.rs application/src/query_service.rs application/src/debug_query_service.rs application/src/mutation_executor.rs engine/src/reconciler.rs engine/src/runtime.rs engine/src/manager.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs storage/src/sqlite.rs server/src/config.rs server/src/projector.rs server/src/http.rs server/src/websocket.rs server/src/assembly.rs server/src/exchange_startup.rs server/src/state_bootstrap.rs server/src/main.rs server/src/test_support.rs server/src/effect_worker/tests/mod.rs server/src/effect_worker/tests/retry.rs server/src/effect_worker/tests/support.rs server/src/runtime/tests/mod.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs configs/bybit-testnet.demo.toml configs/binance-testnet.demo.toml configs/test.demo.toml README.md docs/protocol-contract.md tui/src/main.rs tui/src/views/instance.rs tui/tests/fixtures/track_detail_view.json tui/tests/fixtures/ws_track_detail_changed.json tools/track-tuning-workbench/src/domain/trackDraft.ts tools/track-tuning-workbench/src/domain/trackValidation.ts tools/track-tuning-workbench/src/app/workbenchBridge.ts tools/track-tuning-workbench/src/app/workbenchBridge.test.ts tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx tools/track-tuning-workbench/src/ui/editor/sections/RiskSection.tsx tools/track-tuning-workbench/src-tauri/src/config_document.rs tools/track-tuning-workbench/src-tauri/src/config_projection.rs tools/track-tuning-workbench/src-tauri/src/commands.rs
+git add core/src/strategy.rs core/src/events.rs protocol/src/lib.rs application/src/track_definition.rs application/src/read_model.rs application/src/query_service.rs application/src/debug_query_service.rs application/src/mutation_executor.rs engine/src/reconciler.rs engine/src/runtime.rs engine/src/manager.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs storage/src/sqlite.rs server/src/config.rs server/src/projector.rs server/src/http.rs server/src/websocket.rs server/src/assembly.rs server/src/exchange_startup.rs server/src/state_bootstrap.rs server/src/main.rs server/src/test_support.rs server/src/effect_worker/tests/mod.rs server/src/effect_worker/tests/retry.rs server/src/effect_worker/tests/support.rs server/src/runtime/tests/mod.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs configs/bybit-testnet.demo.toml configs/binance-testnet.demo.toml configs/test.demo.toml README.md docs/protocol-contract.md tui/src/main.rs tui/src/views/instance.rs tui/tests/fixtures/track_detail_view.json tui/tests/fixtures/ws_track_detail_changed.json tools/track-tuning-workbench/src/domain/trackDraft.ts tools/track-tuning-workbench/src/domain/trackCurve.ts tools/track-tuning-workbench/src/domain/trackValidation.ts tools/track-tuning-workbench/src/domain/trackCurvePath.test.ts tools/track-tuning-workbench/src/domain/trackFixtures.test.ts tools/track-tuning-workbench/src/app/AppShell.tsx tools/track-tuning-workbench/src/app/workbenchBridge.ts tools/track-tuning-workbench/src/app/workbenchBridge.test.ts tools/track-tuning-workbench/src/state/workbenchStore.test.ts tools/track-tuning-workbench/src/ui/app/AppShell.test.tsx tools/track-tuning-workbench/src/ui/app/useSelectedTrackWorkbench.test.tsx tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx tools/track-tuning-workbench/src/ui/editor/sections/RiskSection.tsx tools/track-tuning-workbench/src-tauri/src/config_document.rs tools/track-tuning-workbench/src-tauri/src/config_projection.rs tools/track-tuning-workbench/src-tauri/src/commands.rs
 git commit -m "refactor: migrate band protection policy boundary"
 ```
+
+Recorded commit: `924c1dd`
 
 ### Task 3: 迁移 `TrackState/runtime_state` 和完整 snapshot 边界
 
