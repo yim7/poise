@@ -136,7 +136,9 @@ describe('AppShell', () => {
     expect(within(metricRegion).getByText('最小步长对应价格')).toBeInTheDocument();
     expect(within(metricRegion).getByText('每步理论净利')).toBeInTheDocument();
     expect(within(metricRegion).getByText('当前价到风险边缘')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('零仓目标点到风险边缘')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('从 0 建仓到边缘均价')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('从 0 到边缘理论浮亏')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('从 0 到边缘净亏估算')).toBeInTheDocument();
   });
 
   it('keeps analysis panels and the editor in separate workspace rails', async () => {

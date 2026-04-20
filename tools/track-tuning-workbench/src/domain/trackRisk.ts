@@ -1,6 +1,6 @@
 import type { TrackDraftParsedSnapshot } from '@/domain/trackDraft';
+import { summarizeCurvePath } from '@/domain/trackCurvePath';
 import {
-  baseQuantityPerUnit,
   clampPriceToBand,
   desiredExposure,
 } from '@/domain/trackCurve';
@@ -124,20 +124,17 @@ export function computeRiskToBandEdge(
     boundary === 'below'
       ? snapshot.parsedNumbers.lowerPrice
       : snapshot.parsedNumbers.upperPrice;
-  const theoreticalLoss =
-    Math.abs(clampedStartPrice - boundaryPrice) <= Number.EPSILON
-      ? 0
-      : integrateCurvePnl(snapshot, clampedStartPrice, boundaryPrice);
+  const path = summarizeCurvePath(snapshot, clampedStartPrice, boundaryPrice);
   const closeFeeRate =
     options.takerFeeRate ?? snapshot.attachments.exchangeRules?.takerFeeRate ?? 0;
   const edgeTargetExposure = desiredExposure(boundaryPrice, snapshot);
-  const edgeQuantity = edgeTargetExposure * baseQuantityPerUnit(snapshot);
+  const edgeQuantity = path.endQuantity;
 
   return {
     boundary,
     boundaryPrice,
     priceDistance: Math.abs(boundaryPrice - startPrice),
-    theoreticalLoss,
+    theoreticalLoss: path.theoreticalPnl,
     closeFeeRate,
     closeFeeEstimate: Math.abs(edgeQuantity) * boundaryPrice * closeFeeRate,
     edgeTargetExposure,
@@ -175,20 +172,7 @@ export function integrateCurvePnl(
   endPrice: number,
   segments = 2048,
 ): number {
-  if (Math.abs(startPrice - endPrice) <= Number.EPSILON) {
-    return 0;
-  }
-
-  const step = (endPrice - startPrice) / segments;
-  let integral = 0;
-
-  for (let index = 0; index < segments; index += 1) {
-    const left = startPrice + step * index;
-    const right = left + step;
-    integral += ((desiredExposure(left, snapshot) + desiredExposure(right, snapshot)) / 2) * step;
-  }
-
-  return integral * baseQuantityPerUnit(snapshot);
+  return summarizeCurvePath(snapshot, startPrice, endPrice, { segments }).theoreticalPnl;
 }
 
 function selectAdverseBoundary(

@@ -85,14 +85,36 @@ export function MetricCards({
       source: '当前价格出发',
     },
     {
-      title: '零仓目标点到风险边缘',
-      primary: `${formatCurrency(metrics.zeroTargetRiskEdge.theoreticalLoss)} + 费 ${formatCurrency(
-        metrics.zeroTargetRiskEdge.closeFeeEstimate,
+      title: '从 0 建仓到边缘均价',
+      primary: `下 ${formatNullablePrice(metrics.zeroTargetBuildEdges.lower.averageEntryPrice)} / 上 ${formatNullablePrice(
+        metrics.zeroTargetBuildEdges.upper.averageEntryPrice,
       )}`,
-      secondary: `零仓目标点 ${formatPrice(metrics.zeroTargetPrice)} → ${formatBoundary(
-        metrics.zeroTargetRiskEdge.boundary,
-      )} ${formatPrice(metrics.zeroTargetRiskEdge.boundaryPrice)}`,
-      source: '由 desired_exposure = 0 推导',
+      secondary: `零仓点 ${formatPrice(metrics.zeroTargetPrice)} · 数量 ${formatQuantity(
+        Math.abs(metrics.zeroTargetBuildEdges.lower.quantity),
+      )} / ${formatQuantity(Math.abs(metrics.zeroTargetBuildEdges.upper.quantity))}`,
+      source: '真实曲线离散累计总成本',
+    },
+    {
+      title: '从 0 到边缘理论浮亏',
+      primary: `下 ${formatCurrency(metrics.zeroTargetBuildEdges.lower.theoreticalLossAmount)} / 上 ${formatCurrency(
+        metrics.zeroTargetBuildEdges.upper.theoreticalLossAmount,
+      )}`,
+      secondary: `下边缘 ${formatPrice(metrics.zeroTargetBuildEdges.lower.boundaryPrice)} / 上边缘 ${formatPrice(
+        metrics.zeroTargetBuildEdges.upper.boundaryPrice,
+      )}`,
+      source: '由边缘均价反推，和曲线积分等价',
+    },
+    {
+      title: '从 0 到边缘净亏估算',
+      primary: `下 ${formatCurrency(metrics.zeroTargetBuildEdges.lower.netLossEstimate)} / 上 ${formatCurrency(
+        metrics.zeroTargetBuildEdges.upper.netLossEstimate,
+      )}`,
+      secondary: `建仓费 ${formatCurrency(metrics.zeroTargetBuildEdges.lower.feeEstimate.open)} / ${formatCurrency(
+        metrics.zeroTargetBuildEdges.upper.feeEstimate.open,
+      )} · 平仓费 ${formatCurrency(metrics.zeroTargetBuildEdges.lower.feeEstimate.close)} / ${formatCurrency(
+        metrics.zeroTargetBuildEdges.upper.feeEstimate.close,
+      )}`,
+      source: '含建仓费 + 边缘平仓费',
     },
   ];
 
@@ -121,7 +143,7 @@ export function MetricCards({
       </div>
 
       <InlineNotice title="口径说明">
-        当前价格、最小步长、风险边缘与零仓目标点全部来自同一套前端领域试算结果；每步理论净利已扣除开平仓手续费估算。
+        当前价格、最小步长、风险边缘和从 0 建仓到边缘的均价都来自同一套前端领域试算；每步理论净利与边缘净亏估算都已计入手续费。
       </InlineNotice>
     </section>
   );
@@ -155,6 +177,13 @@ function formatBoundary(boundary: 'below' | 'above') {
 
 function formatPrice(value: number) {
   return value.toFixed(2);
+}
+
+function formatNullablePrice(value: number | null) {
+  if (value === null) {
+    return '--';
+  }
+  return formatPrice(value);
 }
 
 function formatCurrency(value: number) {

@@ -1,4 +1,5 @@
 import type { TrackDraftParsedSnapshot } from '@/domain/trackDraft';
+import { summarizeCurvePath } from '@/domain/trackCurvePath';
 import {
   bandCenter,
   bandStatus,
@@ -55,7 +56,27 @@ export interface TrackMetrics {
   currentPriceRiskEdge: TrackCurrentPriceRiskEdge;
   zeroTargetPrice: number;
   zeroTargetRiskEdge: ReturnType<typeof computeRiskToBandEdge>;
+  zeroTargetBuildEdges: {
+    lower: TrackZeroTargetBuildEdge;
+    upper: TrackZeroTargetBuildEdge;
+  };
   curve: ReturnType<typeof sampleTrackCurve>;
+}
+
+export interface TrackZeroTargetBuildEdge {
+  boundary: 'below' | 'above';
+  boundaryPrice: number;
+  quantity: number;
+  averageEntryPrice: number | null;
+  theoreticalPnl: number;
+  theoreticalLossAmount: number;
+  feeEstimate: {
+    open: number;
+    close: number;
+    total: number;
+  };
+  netPnl: number;
+  netLossEstimate: number;
 }
 
 export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMetrics {
@@ -91,6 +112,16 @@ export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMe
   const lowerStepGrossProfit = stepQuantity * lowerStepPriceMove;
   const upperStepGrossProfit = stepQuantity * upperStepPriceMove;
   const zeroTargetPrice = resolveZeroTargetPrice(snapshot);
+  const zeroTargetBuildEdges = {
+    lower: computeZeroTargetBuildEdge(snapshot, zeroTargetPrice, 'below', {
+      open: openFeeRate,
+      close: closeFeeRate,
+    }),
+    upper: computeZeroTargetBuildEdge(snapshot, zeroTargetPrice, 'above', {
+      open: openFeeRate,
+      close: closeFeeRate,
+    }),
+  };
   const riskDecision = evaluateTrackRisk(
     {
       current: snapshot.attachments.currentExposure ?? currentTargetExposure,
@@ -150,6 +181,7 @@ export function computeTrackMetrics(snapshot: TrackDraftParsedSnapshot): TrackMe
     currentPriceRiskEdge: computeCurrentPriceRiskEdge(snapshot, currentPrice),
     zeroTargetPrice,
     zeroTargetRiskEdge: computeRiskToBandEdge(snapshot, zeroTargetPrice),
+    zeroTargetBuildEdges,
     curve: sampleTrackCurve(snapshot),
   };
 }
@@ -171,4 +203,39 @@ function resolveZeroTargetPrice(snapshot: TrackDraftParsedSnapshot): number {
   }
 
   return solvePriceForTargetExposure(snapshot, 0) ?? bandCenter(snapshot);
+}
+
+function computeZeroTargetBuildEdge(
+  snapshot: TrackDraftParsedSnapshot,
+  startPrice: number,
+  boundary: 'below' | 'above',
+  feeRates: {
+    open: number;
+    close: number;
+  },
+): TrackZeroTargetBuildEdge {
+  const boundaryPrice =
+    boundary === 'below'
+      ? snapshot.parsedNumbers.lowerPrice
+      : snapshot.parsedNumbers.upperPrice;
+  const path = summarizeCurvePath(snapshot, startPrice, boundaryPrice);
+  const openFeeEstimate = path.tradedNotional * feeRates.open;
+  const closeFeeEstimate = Math.abs(path.endQuantity) * boundaryPrice * feeRates.close;
+  const netPnl = path.theoreticalPnl - openFeeEstimate - closeFeeEstimate;
+
+  return {
+    boundary,
+    boundaryPrice,
+    quantity: path.quantity,
+    averageEntryPrice: path.averageEntryPrice,
+    theoreticalPnl: path.theoreticalPnl,
+    theoreticalLossAmount: Math.max(-path.theoreticalPnl, 0),
+    feeEstimate: {
+      open: openFeeEstimate,
+      close: closeFeeEstimate,
+      total: openFeeEstimate + closeFeeEstimate,
+    },
+    netPnl,
+    netLossEstimate: Math.max(-netPnl, 0),
+  };
 }

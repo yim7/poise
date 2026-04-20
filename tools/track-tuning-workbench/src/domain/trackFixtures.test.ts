@@ -250,7 +250,14 @@ describe('track domain fixtures', () => {
   });
 
   it('locks symmetric linear semantics and derived metrics', () => {
-    const snapshot = makeSnapshot();
+    const snapshot = makeSnapshot({
+      attachments: {
+        exchangeRules: {
+          makerFeeRate: 0.0002,
+          takerFeeRate: 0.0005,
+        },
+      },
+    });
     const metrics = computeTrackMetrics(snapshot);
     const currentRiskEdge = expectDualRiskEdge(metrics.currentPriceRiskEdge);
 
@@ -263,16 +270,30 @@ describe('track domain fixtures', () => {
     expectClose(currentRiskEdge.lower.boundaryPrice, 90);
     expectClose(currentRiskEdge.lower.priceDistance, 10);
     expectClose(currentRiskEdge.lower.theoreticalLoss, -150);
-    expectClose(currentRiskEdge.lower.closeFeeEstimate, 0);
+    expectClose(currentRiskEdge.lower.closeFeeEstimate, 1.35);
     expectClose(currentRiskEdge.upper.boundaryPrice, 110);
     expectClose(currentRiskEdge.upper.priceDistance, 10);
     expectClose(currentRiskEdge.upper.theoreticalLoss, -150);
-    expectClose(currentRiskEdge.upper.closeFeeEstimate, 0);
+    expectClose(currentRiskEdge.upper.closeFeeEstimate, 1.65);
 
     expectClose(metrics.zeroTargetPrice, 100);
     expectClose(metrics.zeroTargetRiskEdge.boundaryPrice, 90);
     expectClose(metrics.zeroTargetRiskEdge.priceDistance, 10);
     expectClose(metrics.zeroTargetRiskEdge.theoreticalLoss, -150);
+    expectClose(metrics.zeroTargetBuildEdges.lower.averageEntryPrice ?? 0, 95);
+    expectClose(metrics.zeroTargetBuildEdges.lower.quantity, 30);
+    expectClose(metrics.zeroTargetBuildEdges.lower.theoreticalPnl, -150);
+    expectClose(metrics.zeroTargetBuildEdges.lower.theoreticalLossAmount, 150);
+    expectClose(metrics.zeroTargetBuildEdges.lower.feeEstimate.open, 0.57);
+    expectClose(metrics.zeroTargetBuildEdges.lower.feeEstimate.close, 1.35);
+    expectClose(metrics.zeroTargetBuildEdges.lower.netLossEstimate, 151.92);
+    expectClose(metrics.zeroTargetBuildEdges.upper.averageEntryPrice ?? 0, 105);
+    expectClose(metrics.zeroTargetBuildEdges.upper.quantity, -30);
+    expectClose(metrics.zeroTargetBuildEdges.upper.theoreticalPnl, -150);
+    expectClose(metrics.zeroTargetBuildEdges.upper.theoreticalLossAmount, 150);
+    expectClose(metrics.zeroTargetBuildEdges.upper.feeEstimate.open, 0.63);
+    expectClose(metrics.zeroTargetBuildEdges.upper.feeEstimate.close, 1.65);
+    expectClose(metrics.zeroTargetBuildEdges.upper.netLossEstimate, 152.28);
 
     expectClose(metrics.minStepRoundTrip.priceMove.lower, 0.625);
     expectClose(metrics.minStepRoundTrip.priceMove.upper, 0.625);
@@ -322,6 +343,26 @@ describe('track domain fixtures', () => {
     expectClose(curve.points[2]!.targetExposure, 0);
     expectClose(curve.points[4]!.price, 110);
     expectClose(curve.points[4]!.targetExposure, -8);
+    expectClose(
+      metrics.zeroTargetBuildEdges.lower.averageEntryPrice ?? 0,
+      93.8461541636,
+      SEARCH_TOLERANCE,
+    );
+    expectClose(
+      metrics.zeroTargetBuildEdges.upper.averageEntryPrice ?? 0,
+      106.1538458364,
+      SEARCH_TOLERANCE,
+    );
+    expectClose(
+      metrics.zeroTargetBuildEdges.lower.theoreticalLossAmount,
+      115.3846249078,
+      SEARCH_TOLERANCE,
+    );
+    expectClose(
+      metrics.zeroTargetBuildEdges.upper.theoreticalLossAmount,
+      115.3846249078,
+      SEARCH_TOLERANCE,
+    );
   });
 
   it('locks inertial min step search without linear approximation', () => {
