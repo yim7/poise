@@ -14,7 +14,7 @@ export interface TrackEditorProps {
   issues: TrackDraftIssue[];
   onAdditionalChange(field: 'trackId' | 'symbol', value: string): void;
   onNumericChange(field: keyof TrackDraftRawNumericFields, value: string): void;
-  onEnumChange(field: 'shapeFamily' | 'outOfBandPolicy', value: string): void;
+  onEnumChange(field: 'shapeFamily' | 'bandProtectionKind', value: string): void;
   onQuotePriceChange(value: string): void;
   onCommit(): void;
 }
@@ -63,12 +63,12 @@ export interface ExposureSectionProps {
 }
 
 export interface RiskSectionProps {
-  outOfBandPolicy: TrackDraft['enums']['outOfBandPolicy'];
+  bandProtectionKind: TrackDraft['enums']['bandProtectionKind'];
   dailyLossLimit: string;
   totalLossLimit: string;
   dailyLossIssues: string[];
   totalLossIssues: string[];
-  onOutOfBandPolicyChange(value: TrackDraft['enums']['outOfBandPolicy']): void;
+  onBandProtectionKindChange(value: TrackDraft['enums']['bandProtectionKind']): void;
   onDailyLossLimitChange(value: string): void;
   onTotalLossLimitChange(value: string): void;
   onCommit(): void;
@@ -171,12 +171,12 @@ export function TrackEditor({
           onCommit={onCommit}
         />
         <RiskSection
-          outOfBandPolicy={draft.enums.outOfBandPolicy}
+          bandProtectionKind={draft.enums.bandProtectionKind}
           dailyLossLimit={draft.rawNumbers.dailyLossLimit}
           totalLossLimit={draft.rawNumbers.totalLossLimit}
           dailyLossIssues={fieldIssues(issuesByField, 'dailyLossLimit')}
           totalLossIssues={fieldIssues(issuesByField, 'totalLossLimit')}
-          onOutOfBandPolicyChange={(value) => onEnumChange('outOfBandPolicy', value)}
+          onBandProtectionKindChange={(value) => onEnumChange('bandProtectionKind', value)}
           onDailyLossLimitChange={(value) => onNumericChange('dailyLossLimit', value)}
           onTotalLossLimitChange={(value) => onNumericChange('totalLossLimit', value)}
           onCommit={onCommit}

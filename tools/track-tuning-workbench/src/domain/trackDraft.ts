@@ -1,5 +1,5 @@
 export type TrackShapeFamily = 'linear' | 'inertial' | 'responsive';
-export type TrackOutOfBandPolicy = 'freeze' | 'hold' | 'flatten' | 'terminate';
+export type TrackBandProtectionKind = 'freeze' | 'hold' | 'flatten' | 'terminate';
 
 export interface TrackDraftNumericFields {
   lowerPrice: number;
@@ -29,7 +29,7 @@ export interface TrackDraftRawNumericFields {
 
 export interface TrackDraftEnumFields {
   shapeFamily: TrackShapeFamily;
-  outOfBandPolicy: TrackOutOfBandPolicy;
+  bandProtectionKind: TrackBandProtectionKind;
 }
 
 export interface TrackDraftAdditionalFields {
@@ -42,7 +42,7 @@ export type TrackDraftFieldKey =
   | 'trackId'
   | 'symbol'
   | 'shapeFamily'
-  | 'outOfBandPolicy'
+  | 'bandProtectionKind'
   | 'quotePriceInput';
 
 export interface TrackDraftLoadIssue {
@@ -139,7 +139,7 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
     parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
     enums: input.enums ?? {
       shapeFamily: input.raw.shapeFamily,
-      outOfBandPolicy: input.raw.outOfBandPolicy,
+      bandProtectionKind: input.raw.bandProtectionKind,
     },
     ui: {
       quotePriceInput: input.ui?.quotePriceInput ?? '',

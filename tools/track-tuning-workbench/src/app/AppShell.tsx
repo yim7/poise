@@ -303,7 +303,8 @@ export function AppShell({ bridge }: AppShellProps) {
                   if (field === 'shapeFamily') {
                     draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
                   } else {
-                    draft.enums.outOfBandPolicy = value as TrackDraft['enums']['outOfBandPolicy'];
+                    draft.enums.bandProtectionKind =
+                      value as TrackDraft['enums']['bandProtectionKind'];
                   }
                   clearResolvedLoadIssues(draft, field);
                 });
@@ -350,7 +351,7 @@ function createBlankDraft(index: number) {
       dailyLossLimit: '120',
       totalLossLimit: '500',
       shapeFamily: 'linear',
-      outOfBandPolicy: 'freeze',
+      bandProtectionKind: 'freeze',
     },
     ui: {
       quotePriceInput: '',

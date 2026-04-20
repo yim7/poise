@@ -930,7 +930,10 @@ mod tests {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.strategy.out_of_band_policy = serde_json::from_str("\"flatten\"").unwrap();
+        detail.strategy.out_of_band_policy = serde_json::from_value(serde_json::json!({
+            "flatten": { "recover": { "price_confirm": { "bps": 500 } } }
+        }))
+        .unwrap();
         detail.status.lifecycle.status = serde_json::from_str("\"manual_flattening\"").unwrap();
 
         let text = render_text_with_size(detail, 180, 36);

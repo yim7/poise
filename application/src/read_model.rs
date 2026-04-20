@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
 use poise_core::types::Side;
 use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
 use poise_engine::ledger::TrackLedgerState;
@@ -25,7 +25,7 @@ pub struct TrackReadModel {
     pub notional_per_unit: f64,
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
-    pub out_of_band_policy: OutOfBandPolicy,
+    pub out_of_band_policy: BandProtectionPolicy,
     pub budget: CapacityBudget,
     pub strategy_price: Option<f64>,
     pub strategy_price_status: StrategyPriceStatus,
@@ -158,7 +158,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::persisted_runtime::TrackRestoreRevision;
@@ -184,7 +184,9 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: OutOfBandPolicy::Freeze,
+            out_of_band_policy: BandProtectionPolicy::Freeze {
+                recover: BandRecoverPolicy::BackInBand,
+            },
         }
     }
 

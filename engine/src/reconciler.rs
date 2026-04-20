@@ -1,6 +1,6 @@
 use poise_core::events::DomainEvent;
 use poise_core::risk::{self, ExposureIntent, RiskDecision};
-use poise_core::strategy::{self, BandStatus, OutOfBandPolicy};
+use poise_core::strategy::{self, BandProtectionPolicy, BandStatus};
 use poise_core::types::Exposure;
 
 use crate::loss_guard::build_loss_guard_snapshot;
@@ -85,7 +85,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     let would_increase_risk_out_of_band = matches!(
         band,
         BandStatus::OutOfBand {
-            policy: OutOfBandPolicy::Freeze | OutOfBandPolicy::Hold,
+            policy: BandProtectionPolicy::Freeze { .. } | BandProtectionPolicy::Hold,
             ..
         }
     ) && approved_target.0.abs()
@@ -188,7 +188,7 @@ fn resolve_in_band_target(track: &TrackRuntime, target: &Exposure) -> Exposure {
 
 fn apply_out_of_band(
     track: &TrackRuntime,
-    policy: OutOfBandPolicy,
+    policy: BandProtectionPolicy,
 ) -> (Exposure, Option<TrackStatus>) {
     let frozen_target = track
         .desired_exposure
@@ -196,10 +196,10 @@ fn apply_out_of_band(
         .unwrap_or_else(|| track.current_exposure.clone());
 
     match policy {
-        OutOfBandPolicy::Freeze => (frozen_target, Some(TrackStatus::Frozen)),
-        OutOfBandPolicy::Hold => (frozen_target, Some(TrackStatus::Holding)),
-        OutOfBandPolicy::Flatten => (Exposure(0.0), Some(TrackStatus::Flattening)),
-        OutOfBandPolicy::Terminate => (Exposure(0.0), Some(TrackStatus::Terminated)),
+        BandProtectionPolicy::Freeze { .. } => (frozen_target, Some(TrackStatus::Frozen)),
+        BandProtectionPolicy::Hold => (frozen_target, Some(TrackStatus::Holding)),
+        BandProtectionPolicy::Flatten { .. } => (Exposure(0.0), Some(TrackStatus::Flattening)),
+        BandProtectionPolicy::Terminate => (Exposure(0.0), Some(TrackStatus::Terminated)),
     }
 }
 
@@ -271,7 +271,9 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: OutOfBandPolicy::Freeze,
+                out_of_band_policy: BandProtectionPolicy::Freeze {
+                    recover: BandRecoverPolicy::BackInBand,
+                },
             },
             test_budget(),
             poise_core::types::ExchangeRules {
@@ -420,7 +422,9 @@ mod tests {
     #[test]
     fn reconcile_target_flatten_targets_zero() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = OutOfBandPolicy::Flatten;
+        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
         track.status = TrackStatus::Active;
         track.current_exposure = Exposure(8.0);
 
@@ -433,7 +437,7 @@ mod tests {
     #[test]
     fn reconcile_target_terminate_targets_zero() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = OutOfBandPolicy::Terminate;
+        track.config.out_of_band_policy = BandProtectionPolicy::Terminate;
         track.status = TrackStatus::Active;
         track.current_exposure = Exposure(8.0);
 
@@ -587,7 +591,9 @@ mod tests {
         track.status = TrackStatus::Active;
         track.current_exposure = Exposure(4.0);
         track.desired_exposure = Some(Exposure(6.0));
-        track.config.out_of_band_policy = OutOfBandPolicy::Freeze;
+        track.config.out_of_band_policy = BandProtectionPolicy::Freeze {
+            recover: BandRecoverPolicy::BackInBand,
+        };
 
         let result = reconcile_target(&track, 85.0);
 

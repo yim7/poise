@@ -22,7 +22,11 @@
     "notional_per_unit": 375.0,
     "min_rebalance_units": 0.5,
     "shape_family": "linear",
-    "out_of_band_policy": "freeze"
+    "out_of_band_policy": {
+      "freeze": {
+        "recover": "back_in_band"
+      }
+    }
   },
   "market": {
     "mark_price": 101.3,

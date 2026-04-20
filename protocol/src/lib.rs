@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,7 +106,7 @@ pub struct TrackStrategyView {
     pub notional_per_unit: f64,
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
-    pub out_of_band_policy: OutOfBandPolicy,
+    pub out_of_band_policy: BandProtectionPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -401,13 +401,19 @@ pub enum ShapeFamily {
     Responsive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BandProtectionPolicy {
+    Freeze { recover: BandRecoverPolicy },
+    Hold,
+    Flatten { recover: BandRecoverPolicy },
+    Terminate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OutOfBandPolicy {
-    Freeze,
-    Hold,
-    Flatten,
-    Terminate,
+pub enum BandRecoverPolicy {
+    BackInBand,
+    PriceConfirm { bps: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,16 +463,101 @@ impl fmt::Display for ShapeFamily {
     }
 }
 
-impl fmt::Display for OutOfBandPolicy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Freeze => "freeze",
-            Self::Hold => "hold",
-            Self::Flatten => "flatten",
-            Self::Terminate => "terminate",
-        };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BandProtectionPolicySerde {
+    Freeze { recover: BandRecoverPolicy },
+    Hold {},
+    Flatten { recover: BandRecoverPolicy },
+    Terminate {},
+}
 
-        f.write_str(value)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyBandProtectionPolicyKind {
+    Freeze,
+    Hold,
+    Flatten,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum BandProtectionPolicyDeserialize {
+    Canonical(BandProtectionPolicySerde),
+    Legacy(LegacyBandProtectionPolicyKind),
+}
+
+impl BandProtectionPolicy {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Freeze { .. } => "freeze",
+            Self::Hold => "hold",
+            Self::Flatten { .. } => "flatten",
+            Self::Terminate => "terminate",
+        }
+    }
+
+    fn canonical(self) -> BandProtectionPolicySerde {
+        match self {
+            Self::Freeze { recover } => BandProtectionPolicySerde::Freeze { recover },
+            Self::Hold => BandProtectionPolicySerde::Hold {},
+            Self::Flatten { recover } => BandProtectionPolicySerde::Flatten { recover },
+            Self::Terminate => BandProtectionPolicySerde::Terminate {},
+        }
+    }
+
+    fn legacy_default(value: LegacyBandProtectionPolicyKind) -> Self {
+        match value {
+            LegacyBandProtectionPolicyKind::Freeze => Self::Freeze {
+                recover: BandRecoverPolicy::BackInBand,
+            },
+            LegacyBandProtectionPolicyKind::Hold => Self::Hold,
+            LegacyBandProtectionPolicyKind::Flatten => Self::Flatten {
+                recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+            },
+            LegacyBandProtectionPolicyKind::Terminate => Self::Terminate,
+        }
+    }
+}
+
+impl From<BandProtectionPolicySerde> for BandProtectionPolicy {
+    fn from(value: BandProtectionPolicySerde) -> Self {
+        match value {
+            BandProtectionPolicySerde::Freeze { recover } => Self::Freeze { recover },
+            BandProtectionPolicySerde::Hold {} => Self::Hold,
+            BandProtectionPolicySerde::Flatten { recover } => Self::Flatten { recover },
+            BandProtectionPolicySerde::Terminate {} => Self::Terminate,
+        }
+    }
+}
+
+impl Serialize for BandProtectionPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.canonical().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BandProtectionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            match BandProtectionPolicyDeserialize::deserialize(deserializer)? {
+                BandProtectionPolicyDeserialize::Canonical(value) => value.into(),
+                BandProtectionPolicyDeserialize::Legacy(value) => Self::legacy_default(value),
+            },
+        )
+    }
+}
+
+impl fmt::Display for BandProtectionPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.kind_str())
     }
 }
 
@@ -484,9 +575,10 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSummaryView, RiskSignalView, ShapeFamily, StrategyPriceStatusView, StreamEvent,
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackLedgerGapReasonView, TrackListResponse, TrackStatus,
+        AccountSummaryView, BandProtectionPolicy, BandRecoverPolicy, RiskSignalView, ShapeFamily,
+        StrategyPriceStatusView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackLedgerGapReasonView,
+        TrackListResponse, TrackStatus,
     };
 
     #[test]
@@ -500,6 +592,25 @@ mod tests {
     fn shape_family_rejects_legacy_geometry_names() {
         assert!(serde_json::from_str::<ShapeFamily>("\"concave\"").is_err());
         assert!(serde_json::from_str::<ShapeFamily>("\"convex\"").is_err());
+    }
+
+    #[test]
+    fn band_protection_policy_serializes_flatten_as_object() {
+        let payload = serde_json::to_value(BandProtectionPolicy::Flatten {
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        })
+        .unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "flatten": {
+                    "recover": {
+                        "price_confirm": { "bps": 500 }
+                    }
+                }
+            })
+        );
     }
 
     #[test]
@@ -579,7 +690,7 @@ mod tests {
                     "strategy_price":64000.0,
                     "strategy_price_status":"live"
                 },
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":{"freeze":{"recover":"back_in_band"}}},
                 "budget":{"max_notional":3000.0,"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
@@ -630,7 +741,7 @@ mod tests {
                 "detail":{
                     "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                     "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
-                    "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                    "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":{"freeze":{"recover":"back_in_band"}}},
                     "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                     "position":{"current_exposure":0.5,"desired_exposure":0.75},
                     "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
@@ -683,7 +794,7 @@ mod tests {
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":{"freeze":{"recover":"back_in_band"}}},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"unsupported_commission_asset","observed_at":"2026-03-31T11:11:11Z"}]},
@@ -716,7 +827,7 @@ mod tests {
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":{"freeze":{"recover":"back_in_band"}}},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"future_gap_reason","observed_at":"2026-03-31T11:11:11Z"}]},

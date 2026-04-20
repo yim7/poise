@@ -1199,7 +1199,8 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
     use poise_core::strategy::{
-        DEFAULT_MIN_REBALANCE_UNITS, OutOfBandPolicy, ShapeFamily, TrackConfig,
+        BandProtectionPolicy, BandRecoverPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily,
+        TrackConfig,
     };
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
@@ -1224,7 +1225,9 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: OutOfBandPolicy::Freeze,
+            out_of_band_policy: BandProtectionPolicy::Freeze {
+                recover: BandRecoverPolicy::BackInBand,
+            },
         }
     }
 

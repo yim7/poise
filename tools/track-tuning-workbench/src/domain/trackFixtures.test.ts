@@ -61,7 +61,7 @@ function makeDraft(
       dailyLossLimit: String(numericFields.dailyLossLimit),
       totalLossLimit: String(numericFields.totalLossLimit),
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
-      outOfBandPolicy: overrides.enums?.outOfBandPolicy ?? 'freeze',
+      bandProtectionKind: overrides.enums?.bandProtectionKind ?? 'freeze',
     },
     ui: {
       quotePriceInput,
@@ -89,7 +89,7 @@ function makeSnapshot(
     parsedNumbers: numericFields,
     enums: overrides.enums ?? {
       shapeFamily: 'linear',
-      outOfBandPolicy: 'freeze',
+      bandProtectionKind: 'freeze',
     },
     ui: {
       quotePriceInput,
@@ -141,7 +141,7 @@ describe('track domain fixtures', () => {
         dailyLossLimit: '120',
         totalLossLimit: '500',
         shapeFamily: 'linear',
-        outOfBandPolicy: 'freeze',
+        bandProtectionKind: 'freeze',
       },
       ui: {
         quotePriceInput: '100',
@@ -323,7 +323,7 @@ describe('track domain fixtures', () => {
     const snapshot = makeSnapshot({
       enums: {
         shapeFamily: 'responsive',
-        outOfBandPolicy: 'freeze',
+        bandProtectionKind: 'freeze',
       },
     });
 
@@ -369,7 +369,7 @@ describe('track domain fixtures', () => {
     const snapshot = makeSnapshot({
       enums: {
         shapeFamily: 'inertial',
-        outOfBandPolicy: 'freeze',
+        bandProtectionKind: 'freeze',
       },
     });
 
@@ -419,7 +419,7 @@ describe('track domain fixtures', () => {
       {
         enums: {
           shapeFamily: 'responsive',
-          outOfBandPolicy: 'freeze',
+          bandProtectionKind: 'freeze',
         },
       },
       { quotePriceInput: '101' },
@@ -443,7 +443,7 @@ describe('track domain fixtures', () => {
       {
         enums: {
           shapeFamily: 'responsive',
-          outOfBandPolicy: 'freeze',
+          bandProtectionKind: 'freeze',
         },
       },
       { quotePriceInput: '101' },

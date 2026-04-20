@@ -23,7 +23,7 @@ const FIELD_LABELS: Record<
   dailyLossLimit: 'daily_loss_limit',
   totalLossLimit: 'total_loss_limit',
   shapeFamily: 'shape_family',
-  outOfBandPolicy: 'out_of_band_policy',
+  bandProtectionKind: 'out_of_band_policy',
   quotePriceInput: 'quote_price',
 };
 

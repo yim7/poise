@@ -14,7 +14,7 @@ use poise_application::{
 };
 use poise_core::events::DomainEvent;
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 use poise_engine::command::TrackCommand;
 use poise_engine::execution_plan::ExecutionAction;

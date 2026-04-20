@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::types::Exposure;
 
@@ -14,7 +14,7 @@ pub struct TrackConfig {
     #[serde(default = "default_min_rebalance_units")]
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
-    pub out_of_band_policy: OutOfBandPolicy,
+    pub out_of_band_policy: BandProtectionPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,17 +25,7 @@ pub enum ShapeFamily {
     Responsive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutOfBandPolicy {
-    Freeze,
-    Hold,
-    Flatten,
-    Terminate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BandProtectionPolicy {
     Freeze { recover: BandRecoverPolicy },
     Hold,
@@ -56,7 +46,7 @@ pub enum BandStatus {
         target: Exposure,
     },
     OutOfBand {
-        policy: OutOfBandPolicy,
+        policy: BandProtectionPolicy,
         boundary: BandBoundary,
     },
 }
@@ -92,6 +82,98 @@ pub fn validate_config(config: &TrackConfig) -> Result<(), String> {
 
 fn default_min_rebalance_units() -> f64 {
     DEFAULT_MIN_REBALANCE_UNITS
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BandProtectionPolicySerde {
+    Freeze { recover: BandRecoverPolicy },
+    Hold {},
+    Flatten { recover: BandRecoverPolicy },
+    Terminate {},
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyBandProtectionPolicyKind {
+    Freeze,
+    Hold,
+    Flatten,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum BandProtectionPolicyDeserialize {
+    Canonical(BandProtectionPolicySerde),
+    Legacy(LegacyBandProtectionPolicyKind),
+}
+
+impl BandProtectionPolicy {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Freeze { .. } => "freeze",
+            Self::Hold => "hold",
+            Self::Flatten { .. } => "flatten",
+            Self::Terminate => "terminate",
+        }
+    }
+
+    fn legacy_default(value: LegacyBandProtectionPolicyKind) -> Self {
+        match value {
+            LegacyBandProtectionPolicyKind::Freeze => Self::Freeze {
+                recover: BandRecoverPolicy::BackInBand,
+            },
+            LegacyBandProtectionPolicyKind::Hold => Self::Hold,
+            LegacyBandProtectionPolicyKind::Flatten => Self::Flatten {
+                recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+            },
+            LegacyBandProtectionPolicyKind::Terminate => Self::Terminate,
+        }
+    }
+
+    fn canonical(self) -> BandProtectionPolicySerde {
+        match self {
+            Self::Freeze { recover } => BandProtectionPolicySerde::Freeze { recover },
+            Self::Hold => BandProtectionPolicySerde::Hold {},
+            Self::Flatten { recover } => BandProtectionPolicySerde::Flatten { recover },
+            Self::Terminate => BandProtectionPolicySerde::Terminate {},
+        }
+    }
+}
+
+impl From<BandProtectionPolicySerde> for BandProtectionPolicy {
+    fn from(value: BandProtectionPolicySerde) -> Self {
+        match value {
+            BandProtectionPolicySerde::Freeze { recover } => Self::Freeze { recover },
+            BandProtectionPolicySerde::Hold {} => Self::Hold,
+            BandProtectionPolicySerde::Flatten { recover } => Self::Flatten { recover },
+            BandProtectionPolicySerde::Terminate {} => Self::Terminate,
+        }
+    }
+}
+
+impl Serialize for BandProtectionPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.canonical().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BandProtectionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            match BandProtectionPolicyDeserialize::deserialize(deserializer)? {
+                BandProtectionPolicyDeserialize::Canonical(value) => value.into(),
+                BandProtectionPolicyDeserialize::Legacy(value) => Self::legacy_default(value),
+            },
+        )
+    }
 }
 
 /// 纯函数：给定价格和配置，返回目标占用。
@@ -169,12 +251,8 @@ pub fn band_reentry_price_confirmed(
 
             let confirmation_distance = band_width * f64::from(*bps) / 10_000.0;
             match boundary {
-                BandBoundary::Below => {
-                    price >= lower_price + confirmation_distance - f64::EPSILON
-                }
-                BandBoundary::Above => {
-                    price <= upper_price - confirmation_distance + f64::EPSILON
-                }
+                BandBoundary::Below => price >= lower_price + confirmation_distance - f64::EPSILON,
+                BandBoundary::Above => price <= upper_price - confirmation_distance + f64::EPSILON,
             }
         }
     }
@@ -236,7 +314,9 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: OutOfBandPolicy::Freeze,
+            out_of_band_policy: BandProtectionPolicy::Freeze {
+                recover: BandRecoverPolicy::BackInBand,
+            },
         }
     }
 
@@ -278,10 +358,33 @@ mod tests {
     }
 
     #[test]
-    fn out_of_band_policy_serializes_flatten() {
-        let policy: OutOfBandPolicy = serde_json::from_str("\"flatten\"").unwrap();
+    fn band_protection_policy_serializes_flatten_as_canonical_object() {
+        let policy = BandProtectionPolicy::Flatten {
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
 
-        assert_eq!(serde_json::to_string(&policy).unwrap(), "\"flatten\"");
+        assert_eq!(
+            serde_json::to_value(policy).unwrap(),
+            serde_json::json!({
+                "flatten": {
+                    "recover": {
+                        "price_confirm": { "bps": 500 }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn band_protection_policy_accepts_legacy_freeze_string() {
+        let policy: BandProtectionPolicy = serde_json::from_str("\"freeze\"").unwrap();
+
+        assert_eq!(
+            policy,
+            BandProtectionPolicy::Freeze {
+                recover: BandRecoverPolicy::BackInBand,
+            }
+        );
     }
 
     #[test]
@@ -297,6 +400,29 @@ mod tests {
 
         assert!(matches!(
             policy,
+            BandProtectionPolicy::Flatten {
+                recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
+            }
+        ));
+    }
+
+    #[test]
+    fn track_config_accepts_flatten_price_confirm_policy() {
+        let config = TrackConfig {
+            lower_price: 75_000.0,
+            upper_price: 80_800.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Flatten {
+                recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+            },
+        };
+
+        assert!(matches!(
+            config.out_of_band_policy,
             BandProtectionPolicy::Flatten {
                 recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
             }

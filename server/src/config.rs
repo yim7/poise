@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use poise_application::{AccountMonitorConfig, ConfiguredTrackDefinition, ConfiguredTrackInput};
 use poise_binance as binance;
 use poise_bybit as bybit;
-use poise_core::strategy::{OutOfBandPolicy, ShapeFamily};
+use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
 use poise_engine::track::{TrackId, Venue};
 use serde::{Deserialize, Deserializer};
 
@@ -34,7 +34,7 @@ pub struct TrackFileDefinition {
     pub min_rebalance_units: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_shape_family_option")]
     pub shape_family: Option<ShapeFamily>,
-    pub out_of_band_policy: Option<OutOfBandPolicy>,
+    pub out_of_band_policy: Option<BandProtectionPolicy>,
     pub max_notional: Option<f64>,
     pub leverage: Option<u32>,
     pub daily_loss_limit: f64,
@@ -281,7 +281,7 @@ notional_per_unit = 2000.0
 daily_loss_limit = 800.0
 total_loss_limit = 1600.0
 shape_family = "inertial"
-out_of_band_policy = "hold"
+out_of_band_policy = { hold = {} }
 "#,
         )
         .unwrap();
@@ -296,7 +296,7 @@ out_of_band_policy = "hold"
         );
         assert_eq!(
             config.tracks[1].out_of_band_policy,
-            Some(poise_core::strategy::OutOfBandPolicy::Hold)
+            Some(poise_core::strategy::BandProtectionPolicy::Hold)
         );
         if let ExchangeConfig::Binance(exchange) = &config.exchange {
             assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
@@ -304,6 +304,36 @@ out_of_band_policy = "hold"
         } else {
             panic!("expected Binance fixture to parse as ExchangeConfig::Binance");
         }
+    }
+
+    #[test]
+    fn config_toml_parses_flatten_price_confirm_policy() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 75000
+upper_price = 80800
+long_exposure_units = 8
+short_exposure_units = 8
+notional_per_unit = 375
+daily_loss_limit = 120
+total_loss_limit = 500
+out_of_band_policy = { flatten = { recover = { price_confirm = { bps = 500 } } } }
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.tracks[0].out_of_band_policy,
+            Some(poise_core::strategy::BandProtectionPolicy::Flatten {
+                recover: poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps: 500 }
+            })
+        ));
     }
 
     #[test]
@@ -452,7 +482,9 @@ total_loss_limit = 600.0
         );
         assert_eq!(
             track.track_config().out_of_band_policy,
-            poise_core::strategy::OutOfBandPolicy::Freeze
+            poise_core::strategy::BandProtectionPolicy::Freeze {
+                recover: poise_core::strategy::BandRecoverPolicy::BackInBand,
+            }
         );
         assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use toml_edit::{ArrayOfTables, DocumentMut, Table};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
 const DEFAULT_MIN_REBALANCE_UNITS: f64 = 0.5;
 const DEFAULT_LEVERAGE: u32 = 10;
@@ -34,15 +34,15 @@ impl TrackShapeFamily {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrackOutOfBandPolicy {
+pub enum TrackBandProtectionKind {
     Freeze,
     Hold,
     Flatten,
     Terminate,
 }
 
-impl TrackOutOfBandPolicy {
-    fn parse(value: &str) -> Result<Self> {
+impl TrackBandProtectionKind {
+    fn parse_legacy(value: &str) -> Result<Self> {
         match value {
             "freeze" => Ok(Self::Freeze),
             "hold" => Ok(Self::Hold),
@@ -74,7 +74,7 @@ pub struct EditableTrackFields {
     pub max_notional: f64,
     pub min_rebalance_units: f64,
     pub leverage: u32,
-    pub out_of_band_policy: TrackOutOfBandPolicy,
+    pub out_of_band_policy: TrackBandProtectionKind,
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub shape_family: TrackShapeFamily,
@@ -93,7 +93,7 @@ impl Default for EditableTrackFields {
             max_notional: 0.0,
             min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
             leverage: DEFAULT_LEVERAGE,
-            out_of_band_policy: TrackOutOfBandPolicy::Freeze,
+            out_of_band_policy: TrackBandProtectionKind::Freeze,
             daily_loss_limit: 0.0,
             total_loss_limit: 0.0,
             shape_family: TrackShapeFamily::Linear,
@@ -270,25 +270,15 @@ fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackL
         required_f64_lossy(table, "notional_per_unit", &mut issues).unwrap_or(0.0);
     let implied_max_notional =
         fields.long_exposure_units.max(fields.short_exposure_units) * fields.notional_per_unit;
-    fields.max_notional = optional_f64_lossy(table, "max_notional", &mut issues)
-        .unwrap_or(implied_max_notional);
-    fields.min_rebalance_units =
-        optional_f64_lossy(table, "min_rebalance_units", &mut issues)
-            .unwrap_or(DEFAULT_MIN_REBALANCE_UNITS);
+    fields.max_notional =
+        optional_f64_lossy(table, "max_notional", &mut issues).unwrap_or(implied_max_notional);
+    fields.min_rebalance_units = optional_f64_lossy(table, "min_rebalance_units", &mut issues)
+        .unwrap_or(DEFAULT_MIN_REBALANCE_UNITS);
     fields.leverage =
         optional_u32_lossy(table, "leverage", &mut issues).unwrap_or(DEFAULT_LEVERAGE);
-    fields.out_of_band_policy = optional_string_lossy(table, "out_of_band_policy", &mut issues)
-        .and_then(|value| match TrackOutOfBandPolicy::parse(&value) {
-            Ok(policy) => Some(policy),
-            Err(_) => {
-                issues.push(TrackLoadIssue {
-                    field_key: "out_of_band_policy".to_string(),
-                    message: format!("field `out_of_band_policy` has unsupported value `{value}`"),
-                });
-                None
-            }
-        })
-        .unwrap_or(TrackOutOfBandPolicy::Freeze);
+    fields.out_of_band_policy =
+        optional_band_protection_kind_lossy(table, "out_of_band_policy", &mut issues)
+            .unwrap_or(TrackBandProtectionKind::Freeze);
     fields.daily_loss_limit =
         required_f64_lossy(table, "daily_loss_limit", &mut issues).unwrap_or(0.0);
     fields.total_loss_limit =
@@ -368,6 +358,57 @@ fn optional_string_lossy(
             None
         }
     }
+}
+
+fn optional_band_protection_kind_lossy(
+    table: &Table,
+    key: &str,
+    issues: &mut Vec<TrackLoadIssue>,
+) -> Option<TrackBandProtectionKind> {
+    let Some(item) = table.get(key) else {
+        return None;
+    };
+
+    match parse_band_protection_kind(item, key) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            issues.push(load_issue(key, error.to_string()));
+            None
+        }
+    }
+}
+
+fn parse_band_protection_kind(item: &Item, key: &str) -> Result<TrackBandProtectionKind> {
+    if let Some(value) = item.as_str() {
+        return TrackBandProtectionKind::parse_legacy(value);
+    }
+
+    let Some(policy) = item.as_inline_table() else {
+        return Err(anyhow!("field `{key}` must be a string or inline table"));
+    };
+
+    let kinds = [
+        ("freeze", TrackBandProtectionKind::Freeze),
+        ("hold", TrackBandProtectionKind::Hold),
+        ("flatten", TrackBandProtectionKind::Flatten),
+        ("terminate", TrackBandProtectionKind::Terminate),
+    ];
+
+    let mut matched = None;
+    for (name, kind) in kinds {
+        if policy.contains_key(name) {
+            if matched.is_some() {
+                return Err(anyhow!(
+                    "field `{key}` must contain exactly one policy variant"
+                ));
+            }
+            matched = Some(kind);
+        }
+    }
+
+    matched.ok_or_else(|| {
+        anyhow!("field `{key}` must contain one of: freeze, hold, flatten, terminate")
+    })
 }
 
 fn required_f64_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> Option<f64> {
@@ -508,7 +549,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = "freeze"
+out_of_band_policy = { freeze = { recover = "back_in_band" } }
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -541,7 +582,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = "freeze"
+out_of_band_policy = { freeze = { recover = "back_in_band" } }
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -629,7 +670,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = "freeze"
+out_of_band_policy = { freeze = { recover = "back_in_band" } }
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -718,7 +759,9 @@ total_loss_limit = 750.0
         )));
         assert!(exported.contains("max_notional = 3000.0"));
         assert!(exported.contains(&format!("leverage = {DEFAULT_LEVERAGE}")));
-        assert!(exported.contains("out_of_band_policy = \"freeze\""));
+        assert!(
+            exported.contains("out_of_band_policy = { freeze = { recover = \"back_in_band\" } }")
+        );
         assert!(exported.contains("shape_family = \"linear\""));
     }
 
@@ -793,10 +836,14 @@ total_loss_limit = 160.0
         let beta_draft_id = document.drafts()[1].draft_id.clone();
         let alpha_source_draft_id = document.drafts()[0].draft_id.clone();
 
-        let duplicate = document.duplicate_track(&alpha_source_draft_id).unwrap().clone();
-        let reloaded =
-            parse_track_document(&crate::config_projection::export_all_tracks(document.drafts()))
-                .unwrap();
+        let duplicate = document
+            .duplicate_track(&alpha_source_draft_id)
+            .unwrap()
+            .clone();
+        let reloaded = parse_track_document(&crate::config_projection::export_all_tracks(
+            document.drafts(),
+        ))
+        .unwrap();
 
         assert_eq!(
             find_draft_id_by_track_id(&reloaded, "alpha").unwrap(),

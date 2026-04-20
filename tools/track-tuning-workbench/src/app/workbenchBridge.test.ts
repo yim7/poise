@@ -67,7 +67,11 @@ describe('createWorkbenchBridge', () => {
             max_notional: 3000,
             min_rebalance_units: 0.5,
             leverage: 10,
-            out_of_band_policy: 'freeze',
+            out_of_band_policy: {
+              freeze: {
+                recover: 'back_in_band',
+              },
+            },
             daily_loss_limit: 120,
             total_loss_limit: 500,
             shape_family: 'linear',
@@ -81,6 +85,7 @@ describe('createWorkbenchBridge', () => {
     const loaded = await bridge.loadConfigFile('/tmp/strategies/grid.toml');
 
     expect(loaded.projectedTracks).toHaveLength(1);
+    expect(loaded.projectedTracks[0].enums.bandProtectionKind).toBe('freeze');
     expect(loaded.projectedTracks[0].attachments.exchangeRules).toEqual({
       makerFeeRate: 0.0002,
       takerFeeRate: 0.0005,

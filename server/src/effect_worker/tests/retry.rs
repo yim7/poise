@@ -231,7 +231,9 @@ async fn submit_recovery_proceed_keeps_active_pending_target_when_rounded_reques
         notional_per_unit: 100.0,
         min_rebalance_units: 0.5,
         shape_family: ShapeFamily::Linear,
-        out_of_band_policy: OutOfBandPolicy::Freeze,
+        out_of_band_policy: BandProtectionPolicy::Freeze {
+            recover: BandRecoverPolicy::BackInBand,
+        },
     };
     let exchange_rules = ExchangeRules {
         price_tick: 10.0,

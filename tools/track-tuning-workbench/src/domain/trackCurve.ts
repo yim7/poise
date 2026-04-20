@@ -19,7 +19,7 @@ export type TrackBandStatus =
   | {
       kind: 'out_of_band';
       boundary: TrackBandBoundary;
-      policy: TrackDraftParsedSnapshot['enums']['outOfBandPolicy'];
+      policy: TrackDraftParsedSnapshot['enums']['bandProtectionKind'];
       clampedTargetExposure: number;
     };
 
@@ -91,7 +91,7 @@ export function bandStatus(
     return {
       kind: 'out_of_band',
       boundary: 'below',
-      policy: snapshot.enums.outOfBandPolicy,
+      policy: snapshot.enums.bandProtectionKind,
       clampedTargetExposure: desiredExposure(lowerPrice, snapshot),
     };
   }
@@ -99,7 +99,7 @@ export function bandStatus(
     return {
       kind: 'out_of_band',
       boundary: 'above',
-      policy: snapshot.enums.outOfBandPolicy,
+      policy: snapshot.enums.bandProtectionKind,
       clampedTargetExposure: desiredExposure(upperPrice, snapshot),
     };
   }

@@ -714,7 +714,7 @@ mod tests {
         TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{OutOfBandPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
@@ -1507,7 +1507,9 @@ mod tests {
                     notional_per_unit: 375.0,
                     min_rebalance_units: 0.5,
                     shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: OutOfBandPolicy::Freeze,
+                    out_of_band_policy: BandProtectionPolicy::Freeze {
+                        recover: BandRecoverPolicy::BackInBand,
+                    },
                 },
                 CapacityBudget {
                     max_notional: 3000.0,

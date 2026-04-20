@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::{BandBoundary, OutOfBandPolicy};
+use crate::strategy::{BandBoundary, BandProtectionPolicy};
 use crate::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub enum DomainEvent {
         price: f64,
     },
     PolicyTriggered {
-        policy: OutOfBandPolicy,
+        policy: BandProtectionPolicy,
     },
     RiskCapApplied {
         intended: Exposure,

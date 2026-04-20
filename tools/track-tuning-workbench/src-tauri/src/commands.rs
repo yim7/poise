@@ -38,7 +38,7 @@ pub struct EditableTrackFieldsPayload {
     pub max_notional: f64,
     pub min_rebalance_units: f64,
     pub leverage: u32,
-    pub out_of_band_policy: String,
+    pub out_of_band_policy: Value,
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub shape_family: String,
@@ -185,7 +185,7 @@ impl From<&EditableTrackFields> for EditableTrackFieldsPayload {
             max_notional: value.max_notional,
             min_rebalance_units: value.min_rebalance_units,
             leverage: value.leverage,
-            out_of_band_policy: value.out_of_band_policy.as_str().to_string(),
+            out_of_band_policy: band_protection_policy_value(&value.out_of_band_policy),
             daily_loss_limit: value.daily_loss_limit,
             total_loss_limit: value.total_loss_limit,
             shape_family: value.shape_family.as_str().to_string(),
@@ -220,18 +220,7 @@ impl TryFrom<EditableTrackFieldsPayload> for EditableTrackFields {
             max_notional: value.max_notional,
             min_rebalance_units: value.min_rebalance_units,
             leverage: value.leverage,
-            out_of_band_policy: match value.out_of_band_policy.as_str() {
-                "freeze" => crate::config_document::TrackOutOfBandPolicy::Freeze,
-                "hold" => crate::config_document::TrackOutOfBandPolicy::Hold,
-                "flatten" => crate::config_document::TrackOutOfBandPolicy::Flatten,
-                "terminate" => crate::config_document::TrackOutOfBandPolicy::Terminate,
-                other => {
-                    return Err(CommandError::new(
-                        CommandErrorKind::Config,
-                        format!("不支持的 out_of_band_policy: `{other}`"),
-                    ));
-                }
-            },
+            out_of_band_policy: track_band_protection_kind_from_value(value.out_of_band_policy)?,
             daily_loss_limit: value.daily_loss_limit,
             total_loss_limit: value.total_loss_limit,
             shape_family: match value.shape_family.as_str() {
@@ -258,6 +247,65 @@ fn validate_non_empty(value: String, field: &str) -> Result<String, CommandError
     }
 
     Ok(value)
+}
+
+fn band_protection_policy_value(value: &crate::config_document::TrackBandProtectionKind) -> Value {
+    match value {
+        crate::config_document::TrackBandProtectionKind::Freeze => serde_json::json!({
+            "freeze": {
+                "recover": "back_in_band",
+            }
+        }),
+        crate::config_document::TrackBandProtectionKind::Hold => serde_json::json!({
+            "hold": {}
+        }),
+        crate::config_document::TrackBandProtectionKind::Flatten => serde_json::json!({
+            "flatten": {
+                "recover": {
+                    "price_confirm": { "bps": 500 }
+                }
+            }
+        }),
+        crate::config_document::TrackBandProtectionKind::Terminate => serde_json::json!({
+            "terminate": {}
+        }),
+    }
+}
+
+fn track_band_protection_kind_from_value(
+    value: Value,
+) -> Result<crate::config_document::TrackBandProtectionKind, CommandError> {
+    let Some(policy) = value.as_object() else {
+        return Err(CommandError::new(
+            CommandErrorKind::Config,
+            "out_of_band_policy 必须是对象".to_string(),
+        ));
+    };
+
+    let Some((kind, _)) = policy.iter().next() else {
+        return Err(CommandError::new(
+            CommandErrorKind::Config,
+            "out_of_band_policy 不能为空对象".to_string(),
+        ));
+    };
+
+    if policy.len() != 1 {
+        return Err(CommandError::new(
+            CommandErrorKind::Config,
+            "out_of_band_policy 必须只包含一个策略变体".to_string(),
+        ));
+    }
+
+    match kind.as_str() {
+        "freeze" => Ok(crate::config_document::TrackBandProtectionKind::Freeze),
+        "hold" => Ok(crate::config_document::TrackBandProtectionKind::Hold),
+        "flatten" => Ok(crate::config_document::TrackBandProtectionKind::Flatten),
+        "terminate" => Ok(crate::config_document::TrackBandProtectionKind::Terminate),
+        other => Err(CommandError::new(
+            CommandErrorKind::Config,
+            format!("不支持的 out_of_band_policy: `{other}`"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -483,7 +531,11 @@ total_loss_limit = 160.0
                 max_notional: 1600.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: "freeze".to_string(),
+                out_of_band_policy: serde_json::json!({
+                    "freeze": {
+                        "recover": "back_in_band",
+                    }
+                }),
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
@@ -513,7 +565,11 @@ total_loss_limit = 160.0
                 max_notional: 1600.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: "freeze".to_string(),
+                out_of_band_policy: serde_json::json!({
+                    "freeze": {
+                        "recover": "back_in_band",
+                    }
+                }),
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
@@ -533,7 +589,9 @@ total_loss_limit = 160.0
                 max_notional: 500.0,
                 min_rebalance_units: 1.0,
                 leverage: 5,
-                out_of_band_policy: "hold".to_string(),
+                out_of_band_policy: serde_json::json!({
+                    "hold": {}
+                }),
                 daily_loss_limit: 80.0,
                 total_loss_limit: 160.0,
                 shape_family: "responsive".to_string(),
@@ -689,7 +747,11 @@ total_loss_limit = 160.0
                 max_notional: 3000.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: "freeze".to_string(),
+                out_of_band_policy: serde_json::json!({
+                    "freeze": {
+                        "recover": "back_in_band",
+                    }
+                }),
                 daily_loss_limit: 120.0,
                 total_loss_limit: 500.0,
                 shape_family: "linear".to_string(),

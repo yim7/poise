@@ -59,7 +59,7 @@ interface LoadedConfigFilePayload {
       max_notional: number;
       min_rebalance_units: number;
       leverage: number;
-      out_of_band_policy: string;
+      out_of_band_policy: BandProtectionPolicyPayload;
       daily_loss_limit: number;
       total_loss_limit: number;
       shape_family: string;
@@ -70,6 +70,12 @@ interface LoadedConfigFilePayload {
     }>;
   }>;
 }
+
+type BandProtectionPolicyPayload =
+  | { freeze: { recover: 'back_in_band' | { price_confirm: { bps: number } } } }
+  | { hold: Record<string, never> }
+  | { flatten: { recover: 'back_in_band' | { price_confirm: { bps: number } } } }
+  | { terminate: Record<string, never> };
 
 interface TauriQuotePayload {
   price: string | null;
@@ -176,7 +182,7 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
                 leverage: String(track.fields.leverage),
                 dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
                 totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
-                outOfBandPolicy: track.fields.out_of_band_policy as TrackDraft['enums']['outOfBandPolicy'],
+                bandProtectionKind: bandProtectionKindFromPayload(track.fields.out_of_band_policy),
                 shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
               },
               ui: {
@@ -360,7 +366,7 @@ function toTrackDraftPayload(draft: TrackDraft) {
       max_notional: parseRequiredNumber(draft.rawNumbers.maxNotional),
       min_rebalance_units: parseRequiredNumber(draft.rawNumbers.minRebalanceUnits),
       leverage: Math.trunc(parseRequiredNumber(draft.rawNumbers.leverage)),
-      out_of_band_policy: draft.enums.outOfBandPolicy,
+      out_of_band_policy: toBandProtectionPolicyPayload(draft.enums.bandProtectionKind),
       daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
       total_loss_limit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
       shape_family: draft.enums.shapeFamily,
@@ -405,9 +411,49 @@ function normalizeLoadIssueField(fieldKey: string): TrackDraftFieldKey {
     case 'shape_family':
       return 'shapeFamily';
     case 'out_of_band_policy':
-      return 'outOfBandPolicy';
+      return 'bandProtectionKind';
     default:
       return 'trackId';
+  }
+}
+
+function bandProtectionKindFromPayload(
+  policy: BandProtectionPolicyPayload,
+): TrackDraft['enums']['bandProtectionKind'] {
+  if ('freeze' in policy) {
+    return 'freeze';
+  }
+  if ('hold' in policy) {
+    return 'hold';
+  }
+  if ('flatten' in policy) {
+    return 'flatten';
+  }
+  return 'terminate';
+}
+
+function toBandProtectionPolicyPayload(
+  kind: TrackDraft['enums']['bandProtectionKind'],
+): BandProtectionPolicyPayload {
+  switch (kind) {
+    case 'freeze':
+      return {
+        freeze: {
+          recover: 'back_in_band',
+        },
+      };
+    case 'hold':
+      return { hold: {} };
+    case 'flatten':
+      return {
+        flatten: {
+          recover: {
+            price_confirm: { bps: 500 },
+          },
+        },
+      };
+    case 'terminate':
+      return { terminate: {} };
   }
 }
 

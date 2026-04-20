@@ -40,7 +40,7 @@ fn export_track(draft: &TrackDraft) -> String {
         format!("leverage = {}", fields.leverage),
         format!(
             "out_of_band_policy = {}",
-            quote_string(fields.out_of_band_policy.as_str())
+            band_protection_policy_inline(fields.out_of_band_policy.as_str())
         ),
         format!("daily_loss_limit = {}", format_f64(fields.daily_loss_limit)),
         format!("total_loss_limit = {}", format_f64(fields.total_loss_limit)),
@@ -55,6 +55,16 @@ fn export_track(draft: &TrackDraft) -> String {
 fn quote_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+fn band_protection_policy_inline(value: &str) -> &'static str {
+    match value {
+        "freeze" => "{ freeze = { recover = \"back_in_band\" } }",
+        "hold" => "{ hold = {} }",
+        "flatten" => "{ flatten = { recover = { price_confirm = { bps = 500 } } } }",
+        "terminate" => "{ terminate = {} }",
+        _ => "{ freeze = { recover = \"back_in_band\" } }",
+    }
 }
 
 fn format_f64(value: f64) -> String {

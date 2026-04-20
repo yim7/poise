@@ -242,7 +242,9 @@ pub(crate) fn test_config() -> TrackConfig {
         notional_per_unit: 375.0,
         min_rebalance_units: 0.5,
         shape_family: ShapeFamily::Linear,
-        out_of_band_policy: OutOfBandPolicy::Freeze,
+        out_of_band_policy: BandProtectionPolicy::Freeze {
+            recover: BandRecoverPolicy::BackInBand,
+        },
     }
 }
 

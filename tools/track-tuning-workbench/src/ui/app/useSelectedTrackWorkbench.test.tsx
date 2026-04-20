@@ -20,7 +20,7 @@ function makeDraft(draftId: string, overrides: Partial<TrackDraft> = {}): TrackD
       dailyLossLimit: overrides.rawNumbers?.dailyLossLimit ?? '120',
       totalLossLimit: overrides.rawNumbers?.totalLossLimit ?? '500',
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
-      outOfBandPolicy: overrides.enums?.outOfBandPolicy ?? 'freeze',
+      bandProtectionKind: overrides.enums?.bandProtectionKind ?? 'freeze',
     },
     additional: overrides.additional,
     enums: overrides.enums,

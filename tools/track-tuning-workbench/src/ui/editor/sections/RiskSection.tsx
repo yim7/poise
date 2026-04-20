@@ -2,12 +2,12 @@ import { InlineNotice } from '@/ui/common/InlineNotice';
 import { commitOnEnter, type RiskSectionProps } from '@/ui/editor/TrackEditor';
 
 export function RiskSection({
-  outOfBandPolicy,
+  bandProtectionKind,
   dailyLossLimit,
   totalLossLimit,
   dailyLossIssues,
   totalLossIssues,
-  onOutOfBandPolicyChange,
+  onBandProtectionKindChange,
   onDailyLossLimitChange,
   onTotalLossLimitChange,
   onCommit,
@@ -24,9 +24,11 @@ export function RiskSection({
           <span className="field__label">带外策略</span>
           <select
             className="field__input"
-            value={outOfBandPolicy}
+            value={bandProtectionKind}
             onChange={(event) => {
-              onOutOfBandPolicyChange(event.target.value as RiskSectionProps['outOfBandPolicy']);
+              onBandProtectionKindChange(
+                event.target.value as RiskSectionProps['bandProtectionKind'],
+              );
               onCommit();
             }}
           >

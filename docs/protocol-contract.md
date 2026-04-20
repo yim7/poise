@@ -125,7 +125,7 @@
 
 - `status` 提供生命周期和策略价格摘要，当前包含 `lifecycle`、`strategy_price` 和 `strategy_price_status`。
 - `strategy` 提供配置后的价格带、仓位单位、形状族和 `out_of_band_policy`。
-- `strategy.out_of_band_policy` 当前稳定值为 `freeze`、`hold`、`flatten`、`terminate`。
+- `strategy.out_of_band_policy` 当前稳定形状是嵌套 policy object，例如 `{"freeze":{"recover":"back_in_band"}}`、`{"hold":{}}`、`{"flatten":{"recover":{"price_confirm":{"bps":500}}}}`、`{"terminate":{}}`。
 - `budget` 提供当前轨道风险预算。
 - `market` 提供 `mark_price`、`best_bid` 和 `best_ask`。
 - `ledger` 提供累计盈亏读模型，当前包含 `gross_realized_pnl`、`net_realized_pnl`、`unrealized_pnl`、`total_pnl`、费用累计和未解决 ledger gaps。
