@@ -8,15 +8,12 @@ import type {
   WorkbenchSnapshot,
 } from '@/state/workbenchStore';
 import {
-  bandProtectionKindFromPolicy,
   createTrackDraft,
   type BandProtectionPolicyPayload,
-  defaultBandProtectionPolicy,
   type TrackDraft,
   type TrackDraftFieldKey,
   type TrackDraftLoadIssue,
 } from '@/domain/trackDraft';
-import { withBinanceFuturesDefaults } from '@/domain/binanceFuturesDefaults';
 
 export interface WorkbenchBridgeCommandError {
   kind: 'config' | 'io' | 'session_store' | 'dialog' | 'clipboard' | 'internal';
@@ -163,36 +160,33 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
       return {
         configPath: payload.config_path,
         projectedTracks: payload.projected_tracks.map((track) =>
-          withBinanceFuturesDefaults(
-            createTrackDraft({
-              draftId: track.draft_id,
-              raw: {
-                trackId: track.fields.track_id,
-                symbol: track.fields.symbol,
-                lowerPrice: formatRawNumber(track.fields.lower_price),
-                upperPrice: formatRawNumber(track.fields.upper_price),
-                longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
-                shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
-                notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
-                maxNotional: formatRawNumber(track.fields.max_notional),
-                minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
-                leverage: String(track.fields.leverage),
-                dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
-                totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
-                bandProtectionKind: bandProtectionKindFromPolicy(track.fields.out_of_band_policy),
-                bandProtectionPolicy: track.fields.out_of_band_policy,
-                shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
-              },
-              ui: {
-                quotePriceInput: '',
-              },
-              attachments: track.load_issues.length > 0
-                ? {
-                    loadIssues: track.load_issues.map(normalizeLoadIssue),
-                  }
-                : undefined,
-            }),
-          ),
+          createTrackDraft({
+            draftId: track.draft_id,
+            raw: {
+              trackId: track.fields.track_id,
+              symbol: track.fields.symbol,
+              lowerPrice: formatRawNumber(track.fields.lower_price),
+              upperPrice: formatRawNumber(track.fields.upper_price),
+              longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
+              shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
+              notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
+              maxNotional: formatRawNumber(track.fields.max_notional),
+              minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
+              leverage: String(track.fields.leverage),
+              dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
+              totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
+              bandProtectionPolicy: track.fields.out_of_band_policy,
+              shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
+            },
+            ui: {
+              quotePriceInput: '',
+            },
+            attachments: track.load_issues.length > 0
+              ? {
+                  loadIssues: track.load_issues.map(normalizeLoadIssue),
+                }
+              : undefined,
+          }),
         ),
       };
     },
@@ -365,7 +359,7 @@ function toTrackDraftPayload(draft: TrackDraft) {
       min_rebalance_units: parseRequiredNumber(draft.rawNumbers.minRebalanceUnits),
       leverage: Math.trunc(parseRequiredNumber(draft.rawNumbers.leverage)),
       out_of_band_policy:
-        draft.enums.bandProtectionPolicy ?? defaultBandProtectionPolicy(draft.enums.bandProtectionKind),
+        draft.enums.bandProtectionPolicy,
       daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
       total_loss_limit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
       shape_family: draft.enums.shapeFamily,

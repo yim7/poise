@@ -110,7 +110,7 @@ export function useWorkbenchSnapshot(): WorkbenchState {
 
 export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): WorkbenchStore {
   const sessionSync = options.sessionSync ?? createSessionSync(createMemoryPersistence());
-  const initialSnapshot = normalizeSnapshot(options.initialSnapshot ?? createEmptySnapshot());
+  const initialSnapshot = prepareLoadedSnapshot(options.initialSnapshot ?? createEmptySnapshot());
   let currentSourceSnapshot = cloneSnapshot(initialSnapshot);
 
   const committedHistory = createHistory(cloneSnapshot(initialSnapshot), {
@@ -138,11 +138,13 @@ export function createWorkbenchStore(options: WorkbenchStoreOptions = {}): Workb
     async load(configPath, sourceSnapshot) {
       currentFilePath = configPath;
       if (sourceSnapshot) {
-        currentSourceSnapshot = normalizeSnapshot(sourceSnapshot);
+        currentSourceSnapshot = prepareLoadedSnapshot(sourceSnapshot);
       }
 
       const loaded = await sessionSync.loadDraft(configPath);
-      const nextSnapshot = normalizeSnapshot(loaded ?? currentSourceSnapshot);
+      const nextSnapshot = loaded && isSupportedSnapshot(loaded)
+        ? prepareLoadedSnapshot(loaded)
+        : currentSourceSnapshot;
 
       committedHistory.reset(cloneSnapshot(nextSnapshot));
       draftSession = cloneSnapshot(nextSnapshot);
@@ -392,8 +394,8 @@ function cloneDraft(draft: TrackDraft): TrackDraft {
   return structuredClone(draft);
 }
 
-function normalizeSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
-  const normalizedDrafts = snapshot.drafts.map((draft) => normalizeDraft(draft));
+function prepareLoadedSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
+  const normalizedDrafts = snapshot.drafts.map((draft) => prepareLoadedDraft(draft));
   return {
     selectedDraftId: snapshot.selectedDraftId,
     drafts: normalizedDrafts,
@@ -401,15 +403,75 @@ function normalizeSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
       ...snapshot.temporaryPriceOverrides,
     },
     exportedDrafts:
-      snapshot.exportedDrafts?.map((draft) => normalizeDraft(draft))
+      snapshot.exportedDrafts?.map((draft) => prepareLoadedDraft(draft))
       ?? normalizedDrafts.map(toExportBaselineDraft),
   };
 }
 
-function normalizeDraft(draft: TrackDraft): TrackDraft {
+function prepareLoadedDraft(draft: TrackDraft): TrackDraft {
   const nextDraft = withBinanceFuturesDefaults(cloneDraft(draft));
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
+}
+
+function normalizeDraft(draft: TrackDraft): TrackDraft {
+  const nextDraft = cloneDraft(draft);
+  refreshTrackDraftParsedNumbers(nextDraft);
+  return nextDraft;
+}
+
+function isSupportedSnapshot(snapshot: WorkbenchSnapshot): boolean {
+  return snapshot.drafts.every(isSupportedDraft)
+    && (snapshot.exportedDrafts?.every(isSupportedDraft) ?? true);
+}
+
+function isSupportedDraft(draft: TrackDraft): boolean {
+  return isSupportedBandProtectionPolicy(draft.enums.bandProtectionPolicy);
+}
+
+function isSupportedBandProtectionPolicy(value: unknown): boolean {
+  if (value === 'freeze' || value === 'terminate') {
+    return true;
+  }
+
+  if (!value || typeof value !== 'object' || !('flatten' in value)) {
+    return false;
+  }
+
+  const flatten = (value as { flatten?: unknown }).flatten;
+  if (!flatten || typeof flatten !== 'object') {
+    return false;
+  }
+
+  const trigger = (flatten as { trigger?: unknown }).trigger;
+  const recover = (flatten as { recover?: unknown }).recover;
+  return isSupportedFlattenTrigger(trigger) && isSupportedRecoverPolicy(recover);
+}
+
+function isSupportedFlattenTrigger(value: unknown): boolean {
+  if (value === 'immediate') {
+    return true;
+  }
+
+  if (!value || typeof value !== 'object' || !('flatten_confirm' in value)) {
+    return false;
+  }
+
+  const flattenConfirm = (value as { flatten_confirm?: unknown }).flatten_confirm;
+  return typeof (flattenConfirm as { bps?: unknown } | undefined)?.bps === 'number';
+}
+
+function isSupportedRecoverPolicy(value: unknown): boolean {
+  if (value === 'back_in_band') {
+    return true;
+  }
+
+  if (!value || typeof value !== 'object' || !('reentry_confirm' in value)) {
+    return false;
+  }
+
+  const reentryConfirm = (value as { reentry_confirm?: unknown }).reentry_confirm;
+  return typeof (reentryConfirm as { bps?: unknown } | undefined)?.bps === 'number';
 }
 
 function snapshotsEqual(left: WorkbenchSnapshot, right: WorkbenchSnapshot): boolean {
@@ -481,7 +543,7 @@ function createMemoryPersistence(): SessionPersistence {
       return snapshot ? cloneSnapshot(snapshot) : null;
     },
     async saveDraft(_configPath, nextSnapshot) {
-      snapshot = normalizeSnapshot(nextSnapshot);
+      snapshot = cloneSnapshot(nextSnapshot);
     },
   };
 }

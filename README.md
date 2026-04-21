@@ -83,7 +83,7 @@ short_exposure_units = 10.0
 notional_per_unit = 375.0
 min_rebalance_units = 0.5
 shape_family = "linear"
-out_of_band_policy = { freeze = {} }
+out_of_band_policy = "freeze"
 max_notional = 3750.0
 leverage = 10
 daily_loss_limit = 375.0
@@ -103,7 +103,8 @@ tick_timeout_secs = 30
 - `leverage` 不写时默认按 `10x` 处理，并会在每个 `track` 启动时先下发到交易所
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
 - `shape_family` 当前支持 `linear`、`inertial`、`responsive`
-- `out_of_band_policy` 当前使用嵌套 policy object 形状，例如 `{ freeze = {} }`、`{ flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }`、`{ terminate = {} }`
+- `out_of_band_policy` 当前支持字符串简写和完整对象两种输入形状；当前稳定形状是：`freeze / terminate` 用字符串，`flatten` 用对象
+- workbench 导出时，如果 `flatten` 恰好等于当前默认值，也会优先写成字符串简写 `"flatten"`
 - `flatten` 是自动带外平仓语义，不再接受旧的 `reduce_only`
 - 三者都按“围绕价格带中点对称”的控仓曲线解释
 - `inertial` 更恋边，从上下两侧往中间收仓都更慢
@@ -119,6 +120,130 @@ tick_timeout_secs = 30
   - 已有 `SubmitPending` 会继续执行，不会因为小幅 target 漂移被连续 supersede
   - 已有 `Working` 不会因为小幅 target 漂移被 cancel-replace
 - 如果需要更频繁跟随最新目标，应调低该值；如果希望执行更稳、减少 supersede / cancel-replace，应调高该值
+
+### 1.1 `out_of_band_policy` 字段说明
+
+`out_of_band_policy` 决定价格离开主带时系统采用哪一种自动保护策略。
+
+当前支持三种策略：
+
+- `freeze`
+  - 一出主带就进入 `frozen`
+  - 不继续增加风险，不主动平仓
+  - 一回主带就恢复正常策略控制
+- `flatten`
+  - 自动带外平仓策略
+  - 是否立即平仓由 `trigger` 决定
+  - 平仓后何时自动恢复由 `recover` 决定
+- `terminate`
+  - 一出主带就真正终止
+  - 不再自动恢复
+
+#### 字符串简写
+
+如果只想使用默认参数，可以直接写字符串：
+
+```toml
+out_of_band_policy = "freeze"
+out_of_band_policy = "flatten"
+out_of_band_policy = "terminate"
+```
+
+这三个字符串等价于：
+
+- `"freeze"` 等价于 `out_of_band_policy = "freeze"`
+- `"terminate"` 等价于 `out_of_band_policy = "terminate"`
+- `"flatten"` 等价于：
+
+```toml
+out_of_band_policy = { flatten = {
+  trigger = { flatten_confirm = { bps = 500 } },
+  recover = { reentry_confirm = { bps = 500 } }
+} }
+```
+
+这里的默认值表示：
+
+- 出主带后不会立刻平仓
+- 继续沿带外方向再走出主带宽的 `5%` 才真正 `flatten`
+- `flatten` 之后，回带内还要再向内确认主带宽的 `5%` 才自动恢复
+
+#### 完整对象
+
+`freeze`：
+
+```toml
+out_of_band_policy = "freeze"
+```
+
+`terminate`：
+
+```toml
+out_of_band_policy = "terminate"
+```
+
+`flatten`：
+
+```toml
+out_of_band_policy = { flatten = {
+  trigger = "immediate",
+  recover = "back_in_band"
+} }
+```
+
+`flatten` 有两个子字段：
+
+- `trigger`
+  - `"immediate"`
+    - 一出主带就立即进入 `flattening`
+  - `{ flatten_confirm = { bps = N } }`
+    - 一出主带先进入等待阶段
+    - 只有继续沿带外方向再走出主带宽的 `N / 10000`，才真正进入 `flattening`
+- `recover`
+  - `"back_in_band"`
+    - 回到主带内就恢复
+  - `{ reentry_confirm = { bps = N } }`
+    - 回到主带内后，还要继续向带内确认主带宽的 `N / 10000` 才恢复
+
+这里的 `bps` 都是相对主带宽的基点值，不是相对价格本身：
+
+- `500 bps = 主带宽的 5%`
+- `250 bps = 主带宽的 2.5%`
+
+#### 常见案例
+
+1. 只冻结，不平仓：
+
+```toml
+out_of_band_policy = "freeze"
+```
+
+2. 传统自动平仓，回带内就恢复：
+
+```toml
+out_of_band_policy = { flatten = {
+  trigger = "immediate",
+  recover = "back_in_band"
+} }
+```
+
+3. 出带后先确认再平仓，回带内立即恢复：
+
+```toml
+out_of_band_policy = { flatten = {
+  trigger = { flatten_confirm = { bps = 250 } },
+  recover = "back_in_band"
+} }
+```
+
+4. 出带后先确认再平仓，回带内再确认恢复：
+
+```toml
+out_of_band_policy = { flatten = {
+  trigger = { flatten_confirm = { bps = 250 } },
+  recover = { reentry_confirm = { bps = 500 } }
+} }
+```
 
 ### 2. 启动服务端
 

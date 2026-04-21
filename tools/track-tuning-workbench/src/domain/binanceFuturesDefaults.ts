@@ -1,25 +1,14 @@
-import type { TrackDraft, TrackDraftAttachments } from '@/domain/trackDraft';
+import {
+  DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES as BINANCE_FUTURES_DEFAULT_EXCHANGE_RULES,
+  type TrackDraft,
+  withDefaultBinanceFuturesExchangeRules,
+} from '@/domain/trackDraft';
 
-export const BINANCE_FUTURES_DEFAULT_EXCHANGE_RULES = Object.freeze({
-  makerFeeRate: 0.0002,
-  takerFeeRate: 0.0005,
-});
+export { BINANCE_FUTURES_DEFAULT_EXCHANGE_RULES };
 
 export function withBinanceFuturesDefaults(draft: TrackDraft): TrackDraft {
   return {
     ...draft,
-    attachments: mergeBinanceFuturesDefaults(draft.attachments),
-  };
-}
-
-function mergeBinanceFuturesDefaults(
-  attachments: TrackDraftAttachments,
-): TrackDraftAttachments {
-  return {
-    ...attachments,
-    exchangeRules: {
-      ...BINANCE_FUTURES_DEFAULT_EXCHANGE_RULES,
-      ...attachments.exchangeRules,
-    },
+    attachments: withDefaultBinanceFuturesExchangeRules(draft.attachments),
   };
 }

@@ -374,7 +374,7 @@ risk 语义不改：
 稳定配置形状改为，且当前继续推荐用 inline table：
 
 ```toml
-out_of_band_policy = { freeze = {} }
+out_of_band_policy = "freeze"
 out_of_band_policy = { flatten = {
   trigger = "immediate",
   recover = "back_in_band"
@@ -383,7 +383,7 @@ out_of_band_policy = { flatten = {
   trigger = { flatten_confirm = { bps = 500 } },
   recover = { reentry_confirm = { bps = 500 } }
 } }
-out_of_band_policy = { terminate = {} }
+out_of_band_policy = "terminate"
 ```
 
 默认值建议：

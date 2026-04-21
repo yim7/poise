@@ -281,7 +281,7 @@ notional_per_unit = 2000.0
 daily_loss_limit = 800.0
 total_loss_limit = 1600.0
 shape_family = "inertial"
-out_of_band_policy = { freeze = {} }
+out_of_band_policy = "freeze"
 "#,
         )
         .unwrap();
@@ -324,6 +324,37 @@ notional_per_unit = 375
 daily_loss_limit = 120
 total_loss_limit = 500
 out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.tracks[0].out_of_band_policy,
+            Some(poise_core::strategy::BandProtectionPolicy::Flatten {
+                trigger: poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps: 500 }
+            })
+        ));
+    }
+
+    #[test]
+    fn config_toml_parses_flatten_shorthand_as_current_default() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 75000
+upper_price = 80800
+long_exposure_units = 8
+short_exposure_units = 8
+notional_per_unit = 375
+daily_loss_limit = 120
+total_loss_limit = 500
+out_of_band_policy = "flatten"
 "#,
         )
         .unwrap();

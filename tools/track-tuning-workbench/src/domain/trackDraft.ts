@@ -3,9 +3,9 @@ export type TrackBandProtectionKind = 'freeze' | 'flatten' | 'terminate';
 export type BandFlattenTriggerPayload = 'immediate' | { flatten_confirm: { bps: number } };
 export type BandRecoverPolicyPayload = 'back_in_band' | { reentry_confirm: { bps: number } };
 export type BandProtectionPolicyPayload =
-  | { freeze: Record<string, never> }
+  | 'freeze'
   | { flatten: { trigger: BandFlattenTriggerPayload; recover: BandRecoverPolicyPayload } }
-  | { terminate: Record<string, never> };
+  | 'terminate';
 
 export interface TrackDraftNumericFields {
   lowerPrice: number;
@@ -35,8 +35,7 @@ export interface TrackDraftRawNumericFields {
 
 export interface TrackDraftEnumFields {
   shapeFamily: TrackShapeFamily;
-  bandProtectionKind: TrackBandProtectionKind;
-  bandProtectionPolicy?: BandProtectionPolicyPayload;
+  bandProtectionPolicy: BandProtectionPolicyPayload;
 }
 
 export interface TrackDraftAdditionalFields {
@@ -79,6 +78,11 @@ export interface TrackDraftAttachments {
   loadIssues?: TrackDraftLoadIssue[];
 }
 
+export const DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES = Object.freeze({
+  makerFeeRate: 0.0002,
+  takerFeeRate: 0.0005,
+});
+
 export interface TrackDraftUiState {
   quotePriceInput: string;
 }
@@ -111,8 +115,7 @@ export interface CreateTrackDraftInput {
   raw: TrackDraftAdditionalFields &
     TrackDraftRawNumericFields & {
       shapeFamily: TrackShapeFamily;
-      bandProtectionKind: TrackBandProtectionKind;
-      bandProtectionPolicy?: BandProtectionPolicyPayload;
+      bandProtectionPolicy: BandProtectionPolicyPayload;
     };
   parsedNumbers?: Partial<TrackDraftNumericFields>;
   enums?: TrackDraftEnumFields;
@@ -138,11 +141,7 @@ type TrackNumericFieldKey = (typeof TRACK_NUMERIC_FIELD_KEYS)[number];
 
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
   const rawNumbers = extractRawNumbers(input.raw);
-  const defaultPolicy = defaultBandProtectionPolicy(input.raw.bandProtectionKind);
-  const bandProtectionPolicy = input.enums?.bandProtectionPolicy
-    ?? input.raw.bandProtectionPolicy
-    ?? defaultPolicy;
-  const bandProtectionKind = bandProtectionKindFromPolicy(bandProtectionPolicy);
+  const bandProtectionPolicy = input.enums?.bandProtectionPolicy ?? input.raw.bandProtectionPolicy;
 
   return {
     draftId: input.draftId,
@@ -152,15 +151,14 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
     },
     rawNumbers,
     parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
-    enums: input.enums ?? {
-      shapeFamily: input.raw.shapeFamily,
-      bandProtectionKind,
+    enums: {
+      shapeFamily: input.enums?.shapeFamily ?? input.raw.shapeFamily,
       bandProtectionPolicy,
     },
     ui: {
       quotePriceInput: input.ui?.quotePriceInput ?? '',
     },
-    attachments: input.attachments ?? {},
+    attachments: withDefaultBinanceFuturesExchangeRules(input.attachments ?? {}),
   };
 }
 
@@ -174,13 +172,10 @@ function extractRawNumbers(
 export function bandProtectionKindFromPolicy(
   policy: BandProtectionPolicyPayload,
 ): TrackBandProtectionKind {
-  if ('freeze' in policy) {
-    return 'freeze';
+  if (typeof policy === 'string') {
+    return policy;
   }
-  if ('flatten' in policy) {
-    return 'flatten';
-  }
-  return 'terminate';
+  return 'flatten';
 }
 
 export function defaultBandProtectionPolicy(
@@ -188,7 +183,7 @@ export function defaultBandProtectionPolicy(
 ): BandProtectionPolicyPayload {
   switch (kind) {
     case 'freeze':
-      return { freeze: {} };
+      return 'freeze';
     case 'flatten':
       return {
         flatten: {
@@ -201,15 +196,11 @@ export function defaultBandProtectionPolicy(
         },
       };
     case 'terminate':
-      return { terminate: {} };
+      return 'terminate';
   }
 }
 
 export function refreshTrackDraftParsedNumbers(draft: TrackDraft) {
-  const policy = draft.enums.bandProtectionPolicy
-    ?? defaultBandProtectionPolicy(draft.enums.bandProtectionKind);
-  draft.enums.bandProtectionPolicy = policy;
-  draft.enums.bandProtectionKind = bandProtectionKindFromPolicy(policy);
   draft.parsedNumbers = {
     ...draft.parsedNumbers,
     ...parseTrackDraftRawNumbers(draft.rawNumbers),
@@ -244,4 +235,16 @@ function parseFiniteNumber(input: string): number | null {
   }
 
   return value;
+}
+
+export function withDefaultBinanceFuturesExchangeRules(
+  attachments: TrackDraftAttachments,
+): TrackDraftAttachments {
+  return {
+    ...attachments,
+    exchangeRules: {
+      ...DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES,
+      ...attachments.exchangeRules,
+    },
+  };
 }

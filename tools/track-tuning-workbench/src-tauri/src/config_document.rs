@@ -528,7 +528,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = { freeze = {} }
+out_of_band_policy = "freeze"
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -561,7 +561,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = { freeze = {} }
+out_of_band_policy = "freeze"
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -649,7 +649,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = { freeze = {} }
+out_of_band_policy = "freeze"
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -738,8 +738,37 @@ total_loss_limit = 750.0
         )));
         assert!(exported.contains("max_notional = 3000.0"));
         assert!(exported.contains(&format!("leverage = {DEFAULT_LEVERAGE}")));
-        assert!(exported.contains("out_of_band_policy = { freeze = {} }"));
+        assert!(exported.contains("out_of_band_policy = \"freeze\""));
         assert!(exported.contains("shape_family = \"linear\""));
+    }
+
+    #[test]
+    fn export_uses_flatten_shorthand_for_default_flatten_policy() {
+        let document = parse_track_document(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 65500.0
+upper_price = 67500.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
+daily_loss_limit = 375.0
+total_loss_limit = 750.0
+"#,
+        )
+        .unwrap();
+
+        let exported = crate::config_projection::export_current_track(&document.drafts()[0]);
+
+        assert!(exported.contains("out_of_band_policy = \"flatten\""));
+        assert!(!exported.contains("flatten_confirm"));
+        assert!(!exported.contains("reentry_confirm"));
     }
 
     #[test]

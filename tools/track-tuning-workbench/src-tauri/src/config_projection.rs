@@ -61,7 +61,12 @@ fn quote_string(value: &str) -> String {
 
 fn band_protection_policy_inline(value: &BandProtectionPolicy) -> String {
     match value {
-        BandProtectionPolicy::Freeze => "{ freeze = {} }".to_string(),
+        BandProtectionPolicy::Freeze => "\"freeze\"".to_string(),
+        BandProtectionPolicy::Flatten { trigger, recover }
+            if is_default_flatten_policy(*trigger, *recover) =>
+        {
+            "\"flatten\"".to_string()
+        }
         BandProtectionPolicy::Flatten { trigger, recover } => {
             let trigger = match trigger {
                 BandFlattenTrigger::Immediate => "\"immediate\"".to_string(),
@@ -77,8 +82,13 @@ fn band_protection_policy_inline(value: &BandProtectionPolicy) -> String {
             };
             format!("{{ flatten = {{ trigger = {trigger}, recover = {recover} }} }}")
         }
-        BandProtectionPolicy::Terminate => "{ terminate = {} }".to_string(),
+        BandProtectionPolicy::Terminate => "\"terminate\"".to_string(),
     }
+}
+
+fn is_default_flatten_policy(trigger: BandFlattenTrigger, recover: BandRecoverPolicy) -> bool {
+    matches!(trigger, BandFlattenTrigger::FlattenConfirm { bps: 500 })
+        && matches!(recover, BandRecoverPolicy::ReentryConfirm { bps: 500 })
 }
 
 fn format_f64(value: f64) -> String {

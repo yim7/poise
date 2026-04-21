@@ -38,7 +38,7 @@ function makeDraft(
       dailyLossLimit: overrides.rawNumbers?.dailyLossLimit ?? '120',
       totalLossLimit: overrides.rawNumbers?.totalLossLimit ?? '500',
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
-      bandProtectionKind: overrides.enums?.bandProtectionKind ?? 'freeze',
+      bandProtectionPolicy: overrides.enums?.bandProtectionPolicy ?? 'freeze',
     },
     additional: overrides.additional,
     enums: overrides.enums,
@@ -47,6 +47,7 @@ function makeDraft(
     attachments: overrides.attachments,
   });
 }
+
 
 function makeSnapshot(overrides: Partial<WorkbenchSnapshot> = {}): WorkbenchSnapshot {
   return {
@@ -88,6 +89,39 @@ function createMockStorage(): BrowserStorageLike {
 }
 
 describe('workbench store', () => {
+  it('ignores saved snapshots that still use the old band protection policy shape', async () => {
+    const sourceSnapshot = makeSnapshot({ selectedDraftId: 'draft-b' });
+    const persistence: SessionPersistence = {
+      async loadDraft() {
+        return {
+          selectedDraftId: 'draft-a',
+          drafts: [
+            makeDraft('draft-a', {
+              enums: {
+                shapeFamily: 'linear',
+                bandProtectionPolicy: { freeze: {} } as unknown as TrackDraft['enums']['bandProtectionPolicy'],
+              },
+            }),
+          ],
+          temporaryPriceOverrides: {},
+        } as unknown as WorkbenchSnapshot;
+      },
+      async saveDraft() {},
+    };
+
+    const store = createWorkbenchStore({
+      initialSnapshot: sourceSnapshot,
+      sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
+    });
+
+    await store.load('/tmp/config.toml', sourceSnapshot);
+
+    expect(store.getState().selectedDraftId).toBe('draft-b');
+    expect(store.getState().drafts.map((draft) => draft.enums.bandProtectionPolicy)).toEqual(
+      sourceSnapshot.drafts.map((draft) => draft.enums.bandProtectionPolicy),
+    );
+  });
+
   it('returns a stable snapshot reference until state changes', () => {
     const store = createWorkbenchStore({ initialSnapshot: makeSnapshot() });
 
@@ -390,7 +424,7 @@ describe('workbench store', () => {
     expect(reopenedStore.getState().temporaryPriceOverrides['draft-a']).toBe(104);
   });
 
-  it('backfills default Binance futures fee rates when restoring an older saved snapshot', async () => {
+  it('applies current Binance futures fee defaults when a loaded draft omits fee rules', async () => {
     const legacySnapshot = makeSnapshot({
       drafts: [
         makeDraft('draft-a', {

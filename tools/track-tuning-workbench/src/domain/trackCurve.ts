@@ -1,7 +1,9 @@
 import type {
+  TrackBandProtectionKind,
   TrackDraftParsedSnapshot,
   TrackShapeFamily,
 } from '@/domain/trackDraft';
+import { bandProtectionKindFromPolicy } from '@/domain/trackDraft';
 
 const SHAPE_EXPONENTS: Record<TrackShapeFamily, number> = {
   linear: 1,
@@ -19,7 +21,7 @@ export type TrackBandStatus =
   | {
       kind: 'out_of_band';
       boundary: TrackBandBoundary;
-      policy: TrackDraftParsedSnapshot['enums']['bandProtectionKind'];
+      policy: TrackBandProtectionKind;
       clampedTargetExposure: number;
     };
 
@@ -87,11 +89,12 @@ export function bandStatus(
   snapshot: TrackDraftParsedSnapshot,
 ): TrackBandStatus {
   const { lowerPrice, upperPrice } = snapshot.parsedNumbers;
+  const policy = bandProtectionKindFromPolicy(snapshot.enums.bandProtectionPolicy);
   if (price < lowerPrice - Number.EPSILON) {
     return {
       kind: 'out_of_band',
       boundary: 'below',
-      policy: snapshot.enums.bandProtectionKind,
+      policy,
       clampedTargetExposure: desiredExposure(lowerPrice, snapshot),
     };
   }
@@ -99,7 +102,7 @@ export function bandStatus(
     return {
       kind: 'out_of_band',
       boundary: 'above',
-      policy: snapshot.enums.bandProtectionKind,
+      policy,
       clampedTargetExposure: desiredExposure(upperPrice, snapshot),
     };
   }

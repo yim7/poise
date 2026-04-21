@@ -207,7 +207,7 @@ enum BandRecoverPolicy {
 ```
 
 - 删除 `Hold`
-- `freeze` 配置形状改为 `{ freeze = {} }`
+- `freeze` 配置形状改为 `"freeze"`
 - `flatten` 配置形状改为：
 
 ```toml

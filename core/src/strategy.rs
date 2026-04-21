@@ -46,10 +46,7 @@ pub enum BandFlattenTrigger {
 #[serde(rename_all = "snake_case")]
 pub enum BandRecoverPolicy {
     BackInBand,
-    #[serde(alias = "price_confirm")]
-    ReentryConfirm {
-        bps: u32,
-    },
+    ReentryConfirm { bps: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,29 +95,16 @@ fn default_min_rebalance_units() -> f64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum BandProtectionPolicySerde {
-    Freeze {},
+enum BandProtectionPolicyFlattenSerde {
     Flatten {
         trigger: BandFlattenTrigger,
         recover: BandRecoverPolicy,
     },
-    Terminate {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum LegacyBandProtectionPolicySerde {
-    Freeze {},
-    Flatten {
-        trigger_bps: u32,
-        recover: BandRecoverPolicy,
-    },
-    Terminate {},
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum LegacyBandProtectionPolicyKind {
+enum BandProtectionPolicyShorthand {
     Freeze,
     Flatten,
     Terminate,
@@ -129,9 +113,8 @@ enum LegacyBandProtectionPolicyKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 enum BandProtectionPolicyDeserialize {
-    Canonical(BandProtectionPolicySerde),
-    LegacyCanonical(LegacyBandProtectionPolicySerde),
-    Legacy(LegacyBandProtectionPolicyKind),
+    Canonical(BandProtectionPolicyFlattenSerde),
+    Shorthand(BandProtectionPolicyShorthand),
 }
 
 impl BandProtectionPolicy {
@@ -143,52 +126,41 @@ impl BandProtectionPolicy {
         }
     }
 
-    fn legacy_default(value: LegacyBandProtectionPolicyKind) -> Self {
+    fn shorthand_default(value: BandProtectionPolicyShorthand) -> Self {
         match value {
-            LegacyBandProtectionPolicyKind::Freeze => Self::Freeze,
-            LegacyBandProtectionPolicyKind::Flatten => Self::Flatten {
+            BandProtectionPolicyShorthand::Freeze => Self::Freeze,
+            BandProtectionPolicyShorthand::Flatten => Self::Flatten {
                 trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
                 recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
             },
-            LegacyBandProtectionPolicyKind::Terminate => Self::Terminate,
+            BandProtectionPolicyShorthand::Terminate => Self::Terminate,
         }
     }
 
-    fn canonical(self) -> BandProtectionPolicySerde {
+    fn shorthand(self) -> Option<BandProtectionPolicyShorthand> {
         match self {
-            Self::Freeze => BandProtectionPolicySerde::Freeze {},
+            Self::Freeze => Some(BandProtectionPolicyShorthand::Freeze),
+            Self::Flatten { .. } => None,
+            Self::Terminate => Some(BandProtectionPolicyShorthand::Terminate),
+        }
+    }
+
+    fn canonical_flatten(self) -> Option<BandProtectionPolicyFlattenSerde> {
+        match self {
             Self::Flatten { trigger, recover } => {
-                BandProtectionPolicySerde::Flatten { trigger, recover }
+                Some(BandProtectionPolicyFlattenSerde::Flatten { trigger, recover })
             }
-            Self::Terminate => BandProtectionPolicySerde::Terminate {},
+            _ => None,
         }
     }
 }
 
-impl From<BandProtectionPolicySerde> for BandProtectionPolicy {
-    fn from(value: BandProtectionPolicySerde) -> Self {
+impl From<BandProtectionPolicyFlattenSerde> for BandProtectionPolicy {
+    fn from(value: BandProtectionPolicyFlattenSerde) -> Self {
         match value {
-            BandProtectionPolicySerde::Freeze {} => Self::Freeze,
-            BandProtectionPolicySerde::Flatten { trigger, recover } => {
+            BandProtectionPolicyFlattenSerde::Flatten { trigger, recover } => {
                 Self::Flatten { trigger, recover }
             }
-            BandProtectionPolicySerde::Terminate {} => Self::Terminate,
-        }
-    }
-}
-
-impl From<LegacyBandProtectionPolicySerde> for BandProtectionPolicy {
-    fn from(value: LegacyBandProtectionPolicySerde) -> Self {
-        match value {
-            LegacyBandProtectionPolicySerde::Freeze {} => Self::Freeze,
-            LegacyBandProtectionPolicySerde::Flatten {
-                trigger_bps,
-                recover,
-            } => Self::Flatten {
-                trigger: BandFlattenTrigger::FlattenConfirm { bps: trigger_bps },
-                recover,
-            },
-            LegacyBandProtectionPolicySerde::Terminate {} => Self::Terminate,
         }
     }
 }
@@ -198,7 +170,13 @@ impl Serialize for BandProtectionPolicy {
     where
         S: Serializer,
     {
-        self.canonical().serialize(serializer)
+        if let Some(value) = self.shorthand() {
+            value.serialize(serializer)
+        } else if let Some(value) = self.canonical_flatten() {
+            value.serialize(serializer)
+        } else {
+            unreachable!("band protection policy must serialize as shorthand or flatten object")
+        }
     }
 }
 
@@ -210,8 +188,7 @@ impl<'de> Deserialize<'de> for BandProtectionPolicy {
         Ok(
             match BandProtectionPolicyDeserialize::deserialize(deserializer)? {
                 BandProtectionPolicyDeserialize::Canonical(value) => value.into(),
-                BandProtectionPolicyDeserialize::LegacyCanonical(value) => value.into(),
-                BandProtectionPolicyDeserialize::Legacy(value) => Self::legacy_default(value),
+                BandProtectionPolicyDeserialize::Shorthand(value) => Self::shorthand_default(value),
             },
         )
     }
@@ -438,11 +415,23 @@ mod tests {
     }
 
     #[test]
-    fn band_protection_policy_parses_freeze_without_recover() {
+    fn band_protection_policy_parses_freeze_shorthand() {
         let policy: BandProtectionPolicy =
-            serde_json::from_value(serde_json::json!({ "freeze": {} })).unwrap();
+            serde_json::from_value(serde_json::json!("freeze")).unwrap();
 
         assert_eq!(policy, BandProtectionPolicy::Freeze);
+    }
+
+    #[test]
+    fn band_protection_policy_serializes_freeze_as_string() {
+        assert_eq!(
+            serde_json::to_value(BandProtectionPolicy::Freeze).unwrap(),
+            serde_json::json!("freeze")
+        );
+        assert_eq!(
+            serde_json::to_value(BandProtectionPolicy::Terminate).unwrap(),
+            serde_json::json!("terminate")
+        );
     }
 
     #[test]
@@ -485,6 +474,52 @@ mod tests {
                 recover: BandRecoverPolicy::ReentryConfirm { bps: 500 }
             }
         ));
+    }
+
+    #[test]
+    fn band_protection_policy_parses_flatten_shorthand_as_current_default() {
+        let policy = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!("flatten"))
+            .expect("flatten shorthand should parse");
+
+        assert_eq!(
+            policy,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            }
+        );
+    }
+
+    #[test]
+    fn band_protection_policy_rejects_legacy_trigger_bps_shape() {
+        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
+            "flatten": {
+                "trigger_bps": 500,
+                "recover": {
+                    "reentry_confirm": { "bps": 500 }
+                }
+            }
+        }))
+        .expect_err("legacy trigger_bps policy should be rejected");
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn band_protection_policy_rejects_legacy_price_confirm_alias() {
+        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
+            "flatten": {
+                "trigger": {
+                    "flatten_confirm": { "bps": 500 }
+                },
+                "recover": {
+                    "price_confirm": { "bps": 500 }
+                }
+            }
+        }))
+        .expect_err("legacy price_confirm alias should be rejected");
+
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]

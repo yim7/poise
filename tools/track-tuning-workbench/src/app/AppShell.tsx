@@ -7,6 +7,7 @@ import {
 import {
   createTrackDraft,
   defaultBandProtectionPolicy,
+  type TrackBandProtectionKind,
   type TrackDraft,
 } from '@/domain/trackDraft';
 import { clearResolvedLoadIssues, parseFiniteNumber } from '@/domain/trackValidation';
@@ -307,8 +308,7 @@ export function AppShell({ bridge }: AppShellProps) {
                   if (field === 'shapeFamily') {
                     draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
                   } else {
-                    const nextKind = value as TrackDraft['enums']['bandProtectionKind'];
-                    draft.enums.bandProtectionKind = nextKind;
+                    const nextKind = value as TrackBandProtectionKind;
                     draft.enums.bandProtectionPolicy = defaultBandProtectionPolicy(nextKind);
                   }
                   clearResolvedLoadIssues(draft, field);
@@ -356,7 +356,7 @@ function createBlankDraft(index: number) {
       dailyLossLimit: '120',
       totalLossLimit: '500',
       shapeFamily: 'linear',
-      bandProtectionKind: 'freeze',
+      bandProtectionPolicy: defaultBandProtectionPolicy('freeze'),
     },
     ui: {
       quotePriceInput: '',
