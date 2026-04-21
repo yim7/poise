@@ -775,6 +775,45 @@ mod tests {
     }
 
     #[test]
+    fn flattening_price_confirm_recovery_is_boundary_specific() {
+        let mut below_track = test_runtime();
+        below_track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
+            trigger_bps: 500,
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
+        below_track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+                boundary: BandBoundary::Below,
+            }));
+        below_track.current_exposure = Exposure(8.0);
+
+        let below_result = reconcile_target(&below_track, 109.5);
+
+        assert_eq!(
+            below_result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand,
+            ))),
+        );
+
+        let mut above_track = test_runtime();
+        above_track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
+            trigger_bps: 500,
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
+        above_track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+                boundary: BandBoundary::Above,
+            }));
+        above_track.current_exposure = Exposure(-8.0);
+
+        let above_result = reconcile_target(&above_track, 109.5);
+
+        assert_eq!(above_result.new_runtime_state, None);
+        assert_eq!(above_result.desired_exposure, Exposure(0.0));
+    }
+
+    #[test]
     fn reconcile_target_terminate_targets_zero() {
         let mut track = test_runtime();
         track.config.out_of_band_policy = BandProtectionPolicy::Terminate;

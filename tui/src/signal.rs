@@ -28,7 +28,7 @@ pub enum ExposureAction {
     Add,
     Reduce,
     Flip,
-    Hold,
+    Neutral,
     Unavailable,
 }
 
@@ -124,7 +124,7 @@ fn format_exposure_signal(current: f64, target: Option<f64>) -> ExposureSignal {
         ExposureSignal {
             current_side,
             target_side,
-            action: ExposureAction::Hold,
+            action: ExposureAction::Neutral,
             magnitude: 0.0,
             tone: SignalTone::Neutral,
         }

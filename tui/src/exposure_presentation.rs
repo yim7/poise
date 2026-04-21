@@ -32,7 +32,7 @@ fn format_exposure_delta(signal: ExposureSignal) -> String {
         ExposureAction::Flip => format!("⇄ {:.4}", signal.magnitude),
         ExposureAction::Add => format!("↑ +{:.4}", signal.magnitude),
         ExposureAction::Reduce => format!("↓ -{:.4}", signal.magnitude),
-        ExposureAction::Hold => "→ 0.0000".to_string(),
+        ExposureAction::Neutral => "→ 0.0000".to_string(),
         ExposureAction::Unavailable => "target unavailable".to_string(),
     }
 }
