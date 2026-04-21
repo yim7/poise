@@ -431,7 +431,7 @@ git add docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md
 git commit -m "docs: sync track protection state model tasks"
 ```
 
-Recorded commit: `TODO`
+Recorded commit: `1270293`
 
 ## Final Acceptance Criteria
 
