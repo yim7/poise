@@ -154,7 +154,7 @@
 - Test: `tui/src/views/instance.rs`
 - Test: `tools/track-tuning-workbench/src-tauri/src/commands.rs`
 
-- [ ] **Step 1: 先写失败测试，锁定 shared boundary 形状**
+- [x] **Step 1: 先写失败测试，锁定 shared boundary 形状**
 
 ```rust
 #[test]
@@ -179,7 +179,7 @@ fn flatten_policy_immediate_trigger_enters_flattening_with_current_runtime_shape
 fn flatten_policy_uses_flatten_confirm_before_flattening_with_current_runtime_shape() {}
 ```
 
-- [ ] **Step 2: 同 task 改写所有 direct consumer**
+- [x] **Step 2: 同 task 改写所有 direct consumer**
 
 要求：
 
@@ -225,7 +225,7 @@ out_of_band_policy = { flatten = {
 - legacy 字符串 `"flatten"` 的默认映射必须同步切到新的结构化默认值
 - Task 1 只允许修改 `out_of_band_policy` 的 serde / projection / 展示；不得删除或改写 `TrackStatus` / `TrackReadStatus` / `holding` 公开生命周期值
 
-- [ ] **Step 3: 在不改 snapshot 形状的前提下实现新运行语义**
+- [x] **Step 3: 在不改 snapshot 形状的前提下实现新运行语义**
 
 要求：
 
@@ -238,7 +238,7 @@ out_of_band_policy = { flatten = {
   - 只有穿过 `flatten_confirm` 确认带才进入 `flattening`
   - `flattening` 再按 `recover` 自动恢复
 
-- [ ] **Step 4: 运行最小回归**
+- [x] **Step 4: 运行最小回归**
 
 Run:
 
@@ -256,14 +256,14 @@ Run:
 - `cargo test -p poise-track-tuning-workbench commands::tests::export_current_track_only_returns_tracks_table -- --exact`
 - `cargo test -p poise-track-tuning-workbench commands::tests::load_config_file_returns_projected_tracks -- --exact`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/src/strategy.rs protocol/src/lib.rs application/src/track_definition.rs application/src/read_model.rs server/src/config.rs server/src/projector.rs server/src/http.rs server/src/websocket.rs server/src/assembly.rs server/src/main.rs tui/src/main.rs tui/src/views/instance.rs tools/track-tuning-workbench/src/app/workbenchBridge.ts tools/track-tuning-workbench/src-tauri/src/config_document.rs tools/track-tuning-workbench/src-tauri/src/config_projection.rs tools/track-tuning-workbench/src-tauri/src/commands.rs configs/bybit-testnet.demo.toml configs/binance-testnet.demo.toml configs/test.demo.toml README.md docs/protocol-contract.md engine/src/reconciler.rs engine/src/manager.rs
 git commit -m "refactor: migrate public band protection policy boundary"
 ```
 
-Recorded commit: `TODO`
+Recorded commit: `81789ff`
 
 ## Task 2: 迁移 runtime、snapshot 与 public lifecycle boundary 到最终形状
 
