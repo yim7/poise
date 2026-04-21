@@ -414,6 +414,30 @@ describe('track domain fixtures', () => {
     expectClose(metrics.zeroTargetRiskEdge.theoreticalLoss, -234.375);
   });
 
+  it('keeps pure-short zero target pinned to the lower boundary for decimal price bands', () => {
+    const snapshot = makeSnapshot(
+      {
+        parsedNumbers: makeNumericFields({
+          lowerPrice: 0.18,
+          upperPrice: 1,
+          longExposureUnits: 0,
+          shortExposureUnits: 10,
+          notionalPerUnit: 10,
+          maxNotional: 100,
+          minRebalanceUnits: 0.4,
+        }),
+      },
+      { quotePriceInput: '0.46' },
+    );
+
+    const metrics = computeTrackMetrics(snapshot);
+
+    expectClose(metrics.zeroTargetPrice, 0.18);
+    expectClose(metrics.zeroTargetBuildEdges.lower.quantity, 0);
+    expect(metrics.zeroTargetBuildEdges.lower.averageEntryPrice).toBeNull();
+    expectClose(metrics.zeroTargetBuildEdges.upper.quantity, -169.4915254237, SEARCH_TOLERANCE);
+  });
+
   it('locks asymmetric min step with responsive search away from center', () => {
     const snapshot = makeSnapshot(
       {

@@ -73,7 +73,7 @@ export function desiredExposure(
   const position =
     halfBand <= Number.EPSILON
       ? 0
-      : clampNumber((price - bandCenter(snapshot)) / halfBand, -1, 1);
+      : normalizeBandPosition(clampNumber((price - bandCenter(snapshot)) / halfBand, -1, 1));
   const span = (config.longExposureUnits + config.shortExposureUnits) / 2;
   const bias = (config.longExposureUnits - config.shortExposureUnits) / 2;
   const magnitude = Math.abs(position) ** shapeFamilyExponent(snapshot.enums.shapeFamily);
@@ -179,4 +179,20 @@ export function solvePriceForTargetExposure(
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeBandPosition(value: number): number {
+  const tolerance = 1e-12;
+
+  if (Math.abs(value) <= tolerance) {
+    return 0;
+  }
+  if (Math.abs(value - 1) <= tolerance) {
+    return 1;
+  }
+  if (Math.abs(value + 1) <= tolerance) {
+    return -1;
+  }
+
+  return value;
 }
