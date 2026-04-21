@@ -2,7 +2,6 @@ mod account_projector;
 mod assembly;
 mod config;
 mod effect_worker;
-mod event_presentation;
 mod exchange;
 mod exchange_freshness;
 mod exchange_startup;

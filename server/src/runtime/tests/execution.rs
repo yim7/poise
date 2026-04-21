@@ -2338,6 +2338,7 @@ async fn effect_worker_keeps_effect_pending_when_loaded_track_is_missing_for_wri
     let services = build_test_application_services(
         manager,
         mutation_store,
+        persistence.clone() as Arc<dyn TrackQueryStore>,
         effect_store,
         events,
         account_margin_guard,

@@ -44,6 +44,7 @@ pub(crate) async fn test_state_with_track(
     let services = build_test_application_services(
         manager,
         mutation_store.clone(),
+        repository.clone() as Arc<dyn TrackQueryStore>,
         effect_store.clone(),
         notifications.clone(),
         account_margin_guard.clone(),

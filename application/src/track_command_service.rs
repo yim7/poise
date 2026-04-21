@@ -28,10 +28,6 @@ impl TrackCommandService {
         self.executor.command(id, command).await
     }
 
-    pub async fn restore_persisted_track_state(&self, id: &str) -> Result<bool> {
-        self.executor.restore_persisted_track_state(id).await
-    }
-
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.executor.manager()
@@ -68,44 +64,6 @@ mod tests {
             ApplicationNotification::TrackChanged {
                 track_id: TrackId::new("btc-core"),
             }
-        );
-        assert_eq!(
-            service
-                .0
-                .manager()
-                .read()
-                .await
-                .snapshot("btc-core")
-                .unwrap()
-                .status(),
-            poise_engine::runtime::TrackStatus::Paused
-        );
-    }
-
-    #[tokio::test]
-    async fn restore_persisted_track_state_rehydrates_manager_from_store() {
-        let repository = Arc::new(MemoryRepository::default());
-        let mut persisted_manager = seeded_manager();
-        persisted_manager.pause_track("btc-core").unwrap();
-        let persisted_snapshot = persisted_manager.snapshot("btc-core").unwrap();
-        crate::TrackMutationStore::save_transition(
-            repository.as_ref(),
-            "btc-core",
-            &persisted_snapshot,
-            &[],
-            &[],
-        )
-        .await
-        .unwrap();
-
-        let service = test_service(repository);
-
-        assert!(
-            service
-                .0
-                .restore_persisted_track_state("btc-core")
-                .await
-                .unwrap()
         );
         assert_eq!(
             service

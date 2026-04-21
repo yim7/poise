@@ -30,6 +30,7 @@ pub struct TrackServiceSet {
     pub observation: crate::TrackObservationService,
     pub effect: crate::TrackEffectService,
     pub submit_effect: crate::submit_effect_service::SubmitEffectService,
+    pub runtime_lifecycle: crate::TrackRuntimeLifecycleService,
 }
 
 pub trait AccountCapacityGuard: Send + Sync {
@@ -257,6 +258,7 @@ impl TrackServiceSet {
     pub fn new(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
+        query_store: Arc<dyn crate::TrackQueryStore>,
         effect_store: Arc<dyn TrackEffectStore>,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
@@ -264,6 +266,7 @@ impl TrackServiceSet {
         Self::new_with_recovery_anomaly_observer(
             manager,
             mutation_store,
+            query_store,
             effect_store,
             notifications,
             account_margin_guard,
@@ -274,6 +277,7 @@ impl TrackServiceSet {
     pub fn new_with_recovery_anomaly_observer(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
+        query_store: Arc<dyn crate::TrackQueryStore>,
         effect_store: Arc<dyn TrackEffectStore>,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
@@ -287,12 +291,20 @@ impl TrackServiceSet {
             account_margin_guard,
             recovery_anomaly_observer,
         ));
+        let observation = Arc::new(crate::TrackObservationService::from_executor(
+            executor.clone(),
+        ));
         Self {
             command: crate::TrackCommandService::from_executor(executor.clone()),
-            observation: crate::TrackObservationService::from_executor(executor.clone()),
+            observation: observation.as_ref().clone(),
             effect: crate::TrackEffectService::from_executor(executor.clone()),
             submit_effect: crate::submit_effect_service::SubmitEffectService::from_executor(
+                executor.clone(),
+            ),
+            runtime_lifecycle: crate::TrackRuntimeLifecycleService::from_executor(
                 executor,
+                query_store,
+                observation,
             ),
         }
     }
@@ -1324,6 +1336,78 @@ pub(crate) mod test_support {
     }
 
     #[async_trait]
+    impl crate::TrackQueryStore for MemoryRepository {
+        async fn list_track_snapshots(&self) -> Result<Vec<crate::StoredTrackSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .unwrap()
+                .values()
+                .cloned()
+                .map(|snapshot| crate::StoredTrackSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn load_track_snapshot(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<crate::StoredTrackSnapshot>> {
+            Ok(self
+                .snapshots
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .cloned()
+                .map(|snapshot| crate::StoredTrackSnapshot {
+                    snapshot,
+                    updated_at: Utc::now(),
+                }))
+        }
+
+        async fn list_recent_track_events(
+            &self,
+            track_id: &TrackId,
+            _limit: usize,
+        ) -> Result<Vec<crate::StoredTrackEvent>> {
+            Ok(self
+                .events
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| crate::StoredTrackEvent {
+                    id: index as i64,
+                    track_id: track_id.clone(),
+                    event,
+                    created_at: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn list_recent_track_effects(
+            &self,
+            track_id: &TrackId,
+            limit: usize,
+        ) -> Result<Vec<crate::PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[async_trait]
     impl TrackMutationStore for MemoryRepository {
         async fn save_transition_with_effect_status(
             &self,
@@ -1512,6 +1596,7 @@ pub(crate) mod test_support {
         let (notifications, _) = broadcast::channel(16);
         let services = TrackServiceSet::new(
             manager,
+            repository.clone(),
             repository.clone(),
             repository,
             notifications.clone(),

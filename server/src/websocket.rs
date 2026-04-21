@@ -1,6 +1,6 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use poise_application::ApplicationNotification;
+use poise_application::{ApplicationNotification, TrackListReadModel};
 use poise_protocol::{
     PriceExecutionBlockReasonView, StreamEvent, TrackLiveView as ProtocolTrackLiveView,
 };
@@ -568,7 +568,9 @@ async fn push_projected_updates(
     };
 
     let track_id_text = track_id.as_str().to_string();
-    let list_item = state.projector.project_list_item(&source);
+    let list_item = state
+        .projector
+        .project_list_item(&TrackListReadModel::from(&source));
     let detail = state.projector.project_detail(&source);
     let events = [
         StreamEvent::TrackListItemChanged {
@@ -793,6 +795,7 @@ mod tests {
         let services = build_test_application_services(
             test_manager(),
             mutation_store.clone(),
+            repository.clone() as Arc<dyn TrackQueryStore>,
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
@@ -840,6 +843,7 @@ mod tests {
         let services = build_test_application_services(
             test_manager(),
             mutation_store.clone(),
+            repository.clone() as Arc<dyn TrackQueryStore>,
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
@@ -892,6 +896,7 @@ mod tests {
         let services = build_test_application_services(
             test_manager(),
             mutation_store.clone(),
+            repository.clone() as Arc<dyn TrackQueryStore>,
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
@@ -938,6 +943,7 @@ mod tests {
         let services = build_test_application_services(
             test_manager(),
             mutation_store.clone(),
+            repository.clone() as Arc<dyn TrackQueryStore>,
             effect_store.clone(),
             notifications,
             account_margin_guard,

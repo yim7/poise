@@ -1,31 +1,22 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_engine::executor::RecoveryAnomaly;
 use poise_engine::track::TrackId;
 
 use crate::{
-    PreparedTrackRegistry, TrackObservationService, TrackQueryStore, TrackReadModel,
-    track_read_source::{TrackReadSource, TrackRuntimeReadState},
+    PreparedTrackRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
+    TrackReadModel, track_read_source_loader::TrackReadSourceLoader,
 };
 
-const LIST_EFFECTS_LIMIT: usize = 20;
-const DETAIL_EVENTS_LIMIT: usize = 20;
-const DETAIL_EFFECTS_LIMIT: usize = 20;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackRecoveryView {
-    pub recovery_anomaly: Option<RecoveryAnomaly>,
-    pub has_working_orders: bool,
-}
-
 pub struct TrackQueryService {
-    repository: Arc<dyn TrackQueryStore>,
-    prepared_registry: Arc<PreparedTrackRegistry>,
-    observation: Option<Arc<TrackObservationService>>,
+    loader: Arc<TrackReadSourceLoader>,
 }
 
 impl TrackQueryService {
+    pub(crate) fn from_loader(loader: Arc<TrackReadSourceLoader>) -> Self {
+        Self { loader }
+    }
+
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
         prepared_registry: Arc<PreparedTrackRegistry>,
@@ -38,133 +29,22 @@ impl TrackQueryService {
         prepared_registry: Arc<PreparedTrackRegistry>,
         observation: Option<Arc<TrackObservationService>>,
     ) -> Self {
-        Self {
+        Self::from_loader(Arc::new(TrackReadSourceLoader::new(
             repository,
             prepared_registry,
             observation,
-        }
+        )))
     }
 
-    pub async fn list_track_sources(&self) -> Result<Vec<TrackReadModel>> {
-        let mut snapshots = self.repository.list_track_snapshots().await?;
-        snapshots.sort_by(|left, right| {
-            left.snapshot
-                .track_id
-                .as_str()
-                .cmp(right.snapshot.track_id.as_str())
-        });
-
-        let mut sources = Vec::with_capacity(snapshots.len());
-        for snapshot in snapshots {
-            let recent_effects = self
-                .repository
-                .list_recent_track_effects(&snapshot.snapshot.track_id, LIST_EFFECTS_LIMIT)
-                .await?;
-            let source = self
-                .read_source_from_snapshot(
-                    snapshot.snapshot.track_id.clone(),
-                    snapshot.snapshot,
-                    snapshot.updated_at,
-                    Vec::new(),
-                    recent_effects,
-                )
-                .await?;
-
-            sources.push(TrackReadModel::from_source(source));
-        }
-
-        Ok(sources)
+    pub async fn list_track_sources(&self) -> Result<Vec<TrackListReadModel>> {
+        self.loader.list_track_read_models().await
     }
 
     pub async fn load_track_detail_source(
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackReadModel>> {
-        let Some(snapshot) = self.repository.load_track_snapshot(track_id).await? else {
-            return Ok(None);
-        };
-
-        let recent_track_events = self
-            .repository
-            .list_recent_track_events(track_id, DETAIL_EVENTS_LIMIT)
-            .await?;
-        let recent_effects = self
-            .repository
-            .list_recent_track_effects(track_id, DETAIL_EFFECTS_LIMIT)
-            .await?;
-        Ok(Some(TrackReadModel::from_source(
-            self.read_source_from_snapshot(
-                track_id.clone(),
-                snapshot.snapshot,
-                snapshot.updated_at,
-                recent_track_events,
-                recent_effects,
-            )
-            .await?,
-        )))
-    }
-
-    pub async fn load_track_recovery_view(
-        &self,
-        track_id: &TrackId,
-    ) -> Result<Option<TrackRecoveryView>> {
-        let Some(snapshot) = self.repository.load_track_snapshot(track_id).await? else {
-            return Ok(None);
-        };
-        let runtime = self
-            .runtime_from_snapshot(track_id.clone(), snapshot.snapshot)
-            .await?;
-        Ok(Some(TrackRecoveryView {
-            recovery_anomaly: runtime.executor_state.diagnostics.recovery_anomaly.clone(),
-            has_working_orders: runtime
-                .executor_state
-                .slots
-                .iter()
-                .any(|slot| slot.working_order.is_some()),
-        }))
-    }
-
-    async fn read_source_from_snapshot(
-        &self,
-        track_id: TrackId,
-        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
-        updated_at: chrono::DateTime<chrono::Utc>,
-        recent_track_events: Vec<crate::StoredTrackEvent>,
-        recent_effects: Vec<crate::PersistedTrackEffect>,
-    ) -> Result<TrackReadSource> {
-        let definition = self
-            .prepared_registry
-            .get(&track_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing prepared track definition for `{}`",
-                    track_id.as_str()
-                )
-            })?
-            .read_definition();
-        let runtime = self.runtime_from_snapshot(track_id, snapshot).await?;
-
-        Ok(TrackReadSource {
-            definition,
-            runtime,
-            updated_at,
-            recent_track_events,
-            recent_effects,
-        })
-    }
-
-    async fn runtime_from_snapshot(
-        &self,
-        track_id: TrackId,
-        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
-    ) -> Result<TrackRuntimeReadState> {
-        Ok(match &self.observation {
-            Some(observation) => {
-                let live_view = observation.track_live_view(track_id.as_str()).await?;
-                TrackRuntimeReadState::from_parts(snapshot, live_view)
-            }
-            None => TrackRuntimeReadState::from_snapshot(snapshot),
-        })
+        self.loader.load_track_read_model(track_id).await
     }
 }
 
@@ -179,7 +59,7 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, RecoveryAnomaly};
+    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::observation::MarketObservation;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::ExecutionQuote;
@@ -198,6 +78,7 @@ mod tests {
     use crate::{
         ConfiguredTrackDefinition, ConfiguredTrackInput, EffectStatus, PersistedTrackEffect,
         PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
+        track_read_source_loader::TrackReadSourceLoader,
     };
 
     use super::TrackQueryService;
@@ -228,13 +109,8 @@ mod tests {
             sources[0].updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
-        assert_eq!(sources[0].recent_track_events.len(), 0);
-        assert_eq!(sources[0].recent_effects.len(), 1);
-        assert_eq!(sources[0].recent_effects[0].status, EffectStatus::Executing);
-        assert_eq!(
-            repository.recorded_effect_limits(),
-            vec![super::LIST_EFFECTS_LIMIT]
-        );
+        assert_eq!(sources[0].active_slot_count, 1);
+        assert_eq!(repository.recorded_effect_limits(), Vec::<usize>::new());
     }
 
     #[tokio::test]
@@ -251,6 +127,22 @@ mod tests {
             source.updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
+        assert_eq!(source.recent_activity.len(), 1);
+        assert_eq!(source.recent_activity[0].message, "submit order executing");
+    }
+
+    #[tokio::test]
+    async fn internal_loader_reads_raw_source_for_detail_paths() {
+        let source = TrackReadSourceLoader::new(
+            Arc::new(FakeReadRepository::new()),
+            test_prepared_registry(),
+            None,
+        )
+        .load_track_read_source(&TrackId::new("btc-core"))
+        .await
+        .unwrap()
+        .unwrap();
+
         assert_eq!(source.recent_track_events.len(), 1);
         assert_eq!(source.recent_effects.len(), 1);
     }
@@ -290,31 +182,6 @@ mod tests {
         assert_eq!(source.best_bid, Some(94.5));
         assert_eq!(source.best_ask, Some(95.5));
         assert_eq!(source.strategy_price, Some(95.0));
-    }
-
-    #[tokio::test]
-    async fn load_track_recovery_view_projects_runtime_recovery_summary() {
-        let mut repository = FakeReadRepository::new();
-        let snapshot = repository.snapshots.get_mut("btc-core").unwrap();
-        snapshot
-            .snapshot
-            .executor_state
-            .diagnostics
-            .recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
-        snapshot.snapshot.executor_state.slots.clear();
-        let service = TrackQueryService::new(Arc::new(repository), test_prepared_registry());
-
-        let recovery_view = service
-            .load_track_recovery_view(&TrackId::new("btc-core"))
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            recovery_view.recovery_anomaly,
-            Some(RecoveryAnomaly::UnknownLiveOrder)
-        );
-        assert!(!recovery_view.has_working_orders);
     }
 
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {

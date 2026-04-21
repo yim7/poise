@@ -4,36 +4,34 @@ use anyhow::Result;
 use poise_core::events::DomainEvent;
 use poise_engine::track::TrackId;
 
-use crate::{DiagnosticSeverity, TrackDiagnosticItem, TrackQueryService};
+use crate::{
+    DiagnosticSeverity, StoredTrackEvent, TrackDiagnosticItem,
+    track_diagnostic_event_loader::TrackDiagnosticEventLoader,
+};
 
 pub struct TrackDebugQueryService {
-    query_service: Arc<TrackQueryService>,
+    loader: Arc<TrackDiagnosticEventLoader>,
 }
 
 impl TrackDebugQueryService {
-    pub fn new(query_service: Arc<TrackQueryService>) -> Self {
-        Self { query_service }
+    pub(crate) fn from_loader(loader: Arc<TrackDiagnosticEventLoader>) -> Self {
+        Self { loader }
     }
 
     pub async fn load_track_diagnostics(
         &self,
         track_id: &TrackId,
     ) -> Result<Option<Vec<TrackDiagnosticItem>>> {
-        let Some(source) = self
-            .query_service
-            .load_track_detail_source(track_id)
-            .await?
-        else {
+        let Some(events) = self.loader.load_recent_track_events(track_id).await? else {
             return Ok(None);
         };
 
-        Ok(Some(classify_diagnostic_items(&source)))
+        Ok(Some(classify_diagnostic_items(&events)))
     }
 }
 
-fn classify_diagnostic_items(source: &crate::TrackReadModel) -> Vec<TrackDiagnosticItem> {
-    let mut items = source
-        .recent_track_events
+fn classify_diagnostic_items(events: &[StoredTrackEvent]) -> Vec<TrackDiagnosticItem> {
+    let mut items = events
         .iter()
         .filter_map(|event| match &event.event {
             DomainEvent::ExposureTargetChanged { from, to } => Some(TrackDiagnosticItem {
@@ -72,10 +70,8 @@ mod tests {
     use crate::{
         ConfiguredTrackDefinition, ConfiguredTrackInput, DiagnosticSeverity, EffectStatus,
         PersistedTrackEffect, PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot,
-        TrackQueryService, TrackQueryStore,
+        TrackQueryStore, TrackReadServices,
     };
-
-    use super::TrackDebugQueryService;
 
     fn test_track_config() -> TrackConfig {
         TrackConfig {
@@ -95,10 +91,8 @@ mod tests {
     #[tokio::test]
     async fn load_track_diagnostics_projects_only_diagnostic_events_in_order() {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = TrackDebugQueryService::new(Arc::new(TrackQueryService::new(
-            repository,
-            test_prepared_registry(),
-        )));
+        let read_services = TrackReadServices::new(repository, test_prepared_registry());
+        let service = read_services.debug_query_service();
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -118,6 +112,22 @@ mod tests {
             diagnostics[1].observed_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 10).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn load_track_diagnostics_does_not_require_prepared_registry_or_effects() {
+        let repository = Arc::new(FakeReadRepository::new());
+        let read_services = TrackReadServices::new(repository.clone(), Arc::default());
+        let service = read_services.debug_query_service();
+
+        let diagnostics = service
+            .load_track_diagnostics(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(repository.effect_query_count(), 0);
     }
 
     fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
@@ -152,6 +162,7 @@ mod tests {
         snapshot: StoredTrackSnapshot,
         events: Vec<StoredTrackEvent>,
         effects: Vec<PersistedTrackEffect>,
+        effect_query_count: std::sync::Mutex<usize>,
     }
 
     impl FakeReadRepository {
@@ -215,7 +226,12 @@ mod tests {
                     created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
                     updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
                 }],
+                effect_query_count: std::sync::Mutex::new(0),
             }
+        }
+
+        fn effect_query_count(&self) -> usize {
+            *self.effect_query_count.lock().unwrap()
         }
     }
 
@@ -249,6 +265,7 @@ mod tests {
             track_id: &TrackId,
             _limit: usize,
         ) -> Result<Vec<PersistedTrackEffect>> {
+            *self.effect_query_count.lock().unwrap() += 1;
             Ok(if track_id.as_str() == "btc-core" {
                 self.effects.clone()
             } else {

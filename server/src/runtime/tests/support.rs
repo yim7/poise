@@ -250,6 +250,7 @@ async fn runtime_fixture_with_startup_definition_and_options(
         manager,
         persistence.clone(),
         persistence.clone(),
+        persistence.clone(),
         events.clone(),
         account_margin_guard.clone(),
     );
@@ -365,6 +366,7 @@ where
     let services = build_test_application_services(
         manager,
         mutation_store.clone(),
+        persistence.clone() as Arc<dyn TrackQueryStore>,
         effect_store.clone(),
         events.clone(),
         account_margin_guard.clone(),
@@ -1989,6 +1991,7 @@ pub(crate) async fn build_test_runtime_with_ports(
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let services = build_test_application_services(
         manager,
+        persistence.clone(),
         persistence.clone(),
         persistence.clone(),
         events.clone(),

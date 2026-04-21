@@ -1373,6 +1373,7 @@ async fn runtime_start_fails_when_buffered_user_data_replay_cannot_be_persisted(
         manager,
         persistence.clone(),
         persistence.clone(),
+        persistence.clone(),
         events.clone(),
         account_margin_guard.clone(),
     );

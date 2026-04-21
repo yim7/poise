@@ -69,7 +69,7 @@ async fn health(
     let attention_required_count = sources
         .iter()
         .filter(|source| {
-            source.has_recovery_anomaly
+            source.recovery_issue.is_some()
                 || source.has_account_margin_guard
                 || source.has_stale_market_data
         })
@@ -263,7 +263,7 @@ mod tests {
 
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackDebugQueryService, TrackQueryService,
+        StoredAccountMonitorState, TrackQueryService, TrackReadServices,
     };
 
     #[derive(Clone)]
@@ -338,15 +338,14 @@ mod tests {
         let services = build_test_application_services(
             manager,
             mutation_store.clone(),
+            query_store.clone(),
             effect_store.clone(),
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(
-            query_store,
-            test_prepared_registry("btc-core"),
-        ));
-        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let read_services = TrackReadServices::new(query_store, test_prepared_registry("btc-core"));
+        let query_service = read_services.query_service();
+        let debug_query_service = read_services.debug_query_service();
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
@@ -400,6 +399,7 @@ mod tests {
         let services = build_test_application_services(
             manager,
             mutation_store,
+            query_store.clone(),
             effect_store,
             notifications.clone(),
             account_margin_guard,
@@ -432,11 +432,9 @@ mod tests {
         );
         let projector = Arc::new(TrackProjector::new());
         let account_projector = Arc::new(AccountProjector::new());
-        let query_service = Arc::new(TrackQueryService::new(
-            query_store,
-            test_prepared_registry("btc-core"),
-        ));
-        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let read_services = TrackReadServices::new(query_store, test_prepared_registry("btc-core"));
+        let query_service = read_services.query_service();
+        let debug_query_service = read_services.debug_query_service();
         HttpTestState {
             http_state: build_http_state(
                 &services,
@@ -862,14 +860,16 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
-        let query_service = Arc::new(TrackQueryService::new(
+        let read_services = TrackReadServices::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_prepared_registry("btc-core"),
-        ));
+        );
+        let query_service = read_services.query_service();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             manager,
             mutation_store,
+            repository.clone() as Arc<dyn TrackQueryStore>,
             effect_store,
             notifications,
             account_margin_guard,
@@ -877,7 +877,7 @@ mod tests {
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
-        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        let debug_query_service = read_services.debug_query_service();
         let app = router(HttpTestState {
             http_state: build_http_state(
                 &services,

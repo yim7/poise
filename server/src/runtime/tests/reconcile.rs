@@ -27,6 +27,7 @@ async fn apply_user_data_event_preserves_write_service_mutation_error_kind() {
     let services = build_test_application_services(
         manager,
         persistence.clone() as Arc<dyn TrackMutationStore>,
+        persistence.clone() as Arc<dyn TrackQueryStore>,
         persistence.clone() as Arc<dyn TrackEffectStore>,
         events.clone(),
         account_margin_guard.clone(),
@@ -781,6 +782,7 @@ async fn runtime_start_fails_when_user_data_subscription_cannot_be_created() {
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let services = build_test_application_services(
         manager,
+        persistence.clone(),
         persistence.clone(),
         persistence.clone(),
         events.clone(),

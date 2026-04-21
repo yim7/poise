@@ -111,6 +111,7 @@ async fn position_update_without_live_quote_does_not_stage_submit_effect() {
         manager,
         persistence.clone(),
         persistence.clone(),
+        persistence.clone(),
         events.clone(),
         account_margin_guard.clone(),
     );
@@ -204,6 +205,7 @@ async fn position_update_waits_for_first_tick_before_submitting_reconcile() {
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let services = build_test_application_services(
         manager,
+        persistence.clone(),
         persistence.clone(),
         persistence.clone(),
         events.clone(),

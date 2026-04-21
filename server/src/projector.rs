@@ -1,21 +1,21 @@
-use poise_engine::executor::{OrderRole, RecoveryAnomaly};
-use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
-use poise_engine::price_gate::PriceExecutionBlockReason;
-use poise_engine::runtime::TrackStatus as EngineTrackStatus;
 use poise_protocol::{
-    BandProtectionPolicy as ProtocolPolicy, BandRecoverPolicy as ProtocolRecoverPolicy,
-    ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
-    ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
-    InstrumentView, ReplacementGateView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
-    StrategyPriceStatusView, TrackActivityItemView, TrackBudgetView, TrackCommandType,
-    TrackCommandView, TrackDetailView, TrackExecutionStatsView, TrackExecutionView,
-    TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView,
-    TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView, TrackPositionView,
-    TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
+    ActivityLevelView, BandProtectionPolicy as ProtocolPolicy,
+    BandRecoverPolicy as ProtocolRecoverPolicy, ExecutionBadgeView, ExecutionIntentView,
+    ExecutionSlotOrderView, ExecutionSlotPhaseView, ExecutionSlotView, ExecutionStateView,
+    ExecutionStatusView, ExposureSummaryView, InstrumentView, ReplacementGateView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
+    TrackActivityItemView, TrackBudgetView, TrackCommandType, TrackCommandView, TrackDetailView,
+    TrackExecutionStatsView, TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView,
+    TrackLedgerGapView, TrackLedgerView, TrackLifecycleView, TrackListItemView,
+    TrackListLedgerView, TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
+    TrackStatusPanelView, TrackStrategyView,
 };
 
-use crate::event_presentation::project_activity_events;
-use poise_application::TrackReadModel;
+use poise_application::{
+    TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadLedgerGap,
+    TrackReadLedgerGapReason, TrackReadModel, TrackReadOrderRole, TrackReadStatus,
+    TrackRecoveryIssue, TrackStrategyPriceStatus,
+};
 
 pub struct TrackProjector;
 
@@ -33,8 +33,8 @@ impl TrackProjector {
         Self
     }
 
-    pub fn project_list_item(&self, source: &TrackReadModel) -> TrackListItemView {
-        let ledger = project_ledger_summary(source);
+    pub fn project_list_item(&self, source: &TrackListReadModel) -> TrackListItemView {
+        let ledger = project_list_ledger_summary(source);
 
         TrackListItemView {
             id: source.track_id.clone(),
@@ -50,9 +50,9 @@ impl TrackProjector {
                 target: source.desired_exposure,
             },
             execution: ExecutionBadgeView {
-                state: project_execution_state(source),
-                execution_status: project_execution_status(source),
-                active_slot_count: active_slot_count(source),
+                state: project_list_execution_state(source),
+                execution_status: project_list_execution_status(source),
+                active_slot_count: source.active_slot_count,
             },
             ledger: TrackListLedgerView {
                 total_pnl: ledger.total_pnl,
@@ -62,7 +62,7 @@ impl TrackProjector {
     }
 
     pub fn project_detail(&self, source: &TrackReadModel) -> TrackDetailView {
-        let ledger = project_ledger_summary(source);
+        let ledger = project_detail_ledger_summary(source);
 
         TrackDetailView {
             identity: TrackIdentityView {
@@ -142,18 +142,19 @@ impl TrackProjector {
     }
 
     pub fn project_activity(&self, source: &TrackReadModel) -> Vec<TrackActivityItemView> {
-        project_activity_events(source)
-            .into_iter()
+        source
+            .recent_activity
+            .iter()
             .map(|item| TrackActivityItemView {
                 ts: item.ts.to_rfc3339(),
-                message: item.message,
-                level: item.level,
+                message: item.message.clone(),
+                level: project_activity_level(item.level),
             })
             .collect()
     }
 }
 
-fn project_ledger_summary(source: &TrackReadModel) -> LedgerSummary {
+fn project_list_ledger_summary(source: &TrackListReadModel) -> LedgerSummary {
     let gross_realized_pnl = source.ledger_state.gross_realized_pnl_cumulative;
     let net_realized_pnl = source.ledger_state.net_realized_pnl();
 
@@ -167,7 +168,21 @@ fn project_ledger_summary(source: &TrackReadModel) -> LedgerSummary {
     }
 }
 
-fn project_ledger_gap(gap: &LedgerGapRecord) -> TrackLedgerGapView {
+fn project_detail_ledger_summary(source: &TrackReadModel) -> LedgerSummary {
+    let gross_realized_pnl = source.ledger_state.gross_realized_pnl_cumulative;
+    let net_realized_pnl = source.ledger_state.net_realized_pnl();
+
+    LedgerSummary {
+        gross_realized_pnl,
+        net_realized_pnl,
+        total_pnl: net_realized_pnl + source.unrealized_pnl,
+        trading_fee_cumulative: source.ledger_state.trading_fee_cumulative,
+        funding_fee_cumulative: source.ledger_state.funding_fee_cumulative,
+        has_unresolved_gaps: !source.ledger_state.unresolved_gaps.is_empty(),
+    }
+}
+
+fn project_ledger_gap(gap: &TrackReadLedgerGap) -> TrackLedgerGapView {
     TrackLedgerGapView {
         gap_key: gap.gap_key.clone(),
         reason: project_ledger_gap_reason(gap.reason),
@@ -175,16 +190,26 @@ fn project_ledger_gap(gap: &LedgerGapRecord) -> TrackLedgerGapView {
     }
 }
 
-fn project_ledger_gap_reason(reason: LedgerGapReason) -> TrackLedgerGapReasonView {
+fn project_ledger_gap_reason(reason: TrackReadLedgerGapReason) -> TrackLedgerGapReasonView {
     match reason {
-        LedgerGapReason::UnsupportedCommissionAsset => {
+        TrackReadLedgerGapReason::UnsupportedCommissionAsset => {
             TrackLedgerGapReasonView::UnsupportedCommissionAsset
         }
-        LedgerGapReason::MissingCommissionAsset => TrackLedgerGapReasonView::MissingCommissionAsset,
-        LedgerGapReason::MissingSymbol => TrackLedgerGapReasonView::MissingSymbol,
-        LedgerGapReason::UnsupportedFundingAsset => {
+        TrackReadLedgerGapReason::MissingCommissionAsset => {
+            TrackLedgerGapReasonView::MissingCommissionAsset
+        }
+        TrackReadLedgerGapReason::MissingSymbol => TrackLedgerGapReasonView::MissingSymbol,
+        TrackReadLedgerGapReason::UnsupportedFundingAsset => {
             TrackLedgerGapReasonView::UnsupportedFundingAsset
         }
+    }
+}
+
+fn project_activity_level(level: TrackActivityLevel) -> ActivityLevelView {
+    match level {
+        TrackActivityLevel::Info => ActivityLevelView::Info,
+        TrackActivityLevel::Warn => ActivityLevelView::Warn,
+        TrackActivityLevel::Error => ActivityLevelView::Error,
     }
 }
 
@@ -195,25 +220,23 @@ fn project_instrument(venue: &str, symbol: &str) -> InstrumentView {
     }
 }
 
-fn project_track_status(value: &EngineTrackStatus) -> ProtocolTrackStatus {
+fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
     match value {
-        EngineTrackStatus::WaitingMarketData => ProtocolTrackStatus::WaitingMarketData,
-        EngineTrackStatus::Active => ProtocolTrackStatus::Active,
-        EngineTrackStatus::Frozen => ProtocolTrackStatus::Frozen,
-        EngineTrackStatus::Holding => ProtocolTrackStatus::Holding,
-        EngineTrackStatus::Flattening => ProtocolTrackStatus::Flattening,
-        EngineTrackStatus::ManualFlattening => ProtocolTrackStatus::ManualFlattening,
-        EngineTrackStatus::Terminated => ProtocolTrackStatus::Terminated,
-        EngineTrackStatus::Paused => ProtocolTrackStatus::Paused,
+        TrackReadStatus::WaitingMarketData => ProtocolTrackStatus::WaitingMarketData,
+        TrackReadStatus::Active => ProtocolTrackStatus::Active,
+        TrackReadStatus::Frozen => ProtocolTrackStatus::Frozen,
+        TrackReadStatus::Holding => ProtocolTrackStatus::Holding,
+        TrackReadStatus::Flattening => ProtocolTrackStatus::Flattening,
+        TrackReadStatus::ManualFlattening => ProtocolTrackStatus::ManualFlattening,
+        TrackReadStatus::Terminated => ProtocolTrackStatus::Terminated,
+        TrackReadStatus::Paused => ProtocolTrackStatus::Paused,
     }
 }
 
-fn project_strategy_price_status(
-    value: poise_engine::runtime::StrategyPriceStatus,
-) -> StrategyPriceStatusView {
+fn project_strategy_price_status(value: TrackStrategyPriceStatus) -> StrategyPriceStatusView {
     match value {
-        poise_engine::runtime::StrategyPriceStatus::Live => StrategyPriceStatusView::Live,
-        poise_engine::runtime::StrategyPriceStatus::Stale => StrategyPriceStatusView::Stale,
+        TrackStrategyPriceStatus::Live => StrategyPriceStatusView::Live,
+        TrackStrategyPriceStatus::Stale => StrategyPriceStatusView::Stale,
     }
 }
 
@@ -277,8 +300,16 @@ fn project_replacement_gate_reason(
 
 fn project_execution_state(source: &TrackReadModel) -> ExecutionStateView {
     match source.status {
-        EngineTrackStatus::Paused => ExecutionStateView::Paused,
-        EngineTrackStatus::Terminated => ExecutionStateView::Closed,
+        TrackReadStatus::Paused => ExecutionStateView::Paused,
+        TrackReadStatus::Terminated => ExecutionStateView::Closed,
+        _ => ExecutionStateView::Open,
+    }
+}
+
+fn project_list_execution_state(source: &TrackListReadModel) -> ExecutionStateView {
+    match source.status {
+        TrackReadStatus::Paused => ExecutionStateView::Paused,
+        TrackReadStatus::Terminated => ExecutionStateView::Closed,
         _ => ExecutionStateView::Open,
     }
 }
@@ -291,17 +322,22 @@ fn project_execution_status(source: &TrackReadModel) -> ExecutionStatusView {
     }
 }
 
+fn project_list_execution_status(source: &TrackListReadModel) -> ExecutionStatusView {
+    if !project_list_attention_reasons(source).is_empty() {
+        ExecutionStatusView::AttentionRequired
+    } else {
+        ExecutionStatusView::Normal
+    }
+}
+
 fn project_attention_reasons(source: &TrackReadModel) -> Vec<String> {
     let mut reasons = Vec::new();
 
-    if source.has_recovery_anomaly {
-        reasons.push(
-            source
-                .recovery_anomaly
-                .as_ref()
-                .map(|anomaly| format!("recovery anomaly: {}", project_recovery_anomaly(anomaly)))
-                .unwrap_or_else(|| "recovery anomaly".to_string()),
-        );
+    if let Some(issue) = source.recovery_issue.as_ref() {
+        reasons.push(format!(
+            "recovery anomaly: {}",
+            project_recovery_issue(issue)
+        ));
     }
 
     if source.has_stale_market_data {
@@ -319,18 +355,43 @@ fn project_attention_reasons(source: &TrackReadModel) -> Vec<String> {
     reasons
 }
 
-fn project_price_execution_block_reason(reason: PriceExecutionBlockReason) -> &'static str {
+fn project_list_attention_reasons(source: &TrackListReadModel) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    if let Some(issue) = source.recovery_issue.as_ref() {
+        reasons.push(format!(
+            "recovery anomaly: {}",
+            project_recovery_issue(issue)
+        ));
+    }
+
+    if source.has_stale_market_data {
+        reasons.push("market data stale".to_string());
+    }
+
+    if source.has_account_margin_guard {
+        reasons.push("insufficient account margin".to_string());
+    }
+
+    if let Some(reason) = source.price_execution_block_reason {
+        reasons.push(project_price_execution_block_reason(reason).to_string());
+    }
+
+    reasons
+}
+
+fn project_price_execution_block_reason(reason: TrackPriceExecutionBlockReason) -> &'static str {
     match reason {
-        PriceExecutionBlockReason::MissingExecutionQuote => "missing execution quote",
-        PriceExecutionBlockReason::MarkBookDivergence => "mark/book divergence",
+        TrackPriceExecutionBlockReason::MissingExecutionQuote => "missing execution quote",
+        TrackPriceExecutionBlockReason::MarkBookDivergence => "mark/book divergence",
     }
 }
 
-fn project_recovery_anomaly(anomaly: &RecoveryAnomaly) -> &'static str {
-    match anomaly {
-        RecoveryAnomaly::UnknownLiveOrder => "unknown_live_order",
-        RecoveryAnomaly::DuplicateLiveOrders => "duplicate_live_orders",
-        RecoveryAnomaly::AmbiguousLiveOrder => "ambiguous_live_order",
+fn project_recovery_issue(issue: &TrackRecoveryIssue) -> &'static str {
+    match issue {
+        TrackRecoveryIssue::UnknownLiveOrder => "unknown_live_order",
+        TrackRecoveryIssue::DuplicateLiveOrders => "duplicate_live_orders",
+        TrackRecoveryIssue::AmbiguousLiveOrder => "ambiguous_live_order",
     }
 }
 
@@ -350,8 +411,8 @@ fn project_execution_slots(source: &TrackReadModel) -> Vec<ExecutionSlotView> {
                 ExecutionSlotPhaseView::Working
             },
             intent: match slot.role {
-                OrderRole::IncreaseInventory => ExecutionIntentView::IncreaseInventory,
-                OrderRole::DecreaseInventory => ExecutionIntentView::DecreaseInventory,
+                TrackReadOrderRole::IncreaseInventory => ExecutionIntentView::IncreaseInventory,
+                TrackReadOrderRole::DecreaseInventory => ExecutionIntentView::DecreaseInventory,
             },
             order: Some(ExecutionSlotOrderView {
                 side: project_side(slot.side),
@@ -369,11 +430,11 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
             command: TrackCommandType::Pause,
             enabled: !matches!(
                 status,
-                EngineTrackStatus::Paused | EngineTrackStatus::Terminated
+                TrackReadStatus::Paused | TrackReadStatus::Terminated
             ),
             disabled_reason: match status {
-                EngineTrackStatus::Paused => Some("track is already paused".into()),
-                EngineTrackStatus::Terminated => Some("terminated track cannot be paused".into()),
+                TrackReadStatus::Paused => Some("track is already paused".into()),
+                TrackReadStatus::Terminated => Some("terminated track cannot be paused".into()),
                 _ => None,
             },
         },
@@ -381,28 +442,28 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
             command: TrackCommandType::Resume,
             enabled: matches!(
                 status,
-                EngineTrackStatus::Paused
-                    | EngineTrackStatus::Holding
-                    | EngineTrackStatus::ManualFlattening
+                TrackReadStatus::Paused
+                    | TrackReadStatus::Holding
+                    | TrackReadStatus::ManualFlattening
             ),
             disabled_reason: match status {
-                EngineTrackStatus::Paused => None,
-                EngineTrackStatus::Holding => None,
-                EngineTrackStatus::ManualFlattening => None,
-                EngineTrackStatus::Terminated => Some("terminated track cannot be resumed".into()),
+                TrackReadStatus::Paused => None,
+                TrackReadStatus::Holding => None,
+                TrackReadStatus::ManualFlattening => None,
+                TrackReadStatus::Terminated => Some("terminated track cannot be resumed".into()),
                 _ => Some("track is not paused".into()),
             },
         },
         TrackCommandView {
             command: TrackCommandType::Terminate,
-            enabled: !matches!(status, EngineTrackStatus::Terminated),
-            disabled_reason: matches!(status, EngineTrackStatus::Terminated)
+            enabled: !matches!(status, TrackReadStatus::Terminated),
+            disabled_reason: matches!(status, TrackReadStatus::Terminated)
                 .then_some("track is already terminated".into()),
         },
         TrackCommandView {
             command: TrackCommandType::Flatten,
-            enabled: !matches!(status, EngineTrackStatus::Terminated),
-            disabled_reason: matches!(status, EngineTrackStatus::Terminated)
+            enabled: !matches!(status, TrackReadStatus::Terminated),
+            disabled_reason: matches!(status, TrackReadStatus::Terminated)
                 .then_some("terminated track cannot be flattened".into()),
         },
     ]
@@ -411,23 +472,20 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use poise_application::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
-    use poise_core::events::DomainEvent;
+    use poise_application::{
+        ReadModelSlot, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
+        TrackPriceExecutionBlockReason, TrackReadExecutionMode, TrackReadLedgerGap,
+        TrackReadLedgerGapReason, TrackReadLedgerState, TrackReadModel, TrackReadOrderRole,
+        TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
+    };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
-    use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, OrderRole};
-    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
-    use poise_engine::ports::OrderRequest;
-    use poise_engine::runtime::TrackStatus;
-    use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
+    use poise_core::types::Side;
     use poise_protocol::{
         ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
         ExecutionStatusView, TrackCommandType, TrackLedgerGapReasonView,
     };
 
     use super::TrackProjector;
-    use poise_application::{ReadModelSlot, TrackReadModel};
 
     #[test]
     fn project_instrument_preserves_exchange_name() {
@@ -439,7 +497,7 @@ mod tests {
 
     #[test]
     fn projects_execution_badge_from_working_orders() {
-        let source = source_with_submitting_effect();
+        let source = list_source_with_submitting_effect();
         let item = TrackProjector::new().project_list_item(&source);
         let item_json = serde_json::to_value(&item).unwrap();
 
@@ -454,8 +512,8 @@ mod tests {
             Some(true)
         );
 
-        let mut anomaly_source = source_with_submitting_effect();
-        anomaly_source.has_recovery_anomaly = true;
+        let mut anomaly_source = list_source_with_submitting_effect();
+        anomaly_source.recovery_issue = Some(TrackRecoveryIssue::UnknownLiveOrder);
         let anomaly_item = TrackProjector::new().project_list_item(&anomaly_source);
         assert_eq!(
             anomaly_item.execution.execution_status,
@@ -465,11 +523,12 @@ mod tests {
 
     #[test]
     fn projects_list_item_total_pnl_from_shared_ledger_summary() {
-        let source = source_with_submitting_effect();
+        let list_source = list_source_with_submitting_effect();
+        let detail_source = source_with_submitting_effect();
         let projector = TrackProjector::new();
 
-        let item_json = serde_json::to_value(projector.project_list_item(&source)).unwrap();
-        let detail_json = serde_json::to_value(projector.project_detail(&source)).unwrap();
+        let item_json = serde_json::to_value(projector.project_list_item(&list_source)).unwrap();
+        let detail_json = serde_json::to_value(projector.project_detail(&detail_source)).unwrap();
 
         let item_total = item_json["ledger"]["total_pnl"].as_f64().unwrap();
         let detail_total = detail_json["ledger"]["total_pnl"].as_f64().unwrap();
@@ -480,7 +539,7 @@ mod tests {
 
     #[test]
     fn projects_list_item_lightweight_ledger_view() {
-        let source = source_with_submitting_effect();
+        let source = list_source_with_submitting_effect();
         let item_json =
             serde_json::to_value(TrackProjector::new().project_list_item(&source)).unwrap();
 
@@ -494,11 +553,12 @@ mod tests {
 
     #[test]
     fn projector_preserves_existing_detail_and_list_shapes() {
-        let source = source_with_submitting_effect();
+        let list_source = list_source_with_submitting_effect();
+        let detail_source = source_with_submitting_effect();
         let list_json =
-            serde_json::to_value(TrackProjector::new().project_list_item(&source)).unwrap();
+            serde_json::to_value(TrackProjector::new().project_list_item(&list_source)).unwrap();
         let detail_json =
-            serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
+            serde_json::to_value(TrackProjector::new().project_detail(&detail_source)).unwrap();
 
         assert!(list_json.get("execution").is_some());
         assert!(list_json.get("exposure").is_some());
@@ -649,7 +709,7 @@ mod tests {
     #[test]
     fn project_detail_enables_resume_when_manual_flatten_is_active() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackStatus::ManualFlattening;
+        source.status = TrackReadStatus::ManualFlattening;
         source.manual_target_override = Some(0.0);
 
         let detail = TrackProjector::new().project_detail(&source);
@@ -666,7 +726,7 @@ mod tests {
     #[test]
     fn resume_is_enabled_when_holding_is_active() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackStatus::Holding;
+        source.status = TrackReadStatus::Holding;
         source.manual_target_override = None;
 
         let detail = TrackProjector::new().project_detail(&source);
@@ -683,7 +743,7 @@ mod tests {
     #[test]
     fn resume_availability_depends_on_status_not_override() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackStatus::Active;
+        source.status = TrackReadStatus::Active;
         source.manual_target_override = Some(0.0);
 
         let detail = TrackProjector::new().project_detail(&source);
@@ -715,7 +775,7 @@ mod tests {
     #[test]
     fn projector_shows_flatten_price_confirm_policy_without_engine_state() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackStatus::Active;
+        source.status = TrackReadStatus::Active;
         source.out_of_band_policy = poise_core::strategy::BandProtectionPolicy::Flatten {
             recover: poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps: 500 },
         };
@@ -744,7 +804,7 @@ mod tests {
     #[test]
     fn projector_available_commands_follow_public_status_only() {
         let mut read_model = source_with_failed_effect_and_recent_event();
-        read_model.status = TrackStatus::Paused;
+        read_model.status = TrackReadStatus::Paused;
 
         let detail = TrackProjector::new().project_detail(&read_model);
 
@@ -776,7 +836,7 @@ mod tests {
     fn projector_maps_price_gate_to_attention_required_reason() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.price_execution_block_reason =
-            Some(poise_engine::price_gate::PriceExecutionBlockReason::MarkBookDivergence);
+            Some(TrackPriceExecutionBlockReason::MarkBookDivergence);
 
         let detail = TrackProjector::new().project_detail(&source);
 
@@ -796,11 +856,11 @@ mod tests {
     fn projector_marks_strategy_price_status_stale_when_quote_is_missing() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.strategy_price = Some(101.25);
-        source.strategy_price_status = poise_engine::runtime::StrategyPriceStatus::Stale;
+        source.strategy_price_status = TrackStrategyPriceStatus::Stale;
         source.best_bid = None;
         source.best_ask = None;
         source.price_execution_block_reason =
-            Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote);
+            Some(TrackPriceExecutionBlockReason::MissingExecutionQuote);
 
         let detail = TrackProjector::new().project_detail(&source);
 
@@ -822,7 +882,7 @@ mod tests {
     fn projector_uses_read_model_price_execution_block_reason_without_recomputing_gate() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.price_execution_block_reason =
-            Some(poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote);
+            Some(TrackPriceExecutionBlockReason::MissingExecutionQuote);
         source.mark_price = Some(100.0);
         source.best_bid = Some(100.0);
         source.best_ask = Some(100.0);
@@ -861,9 +921,7 @@ mod tests {
     #[test]
     fn multiple_attention_sources_preserve_reason_order_and_attention_status() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.has_recovery_anomaly = true;
-        source.recovery_anomaly =
-            Some(poise_engine::executor::RecoveryAnomaly::DuplicateLiveOrders);
+        source.recovery_issue = Some(TrackRecoveryIssue::DuplicateLiveOrders);
         source.has_stale_market_data = true;
         source.has_account_margin_guard = true;
 
@@ -886,32 +944,40 @@ mod tests {
     #[test]
     fn recovery_anomaly_without_specific_kind_still_projects_attention_reason() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.has_recovery_anomaly = true;
-        source.recovery_anomaly = None;
+        source.recovery_issue = None;
 
         let detail = TrackProjector::new().project_detail(&source);
 
         assert_eq!(
             detail.execution.execution_status,
-            ExecutionStatusView::AttentionRequired
+            ExecutionStatusView::Normal
         );
-        assert_eq!(
-            detail.execution.attention_reasons,
-            vec!["recovery anomaly".to_string()]
-        );
+        assert!(detail.execution.attention_reasons.is_empty());
     }
 
     #[test]
     fn recovery_anomaly_projects_attention_reason() {
         let mut source = source_with_failed_effect_and_recent_event();
-        source.has_recovery_anomaly = true;
-        source.recovery_anomaly = Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
+        source.recovery_issue = Some(TrackRecoveryIssue::UnknownLiveOrder);
 
         let detail = TrackProjector::new().project_detail(&source);
 
         assert_eq!(
             detail.execution.attention_reasons,
             vec!["recovery anomaly: unknown_live_order".to_string()]
+        );
+    }
+
+    #[test]
+    fn recovery_attention_reason_is_derived_from_issue_without_duplicate_flag() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.recovery_issue = Some(TrackRecoveryIssue::DuplicateLiveOrders);
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(
+            detail.execution.attention_reasons,
+            vec!["recovery anomaly: duplicate_live_orders".to_string()]
         );
     }
 
@@ -986,9 +1052,13 @@ mod tests {
     }
 
     #[test]
-    fn project_activity_distinguishes_superseded_submit_from_success() {
+    fn project_activity_preserves_application_activity_message_and_level() {
         let mut source = source_with_submitting_effect();
-        source.recent_effects = vec![test_effect(EffectStatus::Superseded, None)];
+        source.recent_activity = vec![test_activity(
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            "submit order superseded by newer track state",
+            TrackActivityLevel::Info,
+        )];
 
         let activity = TrackProjector::new().project_activity(&source);
 
@@ -1001,16 +1071,20 @@ mod tests {
     }
 
     #[test]
-    fn project_activity_renders_replacement_gate_event_message() {
+    fn project_activity_preserves_application_activity_order() {
         let mut source = source_with_submitting_effect();
-        source.recent_track_events = vec![StoredTrackEvent {
-            id: 1,
-            track_id: TrackId::new("btc-core"),
-            event: DomainEvent::ReplacementGateApplied {
-                reason: poise_core::events::ReplacementGateReason::RoundedMatch,
-            },
-            created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
-        }];
+        source.recent_activity = vec![
+            test_activity(
+                Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
+                "replacement gate: candidate matches working order after rounding",
+                TrackActivityLevel::Info,
+            ),
+            test_activity(
+                Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+                "submit order executing",
+                TrackActivityLevel::Info,
+            ),
+        ];
 
         let activity = TrackProjector::new().project_activity(&source);
 
@@ -1023,13 +1097,19 @@ mod tests {
     }
 
     #[test]
-    fn project_activity_excludes_exposure_target_changed_events() {
-        let source = source_with_failed_effect_and_recent_event();
+    fn project_activity_maps_application_error_level() {
+        let mut source = source_with_submitting_effect();
+        source.recent_activity = vec![test_activity(
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            "submit order rejected",
+            TrackActivityLevel::Error,
+        )];
 
         let activity = TrackProjector::new().project_activity(&source);
 
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].message, "submit order rejected");
+        assert_eq!(activity[0].level, ActivityLevelView::Error);
     }
 
     fn source_with_submitting_effect() -> TrackReadModel {
@@ -1037,7 +1117,7 @@ mod tests {
             track_id: "btc-core".into(),
             venue: "binance".into(),
             symbol: "BTCUSDT".into(),
-            status: TrackStatus::Active,
+            status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,
             upper_price: 110.0,
@@ -1055,14 +1135,13 @@ mod tests {
                 total_loss_limit: 300.0,
             },
             strategy_price: Some(101.25),
-            strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
+            strategy_price_status: TrackStrategyPriceStatus::Live,
             mark_price: Some(101.5),
             best_bid: Some(101.0),
             best_ask: Some(101.5),
             current_exposure: 3.5,
             desired_exposure: Some(4.0),
-            ledger_state: TrackLedgerState {
-                realized_pnl_day: Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
+            ledger_state: TrackReadLedgerState {
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,
                 trading_fee_today: 0.0,
@@ -1070,31 +1149,28 @@ mod tests {
                 funding_fee_today: 0.0,
                 funding_fee_cumulative: -4.0,
                 unresolved_gaps: vec![
-                    LedgerGapRecord {
+                    TrackReadLedgerGap {
                         gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
-                        reason: LedgerGapReason::UnsupportedCommissionAsset,
+                        reason: TrackReadLedgerGapReason::UnsupportedCommissionAsset,
                         observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                        source: "ORDER_TRADE_UPDATE".into(),
                     },
-                    LedgerGapRecord {
+                    TrackReadLedgerGap {
                         gap_key:
                             "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
                                 .into(),
-                        reason: LedgerGapReason::MissingSymbol,
+                        reason: TrackReadLedgerGapReason::MissingSymbol,
                         observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                        source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
                     },
                 ],
             },
             unrealized_pnl: 265.2,
-            executor_mode: ExecutionMode::Passive,
+            executor_mode: TrackReadExecutionMode::Passive,
             inventory_gap: 0.5,
             gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
             max_inventory_gap_abs: 1.5,
             max_gap_age_ms: 120_000,
             stats_started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-            recovery_anomaly: None,
-            has_recovery_anomaly: false,
+            recovery_issue: None,
             has_account_margin_guard: false,
             has_stale_market_data: false,
             price_execution_block_reason: None,
@@ -1105,56 +1181,41 @@ mod tests {
                 side: Side::Buy,
                 price: 100.5,
                 quantity: 0.1,
-                role: OrderRole::IncreaseInventory,
+                role: TrackReadOrderRole::IncreaseInventory,
             }],
             manual_target_override: None,
-            recent_track_events: Vec::new(),
-            recent_effects: vec![test_effect(EffectStatus::Executing, None)],
+            recent_activity: vec![test_activity(
+                Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+                "submit order executing",
+                TrackActivityLevel::Info,
+            )],
         }
     }
 
     fn source_with_failed_effect_and_recent_event() -> TrackReadModel {
         TrackReadModel {
-            recent_track_events: vec![StoredTrackEvent {
-                id: 1,
-                track_id: TrackId::new("btc-core"),
-                event: DomainEvent::ExposureTargetChanged {
-                    from: Exposure(3.5),
-                    to: Exposure(4.0),
-                },
-                created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
-            }],
-            recent_effects: vec![test_effect(
-                EffectStatus::Failed,
-                Some("submit order rejected".into()),
+            recent_activity: vec![test_activity(
+                Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+                "submit order rejected",
+                TrackActivityLevel::Error,
             )],
             ..source_with_submitting_effect()
         }
     }
 
-    fn test_effect(status: EffectStatus, last_error: Option<String>) -> PersistedTrackEffect {
-        PersistedTrackEffect {
-            effect_id: "btc-core:batch-1:0".into(),
-            track_id: TrackId::new("btc-core"),
-            batch_id: "batch-1".into(),
-            sequence: 0,
-            effect: TrackEffect::SubmitOrder {
-                request: OrderRequest {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: Side::Buy,
-                    price: 100.5,
-                    quantity: 0.1,
-                    client_order_id: "client-1".into(),
-                    reduce_only: false,
-                },
-                desired_exposure: Exposure(4.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-            },
-            status,
-            attempt_count: u32::from(matches!(status, EffectStatus::Failed)),
-            last_error,
-            created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+    fn list_source_with_submitting_effect() -> TrackListReadModel {
+        TrackListReadModel::from(&source_with_submitting_effect())
+    }
+
+    fn test_activity(
+        ts: chrono::DateTime<Utc>,
+        message: &str,
+        level: TrackActivityLevel,
+    ) -> TrackActivityEntry {
+        TrackActivityEntry {
+            ts,
+            message: message.into(),
+            level,
         }
     }
 }

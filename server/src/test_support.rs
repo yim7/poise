@@ -4,8 +4,8 @@ use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
     ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectService,
-    TrackEffectStore, TrackMutationStore, TrackObservationService, TrackQueryService,
-    TrackQueryStore, TrackServiceSet,
+    TrackEffectStore, TrackMutationStore, TrackObservationService, TrackQueryStore,
+    TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_core::risk::CapacityBudget;
 use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
@@ -33,6 +33,7 @@ pub(crate) struct TestApplicationServices {
     pub(crate) observation_service: Arc<TrackObservationService>,
     pub(crate) effect_service: Arc<TrackEffectService>,
     pub(crate) submit_effect_service: Arc<SubmitEffectService>,
+    pub(crate) runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
     pub(crate) recovery_dirty_state: Arc<RecoveryDirtyState>,
@@ -167,6 +168,7 @@ impl From<EffectWorkerTestContext> for EffectWorkerState {
 pub(crate) fn build_test_application_services(
     manager: TrackManager,
     mutation_store: Arc<dyn TrackMutationStore>,
+    query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
@@ -175,6 +177,7 @@ pub(crate) fn build_test_application_services(
     build_test_application_services_with_recovery_dirty_state(
         manager,
         mutation_store,
+        query_store,
         effect_store,
         notifications,
         account_margin_guard,
@@ -185,6 +188,7 @@ pub(crate) fn build_test_application_services(
 pub(crate) fn build_test_application_services_with_recovery_dirty_state(
     manager: TrackManager,
     mutation_store: Arc<dyn TrackMutationStore>,
+    query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
@@ -193,6 +197,7 @@ pub(crate) fn build_test_application_services_with_recovery_dirty_state(
     let services = TrackServiceSet::new_with_recovery_anomaly_observer(
         manager,
         mutation_store,
+        query_store,
         effect_store,
         notifications.clone(),
         account_margin_guard.clone() as Arc<dyn AccountCapacityGuard>,
@@ -205,6 +210,7 @@ pub(crate) fn build_test_application_services_with_recovery_dirty_state(
         observation_service: Arc::new(services.observation),
         effect_service: Arc::new(services.effect),
         submit_effect_service: Arc::new(services.submit_effect),
+        runtime_lifecycle_service: Arc::new(services.runtime_lifecycle),
         notifications,
         account_margin_guard,
         recovery_dirty_state,
@@ -327,7 +333,7 @@ pub(crate) fn build_runtime_test_context(
 
 pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     services: &TestApplicationServices,
-    query_store: Arc<dyn TrackQueryStore>,
+    _query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
     account_monitor: Arc<AccountMonitor>,
     projector: Arc<TrackProjector>,
@@ -335,14 +341,9 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
-    let query_service = Arc::new(TrackQueryService::new_with_observation(
-        query_store,
-        test_prepared_registry("BTCUSDT"),
-        Some(Arc::clone(&services.observation_service)),
-    ));
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
-        query_service,
+        Arc::clone(&services.runtime_lifecycle_service),
         effect_store,
         exchange_freshness.clone(),
         reconcile_guards,
@@ -424,19 +425,14 @@ pub(crate) fn build_test_contexts_from_runtime_states(
 
 pub(crate) fn build_effect_worker_test_context(
     services: &TestApplicationServices,
-    query_store: Arc<dyn TrackQueryStore>,
+    _query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectStore>,
 ) -> EffectWorkerTestContext {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
-    let query_service = Arc::new(TrackQueryService::new_with_observation(
-        query_store,
-        test_prepared_registry("BTCUSDT"),
-        Some(Arc::clone(&services.observation_service)),
-    ));
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
-        query_service,
+        Arc::clone(&services.runtime_lifecycle_service),
         effect_store,
         exchange_freshness.clone(),
         Arc::new(TrackReconcileGuards::default()),

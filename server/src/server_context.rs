@@ -4,6 +4,7 @@ use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
     TrackEffectService, TrackEffectStore, TrackObservationService, TrackQueryService,
+    TrackRuntimeLifecycleService,
 };
 use tokio::sync::broadcast;
 
@@ -40,7 +41,7 @@ pub struct WebSocketState {
 #[derive(Clone)]
 pub struct ReconcileState {
     pub observation_service: Arc<TrackObservationService>,
-    pub query_service: Arc<TrackQueryService>,
+    pub runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     pub effect_store: Arc<dyn TrackEffectStore>,
     pub exchange_freshness: Arc<ExchangeFreshness>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,

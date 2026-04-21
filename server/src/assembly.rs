@@ -12,7 +12,7 @@ use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
     TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackObservationService,
-    TrackQueryService, TrackServiceSet,
+    TrackQueryService, TrackReadServices, TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
@@ -304,6 +304,7 @@ async fn assemble_with_state_store(
     let write_services = TrackServiceSet::new_with_recovery_anomaly_observer(
         manager,
         mutation_store.clone(),
+        query_store.clone(),
         effect_store.clone(),
         notifications.clone(),
         account_margin_guard.clone(),
@@ -315,19 +316,21 @@ async fn assemble_with_state_store(
     let observation_service = Arc::new(write_services.observation);
     let effect_service = Arc::new(write_services.effect);
     let submit_effect_service = Arc::new(write_services.submit_effect);
+    let runtime_lifecycle_service = Arc::new(write_services.runtime_lifecycle);
     for track in prepared_registry.iter() {
-        command_service
+        runtime_lifecycle_service
             .restore_persisted_track_state(track.track_id().as_str())
             .await?;
     }
     #[cfg(test)]
     let manager = observation_service.manager();
-    let query_service = Arc::new(TrackQueryService::new_with_observation(
+    let read_services = TrackReadServices::new_with_observation(
         query_store,
         prepared_registry.clone(),
         Some(observation_service.clone()),
-    ));
-    let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+    );
+    let query_service = read_services.query_service();
+    let debug_query_service = read_services.debug_query_service();
     let projector = Arc::new(TrackProjector::new());
     let account_projector = Arc::new(AccountProjector::new());
     let account_monitor = if let Some(account_store) = repositories.account_monitor_store() {
@@ -351,7 +354,7 @@ async fn assemble_with_state_store(
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_state = build_reconcile_state(
         observation_service.clone(),
-        query_service.clone(),
+        runtime_lifecycle_service.clone(),
         effect_store.clone(),
         exchange_freshness.clone(),
         reconcile_guards.clone(),
@@ -562,7 +565,7 @@ pub(crate) fn build_websocket_state(
 
 pub(crate) fn build_reconcile_state(
     observation_service: Arc<TrackObservationService>,
-    query_service: Arc<TrackQueryService>,
+    runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     effect_store: Arc<dyn TrackEffectStore>,
     exchange_freshness: Arc<ExchangeFreshness>,
     reconcile_guards: Arc<TrackReconcileGuards>,
@@ -571,7 +574,7 @@ pub(crate) fn build_reconcile_state(
 ) -> ReconcileState {
     ReconcileState {
         observation_service,
-        query_service,
+        runtime_lifecycle_service,
         effect_store,
         exchange_freshness,
         reconcile_guards,
@@ -651,9 +654,7 @@ mod tests {
         build_test_application_services, build_websocket_state as build_test_websocket_state,
         unavailable_account_monitor,
     };
-    use poise_application::{
-        ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService, TrackQueryService,
-    };
+    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry, TrackReadServices};
 
     use super::{
         ServerPlatform, SystemClock, assemble, build_exchange, validate_unique_instruments,
@@ -1580,15 +1581,17 @@ total_loss_limit = 600.0
         let services = build_test_application_services(
             manager,
             mutation_store.clone(),
+            repository.clone() as Arc<dyn TrackQueryStore>,
             effect_store.clone(),
             events.clone(),
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(
+        let read_services = TrackReadServices::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             crate::test_support::test_prepared_registry("btc-core"),
-        ));
-        let debug_query_service = Arc::new(TrackDebugQueryService::new(query_service.clone()));
+        );
+        let query_service = read_services.query_service();
+        let debug_query_service = read_services.debug_query_service();
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(events.clone());
         let account_projector = Arc::new(crate::account_projector::AccountProjector::new());

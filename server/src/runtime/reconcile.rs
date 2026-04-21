@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use poise_application::{RecoveryAnomalyObserver, TrackInstrument, TrackMutationError};
+use poise_application::{
+    RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackRecoveryIssue,
+};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::ExecutionPort;
 use poise_engine::track::TrackId;
@@ -212,8 +214,8 @@ pub(super) async fn sync_exchange_state_from_exchange(
     let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
     let sync_token = state.exchange_freshness.prepare_sync(track_id).await;
     let recovery_view = state
-        .query_service
-        .load_track_recovery_view(&TrackId::new(track_id))
+        .runtime_lifecycle_service
+        .load_track_recovery_summary(&TrackId::new(track_id))
         .await
         .map_err(TrackMutationError::Persistence)?;
     let mut position = execution
@@ -226,8 +228,7 @@ pub(super) async fn sync_exchange_state_from_exchange(
         .map_err(TrackMutationError::Persistence)?;
 
     if recovery_view.as_ref().is_some_and(|view| {
-        view.recovery_anomaly == Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder)
-            && !view.has_working_orders
+        view.issue == Some(TrackRecoveryIssue::UnknownLiveOrder) && !view.has_working_orders
     }) && !open_orders.is_empty()
     {
         for order in &open_orders {
@@ -319,8 +320,8 @@ async fn seed_recovery_tracking(
     let mut tracked = HashMap::new();
     for track in instruments {
         let Ok(Some(recovery_view)) = state
-            .query_service
-            .load_track_recovery_view(&TrackId::new(&track.id))
+            .runtime_lifecycle_service
+            .load_track_recovery_summary(&TrackId::new(&track.id))
             .await
         else {
             continue;
@@ -329,7 +330,7 @@ async fn seed_recovery_tracking(
             &mut tracked,
             instruments,
             &track.id,
-            recovery_view.recovery_anomaly.is_some(),
+            recovery_view.issue.is_some(),
             retry_interval,
         );
     }
