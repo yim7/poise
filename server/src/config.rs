@@ -281,7 +281,7 @@ notional_per_unit = 2000.0
 daily_loss_limit = 800.0
 total_loss_limit = 1600.0
 shape_family = "inertial"
-out_of_band_policy = { hold = {} }
+out_of_band_policy = { freeze = {} }
 "#,
         )
         .unwrap();
@@ -296,7 +296,7 @@ out_of_band_policy = { hold = {} }
         );
         assert_eq!(
             config.tracks[1].out_of_band_policy,
-            Some(poise_core::strategy::BandProtectionPolicy::Hold)
+            Some(poise_core::strategy::BandProtectionPolicy::Freeze)
         );
         if let ExchangeConfig::Binance(exchange) = &config.exchange {
             assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
@@ -307,7 +307,7 @@ out_of_band_policy = { hold = {} }
     }
 
     #[test]
-    fn config_toml_parses_flatten_price_confirm_policy() {
+    fn config_toml_parses_flatten_trigger_and_price_confirm_policy() {
         let config = parse_config(
             r#"
 [exchange]
@@ -323,7 +323,7 @@ short_exposure_units = 8
 notional_per_unit = 375
 daily_loss_limit = 120
 total_loss_limit = 500
-out_of_band_policy = { flatten = { recover = { price_confirm = { bps = 500 } } } }
+out_of_band_policy = { flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }
 "#,
         )
         .unwrap();
@@ -331,6 +331,7 @@ out_of_band_policy = { flatten = { recover = { price_confirm = { bps = 500 } } }
         assert!(matches!(
             config.tracks[0].out_of_band_policy,
             Some(poise_core::strategy::BandProtectionPolicy::Flatten {
+                trigger_bps: 500,
                 recover: poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps: 500 }
             })
         ));
@@ -482,9 +483,7 @@ total_loss_limit = 600.0
         );
         assert_eq!(
             track.track_config().out_of_band_policy,
-            poise_core::strategy::BandProtectionPolicy::Freeze {
-                recover: poise_core::strategy::BandRecoverPolicy::BackInBand,
-            }
+            poise_core::strategy::BandProtectionPolicy::Freeze
         );
         assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }

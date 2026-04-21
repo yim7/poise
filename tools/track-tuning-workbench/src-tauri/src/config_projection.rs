@@ -59,11 +59,12 @@ fn quote_string(value: &str) -> String {
 
 fn band_protection_policy_inline(value: &str) -> &'static str {
     match value {
-        "freeze" => "{ freeze = { recover = \"back_in_band\" } }",
-        "hold" => "{ hold = {} }",
-        "flatten" => "{ flatten = { recover = { price_confirm = { bps = 500 } } } }",
+        "freeze" => "{ freeze = {} }",
+        "flatten" => {
+            "{ flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }"
+        }
         "terminate" => "{ terminate = {} }",
-        _ => "{ freeze = { recover = \"back_in_band\" } }",
+        _ => "{ freeze = {} }",
     }
 }
 

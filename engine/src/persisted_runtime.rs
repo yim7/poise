@@ -177,7 +177,7 @@ impl PersistedRuntimeCodec {
 mod tests {
     use chrono::Utc;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_core::types::Exposure;
     use serde_json::json;
@@ -219,9 +219,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         };
 
         let left = TrackRestoreRevision::for_track(&instrument, &track_config);
@@ -241,9 +239,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         };
 
         let revision = TrackRestoreRevision::for_track(&instrument, &track_config);
@@ -362,9 +358,7 @@ mod tests {
                         notional_per_unit: 375.0,
                         min_rebalance_units: 0.5,
                         shape_family: ShapeFamily::Linear,
-                        out_of_band_policy: BandProtectionPolicy::Freeze {
-                            recover: BandRecoverPolicy::BackInBand,
-                        },
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
                     },
                 )
                 .as_str()
@@ -436,9 +430,7 @@ mod tests {
                         notional_per_unit: 375.0,
                         min_rebalance_units: 0.5,
                         shape_family: ShapeFamily::Linear,
-                        out_of_band_policy: BandProtectionPolicy::Freeze {
-                            recover: BandRecoverPolicy::BackInBand,
-                        },
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
                     },
                 )
                 .as_str()
@@ -564,9 +556,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             CapacityBudget {
                 max_notional: 6_000.0,

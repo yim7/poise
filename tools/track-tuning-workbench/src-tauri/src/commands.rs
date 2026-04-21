@@ -252,15 +252,11 @@ fn validate_non_empty(value: String, field: &str) -> Result<String, CommandError
 fn band_protection_policy_value(value: &crate::config_document::TrackBandProtectionKind) -> Value {
     match value {
         crate::config_document::TrackBandProtectionKind::Freeze => serde_json::json!({
-            "freeze": {
-                "recover": "back_in_band",
-            }
-        }),
-        crate::config_document::TrackBandProtectionKind::Hold => serde_json::json!({
-            "hold": {}
+            "freeze": {}
         }),
         crate::config_document::TrackBandProtectionKind::Flatten => serde_json::json!({
             "flatten": {
+                "trigger_bps": 500,
                 "recover": {
                     "price_confirm": { "bps": 500 }
                 }
@@ -298,7 +294,6 @@ fn track_band_protection_kind_from_value(
 
     match kind.as_str() {
         "freeze" => Ok(crate::config_document::TrackBandProtectionKind::Freeze),
-        "hold" => Ok(crate::config_document::TrackBandProtectionKind::Hold),
         "flatten" => Ok(crate::config_document::TrackBandProtectionKind::Flatten),
         "terminate" => Ok(crate::config_document::TrackBandProtectionKind::Terminate),
         other => Err(CommandError::new(
@@ -531,11 +526,7 @@ total_loss_limit = 160.0
                 max_notional: 1600.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: serde_json::json!({
-                    "freeze": {
-                        "recover": "back_in_band",
-                    }
-                }),
+                out_of_band_policy: serde_json::json!({ "freeze": {} }),
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
@@ -565,11 +556,7 @@ total_loss_limit = 160.0
                 max_notional: 1600.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: serde_json::json!({
-                    "freeze": {
-                        "recover": "back_in_band",
-                    }
-                }),
+                out_of_band_policy: serde_json::json!({ "freeze": {} }),
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
@@ -590,7 +577,12 @@ total_loss_limit = 160.0
                 min_rebalance_units: 1.0,
                 leverage: 5,
                 out_of_band_policy: serde_json::json!({
-                    "hold": {}
+                    "flatten": {
+                        "trigger_bps": 500,
+                        "recover": {
+                            "price_confirm": { "bps": 500 }
+                        }
+                    }
                 }),
                 daily_loss_limit: 80.0,
                 total_loss_limit: 160.0,
@@ -747,11 +739,7 @@ total_loss_limit = 160.0
                 max_notional: 3000.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: serde_json::json!({
-                    "freeze": {
-                        "recover": "back_in_band",
-                    }
-                }),
+                out_of_band_policy: serde_json::json!({ "freeze": {} }),
                 daily_loss_limit: 120.0,
                 total_loss_limit: 500.0,
                 shape_family: "linear".to_string(),

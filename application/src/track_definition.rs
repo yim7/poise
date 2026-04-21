@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow};
 use poise_core::risk::{CapacityBudget, validate_capacity_budget};
 use poise_core::strategy::{
-    BandProtectionPolicy, BandRecoverPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig,
-    validate_config,
+    BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig, validate_config,
 };
 use poise_engine::persisted_runtime::{
     PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed,
@@ -55,9 +54,7 @@ impl ConfiguredTrackDefinition {
             shape_family: input.shape_family.unwrap_or(ShapeFamily::Linear),
             out_of_band_policy: input
                 .out_of_band_policy
-                .unwrap_or(BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                }),
+                .unwrap_or(BandProtectionPolicy::Freeze),
         };
         validate_config(&track_config).map_err(|error| anyhow!(error))?;
 
@@ -248,7 +245,7 @@ impl PreparedTrackRegistry {
 
 #[cfg(test)]
 mod tests {
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
     use poise_engine::track::{TrackId, Venue};
 
     use super::{
@@ -269,9 +266,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: Some(0.5),
                 shape_family: Some(ShapeFamily::Linear),
-                out_of_band_policy: Some(BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                }),
+                out_of_band_policy: Some(BandProtectionPolicy::Freeze),
                 max_notional,
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
@@ -306,9 +301,7 @@ mod tests {
         assert_eq!(definition.track_config().shape_family, ShapeFamily::Linear);
         assert_eq!(
             definition.track_config().out_of_band_policy,
-            BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            }
+            BandProtectionPolicy::Freeze
         );
         assert_eq!(definition.budget().max_notional, 3000.0);
         assert_eq!(definition.tick_timeout_secs(), 30);
@@ -327,7 +320,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: Some(0.75),
             shape_family: Some(ShapeFamily::Inertial),
-            out_of_band_policy: Some(BandProtectionPolicy::Hold),
+            out_of_band_policy: Some(BandProtectionPolicy::Terminate),
             max_notional: Some(4200.0),
             daily_loss_limit: 300.0,
             total_loss_limit: 600.0,

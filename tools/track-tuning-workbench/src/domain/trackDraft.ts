@@ -1,5 +1,5 @@
 export type TrackShapeFamily = 'linear' | 'inertial' | 'responsive';
-export type TrackBandProtectionKind = 'freeze' | 'hold' | 'flatten' | 'terminate';
+export type TrackBandProtectionKind = 'freeze' | 'flatten' | 'terminate';
 
 export interface TrackDraftNumericFields {
   lowerPrice: number;

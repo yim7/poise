@@ -1218,9 +1218,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         }
     }
 

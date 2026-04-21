@@ -250,15 +250,14 @@ fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolSha
 
 fn project_out_of_band_policy(value: poise_core::strategy::BandProtectionPolicy) -> ProtocolPolicy {
     match value {
-        poise_core::strategy::BandProtectionPolicy::Freeze { recover } => ProtocolPolicy::Freeze {
+        poise_core::strategy::BandProtectionPolicy::Freeze => ProtocolPolicy::Freeze,
+        poise_core::strategy::BandProtectionPolicy::Flatten {
+            trigger_bps,
+            recover,
+        } => ProtocolPolicy::Flatten {
+            trigger_bps,
             recover: project_band_recover_policy(recover),
         },
-        poise_core::strategy::BandProtectionPolicy::Hold => ProtocolPolicy::Hold,
-        poise_core::strategy::BandProtectionPolicy::Flatten { recover } => {
-            ProtocolPolicy::Flatten {
-                recover: project_band_recover_policy(recover),
-            }
-        }
         poise_core::strategy::BandProtectionPolicy::Terminate => ProtocolPolicy::Terminate,
     }
 }
@@ -764,6 +763,7 @@ mod tests {
     fn project_out_of_band_policy_uses_flatten() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.out_of_band_policy = BandProtectionPolicy::Flatten {
+            trigger_bps: 500,
             recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
         };
 
@@ -773,10 +773,11 @@ mod tests {
     }
 
     #[test]
-    fn projector_shows_flatten_price_confirm_policy_without_engine_state() {
+    fn projector_shows_flatten_trigger_and_recover_policy() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.status = TrackReadStatus::Active;
         source.out_of_band_policy = poise_core::strategy::BandProtectionPolicy::Flatten {
+            trigger_bps: 500,
             recover: poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps: 500 },
         };
 
@@ -784,7 +785,12 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(detail.strategy.out_of_band_policy).unwrap(),
-            serde_json::json!({ "flatten": { "recover": { "price_confirm": { "bps": 500 } } } })
+            serde_json::json!({
+                "flatten": {
+                    "trigger_bps": 500,
+                    "recover": { "price_confirm": { "bps": 500 } }
+                }
+            })
         );
     }
 
@@ -1126,9 +1132,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
             budget: poise_core::risk::CapacityBudget {
                 max_notional: 3000.0,
                 daily_loss_limit: 100.0,

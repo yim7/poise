@@ -36,7 +36,6 @@ impl TrackShapeFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackBandProtectionKind {
     Freeze,
-    Hold,
     Flatten,
     Terminate,
 }
@@ -45,7 +44,6 @@ impl TrackBandProtectionKind {
     fn parse_legacy(value: &str) -> Result<Self> {
         match value {
             "freeze" => Ok(Self::Freeze),
-            "hold" => Ok(Self::Hold),
             "flatten" => Ok(Self::Flatten),
             "terminate" => Ok(Self::Terminate),
             other => bail!("unsupported out_of_band_policy `{other}`"),
@@ -55,7 +53,6 @@ impl TrackBandProtectionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Freeze => "freeze",
-            Self::Hold => "hold",
             Self::Flatten => "flatten",
             Self::Terminate => "terminate",
         }
@@ -389,7 +386,6 @@ fn parse_band_protection_kind(item: &Item, key: &str) -> Result<TrackBandProtect
 
     let kinds = [
         ("freeze", TrackBandProtectionKind::Freeze),
-        ("hold", TrackBandProtectionKind::Hold),
         ("flatten", TrackBandProtectionKind::Flatten),
         ("terminate", TrackBandProtectionKind::Terminate),
     ];
@@ -406,9 +402,7 @@ fn parse_band_protection_kind(item: &Item, key: &str) -> Result<TrackBandProtect
         }
     }
 
-    matched.ok_or_else(|| {
-        anyhow!("field `{key}` must contain one of: freeze, hold, flatten, terminate")
-    })
+    matched.ok_or_else(|| anyhow!("field `{key}` must contain one of: freeze, flatten, terminate"))
 }
 
 fn required_f64_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> Option<f64> {
@@ -549,7 +543,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = { freeze = { recover = "back_in_band" } }
+out_of_band_policy = { freeze = {} }
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -582,7 +576,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = { freeze = { recover = "back_in_band" } }
+out_of_band_policy = { freeze = {} }
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -670,7 +664,7 @@ notional_per_unit = 375.0
 max_notional = 3000.0
 min_rebalance_units = 0.5
 leverage = 10
-out_of_band_policy = { freeze = { recover = "back_in_band" } }
+out_of_band_policy = { freeze = {} }
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
 shape_family = "linear"
@@ -759,9 +753,7 @@ total_loss_limit = 750.0
         )));
         assert!(exported.contains("max_notional = 3000.0"));
         assert!(exported.contains(&format!("leverage = {DEFAULT_LEVERAGE}")));
-        assert!(
-            exported.contains("out_of_band_policy = { freeze = { recover = \"back_in_band\" } }")
-        );
+        assert!(exported.contains("out_of_band_policy = { freeze = {} }"));
         assert!(exported.contains("shape_family = \"linear\""));
     }
 

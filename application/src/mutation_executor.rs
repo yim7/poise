@@ -1619,9 +1619,7 @@ pub(crate) mod test_support {
                     notional_per_unit: 375.0,
                     min_rebalance_units: 0.5,
                     shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: BandProtectionPolicy::Freeze {
-                        recover: BandRecoverPolicy::BackInBand,
-                    },
+                    out_of_band_policy: BandProtectionPolicy::Freeze,
                 },
                 CapacityBudget {
                     max_notional: 3_000.0,

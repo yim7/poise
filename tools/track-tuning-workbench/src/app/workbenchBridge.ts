@@ -72,9 +72,8 @@ interface LoadedConfigFilePayload {
 }
 
 type BandProtectionPolicyPayload =
-  | { freeze: { recover: 'back_in_band' | { price_confirm: { bps: number } } } }
-  | { hold: Record<string, never> }
-  | { flatten: { recover: 'back_in_band' | { price_confirm: { bps: number } } } }
+  | { freeze: Record<string, never> }
+  | { flatten: { trigger_bps: number; recover: 'back_in_band' | { price_confirm: { bps: number } } } }
   | { terminate: Record<string, never> };
 
 interface TauriQuotePayload {
@@ -423,9 +422,6 @@ function bandProtectionKindFromPayload(
   if ('freeze' in policy) {
     return 'freeze';
   }
-  if ('hold' in policy) {
-    return 'hold';
-  }
   if ('flatten' in policy) {
     return 'flatten';
   }
@@ -437,16 +433,11 @@ function toBandProtectionPolicyPayload(
 ): BandProtectionPolicyPayload {
   switch (kind) {
     case 'freeze':
-      return {
-        freeze: {
-          recover: 'back_in_band',
-        },
-      };
-    case 'hold':
-      return { hold: {} };
+      return { freeze: {} };
     case 'flatten':
       return {
         flatten: {
+          trigger_bps: 500,
           recover: {
             price_confirm: { bps: 500 },
           },

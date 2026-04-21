@@ -926,12 +926,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_flatten_out_of_band_policy_name() {
+    fn renders_flatten_trigger_policy_name() {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
         detail.strategy.out_of_band_policy = serde_json::from_value(serde_json::json!({
-            "flatten": { "recover": { "price_confirm": { "bps": 500 } } }
+            "flatten": {
+                "trigger_bps": 500,
+                "recover": { "price_confirm": { "bps": 500 } }
+            }
         }))
         .unwrap();
         detail.status.lifecycle.status = serde_json::from_str("\"manual_flattening\"").unwrap();

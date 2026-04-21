@@ -33,7 +33,6 @@ export function RiskSection({
             }}
           >
             <option value="freeze">freeze</option>
-            <option value="hold">hold</option>
             <option value="flatten">flatten</option>
             <option value="terminate">terminate</option>
           </select>

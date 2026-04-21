@@ -27,9 +27,11 @@ pub enum ShapeFamily {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BandProtectionPolicy {
-    Freeze { recover: BandRecoverPolicy },
-    Hold,
-    Flatten { recover: BandRecoverPolicy },
+    Freeze,
+    Flatten {
+        trigger_bps: u32,
+        recover: BandRecoverPolicy,
+    },
     Terminate,
 }
 
@@ -87,9 +89,11 @@ fn default_min_rebalance_units() -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BandProtectionPolicySerde {
-    Freeze { recover: BandRecoverPolicy },
-    Hold {},
-    Flatten { recover: BandRecoverPolicy },
+    Freeze {},
+    Flatten {
+        trigger_bps: u32,
+        recover: BandRecoverPolicy,
+    },
     Terminate {},
 }
 
@@ -97,7 +101,6 @@ enum BandProtectionPolicySerde {
 #[serde(rename_all = "snake_case")]
 enum LegacyBandProtectionPolicyKind {
     Freeze,
-    Hold,
     Flatten,
     Terminate,
 }
@@ -112,8 +115,7 @@ enum BandProtectionPolicyDeserialize {
 impl BandProtectionPolicy {
     pub fn kind_str(&self) -> &'static str {
         match self {
-            Self::Freeze { .. } => "freeze",
-            Self::Hold => "hold",
+            Self::Freeze => "freeze",
             Self::Flatten { .. } => "flatten",
             Self::Terminate => "terminate",
         }
@@ -121,11 +123,9 @@ impl BandProtectionPolicy {
 
     fn legacy_default(value: LegacyBandProtectionPolicyKind) -> Self {
         match value {
-            LegacyBandProtectionPolicyKind::Freeze => Self::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
-            LegacyBandProtectionPolicyKind::Hold => Self::Hold,
+            LegacyBandProtectionPolicyKind::Freeze => Self::Freeze,
             LegacyBandProtectionPolicyKind::Flatten => Self::Flatten {
+                trigger_bps: 500,
                 recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
             },
             LegacyBandProtectionPolicyKind::Terminate => Self::Terminate,
@@ -134,9 +134,14 @@ impl BandProtectionPolicy {
 
     fn canonical(self) -> BandProtectionPolicySerde {
         match self {
-            Self::Freeze { recover } => BandProtectionPolicySerde::Freeze { recover },
-            Self::Hold => BandProtectionPolicySerde::Hold {},
-            Self::Flatten { recover } => BandProtectionPolicySerde::Flatten { recover },
+            Self::Freeze => BandProtectionPolicySerde::Freeze {},
+            Self::Flatten {
+                trigger_bps,
+                recover,
+            } => BandProtectionPolicySerde::Flatten {
+                trigger_bps,
+                recover,
+            },
             Self::Terminate => BandProtectionPolicySerde::Terminate {},
         }
     }
@@ -145,9 +150,14 @@ impl BandProtectionPolicy {
 impl From<BandProtectionPolicySerde> for BandProtectionPolicy {
     fn from(value: BandProtectionPolicySerde) -> Self {
         match value {
-            BandProtectionPolicySerde::Freeze { recover } => Self::Freeze { recover },
-            BandProtectionPolicySerde::Hold {} => Self::Hold,
-            BandProtectionPolicySerde::Flatten { recover } => Self::Flatten { recover },
+            BandProtectionPolicySerde::Freeze {} => Self::Freeze,
+            BandProtectionPolicySerde::Flatten {
+                trigger_bps,
+                recover,
+            } => Self::Flatten {
+                trigger_bps,
+                recover,
+            },
             BandProtectionPolicySerde::Terminate {} => Self::Terminate,
         }
     }
@@ -258,6 +268,25 @@ pub fn band_reentry_price_confirmed(
     }
 }
 
+pub fn flatten_trigger_price_reached(
+    price: f64,
+    trigger_bps: u32,
+    lower_price: f64,
+    upper_price: f64,
+    boundary: BandBoundary,
+) -> bool {
+    let band_width = upper_price - lower_price;
+    if !band_width.is_finite() || band_width <= f64::EPSILON {
+        return false;
+    }
+
+    let trigger_distance = band_width * f64::from(trigger_bps) / 10_000.0;
+    match boundary {
+        BandBoundary::Below => price <= lower_price - trigger_distance + f64::EPSILON,
+        BandBoundary::Above => price >= upper_price + trigger_distance - f64::EPSILON,
+    }
+}
+
 impl TrackConfig {
     pub fn band_center(&self) -> f64 {
         (self.lower_price + self.upper_price) / 2.0
@@ -314,9 +343,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         }
     }
 
@@ -360,6 +387,7 @@ mod tests {
     #[test]
     fn band_protection_policy_serializes_flatten_as_canonical_object() {
         let policy = BandProtectionPolicy::Flatten {
+            trigger_bps: 500,
             recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
         };
 
@@ -367,6 +395,7 @@ mod tests {
             serde_json::to_value(policy).unwrap(),
             serde_json::json!({
                 "flatten": {
+                    "trigger_bps": 500,
                     "recover": {
                         "price_confirm": { "bps": 500 }
                     }
@@ -376,21 +405,18 @@ mod tests {
     }
 
     #[test]
-    fn band_protection_policy_accepts_legacy_freeze_string() {
-        let policy: BandProtectionPolicy = serde_json::from_str("\"freeze\"").unwrap();
+    fn band_protection_policy_parses_freeze_without_recover() {
+        let policy: BandProtectionPolicy =
+            serde_json::from_value(serde_json::json!({ "freeze": {} })).unwrap();
 
-        assert_eq!(
-            policy,
-            BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            }
-        );
+        assert_eq!(policy, BandProtectionPolicy::Freeze);
     }
 
     #[test]
-    fn band_protection_policy_parses_flatten_with_price_confirm() {
+    fn band_protection_policy_parses_flatten_with_trigger_and_price_confirm() {
         let policy: BandProtectionPolicy = serde_json::from_value(serde_json::json!({
             "flatten": {
+                "trigger_bps": 500,
                 "recover": {
                     "price_confirm": { "bps": 500 }
                 }
@@ -401,6 +427,7 @@ mod tests {
         assert!(matches!(
             policy,
             BandProtectionPolicy::Flatten {
+                trigger_bps: 500,
                 recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
             }
         ));
@@ -417,6 +444,7 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Flatten {
+                trigger_bps: 500,
                 recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
             },
         };
@@ -424,6 +452,7 @@ mod tests {
         assert!(matches!(
             config.out_of_band_policy,
             BandProtectionPolicy::Flatten {
+                trigger_bps: 500,
                 recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
             }
         ));

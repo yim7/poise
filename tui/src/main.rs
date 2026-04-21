@@ -2160,7 +2160,7 @@ long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
 shape_family = "inertial"
-out_of_band_policy = { hold = {} }
+out_of_band_policy = { flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }
 "#,
             );
         }
@@ -2332,7 +2332,7 @@ out_of_band_policy = { hold = {} }
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
-            eth_view.contains("out of band hold"),
+            eth_view.contains("out of band flatten"),
             "eth view:\n{eth_view}"
         );
 

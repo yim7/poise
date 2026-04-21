@@ -31,10 +31,9 @@
 - `mark_price` 只用于风控和价格保护，不参与目标仓位计算
 - 执行定价统一使用盘口一档：`Buy -> best_ask`，`Sell -> best_bid`
 - 缺少盘口或 `mark_price` 与盘口偏离过大时，自动执行会进入 `attention_required`
-- 策略层带外策略稳定值是 `freeze / hold / flatten / terminate`
-- `freeze` 回带内后自动恢复正常策略
-- `hold` 回带内后继续保持 `holding`，只能人工 `resume`
-- 自动带外 `flatten` 会把目标压到 `0` 并进入 `flattening`，回带内后自动恢复
+- 策略层带外策略稳定值是 `freeze / flatten / terminate`
+- `freeze` 一出主带即冻结当前目标，不再继续补仓；回带内后自动恢复正常策略
+- 自动带外 `flatten` 先进入 `frozen`，继续穿过外侧触发带后才把目标压到 `0` 并进入 `flattening`，再按恢复规则自动恢复
 - 手动 `Flatten` 会进入 `manual_flattening`，只能由 `Resume` 清除人工目标覆盖
 
 ## 快速开始
@@ -84,7 +83,7 @@ short_exposure_units = 10.0
 notional_per_unit = 375.0
 min_rebalance_units = 0.5
 shape_family = "linear"
-out_of_band_policy = { freeze = { recover = "back_in_band" } }
+out_of_band_policy = { freeze = {} }
 max_notional = 3750.0
 leverage = 10
 daily_loss_limit = 375.0
@@ -104,7 +103,7 @@ tick_timeout_secs = 30
 - `leverage` 不写时默认按 `10x` 处理，并会在每个 `track` 启动时先下发到交易所
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
 - `shape_family` 当前支持 `linear`、`inertial`、`responsive`
-- `out_of_band_policy` 当前使用嵌套 policy object 形状，例如 `{ freeze = { recover = "back_in_band" } }`、`{ hold = {} }`、`{ flatten = { recover = { price_confirm = { bps = 500 } } } }`、`{ terminate = {} }`
+- `out_of_band_policy` 当前使用嵌套 policy object 形状，例如 `{ freeze = {} }`、`{ flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }`、`{ terminate = {} }`
 - `flatten` 是自动带外平仓语义，不再接受旧的 `reduce_only`
 - 三者都按“围绕价格带中点对称”的控仓曲线解释
 - `inertial` 更恋边，从上下两侧往中间收仓都更慢
