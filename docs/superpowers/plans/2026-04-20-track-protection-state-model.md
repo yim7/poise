@@ -304,7 +304,7 @@ Recorded commit: `81789ff`
 - Test: `server/src/projector.rs`
 - Test: `tui/src/views/dashboard.rs`
 
-- [ ] **Step 1: 先写失败测试，锁定最终 runtime state**
+- [x] **Step 1: 先写失败测试，锁定最终 runtime state**
 
 ```rust
 #[test]
@@ -329,7 +329,7 @@ fn flatten_pending_projects_as_frozen_without_leaking_private_state() {}
 fn runtime_boundary_migration_removes_holding_from_public_status_projection() {}
 ```
 
-- [ ] **Step 2: 同 task 切换 final runtime_state / snapshot 形状**
+- [x] **Step 2: 同 task 切换 final runtime_state / snapshot 形状**
 
 要求：
 
@@ -358,7 +358,7 @@ enum AutoState {
   - `server::projector` 的 lifecycle / command 逻辑
   - TUI dashboard / theme 的 lifecycle 展示
 
-- [ ] **Step 3: 锁死 `FlattenPending` 的 opposite-side 语义**
+- [x] **Step 3: 锁死 `FlattenPending` 的 opposite-side 语义**
 
 要求：
 
@@ -368,7 +368,7 @@ enum AutoState {
 - 不允许继续沿用旧 `boundary`
 - 不要求必须先回到 in-band 才能 re-arm
 
-- [ ] **Step 4: 运行最小回归**
+- [x] **Step 4: 运行最小回归**
 
 Run:
 
@@ -382,14 +382,14 @@ Run:
 - `cargo test -p poise-server projector::tests::runtime_boundary_migration_removes_holding_from_public_status_projection -- --exact`
 - `cargo test -p poise-tui views::dashboard::tests::renders_flattening_without_holding_status -- --exact`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/reconciler.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs engine/src/manager.rs storage/src/sqlite.rs application/src/track_read_source.rs application/src/query_service.rs application/src/debug_query_service.rs application/src/runtime_lifecycle_service.rs application/src/runtime_read_state_loader.rs application/src/track_read_source_loader.rs application/src/track_mutation_store.rs application/src/track_persistence.rs application/src/mutation_executor.rs application/src/read_model.rs protocol/src/lib.rs server/src/http.rs server/src/websocket.rs server/src/assembly.rs server/src/projector.rs server/src/runtime/tests/support.rs server/src/runtime/tests/user_data.rs server/src/effect_worker/tests/support.rs server/src/effect_worker/tests/mod.rs tui/src/views/dashboard.rs tui/src/theme.rs
 git commit -m "refactor: migrate runtime snapshot boundary to final protection state"
 ```
 
-Recorded commit: `TODO`
+Recorded commit: `83b10cd`
 
 ## Task 3: 最终校验与文档回写
 
