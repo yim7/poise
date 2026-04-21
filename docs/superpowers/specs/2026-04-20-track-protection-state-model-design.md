@@ -258,6 +258,8 @@ recover_distance = band_width * recover_bps / 10_000
 - `Frozen` -> `frozen`
 - `FlattenPending` -> `frozen`
 - `Flattening` -> `flattening`
+
+同时，非生命周期的中性展示文案也不再复用 `hold/holding` 这组词，避免和已删除的自动保护语义重新混淆。
 - `ManualState::Flattened` -> `manual_flattening`
 - `Paused` -> `paused`
 - `Terminated` -> `terminated`
