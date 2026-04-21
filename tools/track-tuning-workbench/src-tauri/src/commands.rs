@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use poise_core::strategy::BandProtectionPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
@@ -185,7 +186,8 @@ impl From<&EditableTrackFields> for EditableTrackFieldsPayload {
             max_notional: value.max_notional,
             min_rebalance_units: value.min_rebalance_units,
             leverage: value.leverage,
-            out_of_band_policy: band_protection_policy_value(&value.out_of_band_policy),
+            out_of_band_policy: serde_json::to_value(&value.out_of_band_policy)
+                .expect("BandProtectionPolicy should always serialize into JSON payload"),
             daily_loss_limit: value.daily_loss_limit,
             total_loss_limit: value.total_loss_limit,
             shape_family: value.shape_family.as_str().to_string(),
@@ -220,7 +222,15 @@ impl TryFrom<EditableTrackFieldsPayload> for EditableTrackFields {
             max_notional: value.max_notional,
             min_rebalance_units: value.min_rebalance_units,
             leverage: value.leverage,
-            out_of_band_policy: track_band_protection_kind_from_value(value.out_of_band_policy)?,
+            out_of_band_policy: serde_json::from_value::<BandProtectionPolicy>(
+                value.out_of_band_policy,
+            )
+            .map_err(|error| {
+                CommandError::new(
+                    CommandErrorKind::Config,
+                    format!("out_of_band_policy 无法解析: {error}"),
+                )
+            })?,
             daily_loss_limit: value.daily_loss_limit,
             total_loss_limit: value.total_loss_limit,
             shape_family: match value.shape_family.as_str() {
@@ -247,65 +257,6 @@ fn validate_non_empty(value: String, field: &str) -> Result<String, CommandError
     }
 
     Ok(value)
-}
-
-fn band_protection_policy_value(value: &crate::config_document::TrackBandProtectionKind) -> Value {
-    match value {
-        crate::config_document::TrackBandProtectionKind::Freeze => serde_json::json!({
-            "freeze": {
-                "recover": "back_in_band",
-            }
-        }),
-        crate::config_document::TrackBandProtectionKind::Hold => serde_json::json!({
-            "hold": {}
-        }),
-        crate::config_document::TrackBandProtectionKind::Flatten => serde_json::json!({
-            "flatten": {
-                "recover": {
-                    "price_confirm": { "bps": 500 }
-                }
-            }
-        }),
-        crate::config_document::TrackBandProtectionKind::Terminate => serde_json::json!({
-            "terminate": {}
-        }),
-    }
-}
-
-fn track_band_protection_kind_from_value(
-    value: Value,
-) -> Result<crate::config_document::TrackBandProtectionKind, CommandError> {
-    let Some(policy) = value.as_object() else {
-        return Err(CommandError::new(
-            CommandErrorKind::Config,
-            "out_of_band_policy 必须是对象".to_string(),
-        ));
-    };
-
-    let Some((kind, _)) = policy.iter().next() else {
-        return Err(CommandError::new(
-            CommandErrorKind::Config,
-            "out_of_band_policy 不能为空对象".to_string(),
-        ));
-    };
-
-    if policy.len() != 1 {
-        return Err(CommandError::new(
-            CommandErrorKind::Config,
-            "out_of_band_policy 必须只包含一个策略变体".to_string(),
-        ));
-    }
-
-    match kind.as_str() {
-        "freeze" => Ok(crate::config_document::TrackBandProtectionKind::Freeze),
-        "hold" => Ok(crate::config_document::TrackBandProtectionKind::Hold),
-        "flatten" => Ok(crate::config_document::TrackBandProtectionKind::Flatten),
-        "terminate" => Ok(crate::config_document::TrackBandProtectionKind::Terminate),
-        other => Err(CommandError::new(
-            CommandErrorKind::Config,
-            format!("不支持的 out_of_band_policy: `{other}`"),
-        )),
-    }
 }
 
 #[cfg(test)]
@@ -356,6 +307,40 @@ total_loss_limit = 200.0
         assert_eq!(payload.projected_tracks.len(), 1);
         assert_eq!(payload.projected_tracks[0].fields.track_id, "btc-core");
         assert_eq!(payload.projected_tracks[0].fields.symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn load_config_file_preserves_non_default_flatten_policy_when_exporting_track() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("grid.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 65000.0
+upper_price = 68000.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 250.0
+max_notional = 3000.0
+min_rebalance_units = 0.5
+leverage = 10
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 250 } }, recover = "back_in_band" } }
+daily_loss_limit = 100.0
+total_loss_limit = 200.0
+shape_family = "linear"
+"#,
+        )
+        .unwrap();
+
+        let payload = load_config_file_from_path(&config_path).unwrap();
+        let exported = export_current_track_text(payload.projected_tracks[0].clone()).unwrap();
+
+        assert!(exported.contains(
+            "out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 250 } }, recover = \"back_in_band\" } }"
+        ));
     }
 
     #[test]
@@ -531,11 +516,7 @@ total_loss_limit = 160.0
                 max_notional: 1600.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: serde_json::json!({
-                    "freeze": {
-                        "recover": "back_in_band",
-                    }
-                }),
+                out_of_band_policy: serde_json::json!("freeze"),
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
@@ -565,11 +546,7 @@ total_loss_limit = 160.0
                 max_notional: 1600.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: serde_json::json!({
-                    "freeze": {
-                        "recover": "back_in_band",
-                    }
-                }),
+                out_of_band_policy: serde_json::json!("freeze"),
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
@@ -590,7 +567,14 @@ total_loss_limit = 160.0
                 min_rebalance_units: 1.0,
                 leverage: 5,
                 out_of_band_policy: serde_json::json!({
-                    "hold": {}
+                    "flatten": {
+                        "trigger": {
+                            "flatten_confirm": { "bps": 500 }
+                        },
+                        "recover": {
+                            "reentry_confirm": { "bps": 500 }
+                        }
+                    }
                 }),
                 daily_loss_limit: 80.0,
                 total_loss_limit: 160.0,
@@ -747,11 +731,7 @@ total_loss_limit = 160.0
                 max_notional: 3000.0,
                 min_rebalance_units: 0.5,
                 leverage: 10,
-                out_of_band_policy: serde_json::json!({
-                    "freeze": {
-                        "recover": "back_in_band",
-                    }
-                }),
+                out_of_band_policy: serde_json::json!("freeze"),
                 daily_loss_limit: 120.0,
                 total_loss_limit: 500.0,
                 shape_family: "linear".to_string(),

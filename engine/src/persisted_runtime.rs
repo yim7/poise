@@ -177,13 +177,13 @@ impl PersistedRuntimeCodec {
 mod tests {
     use chrono::Utc;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_core::types::Exposure;
     use serde_json::json;
 
     use crate::execution_gate::ExecutionGateState;
-    use crate::runtime::{AutoState, ControlState, ReentryGuard, TrackRuntime, TrackState};
+    use crate::runtime::{AutoState, ControlState, TrackRuntime, TrackState};
     use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
@@ -200,9 +200,7 @@ mod tests {
     fn flattening_state_json() -> String {
         serde_json::to_string(&TrackState::Running(ControlState::Automatic(
             AutoState::Flattening {
-                guard: ReentryGuard {
-                    boundary: poise_core::strategy::BandBoundary::Below,
-                },
+                boundary: poise_core::strategy::BandBoundary::Below,
             },
         )))
         .unwrap()
@@ -219,9 +217,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         };
 
         let left = TrackRestoreRevision::for_track(&instrument, &track_config);
@@ -241,9 +237,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         };
 
         let revision = TrackRestoreRevision::for_track(&instrument, &track_config);
@@ -362,9 +356,7 @@ mod tests {
                         notional_per_unit: 375.0,
                         min_rebalance_units: 0.5,
                         shape_family: ShapeFamily::Linear,
-                        out_of_band_policy: BandProtectionPolicy::Freeze {
-                            recover: BandRecoverPolicy::BackInBand,
-                        },
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
                     },
                 )
                 .as_str()
@@ -436,9 +428,7 @@ mod tests {
                         notional_per_unit: 375.0,
                         min_rebalance_units: 0.5,
                         shape_family: ShapeFamily::Linear,
-                        out_of_band_policy: BandProtectionPolicy::Freeze {
-                            recover: BandRecoverPolicy::BackInBand,
-                        },
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
                     },
                 )
                 .as_str()
@@ -564,9 +554,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             CapacityBudget {
                 max_notional: 6_000.0,

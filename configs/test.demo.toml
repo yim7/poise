@@ -14,7 +14,7 @@ short_exposure_units = 8.0
 notional_per_unit = 375.0
 min_rebalance_units = 0.5
 shape_family = "linear"
-out_of_band_policy = { freeze = { recover = "back_in_band" } }
+out_of_band_policy = "freeze"
 max_notional = 3000.0
 daily_loss_limit = 300.0
 total_loss_limit = 600.0
@@ -30,7 +30,7 @@ short_exposure_units = 4.0
 notional_per_unit = 1200.0
 min_rebalance_units = 0.5
 shape_family = "linear"
-out_of_band_policy = { freeze = { recover = "back_in_band" } }
+out_of_band_policy = "freeze"
 max_notional = 6000.0
 daily_loss_limit = 600.0
 total_loss_limit = 1200.0

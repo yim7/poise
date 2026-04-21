@@ -1,5 +1,11 @@
 export type TrackShapeFamily = 'linear' | 'inertial' | 'responsive';
-export type TrackBandProtectionKind = 'freeze' | 'hold' | 'flatten' | 'terminate';
+export type TrackBandProtectionKind = 'freeze' | 'flatten' | 'terminate';
+export type BandFlattenTriggerPayload = 'immediate' | { flatten_confirm: { bps: number } };
+export type BandRecoverPolicyPayload = 'back_in_band' | { reentry_confirm: { bps: number } };
+export type BandProtectionPolicyPayload =
+  | 'freeze'
+  | { flatten: { trigger: BandFlattenTriggerPayload; recover: BandRecoverPolicyPayload } }
+  | 'terminate';
 
 export interface TrackDraftNumericFields {
   lowerPrice: number;
@@ -29,7 +35,7 @@ export interface TrackDraftRawNumericFields {
 
 export interface TrackDraftEnumFields {
   shapeFamily: TrackShapeFamily;
-  bandProtectionKind: TrackBandProtectionKind;
+  bandProtectionPolicy: BandProtectionPolicyPayload;
 }
 
 export interface TrackDraftAdditionalFields {
@@ -72,6 +78,11 @@ export interface TrackDraftAttachments {
   loadIssues?: TrackDraftLoadIssue[];
 }
 
+export const DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES = Object.freeze({
+  makerFeeRate: 0.0002,
+  takerFeeRate: 0.0005,
+});
+
 export interface TrackDraftUiState {
   quotePriceInput: string;
 }
@@ -102,8 +113,10 @@ export interface TrackDraftParsedSnapshot {
 export interface CreateTrackDraftInput {
   draftId: string;
   raw: TrackDraftAdditionalFields &
-    TrackDraftRawNumericFields &
-    TrackDraftEnumFields;
+    TrackDraftRawNumericFields & {
+      shapeFamily: TrackShapeFamily;
+      bandProtectionPolicy: BandProtectionPolicyPayload;
+    };
   parsedNumbers?: Partial<TrackDraftNumericFields>;
   enums?: TrackDraftEnumFields;
   additional?: TrackDraftAdditionalFields;
@@ -128,6 +141,7 @@ type TrackNumericFieldKey = (typeof TRACK_NUMERIC_FIELD_KEYS)[number];
 
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
   const rawNumbers = extractRawNumbers(input.raw);
+  const bandProtectionPolicy = input.enums?.bandProtectionPolicy ?? input.raw.bandProtectionPolicy;
 
   return {
     draftId: input.draftId,
@@ -137,14 +151,14 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
     },
     rawNumbers,
     parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
-    enums: input.enums ?? {
-      shapeFamily: input.raw.shapeFamily,
-      bandProtectionKind: input.raw.bandProtectionKind,
+    enums: {
+      shapeFamily: input.enums?.shapeFamily ?? input.raw.shapeFamily,
+      bandProtectionPolicy,
     },
     ui: {
       quotePriceInput: input.ui?.quotePriceInput ?? '',
     },
-    attachments: input.attachments ?? {},
+    attachments: withDefaultBinanceFuturesExchangeRules(input.attachments ?? {}),
   };
 }
 
@@ -153,6 +167,37 @@ function extractRawNumbers(
 ): TrackDraftRawNumericFields {
   const entries = TRACK_NUMERIC_FIELD_KEYS.map((key) => [key, raw[key]]);
   return Object.fromEntries(entries) as Record<TrackNumericFieldKey, string>;
+}
+
+export function bandProtectionKindFromPolicy(
+  policy: BandProtectionPolicyPayload,
+): TrackBandProtectionKind {
+  if (typeof policy === 'string') {
+    return policy;
+  }
+  return 'flatten';
+}
+
+export function defaultBandProtectionPolicy(
+  kind: TrackBandProtectionKind,
+): BandProtectionPolicyPayload {
+  switch (kind) {
+    case 'freeze':
+      return 'freeze';
+    case 'flatten':
+      return {
+        flatten: {
+          trigger: {
+            flatten_confirm: { bps: 500 },
+          },
+          recover: {
+            reentry_confirm: { bps: 500 },
+          },
+        },
+      };
+    case 'terminate':
+      return 'terminate';
+  }
 }
 
 export function refreshTrackDraftParsedNumbers(draft: TrackDraft) {
@@ -190,4 +235,16 @@ function parseFiniteNumber(input: string): number | null {
   }
 
   return value;
+}
+
+export function withDefaultBinanceFuturesExchangeRules(
+  attachments: TrackDraftAttachments,
+): TrackDraftAttachments {
+  return {
+    ...attachments,
+    exchangeRules: {
+      ...DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES,
+      ...attachments.exchangeRules,
+    },
+  };
 }

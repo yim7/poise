@@ -407,26 +407,6 @@ impl TrackManager {
             };
         }
 
-        if matches!(
-            track.track_state,
-            TrackState::Running(ControlState::Automatic(AutoState::Holding { .. }))
-        ) {
-            let strategy_price = {
-                let track = self
-                    .tracks
-                    .get_mut(&track_id)
-                    .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
-                track.track_state = TrackState::WaitingMarketData;
-                Self::clear_targeting_state(track);
-                Self::live_strategy_price_for(track)
-            };
-
-            return match strategy_price {
-                Some(strategy_price) => self.reconcile_track(&track_id, strategy_price),
-                None => Ok((vec![], vec![])),
-            };
-        }
-
         let resumed_at = self.clock.now();
         let resumed_state = {
             let track = self
@@ -1255,8 +1235,8 @@ mod tests {
     use crate::price_gate::PriceExecutionGate;
     use crate::runtime::{
         AutoState, ControlState, ExecutionSlot, ExecutionStats, ExecutorState, ManualState,
-        ReentryGuard, RiskState, SlotState, StrategyPriceStatus, TerminationCause, TrackState,
-        TrackStatus, WorkingOrder,
+        RiskState, SlotState, StrategyPriceStatus, TerminationCause, TrackState, TrackStatus,
+        WorkingOrder,
     };
     use chrono::{TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
@@ -1317,9 +1297,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         }
     }
 
@@ -1349,23 +1327,11 @@ mod tests {
                 TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
             }
             TrackStatus::Frozen => {
-                TrackState::Running(ControlState::Automatic(AutoState::Frozen {
-                    target_anchor,
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
-                }))
-            }
-            TrackStatus::Holding => {
-                TrackState::Running(ControlState::Automatic(AutoState::Holding {
-                    target_anchor,
-                }))
+                TrackState::Running(ControlState::Automatic(AutoState::Frozen { target_anchor }))
             }
             TrackStatus::Flattening => {
                 TrackState::Running(ControlState::Automatic(AutoState::Flattening {
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
+                    boundary: BandBoundary::Below,
                 }))
             }
             TrackStatus::ManualFlattening => {
@@ -2885,45 +2851,6 @@ mod tests {
         let track = manager.get_track("btc-core").unwrap();
         assert!(track.manual_target_override().is_none());
         assert_ne!(track.status(), TrackStatus::ManualFlattening);
-    }
-
-    #[test]
-    fn resume_clears_holding_and_reconciles_normally() {
-        let mut manager = test_manager();
-        register_test_track(&mut manager, "btc1", "BTCUSDT");
-
-        let track = manager.tracks.get_mut(&TrackId::new("btc1")).unwrap();
-        set_runtime_status(&mut *track, TrackStatus::Holding);
-        track.current_exposure = Exposure(8.0);
-        track.strategy_price = Some(100.0);
-        track.strategy_price_status = StrategyPriceStatus::Live;
-
-        manager.resume_track("btc1").unwrap();
-
-        let track = manager.get_track("btc1").unwrap();
-        assert_eq!(track.status(), TrackStatus::Active);
-        assert_eq!(track.desired_exposure, Some(Exposure(0.0)));
-    }
-
-    #[test]
-    fn resume_from_holding_clears_target_anchor_and_recomputes_following_band() {
-        let mut manager = test_manager_with_cached_strategy_price(95.0);
-        let track_id = TrackId::new("btc-core");
-
-        let track = manager.tracks.get_mut(&track_id).unwrap();
-        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Holding {
-            target_anchor: Exposure(4.0),
-        }));
-        track.current_exposure = Exposure(4.0);
-
-        manager.resume_track("btc-core").unwrap();
-
-        let track = manager.get_track("btc-core").unwrap();
-        assert_eq!(
-            track.track_state,
-            TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
-        );
-        assert_eq!(track.desired_exposure, Some(Exposure(4.0)));
     }
 
     #[test]

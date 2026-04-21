@@ -61,7 +61,7 @@ function makeDraft(
       dailyLossLimit: String(numericFields.dailyLossLimit),
       totalLossLimit: String(numericFields.totalLossLimit),
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
-      bandProtectionKind: overrides.enums?.bandProtectionKind ?? 'freeze',
+      bandProtectionPolicy: overrides.enums?.bandProtectionPolicy ?? 'freeze',
     },
     ui: {
       quotePriceInput,
@@ -87,9 +87,9 @@ function makeSnapshot(
       symbol: 'BTCUSDT',
     },
     parsedNumbers: numericFields,
-    enums: overrides.enums ?? {
-      shapeFamily: 'linear',
-      bandProtectionKind: 'freeze',
+    enums: {
+      shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
+      bandProtectionPolicy: overrides.enums?.bandProtectionPolicy ?? 'freeze',
     },
     ui: {
       quotePriceInput,
@@ -116,6 +116,36 @@ function expectDualRiskEdge(riskEdge: TrackMetrics['currentPriceRiskEdge']) {
 }
 
 describe('track domain fixtures', () => {
+  it('applies default Binance futures fee rates to new drafts', () => {
+    const draft = createTrackDraft({
+      draftId: 'draft-btc-core',
+      raw: {
+        trackId: 'btc-core',
+        symbol: 'BTCUSDT',
+        lowerPrice: '90',
+        upperPrice: '110',
+        longExposureUnits: '8',
+        shortExposureUnits: '8',
+        notionalPerUnit: '375',
+        maxNotional: '3000',
+        minRebalanceUnits: '0.5',
+        leverage: '10',
+        dailyLossLimit: '120',
+        totalLossLimit: '500',
+        shapeFamily: 'linear',
+        bandProtectionPolicy: 'freeze',
+      },
+      ui: {
+        quotePriceInput: '100',
+      },
+    });
+
+    expect(draft.attachments.exchangeRules).toEqual({
+      makerFeeRate: 0.0002,
+      takerFeeRate: 0.0005,
+    });
+  });
+
   it('builds a parsed snapshot for valid editable drafts', () => {
     const snapshot = buildTrackDraftSnapshot(makeDraft());
 
@@ -141,7 +171,7 @@ describe('track domain fixtures', () => {
         dailyLossLimit: '120',
         totalLossLimit: '500',
         shapeFamily: 'linear',
-        bandProtectionKind: 'freeze',
+        bandProtectionPolicy: 'freeze',
       },
       ui: {
         quotePriceInput: '100',
@@ -323,7 +353,7 @@ describe('track domain fixtures', () => {
     const snapshot = makeSnapshot({
       enums: {
         shapeFamily: 'responsive',
-        bandProtectionKind: 'freeze',
+        bandProtectionPolicy: 'freeze',
       },
     });
 
@@ -369,7 +399,7 @@ describe('track domain fixtures', () => {
     const snapshot = makeSnapshot({
       enums: {
         shapeFamily: 'inertial',
-        bandProtectionKind: 'freeze',
+        bandProtectionPolicy: 'freeze',
       },
     });
 
@@ -443,7 +473,7 @@ describe('track domain fixtures', () => {
       {
         enums: {
           shapeFamily: 'responsive',
-          bandProtectionKind: 'freeze',
+          bandProtectionPolicy: 'freeze',
         },
       },
       { quotePriceInput: '101' },
@@ -467,7 +497,7 @@ describe('track domain fixtures', () => {
       {
         enums: {
           shapeFamily: 'responsive',
-          bandProtectionKind: 'freeze',
+          bandProtectionPolicy: 'freeze',
         },
       },
       { quotePriceInput: '101' },

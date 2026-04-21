@@ -533,9 +533,7 @@ pub(crate) fn test_config() -> TrackConfig {
         notional_per_unit: 375.0,
         min_rebalance_units: 0.5,
         shape_family: ShapeFamily::Linear,
-        out_of_band_policy: BandProtectionPolicy::Freeze {
-            recover: BandRecoverPolicy::BackInBand,
-        },
+        out_of_band_policy: BandProtectionPolicy::Freeze,
     }
 }
 
@@ -548,9 +546,7 @@ pub(crate) fn rounded_submit_test_config() -> TrackConfig {
         notional_per_unit: 333.0,
         min_rebalance_units: 0.5,
         shape_family: ShapeFamily::Linear,
-        out_of_band_policy: BandProtectionPolicy::Freeze {
-            recover: BandRecoverPolicy::BackInBand,
-        },
+        out_of_band_policy: BandProtectionPolicy::Freeze,
     }
 }
 
@@ -583,9 +579,7 @@ pub(crate) fn test_runtime_startup_definition(
             notional_per_unit: 375.0,
             min_rebalance_units: Some(0.5),
             shape_family: Some(ShapeFamily::Linear),
-            out_of_band_policy: Some(BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            }),
+            out_of_band_policy: Some(BandProtectionPolicy::Freeze),
             max_notional: Some(budget.max_notional),
             daily_loss_limit: budget.daily_loss_limit,
             total_loss_limit: budget.total_loss_limit,

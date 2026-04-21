@@ -106,7 +106,6 @@ pub enum TrackReadStatus {
     WaitingMarketData,
     Active,
     Frozen,
-    Holding,
     Flattening,
     ManualFlattening,
     Terminated,
@@ -119,7 +118,6 @@ impl From<TrackStatus> for TrackReadStatus {
             TrackStatus::WaitingMarketData => Self::WaitingMarketData,
             TrackStatus::Active => Self::Active,
             TrackStatus::Frozen => Self::Frozen,
-            TrackStatus::Holding => Self::Holding,
             TrackStatus::Flattening => Self::Flattening,
             TrackStatus::ManualFlattening => Self::ManualFlattening,
             TrackStatus::Terminated => Self::Terminated,
@@ -553,7 +551,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::events::{DomainEvent, ReplacementGateReason};
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
     use poise_engine::persisted_runtime::TrackRestoreRevision;
@@ -583,9 +581,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         }
     }
 

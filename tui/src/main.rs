@@ -1150,16 +1150,23 @@ mod tests {
 
     #[test]
     fn runtime_config_ignores_removed_ws_env_vars() {
-        with_runtime_env(
-            Some("http://127.0.0.1:9000"),
-            Some("ws://127.0.0.1:9999/other"),
-            Some("ws://127.0.0.1:9999/other"),
-            || {
-                let config = super::RuntimeConfig::from_env().unwrap();
-                assert_eq!(config.base_url, "http://127.0.0.1:9000");
-                assert_eq!(config.ws_url, "ws://127.0.0.1:9000/ws");
-            },
-        );
+        with_runtime_env(Some("http://127.0.0.1:9000"), || {
+            let config = super::RuntimeConfig::from_env().unwrap();
+            assert_eq!(config.base_url, "http://127.0.0.1:9000");
+            assert_eq!(config.ws_url, "ws://127.0.0.1:9000/ws");
+        });
+    }
+
+    #[test]
+    fn with_runtime_env_only_sets_current_base_url_variable() {
+        with_runtime_env(Some("http://127.0.0.1:9000"), || {
+            assert_eq!(
+                std::env::var("POISE_BASE_URL").as_deref(),
+                Ok("http://127.0.0.1:9000")
+            );
+            assert!(std::env::var("POISE_WS_URL").is_err());
+            assert!(std::env::var("POISE_TUI_WS_URL").is_err());
+        });
     }
 
     #[test]
@@ -2160,7 +2167,7 @@ long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
 shape_family = "inertial"
-out_of_band_policy = { hold = {} }
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
 "#,
             );
         }
@@ -2332,7 +2339,7 @@ out_of_band_policy = { hold = {} }
         let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
-            eth_view.contains("out of band hold"),
+            eth_view.contains("out of band flatten"),
             "eth view:\n{eth_view}"
         );
 
@@ -2358,34 +2365,17 @@ out_of_band_policy = { hold = {} }
         LOCK.get_or_init(|| StdMutex::new(()))
     }
 
-    fn legacy_runtime_env_names() -> (String, String) {
-        (
-            ["POISE", "WS", "URL"].join("_"),
-            ["POISE", "TUI", "WS", "URL"].join("_"),
-        )
-    }
-
-    fn with_runtime_env<T>(
-        base_url: Option<&str>,
-        ws_url: Option<&str>,
-        tui_ws_url: Option<&str>,
-        f: impl FnOnce() -> T,
-    ) -> T {
+    fn with_runtime_env<T>(base_url: Option<&str>, f: impl FnOnce() -> T) -> T {
         let _guard = runtime_env_lock().lock().unwrap();
-        let (legacy_ws_env, legacy_tui_ws_env) = legacy_runtime_env_names();
 
         unsafe {
             set_env_var("POISE_BASE_URL", base_url);
-            set_env_var(&legacy_ws_env, ws_url);
-            set_env_var(&legacy_tui_ws_env, tui_ws_url);
         }
 
         let result = f();
 
         unsafe {
             std::env::remove_var("POISE_BASE_URL");
-            std::env::remove_var(&legacy_ws_env);
-            std::env::remove_var(&legacy_tui_ws_env);
         }
 
         result

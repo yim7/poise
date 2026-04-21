@@ -125,7 +125,23 @@
 
 - `status` 提供生命周期和策略价格摘要，当前包含 `lifecycle`、`strategy_price` 和 `strategy_price_status`。
 - `strategy` 提供配置后的价格带、仓位单位、形状族和 `out_of_band_policy`。
-- `strategy.out_of_band_policy` 当前稳定形状是嵌套 policy object，例如 `{"freeze":{"recover":"back_in_band"}}`、`{"hold":{}}`、`{"flatten":{"recover":{"price_confirm":{"bps":500}}}}`、`{"terminate":{}}`。
+- `strategy.out_of_band_policy` 对外稳定返回当前 canonical 形状：
+  - `"freeze"`
+    - 表示一出主带就冻结，不主动平仓，回主带立即恢复
+  - `"terminate"`
+    - 表示一出主带就终止，不再恢复
+  - `{"flatten":{"trigger":"immediate","recover":"back_in_band"}}`
+    - 表示一出主带立即平仓，回到主带内就恢复
+  - `{"flatten":{"trigger":{"flatten_confirm":{"bps":250}},"recover":"back_in_band"}}`
+    - 表示一出主带先进入等待阶段，继续沿带外方向再走出主带宽的 `2.5%` 才平仓；平仓后回带内立即恢复
+  - `{"flatten":{"trigger":{"flatten_confirm":{"bps":250}},"recover":{"reentry_confirm":{"bps":500}}}}`
+    - 表示先做平仓确认，再做恢复确认
+  - `flatten.trigger`
+    - `"immediate"`：一出主带就立刻进入 `flattening`
+    - `{"flatten_confirm":{"bps":N}}`：继续沿带外方向再走出主带宽的 `N / 10000` 才真正进入 `flattening`
+  - `flatten.recover`
+    - `"back_in_band"`：回到主带内就恢复
+    - `{"reentry_confirm":{"bps":N}}`：回到主带内后，还要继续向带内确认主带宽的 `N / 10000` 才恢复
 - `budget` 提供当前轨道风险预算。
 - `market` 提供 `mark_price`、`best_bid` 和 `best_ask`。
 - `ledger` 提供累计盈亏读模型，当前包含 `gross_realized_pnl`、`net_realized_pnl`、`unrealized_pnl`、`total_pnl`、费用累计和未解决 ledger gaps。
@@ -183,8 +199,8 @@
 
 `resume` 的语义：
 
-- 在 `paused`、`holding` 或 `manual_flattening` 时可执行
-- 从 `holding` 或 `manual_flattening` 恢复正常策略控制
+- 在 `paused` 或 `manual_flattening` 时可执行
+- 从 `paused` 或 `manual_flattening` 恢复正常策略控制
 - 如果当前没有 live `strategy_price`，恢复到 `waiting_market_data`
 
 `flatten` 的语义：

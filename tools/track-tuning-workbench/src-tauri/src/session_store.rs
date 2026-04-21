@@ -145,7 +145,10 @@ fn backup_session_file_path(session_file: &Path) -> PathBuf {
     session_file.with_file_name(format!("{file_name}.{unique_suffix}.bak"))
 }
 
-fn replace_file_preserving_existing(temp_file: &Path, session_file: &Path) -> Result<(), CommandError> {
+fn replace_file_preserving_existing(
+    temp_file: &Path,
+    session_file: &Path,
+) -> Result<(), CommandError> {
     replace_file_preserving_existing_with(
         temp_file,
         session_file,
@@ -222,11 +225,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        cell::RefCell,
-        collections::HashSet,
-        path::PathBuf,
-    };
+    use std::{cell::RefCell, collections::HashSet, path::PathBuf};
 
     use super::replace_file_preserving_existing_with;
 
@@ -235,10 +234,7 @@ mod tests {
         let temp_file = PathBuf::from("/tmp/new.json.tmp");
         let session_file = PathBuf::from("/tmp/session.json");
         let backup_file = PathBuf::from("/tmp/session.json.bak");
-        let files = RefCell::new(HashSet::from([
-            temp_file.clone(),
-            session_file.clone(),
-        ]));
+        let files = RefCell::new(HashSet::from([temp_file.clone(), session_file.clone()]));
 
         let error = replace_file_preserving_existing_with(
             &temp_file,
@@ -279,10 +275,7 @@ mod tests {
         let temp_file = PathBuf::from("/tmp/new.json.tmp");
         let session_file = PathBuf::from("/tmp/session.json");
         let backup_file = PathBuf::from("/tmp/session.json.bak");
-        let files = RefCell::new(HashSet::from([
-            temp_file.clone(),
-            session_file.clone(),
-        ]));
+        let files = RefCell::new(HashSet::from([temp_file.clone(), session_file.clone()]));
         let removed = RefCell::new(Vec::<PathBuf>::new());
 
         replace_file_preserving_existing_with(

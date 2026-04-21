@@ -30,7 +30,6 @@ pub enum TrackStatus {
     WaitingMarketData,
     Active,
     Frozen,
-    Holding,
     Flattening,
     ManualFlattening,
     Terminated,
@@ -75,13 +74,13 @@ pub enum AutoState {
     FollowingBand,
     Frozen {
         target_anchor: Exposure,
-        guard: ReentryGuard,
     },
-    Holding {
+    FlattenPending {
         target_anchor: Exposure,
+        boundary: BandBoundary,
     },
     Flattening {
-        guard: ReentryGuard,
+        boundary: BandBoundary,
     },
 }
 
@@ -89,11 +88,6 @@ pub enum AutoState {
 pub enum ManualState {
     Flattened,
     TargetOverride { target: Exposure },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReentryGuard {
-    pub boundary: BandBoundary,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,9 +107,9 @@ impl TrackState {
         match self {
             Self::WaitingMarketData => TrackStatus::WaitingMarketData,
             Self::Running(ControlState::Automatic(AutoState::FollowingBand)) => TrackStatus::Active,
-            Self::Running(ControlState::Automatic(AutoState::Frozen { .. })) => TrackStatus::Frozen,
-            Self::Running(ControlState::Automatic(AutoState::Holding { .. })) => {
-                TrackStatus::Holding
+            Self::Running(ControlState::Automatic(AutoState::Frozen { .. }))
+            | Self::Running(ControlState::Automatic(AutoState::FlattenPending { .. })) => {
+                TrackStatus::Frozen
             }
             Self::Running(ControlState::Automatic(AutoState::Flattening { .. })) => {
                 TrackStatus::Flattening
@@ -658,9 +652,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use poise_core::events::ReplacementGateReason;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{
-        BandBoundary, BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig,
-    };
+    use poise_core::strategy::{BandBoundary, BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use crate::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
@@ -674,9 +666,8 @@ mod tests {
 
     use super::{
         AutoState, ControlState, ExecutionRound, ExecutionSlot, ExecutionStats,
-        ExecutorDiagnostics, ExecutorState, ManualState, QuoteHealthView, ReentryGuard, RiskState,
-        SlotState, StrategyPriceStatus, TerminationCause, TrackRuntime, TrackState, TrackStatus,
-        WorkingOrder,
+        ExecutorDiagnostics, ExecutorState, ManualState, QuoteHealthView, RiskState, SlotState,
+        StrategyPriceStatus, TerminationCause, TrackRuntime, TrackState, TrackStatus, WorkingOrder,
     };
     use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate};
 
@@ -692,9 +683,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             CapacityBudget {
                 max_notional: 6_000.0,
@@ -725,9 +714,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             budget: CapacityBudget {
                 max_notional: 6_000.0,
@@ -799,23 +786,11 @@ mod tests {
                 TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
             }
             TrackStatus::Frozen => {
-                TrackState::Running(ControlState::Automatic(AutoState::Frozen {
-                    target_anchor,
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
-                }))
-            }
-            TrackStatus::Holding => {
-                TrackState::Running(ControlState::Automatic(AutoState::Holding {
-                    target_anchor,
-                }))
+                TrackState::Running(ControlState::Automatic(AutoState::Frozen { target_anchor }))
             }
             TrackStatus::Flattening => {
                 TrackState::Running(ControlState::Automatic(AutoState::Flattening {
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
+                    boundary: BandBoundary::Below,
                 }))
             }
             TrackStatus::ManualFlattening => {

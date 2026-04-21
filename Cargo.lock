@@ -3147,6 +3147,7 @@ name = "poise-track-tuning-workbench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "poise-core",
  "reqwest 0.11.27",
  "serde",
  "serde_json",

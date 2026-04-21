@@ -1,14 +1,14 @@
 use poise_protocol::{
-    ActivityLevelView, BandProtectionPolicy as ProtocolPolicy,
-    BandRecoverPolicy as ProtocolRecoverPolicy, ExecutionBadgeView, ExecutionIntentView,
-    ExecutionSlotOrderView, ExecutionSlotPhaseView, ExecutionSlotView, ExecutionStateView,
-    ExecutionStatusView, ExposureSummaryView, InstrumentView, ReplacementGateView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
-    TrackActivityItemView, TrackBudgetView, TrackCommandType, TrackCommandView, TrackDetailView,
-    TrackExecutionStatsView, TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView,
-    TrackLedgerGapView, TrackLedgerView, TrackLifecycleView, TrackListItemView,
-    TrackListLedgerView, TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
-    TrackStatusPanelView, TrackStrategyView,
+    ActivityLevelView, BandFlattenTrigger as ProtocolTrigger,
+    BandProtectionPolicy as ProtocolPolicy, BandRecoverPolicy as ProtocolRecoverPolicy,
+    ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
+    ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
+    InstrumentView, ReplacementGateView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
+    StrategyPriceStatusView, TrackActivityItemView, TrackBudgetView, TrackCommandType,
+    TrackCommandView, TrackDetailView, TrackExecutionStatsView, TrackExecutionView,
+    TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView,
+    TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView, TrackPositionView,
+    TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
 use poise_application::{
@@ -225,7 +225,6 @@ fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
         TrackReadStatus::WaitingMarketData => ProtocolTrackStatus::WaitingMarketData,
         TrackReadStatus::Active => ProtocolTrackStatus::Active,
         TrackReadStatus::Frozen => ProtocolTrackStatus::Frozen,
-        TrackReadStatus::Holding => ProtocolTrackStatus::Holding,
         TrackReadStatus::Flattening => ProtocolTrackStatus::Flattening,
         TrackReadStatus::ManualFlattening => ProtocolTrackStatus::ManualFlattening,
         TrackReadStatus::Terminated => ProtocolTrackStatus::Terminated,
@@ -250,16 +249,25 @@ fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolSha
 
 fn project_out_of_band_policy(value: poise_core::strategy::BandProtectionPolicy) -> ProtocolPolicy {
     match value {
-        poise_core::strategy::BandProtectionPolicy::Freeze { recover } => ProtocolPolicy::Freeze {
-            recover: project_band_recover_policy(recover),
-        },
-        poise_core::strategy::BandProtectionPolicy::Hold => ProtocolPolicy::Hold,
-        poise_core::strategy::BandProtectionPolicy::Flatten { recover } => {
+        poise_core::strategy::BandProtectionPolicy::Freeze => ProtocolPolicy::Freeze,
+        poise_core::strategy::BandProtectionPolicy::Flatten { trigger, recover } => {
             ProtocolPolicy::Flatten {
+                trigger: project_band_flatten_trigger(trigger),
                 recover: project_band_recover_policy(recover),
             }
         }
         poise_core::strategy::BandProtectionPolicy::Terminate => ProtocolPolicy::Terminate,
+    }
+}
+
+fn project_band_flatten_trigger(
+    value: poise_core::strategy::BandFlattenTrigger,
+) -> ProtocolTrigger {
+    match value {
+        poise_core::strategy::BandFlattenTrigger::Immediate => ProtocolTrigger::Immediate,
+        poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps } => {
+            ProtocolTrigger::FlattenConfirm { bps }
+        }
     }
 }
 
@@ -268,8 +276,8 @@ fn project_band_recover_policy(
 ) -> ProtocolRecoverPolicy {
     match value {
         poise_core::strategy::BandRecoverPolicy::BackInBand => ProtocolRecoverPolicy::BackInBand,
-        poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps } => {
-            ProtocolRecoverPolicy::PriceConfirm { bps }
+        poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps } => {
+            ProtocolRecoverPolicy::ReentryConfirm { bps }
         }
     }
 }
@@ -442,13 +450,10 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
             command: TrackCommandType::Resume,
             enabled: matches!(
                 status,
-                TrackReadStatus::Paused
-                    | TrackReadStatus::Holding
-                    | TrackReadStatus::ManualFlattening
+                TrackReadStatus::Paused | TrackReadStatus::ManualFlattening
             ),
             disabled_reason: match status {
                 TrackReadStatus::Paused => None,
-                TrackReadStatus::Holding => None,
                 TrackReadStatus::ManualFlattening => None,
                 TrackReadStatus::Terminated => Some("terminated track cannot be resumed".into()),
                 _ => Some("track is not paused".into()),
@@ -724,23 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn resume_is_enabled_when_holding_is_active() {
-        let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackReadStatus::Holding;
-        source.manual_target_override = None;
-
-        let detail = TrackProjector::new().project_detail(&source);
-        let resume = detail
-            .available_commands
-            .iter()
-            .find(|command| command.command == TrackCommandType::Resume)
-            .expect("resume command should be present");
-
-        assert!(resume.enabled);
-        assert_eq!(resume.disabled_reason, None);
-    }
-
-    #[test]
     fn resume_availability_depends_on_status_not_override() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.status = TrackReadStatus::Active;
@@ -764,7 +752,8 @@ mod tests {
     fn project_out_of_band_policy_uses_flatten() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.out_of_band_policy = BandProtectionPolicy::Flatten {
-            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+            trigger: poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps: 500 },
+            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
         };
 
         let detail = TrackProjector::new().project_detail(&source);
@@ -773,18 +762,24 @@ mod tests {
     }
 
     #[test]
-    fn projector_shows_flatten_price_confirm_policy_without_engine_state() {
+    fn projector_shows_flatten_trigger_and_recover_policy() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.status = TrackReadStatus::Active;
         source.out_of_band_policy = poise_core::strategy::BandProtectionPolicy::Flatten {
-            recover: poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps: 500 },
+            trigger: poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps: 500 },
+            recover: poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps: 500 },
         };
 
         let detail = TrackProjector::new().project_detail(&source);
 
         assert_eq!(
             serde_json::to_value(detail.strategy.out_of_band_policy).unwrap(),
-            serde_json::json!({ "flatten": { "recover": { "price_confirm": { "bps": 500 } } } })
+            serde_json::json!({
+                "flatten": {
+                    "trigger": { "flatten_confirm": { "bps": 500 } },
+                    "recover": { "reentry_confirm": { "bps": 500 } }
+                }
+            })
         );
     }
 
@@ -814,6 +809,16 @@ mod tests {
                 .iter()
                 .any(|command| command.command == TrackCommandType::Resume && command.enabled)
         );
+    }
+
+    #[test]
+    fn runtime_boundary_migration_removes_holding_from_public_status_projection() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.status = TrackReadStatus::Frozen;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(detail.status.lifecycle.status.to_string(), "frozen");
     }
 
     #[test]
@@ -1126,9 +1131,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
             budget: poise_core::risk::CapacityBudget {
                 max_notional: 3000.0,
                 daily_loss_limit: 100.0,

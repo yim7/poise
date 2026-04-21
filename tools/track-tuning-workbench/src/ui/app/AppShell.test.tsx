@@ -33,7 +33,7 @@ function makeDraft(draftId: string, overrides: DraftOverrides = {}): TrackDraft 
       dailyLossLimit: overrides.rawNumbers?.dailyLossLimit ?? '120',
       totalLossLimit: overrides.rawNumbers?.totalLossLimit ?? '500',
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
-      bandProtectionKind: overrides.enums?.bandProtectionKind ?? 'freeze',
+      bandProtectionPolicy: overrides.enums?.bandProtectionPolicy ?? 'freeze',
     },
     additional: overrides.additional,
     enums: overrides.enums,
@@ -43,6 +43,7 @@ function makeDraft(draftId: string, overrides: DraftOverrides = {}): TrackDraft 
     attachments: overrides.attachments,
   });
 }
+
 
 async function renderShell() {
   const snapshot = {

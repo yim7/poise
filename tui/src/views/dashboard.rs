@@ -146,7 +146,6 @@ fn format_lifecycle_label(status: &TrackStatus) -> &'static str {
         TrackStatus::WaitingMarketData => "waiting",
         TrackStatus::Active => "active",
         TrackStatus::Frozen => "frozen",
-        TrackStatus::Holding => "holding",
         TrackStatus::Flattening => "flattening",
         TrackStatus::ManualFlattening => "manual_flattening",
         TrackStatus::Terminated => "terminated",
@@ -467,6 +466,26 @@ mod tests {
         let text = buffer_text(&terminal);
 
         assert!(text.contains("manual_flattening"));
+    }
+
+    #[test]
+    fn renders_flattening_without_holding_status() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        response.items[0].lifecycle.status = serde_json::from_str("\"flattening\"").unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("flattening"));
+        assert!(!text.contains("holding"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use poise_application::{
     TrackMutationStore, TrackQueryStore,
 };
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 use poise_engine::executor::{ExecutionMode, ExecutionReason, RecoveryAnomaly};
 use poise_engine::manager::TrackManager;

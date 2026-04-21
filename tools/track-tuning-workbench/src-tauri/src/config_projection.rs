@@ -1,3 +1,5 @@
+use poise_core::strategy::{BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy};
+
 use crate::config_document::TrackDraft;
 
 pub fn export_current_track(draft: &TrackDraft) -> String {
@@ -40,7 +42,7 @@ fn export_track(draft: &TrackDraft) -> String {
         format!("leverage = {}", fields.leverage),
         format!(
             "out_of_band_policy = {}",
-            band_protection_policy_inline(fields.out_of_band_policy.as_str())
+            band_protection_policy_inline(&fields.out_of_band_policy)
         ),
         format!("daily_loss_limit = {}", format_f64(fields.daily_loss_limit)),
         format!("total_loss_limit = {}", format_f64(fields.total_loss_limit)),
@@ -57,14 +59,36 @@ fn quote_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn band_protection_policy_inline(value: &str) -> &'static str {
+fn band_protection_policy_inline(value: &BandProtectionPolicy) -> String {
     match value {
-        "freeze" => "{ freeze = { recover = \"back_in_band\" } }",
-        "hold" => "{ hold = {} }",
-        "flatten" => "{ flatten = { recover = { price_confirm = { bps = 500 } } } }",
-        "terminate" => "{ terminate = {} }",
-        _ => "{ freeze = { recover = \"back_in_band\" } }",
+        BandProtectionPolicy::Freeze => "\"freeze\"".to_string(),
+        BandProtectionPolicy::Flatten { trigger, recover }
+            if is_default_flatten_policy(*trigger, *recover) =>
+        {
+            "\"flatten\"".to_string()
+        }
+        BandProtectionPolicy::Flatten { trigger, recover } => {
+            let trigger = match trigger {
+                BandFlattenTrigger::Immediate => "\"immediate\"".to_string(),
+                BandFlattenTrigger::FlattenConfirm { bps } => {
+                    format!("{{ flatten_confirm = {{ bps = {bps} }} }}")
+                }
+            };
+            let recover = match recover {
+                BandRecoverPolicy::BackInBand => "\"back_in_band\"".to_string(),
+                BandRecoverPolicy::ReentryConfirm { bps } => {
+                    format!("{{ reentry_confirm = {{ bps = {bps} }} }}")
+                }
+            };
+            format!("{{ flatten = {{ trigger = {trigger}, recover = {recover} }} }}")
+        }
+        BandProtectionPolicy::Terminate => "\"terminate\"".to_string(),
     }
+}
+
+fn is_default_flatten_policy(trigger: BandFlattenTrigger, recover: BandRecoverPolicy) -> bool {
+    matches!(trigger, BandFlattenTrigger::FlattenConfirm { bps: 500 })
+        && matches!(recover, BandRecoverPolicy::ReentryConfirm { bps: 500 })
 }
 
 fn format_f64(value: f64) -> String {

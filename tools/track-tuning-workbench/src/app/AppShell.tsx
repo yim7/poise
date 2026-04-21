@@ -4,7 +4,12 @@ import {
   createSourceSnapshot,
   type WorkbenchBridge,
 } from '@/app/workbenchBridge';
-import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
+import {
+  createTrackDraft,
+  defaultBandProtectionPolicy,
+  type TrackBandProtectionKind,
+  type TrackDraft,
+} from '@/domain/trackDraft';
 import { clearResolvedLoadIssues, parseFiniteNumber } from '@/domain/trackValidation';
 import { useWorkbenchSnapshot, useWorkbenchStore } from '@/state/workbenchStore';
 import { TrackWorkbenchChart } from '@/ui/chart/TrackWorkbenchChart';
@@ -303,8 +308,8 @@ export function AppShell({ bridge }: AppShellProps) {
                   if (field === 'shapeFamily') {
                     draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
                   } else {
-                    draft.enums.bandProtectionKind =
-                      value as TrackDraft['enums']['bandProtectionKind'];
+                    const nextKind = value as TrackBandProtectionKind;
+                    draft.enums.bandProtectionPolicy = defaultBandProtectionPolicy(nextKind);
                   }
                   clearResolvedLoadIssues(draft, field);
                 });
@@ -351,7 +356,7 @@ function createBlankDraft(index: number) {
       dailyLossLimit: '120',
       totalLossLimit: '500',
       shapeFamily: 'linear',
-      bandProtectionKind: 'freeze',
+      bandProtectionPolicy: defaultBandProtectionPolicy('freeze'),
     },
     ui: {
       quotePriceInput: '',

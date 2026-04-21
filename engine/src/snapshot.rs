@@ -69,13 +69,11 @@ pub struct PersistedTrackState {
 #[cfg(test)]
 mod tests {
     use crate::persisted_runtime::PersistedRuntimeCodec;
-    use crate::runtime::{
-        AutoState, ControlState, ReentryGuard, StrategyPriceStatus, TrackRuntime, TrackState,
-    };
+    use crate::runtime::{AutoState, ControlState, StrategyPriceStatus, TrackRuntime, TrackState};
     use crate::track::{Instrument, TrackId, Venue};
     use poise_core::risk::CapacityBudget;
     use poise_core::strategy::BandBoundary;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure};
 
     #[test]
@@ -91,9 +89,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             CapacityBudget {
                 max_notional: 6_000.0,
@@ -146,9 +142,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             CapacityBudget {
                 max_notional: 6_000.0,
@@ -197,9 +191,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                },
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
             CapacityBudget {
                 max_notional: 6_000.0,
@@ -232,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_round_trips_runtime_track_state() {
+    fn snapshot_round_trips_flatten_pending_runtime_state() {
         let mut runtime = TrackRuntime::with_tick_timeout_secs(
             TrackId::new("track-1"),
             Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -244,8 +236,9 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
+                out_of_band_policy: BandProtectionPolicy::Flatten {
+                    trigger: poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                    recover: poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps: 500 },
                 },
             },
             CapacityBudget {
@@ -264,10 +257,58 @@ mod tests {
             chrono::Utc::now(),
             45,
         );
-        runtime.track_state = TrackState::Running(ControlState::Automatic(AutoState::Flattening {
-            guard: ReentryGuard {
+        runtime.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(4.0),
                 boundary: BandBoundary::Below,
+            }));
+
+        let json = PersistedRuntimeCodec::encode_snapshot(&runtime.snapshot()).unwrap();
+        let restored = PersistedRuntimeCodec::decode(json).unwrap();
+
+        assert_eq!(
+            restored.runtime_state,
+            TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(4.0),
+                boundary: BandBoundary::Below,
+            })),
+        );
+        assert_eq!(restored.status(), crate::runtime::TrackStatus::Frozen);
+    }
+
+    #[test]
+    fn snapshot_round_trips_runtime_track_state() {
+        let mut runtime = TrackRuntime::with_tick_timeout_secs(
+            TrackId::new("track-1"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze,
             },
+            CapacityBudget {
+                max_notional: 6_000.0,
+                daily_loss_limit: 500.0,
+                total_loss_limit: 1_000.0,
+            },
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.01,
+                min_qty: 0.01,
+                min_notional: 5.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+            chrono::Utc::now(),
+            45,
+        );
+        runtime.track_state = TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+            boundary: BandBoundary::Below,
         }));
 
         let snapshot = runtime.snapshot();

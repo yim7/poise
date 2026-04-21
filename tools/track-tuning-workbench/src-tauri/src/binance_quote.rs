@@ -161,7 +161,13 @@ fn map_error_response(
 ) -> BinanceQuotePayload {
     let error_body = serde_json::from_slice::<BinanceErrorBody>(body).ok();
     let kind = classify_error(status, error_body.as_ref());
-    let error_message = build_error_message(kind.clone(), status, error_body.as_ref(), body, requested_symbol);
+    let error_message = build_error_message(
+        kind.clone(),
+        status,
+        error_body.as_ref(),
+        body,
+        requested_symbol,
+    );
     BinanceQuotePayload::failure(None, kind, error_message)
 }
 

@@ -25,7 +25,11 @@ function makeSnapshot(shapeFamily: 'linear' | 'inertial' | 'responsive' = 'linea
       dailyLossLimit: '120',
       totalLossLimit: '500',
       shapeFamily,
-      bandProtectionKind: 'freeze',
+      bandProtectionPolicy: 'freeze',
+    },
+    enums: {
+      shapeFamily,
+      bandProtectionPolicy: 'freeze',
     },
     ui: {
       quotePriceInput: '100',

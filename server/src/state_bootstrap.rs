@@ -974,9 +974,7 @@ mod tests {
                 notional_per_unit: 375.0,
                 min_rebalance_units: Some(0.5),
                 shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
-                out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze {
-                    recover: poise_core::strategy::BandRecoverPolicy::BackInBand,
-                }),
+                out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
                 max_notional: None,
                 leverage: None,
                 daily_loss_limit: 300.0,
@@ -1008,9 +1006,7 @@ mod tests {
                     notional_per_unit: 375.0,
                     min_rebalance_units: 0.5,
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze {
-                        recover: poise_core::strategy::BandRecoverPolicy::BackInBand,
-                    },
+                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
                 },
                 poise_core::risk::CapacityBudget {
                     max_notional: 3000.0,

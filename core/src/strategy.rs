@@ -27,17 +27,26 @@ pub enum ShapeFamily {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BandProtectionPolicy {
-    Freeze { recover: BandRecoverPolicy },
-    Hold,
-    Flatten { recover: BandRecoverPolicy },
+    Freeze,
+    Flatten {
+        trigger: BandFlattenTrigger,
+        recover: BandRecoverPolicy,
+    },
     Terminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandFlattenTrigger {
+    Immediate,
+    FlattenConfirm { bps: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BandRecoverPolicy {
     BackInBand,
-    PriceConfirm { bps: u32 },
+    ReentryConfirm { bps: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,18 +95,17 @@ fn default_min_rebalance_units() -> f64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum BandProtectionPolicySerde {
-    Freeze { recover: BandRecoverPolicy },
-    Hold {},
-    Flatten { recover: BandRecoverPolicy },
-    Terminate {},
+enum BandProtectionPolicyFlattenSerde {
+    Flatten {
+        trigger: BandFlattenTrigger,
+        recover: BandRecoverPolicy,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum LegacyBandProtectionPolicyKind {
+enum BandProtectionPolicyShorthand {
     Freeze,
-    Hold,
     Flatten,
     Terminate,
 }
@@ -105,50 +113,54 @@ enum LegacyBandProtectionPolicyKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 enum BandProtectionPolicyDeserialize {
-    Canonical(BandProtectionPolicySerde),
-    Legacy(LegacyBandProtectionPolicyKind),
+    Canonical(BandProtectionPolicyFlattenSerde),
+    Shorthand(BandProtectionPolicyShorthand),
 }
 
 impl BandProtectionPolicy {
     pub fn kind_str(&self) -> &'static str {
         match self {
-            Self::Freeze { .. } => "freeze",
-            Self::Hold => "hold",
+            Self::Freeze => "freeze",
             Self::Flatten { .. } => "flatten",
             Self::Terminate => "terminate",
         }
     }
 
-    fn legacy_default(value: LegacyBandProtectionPolicyKind) -> Self {
+    fn shorthand_default(value: BandProtectionPolicyShorthand) -> Self {
         match value {
-            LegacyBandProtectionPolicyKind::Freeze => Self::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
+            BandProtectionPolicyShorthand::Freeze => Self::Freeze,
+            BandProtectionPolicyShorthand::Flatten => Self::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
             },
-            LegacyBandProtectionPolicyKind::Hold => Self::Hold,
-            LegacyBandProtectionPolicyKind::Flatten => Self::Flatten {
-                recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
-            },
-            LegacyBandProtectionPolicyKind::Terminate => Self::Terminate,
+            BandProtectionPolicyShorthand::Terminate => Self::Terminate,
         }
     }
 
-    fn canonical(self) -> BandProtectionPolicySerde {
+    fn shorthand(self) -> Option<BandProtectionPolicyShorthand> {
         match self {
-            Self::Freeze { recover } => BandProtectionPolicySerde::Freeze { recover },
-            Self::Hold => BandProtectionPolicySerde::Hold {},
-            Self::Flatten { recover } => BandProtectionPolicySerde::Flatten { recover },
-            Self::Terminate => BandProtectionPolicySerde::Terminate {},
+            Self::Freeze => Some(BandProtectionPolicyShorthand::Freeze),
+            Self::Flatten { .. } => None,
+            Self::Terminate => Some(BandProtectionPolicyShorthand::Terminate),
+        }
+    }
+
+    fn canonical_flatten(self) -> Option<BandProtectionPolicyFlattenSerde> {
+        match self {
+            Self::Flatten { trigger, recover } => {
+                Some(BandProtectionPolicyFlattenSerde::Flatten { trigger, recover })
+            }
+            _ => None,
         }
     }
 }
 
-impl From<BandProtectionPolicySerde> for BandProtectionPolicy {
-    fn from(value: BandProtectionPolicySerde) -> Self {
+impl From<BandProtectionPolicyFlattenSerde> for BandProtectionPolicy {
+    fn from(value: BandProtectionPolicyFlattenSerde) -> Self {
         match value {
-            BandProtectionPolicySerde::Freeze { recover } => Self::Freeze { recover },
-            BandProtectionPolicySerde::Hold {} => Self::Hold,
-            BandProtectionPolicySerde::Flatten { recover } => Self::Flatten { recover },
-            BandProtectionPolicySerde::Terminate {} => Self::Terminate,
+            BandProtectionPolicyFlattenSerde::Flatten { trigger, recover } => {
+                Self::Flatten { trigger, recover }
+            }
         }
     }
 }
@@ -158,7 +170,13 @@ impl Serialize for BandProtectionPolicy {
     where
         S: Serializer,
     {
-        self.canonical().serialize(serializer)
+        if let Some(value) = self.shorthand() {
+            value.serialize(serializer)
+        } else if let Some(value) = self.canonical_flatten() {
+            value.serialize(serializer)
+        } else {
+            unreachable!("band protection policy must serialize as shorthand or flatten object")
+        }
     }
 }
 
@@ -170,7 +188,7 @@ impl<'de> Deserialize<'de> for BandProtectionPolicy {
         Ok(
             match BandProtectionPolicyDeserialize::deserialize(deserializer)? {
                 BandProtectionPolicyDeserialize::Canonical(value) => value.into(),
-                BandProtectionPolicyDeserialize::Legacy(value) => Self::legacy_default(value),
+                BandProtectionPolicyDeserialize::Shorthand(value) => Self::shorthand_default(value),
             },
         )
     }
@@ -232,7 +250,7 @@ pub fn band_status(price: f64, config: &TrackConfig) -> BandStatus {
     }
 }
 
-pub fn band_reentry_price_confirmed(
+pub fn band_reentry_confirmed(
     price: f64,
     recover: &BandRecoverPolicy,
     lower_price: f64,
@@ -243,7 +261,7 @@ pub fn band_reentry_price_confirmed(
         BandRecoverPolicy::BackInBand => {
             price >= lower_price - f64::EPSILON && price <= upper_price + f64::EPSILON
         }
-        BandRecoverPolicy::PriceConfirm { bps } => {
+        BandRecoverPolicy::ReentryConfirm { bps } => {
             let band_width = upper_price - lower_price;
             if !band_width.is_finite() || band_width <= f64::EPSILON {
                 return false;
@@ -255,6 +273,25 @@ pub fn band_reentry_price_confirmed(
                 BandBoundary::Above => price <= upper_price - confirmation_distance + f64::EPSILON,
             }
         }
+    }
+}
+
+pub fn flatten_confirm_reached(
+    price: f64,
+    confirm_bps: u32,
+    lower_price: f64,
+    upper_price: f64,
+    boundary: BandBoundary,
+) -> bool {
+    let band_width = upper_price - lower_price;
+    if !band_width.is_finite() || band_width <= f64::EPSILON {
+        return false;
+    }
+
+    let confirm_distance = band_width * f64::from(confirm_bps) / 10_000.0;
+    match boundary {
+        BandBoundary::Below => price <= lower_price - confirm_distance + f64::EPSILON,
+        BandBoundary::Above => price >= upper_price + confirm_distance - f64::EPSILON,
     }
 }
 
@@ -314,9 +351,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         }
     }
 
@@ -360,15 +395,19 @@ mod tests {
     #[test]
     fn band_protection_policy_serializes_flatten_as_canonical_object() {
         let policy = BandProtectionPolicy::Flatten {
-            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
         };
 
         assert_eq!(
             serde_json::to_value(policy).unwrap(),
             serde_json::json!({
                 "flatten": {
+                    "trigger": {
+                        "flatten_confirm": { "bps": 500 }
+                    },
                     "recover": {
-                        "price_confirm": { "bps": 500 }
+                        "reentry_confirm": { "bps": 500 }
                     }
                 }
             })
@@ -376,23 +415,53 @@ mod tests {
     }
 
     #[test]
-    fn band_protection_policy_accepts_legacy_freeze_string() {
-        let policy: BandProtectionPolicy = serde_json::from_str("\"freeze\"").unwrap();
+    fn band_protection_policy_parses_freeze_shorthand() {
+        let policy: BandProtectionPolicy =
+            serde_json::from_value(serde_json::json!("freeze")).unwrap();
 
+        assert_eq!(policy, BandProtectionPolicy::Freeze);
+    }
+
+    #[test]
+    fn band_protection_policy_serializes_freeze_as_string() {
         assert_eq!(
-            policy,
-            BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            }
+            serde_json::to_value(BandProtectionPolicy::Freeze).unwrap(),
+            serde_json::json!("freeze")
+        );
+        assert_eq!(
+            serde_json::to_value(BandProtectionPolicy::Terminate).unwrap(),
+            serde_json::json!("terminate")
         );
     }
 
     #[test]
-    fn band_protection_policy_parses_flatten_with_price_confirm() {
+    fn band_protection_policy_parses_flatten_with_immediate_trigger_and_back_in_band() {
         let policy: BandProtectionPolicy = serde_json::from_value(serde_json::json!({
             "flatten": {
+                "trigger": "immediate",
+                "recover": "back_in_band"
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            policy,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::Immediate,
+                recover: BandRecoverPolicy::BackInBand
+            }
+        ));
+    }
+
+    #[test]
+    fn band_protection_policy_parses_flatten_with_flatten_confirm_and_reentry_confirm() {
+        let policy: BandProtectionPolicy = serde_json::from_value(serde_json::json!({
+            "flatten": {
+                "trigger": {
+                    "flatten_confirm": { "bps": 500 }
+                },
                 "recover": {
-                    "price_confirm": { "bps": 500 }
+                    "reentry_confirm": { "bps": 500 }
                 }
             }
         }))
@@ -401,13 +470,60 @@ mod tests {
         assert!(matches!(
             policy,
             BandProtectionPolicy::Flatten {
-                recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 }
             }
         ));
     }
 
     #[test]
-    fn track_config_accepts_flatten_price_confirm_policy() {
+    fn band_protection_policy_parses_flatten_shorthand_as_current_default() {
+        let policy = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!("flatten"))
+            .expect("flatten shorthand should parse");
+
+        assert_eq!(
+            policy,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            }
+        );
+    }
+
+    #[test]
+    fn band_protection_policy_rejects_legacy_trigger_bps_shape() {
+        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
+            "flatten": {
+                "trigger_bps": 500,
+                "recover": {
+                    "reentry_confirm": { "bps": 500 }
+                }
+            }
+        }))
+        .expect_err("legacy trigger_bps policy should be rejected");
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn band_protection_policy_rejects_legacy_price_confirm_alias() {
+        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
+            "flatten": {
+                "trigger": {
+                    "flatten_confirm": { "bps": 500 }
+                },
+                "recover": {
+                    "price_confirm": { "bps": 500 }
+                }
+            }
+        }))
+        .expect_err("legacy price_confirm alias should be rejected");
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn track_config_accepts_flatten_reentry_confirm_policy() {
         let config = TrackConfig {
             lower_price: 75_000.0,
             upper_price: 80_800.0,
@@ -417,30 +533,32 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Flatten {
-                recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
             },
         };
 
         assert!(matches!(
             config.out_of_band_policy,
             BandProtectionPolicy::Flatten {
-                recover: BandRecoverPolicy::PriceConfirm { bps: 500 }
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 }
             }
         ));
     }
 
     #[test]
-    fn band_reentry_price_confirmation_is_boundary_specific() {
-        assert!(band_reentry_price_confirmed(
+    fn band_reentry_confirmation_is_boundary_specific() {
+        assert!(band_reentry_confirmed(
             75_290.0,
-            &BandRecoverPolicy::PriceConfirm { bps: 500 },
+            &BandRecoverPolicy::ReentryConfirm { bps: 500 },
             75_000.0,
             80_800.0,
             BandBoundary::Below,
         ));
-        assert!(!band_reentry_price_confirmed(
+        assert!(!band_reentry_confirmed(
             80_700.0,
-            &BandRecoverPolicy::PriceConfirm { bps: 500 },
+            &BandRecoverPolicy::ReentryConfirm { bps: 500 },
             75_000.0,
             80_800.0,
             BandBoundary::Above,

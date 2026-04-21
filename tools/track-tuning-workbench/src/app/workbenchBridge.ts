@@ -9,11 +9,11 @@ import type {
 } from '@/state/workbenchStore';
 import {
   createTrackDraft,
+  type BandProtectionPolicyPayload,
   type TrackDraft,
   type TrackDraftFieldKey,
   type TrackDraftLoadIssue,
 } from '@/domain/trackDraft';
-import { withBinanceFuturesDefaults } from '@/domain/binanceFuturesDefaults';
 
 export interface WorkbenchBridgeCommandError {
   kind: 'config' | 'io' | 'session_store' | 'dialog' | 'clipboard' | 'internal';
@@ -70,12 +70,6 @@ interface LoadedConfigFilePayload {
     }>;
   }>;
 }
-
-type BandProtectionPolicyPayload =
-  | { freeze: { recover: 'back_in_band' | { price_confirm: { bps: number } } } }
-  | { hold: Record<string, never> }
-  | { flatten: { recover: 'back_in_band' | { price_confirm: { bps: number } } } }
-  | { terminate: Record<string, never> };
 
 interface TauriQuotePayload {
   price: string | null;
@@ -166,35 +160,33 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
       return {
         configPath: payload.config_path,
         projectedTracks: payload.projected_tracks.map((track) =>
-          withBinanceFuturesDefaults(
-            createTrackDraft({
-              draftId: track.draft_id,
-              raw: {
-                trackId: track.fields.track_id,
-                symbol: track.fields.symbol,
-                lowerPrice: formatRawNumber(track.fields.lower_price),
-                upperPrice: formatRawNumber(track.fields.upper_price),
-                longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
-                shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
-                notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
-                maxNotional: formatRawNumber(track.fields.max_notional),
-                minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
-                leverage: String(track.fields.leverage),
-                dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
-                totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
-                bandProtectionKind: bandProtectionKindFromPayload(track.fields.out_of_band_policy),
-                shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
-              },
-              ui: {
-                quotePriceInput: '',
-              },
-              attachments: track.load_issues.length > 0
-                ? {
-                    loadIssues: track.load_issues.map(normalizeLoadIssue),
-                  }
-                : undefined,
-            }),
-          ),
+          createTrackDraft({
+            draftId: track.draft_id,
+            raw: {
+              trackId: track.fields.track_id,
+              symbol: track.fields.symbol,
+              lowerPrice: formatRawNumber(track.fields.lower_price),
+              upperPrice: formatRawNumber(track.fields.upper_price),
+              longExposureUnits: formatRawNumber(track.fields.long_exposure_units),
+              shortExposureUnits: formatRawNumber(track.fields.short_exposure_units),
+              notionalPerUnit: formatRawNumber(track.fields.notional_per_unit),
+              maxNotional: formatRawNumber(track.fields.max_notional),
+              minRebalanceUnits: formatRawNumber(track.fields.min_rebalance_units),
+              leverage: String(track.fields.leverage),
+              dailyLossLimit: formatRawNumber(track.fields.daily_loss_limit),
+              totalLossLimit: formatRawNumber(track.fields.total_loss_limit),
+              bandProtectionPolicy: track.fields.out_of_band_policy,
+              shapeFamily: track.fields.shape_family as TrackDraft['enums']['shapeFamily'],
+            },
+            ui: {
+              quotePriceInput: '',
+            },
+            attachments: track.load_issues.length > 0
+              ? {
+                  loadIssues: track.load_issues.map(normalizeLoadIssue),
+                }
+              : undefined,
+          }),
         ),
       };
     },
@@ -366,7 +358,8 @@ function toTrackDraftPayload(draft: TrackDraft) {
       max_notional: parseRequiredNumber(draft.rawNumbers.maxNotional),
       min_rebalance_units: parseRequiredNumber(draft.rawNumbers.minRebalanceUnits),
       leverage: Math.trunc(parseRequiredNumber(draft.rawNumbers.leverage)),
-      out_of_band_policy: toBandProtectionPolicyPayload(draft.enums.bandProtectionKind),
+      out_of_band_policy:
+        draft.enums.bandProtectionPolicy,
       daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
       total_loss_limit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
       shape_family: draft.enums.shapeFamily,
@@ -414,46 +407,6 @@ function normalizeLoadIssueField(fieldKey: string): TrackDraftFieldKey {
       return 'bandProtectionKind';
     default:
       return 'trackId';
-  }
-}
-
-function bandProtectionKindFromPayload(
-  policy: BandProtectionPolicyPayload,
-): TrackDraft['enums']['bandProtectionKind'] {
-  if ('freeze' in policy) {
-    return 'freeze';
-  }
-  if ('hold' in policy) {
-    return 'hold';
-  }
-  if ('flatten' in policy) {
-    return 'flatten';
-  }
-  return 'terminate';
-}
-
-function toBandProtectionPolicyPayload(
-  kind: TrackDraft['enums']['bandProtectionKind'],
-): BandProtectionPolicyPayload {
-  switch (kind) {
-    case 'freeze':
-      return {
-        freeze: {
-          recover: 'back_in_band',
-        },
-      };
-    case 'hold':
-      return { hold: {} };
-    case 'flatten':
-      return {
-        flatten: {
-          recover: {
-            price_confirm: { bps: 500 },
-          },
-        },
-      };
-    case 'terminate':
-      return { terminate: {} };
   }
 }
 

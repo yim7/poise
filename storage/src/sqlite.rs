@@ -1191,8 +1191,7 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
     use poise_core::strategy::{
-        BandProtectionPolicy, BandRecoverPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily,
-        TrackConfig,
+        BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig,
     };
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
@@ -1218,9 +1217,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         }
     }
 
@@ -1733,6 +1730,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(desired_exposure, Some(6.0));
+    }
+
+    #[tokio::test]
+    async fn save_transition_persists_runtime_state_json() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let mut snapshot = test_snapshot();
+        snapshot.runtime_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(6.0),
+                boundary: BandBoundary::Below,
+            }));
+
+        storage
+            .save_transition("test-1", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let conn = storage.conn.lock().unwrap();
+        let runtime_state_json: String = conn
+            .query_row(
+                "SELECT runtime_state_json
+                 FROM track_snapshots
+                 WHERE track_id = ?1",
+                params!["test-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let persisted_state: TrackState = serde_json::from_str(&runtime_state_json).unwrap();
+        assert_eq!(persisted_state, snapshot.runtime_state);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use poise_application::{
     TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_core::risk::CapacityBudget;
-use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
+use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::OrderUpdateAbsorbResult;
 use poise_engine::manager::TrackManager;
@@ -256,9 +256,7 @@ fn prepared_registry_for(
                 notional_per_unit: 375.0,
                 min_rebalance_units: Some(0.5),
                 shape_family: Some(ShapeFamily::Linear),
-                out_of_band_policy: Some(BandProtectionPolicy::Freeze {
-                    recover: BandRecoverPolicy::BackInBand,
-                }),
+                out_of_band_policy: Some(BandProtectionPolicy::Freeze),
                 max_notional: Some(budget.max_notional),
                 daily_loss_limit: budget.daily_loss_limit,
                 total_loss_limit: budget.total_loss_limit,

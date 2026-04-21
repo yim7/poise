@@ -1,6 +1,11 @@
 import type { KeyboardEvent } from 'react';
 
-import type { TrackDraft, TrackDraftRawNumericFields } from '@/domain/trackDraft';
+import {
+  bandProtectionKindFromPolicy,
+  type TrackBandProtectionKind,
+  type TrackDraft,
+  type TrackDraftRawNumericFields,
+} from '@/domain/trackDraft';
 import type { TrackDraftIssue } from '@/domain/trackValidation';
 import { InlineNotice } from '@/ui/common/InlineNotice';
 import { CurveSection } from '@/ui/editor/sections/CurveSection';
@@ -63,12 +68,12 @@ export interface ExposureSectionProps {
 }
 
 export interface RiskSectionProps {
-  bandProtectionKind: TrackDraft['enums']['bandProtectionKind'];
+  bandProtectionKind: TrackBandProtectionKind;
   dailyLossLimit: string;
   totalLossLimit: string;
   dailyLossIssues: string[];
   totalLossIssues: string[];
-  onBandProtectionKindChange(value: TrackDraft['enums']['bandProtectionKind']): void;
+  onBandProtectionKindChange(value: TrackBandProtectionKind): void;
   onDailyLossLimitChange(value: string): void;
   onTotalLossLimitChange(value: string): void;
   onCommit(): void;
@@ -171,7 +176,7 @@ export function TrackEditor({
           onCommit={onCommit}
         />
         <RiskSection
-          bandProtectionKind={draft.enums.bandProtectionKind}
+          bandProtectionKind={bandProtectionKindFromPolicy(draft.enums.bandProtectionPolicy)}
           dailyLossLimit={draft.rawNumbers.dailyLossLimit}
           totalLossLimit={draft.rawNumbers.totalLossLimit}
           dailyLossIssues={fieldIssues(issuesByField, 'dailyLossLimit')}

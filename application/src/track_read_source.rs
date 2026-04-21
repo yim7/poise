@@ -90,10 +90,12 @@ pub struct TrackReadSource {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandBoundary, BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::Exposure;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
-    use poise_engine::runtime::{ControlState, ExecutorState, ManualState, RiskState, TrackState};
+    use poise_engine::runtime::{
+        AutoState, ControlState, ExecutorState, ManualState, RiskState, TrackState,
+    };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
@@ -113,6 +115,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn flatten_pending_projects_as_frozen_without_leaking_private_state() {
+        let snapshot = test_snapshot_with_runtime_state(TrackState::Running(
+            ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(4.0),
+                boundary: BandBoundary::Below,
+            }),
+        ));
+
+        let source = TrackRuntimeReadState::from_snapshot(snapshot);
+
+        assert_eq!(source.status, poise_engine::runtime::TrackStatus::Frozen);
+    }
+
     fn test_snapshot_with_runtime_state(runtime_state: TrackState) -> TrackRuntimeSnapshot {
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let config = TrackConfig {
@@ -123,9 +139,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         };
 
         TrackRuntimeSnapshot {

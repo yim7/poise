@@ -78,7 +78,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, RecoveryAnomaly};
     use poise_engine::persisted_runtime::TrackRestoreRevision;
@@ -207,9 +207,7 @@ mod tests {
             notional_per_unit: 375.0,
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze {
-                recover: BandRecoverPolicy::BackInBand,
-            },
+            out_of_band_policy: BandProtectionPolicy::Freeze,
         };
         TrackRuntimeSnapshot {
             track_id: TrackId::new("btc-core"),
