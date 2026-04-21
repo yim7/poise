@@ -828,6 +828,60 @@ mod tests {
     }
 
     #[test]
+    fn flatten_policy_immediate_trigger_bypasses_flatten_pending() {
+        let mut track = test_runtime();
+        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
+            trigger: BandFlattenTrigger::Immediate,
+            recover: BandRecoverPolicy::BackInBand,
+        };
+        set_runtime_status(&mut track, TrackStatus::Active);
+        track.current_exposure = Exposure(8.0);
+        track.desired_exposure = Some(Exposure(8.0));
+
+        let result = reconcile_target(&track, 79.0);
+
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::Flattening {
+                    boundary: BandBoundary::Below,
+                },
+            ))),
+        );
+        assert!(!matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FlattenPending { .. },
+            )))
+        ));
+        assert!(result.desired_exposure.0.abs() < 0.001);
+    }
+
+    #[test]
+    fn flatten_policy_uses_flatten_pending_before_flattening_when_trigger_is_flatten_confirm() {
+        let mut track = test_runtime();
+        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
+            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+        };
+        set_runtime_status(&mut track, TrackStatus::Active);
+        track.current_exposure = Exposure(8.0);
+
+        let result = reconcile_target(&track, 85.0);
+
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FlattenPending {
+                    target_anchor: Exposure(8.0),
+                    boundary: BandBoundary::Below,
+                },
+            ))),
+        );
+        assert_eq!(result.desired_exposure, Exposure(8.0));
+    }
+
+    #[test]
     fn flatten_policy_uses_flatten_confirm_before_flattening_second_tick() {
         let mut track = test_runtime();
         track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
