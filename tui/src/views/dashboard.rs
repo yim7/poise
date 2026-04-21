@@ -1,6 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::exposure_presentation::dashboard_exposure_summary;
@@ -10,6 +11,14 @@ use crate::protocol::{
 use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
 use crate::theme::Theme;
 use crate::views::account_panel;
+
+const DASHBOARD_COLUMN_SPACING: u16 = 1;
+const DASHBOARD_TABLE_CHROME_WIDTH: u16 = 3;
+const DASHBOARD_ID_COLUMN_MAX_WIDTH: u16 = 8;
+const DASHBOARD_SYMBOL_COLUMN_MAX_WIDTH: u16 = 13;
+const DASHBOARD_TRAILING_COLUMN_WIDTHS: [u16; 5] = [18, 15, 13, 24, 11];
+const DASHBOARD_TRAILING_COLUMN_MIN_WIDTHS: [u16; 5] = [6, 4, 9, 4, 4];
+const DASHBOARD_COLUMN_SHRINK_ORDER: [usize; 5] = [4, 2, 5, 3, 6];
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let sections = Layout::default()
@@ -51,29 +60,81 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ])
     });
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Length(18),
-            Constraint::Length(15),
-            Constraint::Length(13),
-            Constraint::Length(23),
-            Constraint::Length(11),
-        ],
-    )
-    .header(header)
-    .column_spacing(1)
-    .row_highlight_style(Theme::highlight())
-    .highlight_symbol(">")
-    .block(Block::default().title("Dashboard").borders(Borders::ALL));
+    let table = Table::new(rows, dashboard_column_constraints(sections[1].width, app))
+        .header(header)
+        .column_spacing(DASHBOARD_COLUMN_SPACING)
+        .row_highlight_style(Theme::highlight())
+        .highlight_symbol(">")
+        .block(Block::default().title("Dashboard").borders(Borders::ALL));
 
     let mut state = TableState::default();
     if !app.tracks.is_empty() {
         state.select(Some(app.selected_index));
     }
     frame.render_stateful_widget(table, sections[1], &mut state);
+}
+
+fn dashboard_column_constraints(table_width: u16, app: &App) -> [Constraint; 7] {
+    let mut widths = [
+        dashboard_key_column_width(
+            app.tracks.iter().map(|item| item.id.as_str()),
+            "ID",
+            DASHBOARD_ID_COLUMN_MAX_WIDTH,
+        ),
+        dashboard_key_column_width(
+            app.tracks
+                .iter()
+                .map(|item| item.instrument.symbol.as_str()),
+            "Symbol",
+            DASHBOARD_SYMBOL_COLUMN_MAX_WIDTH,
+        ),
+        DASHBOARD_TRAILING_COLUMN_WIDTHS[0],
+        DASHBOARD_TRAILING_COLUMN_WIDTHS[1],
+        DASHBOARD_TRAILING_COLUMN_WIDTHS[2],
+        DASHBOARD_TRAILING_COLUMN_WIDTHS[3],
+        DASHBOARD_TRAILING_COLUMN_WIDTHS[4],
+    ];
+    let min_widths = [
+        widths[0],
+        widths[1],
+        DASHBOARD_TRAILING_COLUMN_MIN_WIDTHS[0],
+        DASHBOARD_TRAILING_COLUMN_MIN_WIDTHS[1],
+        DASHBOARD_TRAILING_COLUMN_MIN_WIDTHS[2],
+        DASHBOARD_TRAILING_COLUMN_MIN_WIDTHS[3],
+        DASHBOARD_TRAILING_COLUMN_MIN_WIDTHS[4],
+    ];
+    let available_width = table_width
+        .saturating_sub(DASHBOARD_TABLE_CHROME_WIDTH)
+        .saturating_sub(DASHBOARD_COLUMN_SPACING * (widths.len().saturating_sub(1) as u16));
+    let mut deficit = widths.iter().sum::<u16>().saturating_sub(available_width);
+
+    for index in DASHBOARD_COLUMN_SHRINK_ORDER {
+        if deficit == 0 {
+            break;
+        }
+        let min_width = min_widths[index];
+        let shrinkable = widths[index].saturating_sub(min_width);
+        let reduction = shrinkable.min(deficit);
+        widths[index] = widths[index].saturating_sub(reduction);
+        deficit = deficit.saturating_sub(reduction);
+    }
+
+    widths.map(Constraint::Length)
+}
+
+fn dashboard_key_column_width<'a>(
+    values: impl Iterator<Item = &'a str>,
+    header: &str,
+    max_width: u16,
+) -> u16 {
+    values
+        .map(display_width)
+        .fold(display_width(header), usize::max)
+        .min(max_width as usize) as u16
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
 }
 
 fn format_exposure_summary(current: f64, target: Option<f64>) -> SignalDisplay {
@@ -180,6 +241,10 @@ mod tests {
 
             line.contains(needle).then_some(line)
         })
+    }
+
+    fn compact_text(text: &str) -> String {
+        text.chars().filter(|ch| *ch != ' ').collect()
     }
 
     fn background_colors_for_substring(
@@ -463,6 +528,44 @@ mod tests {
 
         assert!(text.contains("! ATTN open (1)"));
         assert!(text.contains("↑ +12345.67"));
+    }
+
+    #[test]
+    fn keeps_full_cjk_id_and_symbol_visible_when_dashboard_is_narrow() {
+        let backend = TestBackend::new(70, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(
+            r#"{
+                "items": [
+                    {
+                        "id": "币安人生",
+                        "instrument": {"venue": "binance_futures", "symbol": "币安人生 USDT"},
+                        "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
+                        "strategy_price": 101.25,
+                        "strategy_price_status": "live",
+                        "exposure": {"current": 3.5, "target": 3.0},
+                        "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
+                        "ledger": {"total_pnl": 12.3, "has_unresolved_gaps": false}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+
+        let row = compact_text(&buffer_line_containing(&terminal, "active").unwrap());
+        assert!(
+            row.contains(&compact_text("币安人生")),
+            "row should keep full CJK id visible, line: {row:?}"
+        );
+        assert!(
+            row.contains(&compact_text("币安人生 USDT")),
+            "row should keep full mixed-width symbol visible, line: {row:?}"
+        );
     }
 
     #[test]

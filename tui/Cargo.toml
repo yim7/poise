@@ -18,6 +18,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 crossterm = "0.28"
 ratatui = "0.29"
+unicode-width = "0.2"
 
 [dev-dependencies]
 axum.workspace = true
