@@ -86,7 +86,6 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn submit_intent_input<'a>(
-        track_id: &'a TrackId,
         instrument: &'a Instrument,
         exchange_rules: &'a ExchangeRules,
         base_qty_per_unit: f64,
@@ -97,7 +96,6 @@ mod tests {
         observed_at: DateTime<Utc>,
     ) -> SubmitIntentInput<'a> {
         SubmitIntentInput {
-            track_id,
             instrument,
             exchange_rules,
             base_qty_per_unit,
@@ -113,7 +111,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn executor_input<'a>(
-        track_id: &'a TrackId,
+        _track_id: &'a TrackId,
         instrument: &'a Instrument,
         exchange_rules: &'a ExchangeRules,
         base_qty_per_unit: f64,
@@ -126,7 +124,6 @@ mod tests {
     ) -> ExecutorInput<'a> {
         ExecutorInput::new(
             submit_intent_input(
-                track_id,
                 instrument,
                 exchange_rules,
                 base_qty_per_unit,
@@ -142,7 +139,6 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn quoted_submit_intent_input<'a>(
-        track_id: &'a TrackId,
         instrument: &'a Instrument,
         exchange_rules: &'a ExchangeRules,
         base_qty_per_unit: f64,
@@ -155,7 +151,6 @@ mod tests {
         observed_at: DateTime<Utc>,
     ) -> SubmitIntentInput<'a> {
         SubmitIntentInput {
-            track_id,
             instrument,
             exchange_rules,
             base_qty_per_unit,
@@ -171,7 +166,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn quoted_executor_input<'a>(
-        track_id: &'a TrackId,
+        _track_id: &'a TrackId,
         instrument: &'a Instrument,
         exchange_rules: &'a ExchangeRules,
         base_qty_per_unit: f64,
@@ -186,7 +181,6 @@ mod tests {
     ) -> ExecutorInput<'a> {
         ExecutorInput::new(
             quoted_submit_intent_input(
-                track_id,
                 instrument,
                 exchange_rules,
                 base_qty_per_unit,
@@ -1117,11 +1111,9 @@ mod tests {
     fn current_submit_hint_returns_single_submit_effect_from_plan() {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
-        let track_id = test_track_id();
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let hint = current_submit_hint(submit_intent_input(
-            &track_id,
             &instrument,
             &rules,
             3.75,
@@ -1134,9 +1126,12 @@ mod tests {
 
         let hint = hint.expect("expected current plan to expose a single submit hint");
         assert_eq!(hint.request.instrument, instrument);
-        assert_eq!(
-            hint.request.client_order_id,
-            format!("btc-core-{}", now.timestamp_millis())
+        assert!(!hint.request.client_order_id.contains("btc-core"));
+        assert!(
+            hint.request
+                .client_order_id
+                .chars()
+                .all(|ch| matches!(ch, '-' | '0'..='9' | 'a'..='f'))
         );
         assert!(!hint.request.reduce_only);
         assert_eq!(hint.request.side, Side::Buy);
@@ -1153,7 +1148,6 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let hint = current_submit_hint(submit_intent_input(
-            &track_id,
             &instrument,
             &rules,
             3.75,
@@ -1176,7 +1170,6 @@ mod tests {
 
         let evaluation = planning::evaluate_submit_intent_with_active_lifecycle(
             submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 3.75,
@@ -1211,7 +1204,6 @@ mod tests {
 
         let evaluation = planning::evaluate_submit_intent_with_active_lifecycle(
             submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 3.75,
@@ -2017,7 +2009,6 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 3.75,
@@ -2036,37 +2027,36 @@ mod tests {
         else {
             panic!("expected stale submit effect to be superseded");
         };
-        assert_eq!(
-            effects,
-            vec![ExecutionAction::SubmitOrder {
-                request: OrderRequest {
-                    instrument,
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 15.0,
-                    client_order_id: format!("track-1-{}", now.timestamp_millis()),
-                    reduce_only: false,
-                },
-                desired_exposure: Exposure(4.0),
-                submit_purpose: SubmitPurpose::AutoReconcile,
-            }]
-        );
-        assert_eq!(
-            state.slots,
-            vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::SubmitPending,
-                working_order: Some(WorkingOrder {
-                    order_id: None,
-                    client_order_id: format!("track-1-{}", now.timestamp_millis()),
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 15.0,
-                    status: OrderStatus::Submitting,
-                    role: OrderRole::IncreaseInventory,
-                }),
-            }]
-        );
+        let [
+            ExecutionAction::SubmitOrder {
+                request,
+                desired_exposure,
+                submit_purpose,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected single submit effect");
+        };
+        assert_eq!(request.instrument, instrument);
+        assert_eq!(request.side, Side::Buy);
+        assert_eq!(request.price, 95.0);
+        assert_eq!(request.quantity, 15.0);
+        assert!(!request.client_order_id.contains("track-1"));
+        assert_eq!(*desired_exposure, Exposure(4.0));
+        assert_eq!(*submit_purpose, SubmitPurpose::AutoReconcile);
+
+        assert_eq!(state.slots.len(), 1);
+        let slot = &state.slots[0];
+        assert_eq!(slot.slot, OrderSlot::new("inventory_core"));
+        assert_eq!(slot.state, SlotState::SubmitPending);
+        let working_order = slot.working_order.as_ref().expect("expected working order");
+        assert_eq!(working_order.order_id, None);
+        assert_eq!(working_order.client_order_id, request.client_order_id);
+        assert_eq!(working_order.side, Side::Buy);
+        assert_eq!(working_order.price, 95.0);
+        assert_eq!(working_order.quantity, 15.0);
+        assert_eq!(working_order.status, OrderStatus::Submitting);
+        assert_eq!(working_order.role, OrderRole::IncreaseInventory);
     }
 
     #[test]
@@ -2107,7 +2097,6 @@ mod tests {
             current_exposure: &Exposure(-9.6),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 0.0169,
@@ -2229,7 +2218,6 @@ mod tests {
             current_exposure: &Exposure(-10.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2302,8 +2290,7 @@ mod tests {
         let instrument = test_instrument();
         let rules = test_exchange_rules();
         let track_id = test_track_id();
-        let t1 = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let t2 = t1 + Duration::milliseconds(1);
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
 
         let plan1 = plan(executor_input(
             &track_id,
@@ -2315,7 +2302,7 @@ mod tests {
             Exposure(4.0),
             95.0,
             None,
-            t1,
+            now,
         ));
         let plan2 = plan(executor_input(
             &track_id,
@@ -2327,7 +2314,7 @@ mod tests {
             Exposure(4.0),
             95.0,
             None,
-            t2,
+            now,
         ));
 
         let id1 = plan1.effects.iter().find_map(|effect| match effect {
@@ -2342,7 +2329,77 @@ mod tests {
         assert!(id1.is_some());
         assert!(id2.is_some());
         assert_ne!(id1, id2);
-        assert!(id1.unwrap().starts_with("btc-core-"));
+        assert!(!id1.as_ref().unwrap().contains("btc-core"));
+        assert!(
+            id1.as_ref()
+                .unwrap()
+                .chars()
+                .all(|ch| matches!(ch, '-' | '0'..='9' | 'a'..='f'))
+        );
+    }
+
+    #[test]
+    fn plan_generates_binance_safe_client_order_id_for_non_ascii_track_id() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = TrackId::new("币安人生");
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            now,
+        ));
+
+        let client_order_id = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request.client_order_id.as_str()),
+            _ => None,
+        });
+
+        let client_order_id = client_order_id.expect("expected submit order");
+        assert!(client_order_id.len() <= 36);
+        assert!(client_order_id.chars().all(|ch| {
+            matches!(
+                ch,
+                '.' | ':' | '/' | '_' | '-' | '0'..='9' | 'A'..='Z' | 'a'..='z'
+            )
+        }));
+    }
+
+    #[test]
+    fn plan_truncates_client_order_id_to_binance_max_length() {
+        let instrument = test_instrument();
+        let rules = test_exchange_rules();
+        let track_id = TrackId::new("track-id-that-is-way-too-long-for-binance");
+        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
+
+        let plan = plan(executor_input(
+            &track_id,
+            &instrument,
+            &rules,
+            3.75,
+            0.0,
+            Exposure(0.0),
+            Exposure(4.0),
+            95.0,
+            None,
+            now,
+        ));
+
+        let client_order_id = plan.effects.iter().find_map(|effect| match effect {
+            ExecutionAction::SubmitOrder { request, .. } => Some(request.client_order_id.as_str()),
+            _ => None,
+        });
+
+        let client_order_id = client_order_id.expect("expected submit order");
+        assert!(client_order_id.len() <= 36);
     }
 
     #[test]
@@ -2370,7 +2427,6 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2430,7 +2486,6 @@ mod tests {
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2534,7 +2589,6 @@ mod tests {
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2586,7 +2640,6 @@ mod tests {
             current_exposure: &Exposure(5.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2646,7 +2699,6 @@ mod tests {
             current_exposure: &Exposure(2.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2698,7 +2750,6 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -2761,7 +2812,6 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 1.0,
@@ -3146,7 +3196,6 @@ mod tests {
             current_exposure: &Exposure(0.0),
             live_order: None,
             current_plan: Some(quoted_submit_intent_input(
-                &track_id,
                 &instrument,
                 &rules,
                 3.75,

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::ReplacementGateReason;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
@@ -13,7 +14,7 @@ use crate::price_gate::{
 use crate::runtime::{
     ExecutionRound, ExecutionSlot, ExecutorDiagnostics, ExecutorState, SlotState, WorkingOrder,
 };
-use crate::track::{Instrument, TrackId};
+use crate::track::Instrument;
 
 use super::rebalance_trigger::ActiveLifecycle;
 use super::round_policy::{
@@ -55,7 +56,6 @@ pub struct ExecutorInput<'a> {
 
 #[derive(Debug, Clone)]
 pub struct SubmitIntentInput<'a> {
-    pub track_id: &'a TrackId,
     pub instrument: &'a Instrument,
     pub exchange_rules: &'a ExchangeRules,
     pub base_qty_per_unit: f64,
@@ -96,6 +96,7 @@ const CATCH_UP_REPLACEMENT_SAFETY_BUFFER_BPS: f64 = 0.0;
 const PASSIVE_STALE_REPRICE_AFTER_MS: i64 = 180_000;
 const REBALANCE_STALE_REPRICE_AFTER_MS: i64 = 60_000;
 const CATCH_UP_STALE_REPRICE_AFTER_MS: i64 = 20_000;
+static CLIENT_ORDER_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 impl<'a> ExecutorInput<'a> {
     pub fn new(
         submit_intent: SubmitIntentInput<'a>,
@@ -580,13 +581,14 @@ fn desired_order_to_request(
         side: desired_order.side,
         price: desired_order.price,
         quantity: desired_order.quantity,
-        client_order_id: format!(
-            "{}-{}",
-            input.track_id.as_str(),
-            input.observed_at.timestamp_millis()
-        ),
+        client_order_id: technical_client_order_id(input.observed_at),
         reduce_only: desired_order.role == OrderRole::DecreaseInventory,
     }
+}
+
+fn technical_client_order_id(observed_at: DateTime<Utc>) -> String {
+    let sequence = CLIENT_ORDER_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{sequence:016x}", observed_at.timestamp_millis())
 }
 
 fn desired_matches_working_order(

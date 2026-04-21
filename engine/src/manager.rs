@@ -1117,7 +1117,6 @@ impl TrackManager {
     ) -> executor::SubmitIntentInput<'a> {
         let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
         executor::SubmitIntentInput {
-            track_id: &track.id,
             instrument: &track.instrument,
             exchange_rules: &track.exchange_rules,
             base_qty_per_unit: track.config.base_qty_per_unit(),
