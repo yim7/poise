@@ -401,7 +401,7 @@ Recorded commit: `83b10cd`
 - Modify: `docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md`
 - Modify: `docs/superpowers/plans/2026-04-20-track-protection-state-model.md`
 
-- [ ] **Step 1: 运行最终语义校验**
+- [x] **Step 1: 运行最终语义校验**
 
 Run:
 
@@ -416,7 +416,7 @@ Run:
 - `cargo fmt --all`
 - `git diff --check`
 
-- [ ] **Step 2: 文档负向检查**
+- [x] **Step 2: 文档负向检查**
 
 Run:
 
@@ -424,7 +424,7 @@ Run:
 - `! rg -n "Freeze \\{ recover|freeze = \\{ recover" core protocol application engine storage server tui tools README.md docs/protocol-contract.md configs`
 - `! rg -n "ReentryGuard" core application engine storage server tui tools`
 
-- [ ] **Step 3: 回写任务清单并提交**
+- [x] **Step 3: 回写任务清单并提交**
 
 ```bash
 git add docs/superpowers/specs/2026-04-20-track-protection-state-model-design.md docs/superpowers/plans/2026-04-20-track-protection-state-model.md
