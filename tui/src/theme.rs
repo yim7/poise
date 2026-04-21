@@ -57,7 +57,7 @@ impl Theme {
         let color = match status {
             TrackStatus::WaitingMarketData => Color::DarkGray,
             TrackStatus::Active => Color::Green,
-            TrackStatus::Frozen | TrackStatus::Holding => Color::Yellow,
+            TrackStatus::Frozen => Color::Yellow,
             TrackStatus::Flattening | TrackStatus::ManualFlattening => Color::LightYellow,
             TrackStatus::Terminated | TrackStatus::Paused => Color::Red,
         };

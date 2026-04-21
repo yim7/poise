@@ -225,7 +225,6 @@ fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
         TrackReadStatus::WaitingMarketData => ProtocolTrackStatus::WaitingMarketData,
         TrackReadStatus::Active => ProtocolTrackStatus::Active,
         TrackReadStatus::Frozen => ProtocolTrackStatus::Frozen,
-        TrackReadStatus::Holding => ProtocolTrackStatus::Holding,
         TrackReadStatus::Flattening => ProtocolTrackStatus::Flattening,
         TrackReadStatus::ManualFlattening => ProtocolTrackStatus::ManualFlattening,
         TrackReadStatus::Terminated => ProtocolTrackStatus::Terminated,
@@ -441,13 +440,10 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
             command: TrackCommandType::Resume,
             enabled: matches!(
                 status,
-                TrackReadStatus::Paused
-                    | TrackReadStatus::Holding
-                    | TrackReadStatus::ManualFlattening
+                TrackReadStatus::Paused | TrackReadStatus::ManualFlattening
             ),
             disabled_reason: match status {
                 TrackReadStatus::Paused => None,
-                TrackReadStatus::Holding => None,
                 TrackReadStatus::ManualFlattening => None,
                 TrackReadStatus::Terminated => Some("terminated track cannot be resumed".into()),
                 _ => Some("track is not paused".into()),
@@ -723,23 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn resume_is_enabled_when_holding_is_active() {
-        let mut source = source_with_failed_effect_and_recent_event();
-        source.status = TrackReadStatus::Holding;
-        source.manual_target_override = None;
-
-        let detail = TrackProjector::new().project_detail(&source);
-        let resume = detail
-            .available_commands
-            .iter()
-            .find(|command| command.command == TrackCommandType::Resume)
-            .expect("resume command should be present");
-
-        assert!(resume.enabled);
-        assert_eq!(resume.disabled_reason, None);
-    }
-
-    #[test]
     fn resume_availability_depends_on_status_not_override() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.status = TrackReadStatus::Active;
@@ -820,6 +799,16 @@ mod tests {
                 .iter()
                 .any(|command| command.command == TrackCommandType::Resume && command.enabled)
         );
+    }
+
+    #[test]
+    fn runtime_boundary_migration_removes_holding_from_public_status_projection() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.status = TrackReadStatus::Frozen;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(detail.status.lifecycle.status.to_string(), "frozen");
     }
 
     #[test]

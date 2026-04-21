@@ -6,8 +6,8 @@ use poise_core::types::Exposure;
 use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision};
 use crate::loss_guard::build_loss_guard_snapshot;
 use crate::runtime::{
-    AppliedRiskCap, AutoState, BandTerminationCause, ControlState, ManualState, ReentryGuard,
-    TerminationCause, TrackRuntime, TrackState,
+    AppliedRiskCap, AutoState, BandTerminationCause, ControlState, ManualState, TerminationCause,
+    TrackRuntime, TrackState,
 };
 
 pub struct TargetReconcileResult {
@@ -108,7 +108,10 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 target_anchor,
                 ..
             }))
-            | TrackState::Running(ControlState::Automatic(AutoState::Holding { target_anchor })) => {
+            | TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor,
+                ..
+            })) => {
                 *target_anchor = approved_target.clone();
             }
             _ => {}
@@ -209,9 +212,10 @@ fn resolve_in_band_target(track: &TrackRuntime, target: &Exposure) -> Exposure {
         TrackState::Running(ControlState::Automatic(AutoState::Frozen {
             target_anchor, ..
         }))
-        | TrackState::Running(ControlState::Automatic(AutoState::Holding { target_anchor })) => {
-            target_anchor.clone()
-        }
+        | TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+            target_anchor,
+            ..
+        })) => target_anchor.clone(),
         TrackState::Running(ControlState::Automatic(AutoState::Flattening { .. })) => Exposure(0.0),
         _ => target.clone(),
     }
@@ -222,11 +226,11 @@ fn resolve_in_band_state(track: &TrackRuntime, strategy_price: f64) -> Option<Tr
         TrackState::WaitingMarketData => Some(TrackState::Running(ControlState::Automatic(
             AutoState::FollowingBand,
         ))),
-        TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. })) => Some(
+        TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. }))
+        | TrackState::Running(ControlState::Automatic(AutoState::FlattenPending { .. })) => Some(
             TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
         ),
-        TrackState::Running(ControlState::Automatic(AutoState::Holding { .. })) => None,
-        TrackState::Running(ControlState::Automatic(AutoState::Flattening { guard })) => {
+        TrackState::Running(ControlState::Automatic(AutoState::Flattening { boundary })) => {
             let BandProtectionPolicy::Flatten { recover, .. } = track.config.out_of_band_policy
             else {
                 return Some(TrackState::Running(ControlState::Automatic(
@@ -238,7 +242,7 @@ fn resolve_in_band_state(track: &TrackRuntime, strategy_price: f64) -> Option<Tr
                 &recover,
                 track.config.lower_price,
                 track.config.upper_price,
-                guard.boundary,
+                *boundary,
             )
             .then_some(TrackState::Running(ControlState::Automatic(
                 AutoState::FollowingBand,
@@ -255,7 +259,7 @@ fn apply_out_of_band(
     boundary: BandBoundary,
 ) -> (Exposure, Option<TrackState>) {
     match policy {
-        BandProtectionPolicy::Freeze => freeze_with_reentry_guard(track, boundary),
+        BandProtectionPolicy::Freeze => freeze_with_target_anchor(track),
         BandProtectionPolicy::Flatten { trigger_bps, .. } => {
             flatten_with_trigger_guard(track, strategy_price, boundary, trigger_bps)
         }
@@ -268,10 +272,7 @@ fn apply_out_of_band(
     }
 }
 
-fn freeze_with_reentry_guard(
-    track: &TrackRuntime,
-    boundary: BandBoundary,
-) -> (Exposure, Option<TrackState>) {
+fn freeze_with_target_anchor(track: &TrackRuntime) -> (Exposure, Option<TrackState>) {
     let target_anchor = protection_target_anchor(track);
     if matches!(
         track.track_state,
@@ -282,10 +283,7 @@ fn freeze_with_reentry_guard(
     (
         target_anchor.clone(),
         Some(TrackState::Running(ControlState::Automatic(
-            AutoState::Frozen {
-                target_anchor,
-                guard: ReentryGuard { boundary },
-            },
+            AutoState::Frozen { target_anchor },
         ))),
     )
 }
@@ -297,18 +295,18 @@ fn flatten_with_trigger_guard(
     trigger_bps: u32,
 ) -> (Exposure, Option<TrackState>) {
     let target_anchor = protection_target_anchor(track);
-    if let TrackState::Running(ControlState::Automatic(AutoState::Frozen {
+    if let TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
         target_anchor: existing_target_anchor,
-        guard,
+        boundary: existing_boundary,
     })) = &track.track_state
     {
-        if guard.boundary != boundary {
+        if *existing_boundary != boundary {
             return (
                 target_anchor.clone(),
                 Some(TrackState::Running(ControlState::Automatic(
-                    AutoState::Frozen {
+                    AutoState::FlattenPending {
                         target_anchor,
-                        guard: ReentryGuard { boundary },
+                        boundary,
                     },
                 ))),
             );
@@ -330,9 +328,9 @@ fn flatten_with_trigger_guard(
         return (
             target_anchor.clone(),
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::Frozen {
+                AutoState::FlattenPending {
                     target_anchor,
-                    guard: ReentryGuard { boundary },
+                    boundary,
                 },
             ))),
         );
@@ -347,9 +345,7 @@ fn flatten_with_trigger_guard(
     (
         Exposure(0.0),
         Some(TrackState::Running(ControlState::Automatic(
-            AutoState::Flattening {
-                guard: ReentryGuard { boundary },
-            },
+            AutoState::Flattening { boundary },
         ))),
     )
 }
@@ -372,9 +368,8 @@ fn should_suppress_protected_risk_increase(
 ) -> bool {
     matches!(
         effective_runtime_state(track, next_state),
-        TrackState::Running(ControlState::Automatic(
-            AutoState::Frozen { .. } | AutoState::Holding { .. }
-        ))
+        TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. }))
+            | TrackState::Running(ControlState::Automatic(AutoState::FlattenPending { .. }))
     ) && approved_target.0.abs() > track.current_exposure.0.abs()
 }
 
@@ -382,8 +377,7 @@ fn should_suppress_protected_risk_increase(
 mod tests {
     use super::*;
     use crate::runtime::{
-        AutoState, ControlState, ManualState, ReentryGuard, TerminationCause, TrackState,
-        TrackStatus,
+        AutoState, ControlState, ManualState, TerminationCause, TrackState, TrackStatus,
     };
     use chrono::{TimeZone, Utc};
     use poise_core::risk::CapacityBudget;
@@ -435,23 +429,11 @@ mod tests {
                 TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
             }
             TrackStatus::Frozen => {
-                TrackState::Running(ControlState::Automatic(AutoState::Frozen {
-                    target_anchor,
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
-                }))
-            }
-            TrackStatus::Holding => {
-                TrackState::Running(ControlState::Automatic(AutoState::Holding {
-                    target_anchor,
-                }))
+                TrackState::Running(ControlState::Automatic(AutoState::Frozen { target_anchor }))
             }
             TrackStatus::Flattening => {
                 TrackState::Running(ControlState::Automatic(AutoState::Flattening {
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
+                    boundary: BandBoundary::Below,
                 }))
             }
             TrackStatus::ManualFlattening => {
@@ -521,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn freeze_samples_target_anchor_from_last_risk_approved_target() {
+    fn freeze_policy_uses_frozen_without_boundary_guard() {
         let mut track = test_runtime_with_strategy_target(Exposure(4.0));
         track.current_exposure = Exposure(1.0);
         track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
@@ -533,9 +515,6 @@ mod tests {
             Some(TrackState::Running(ControlState::Automatic(
                 AutoState::Frozen {
                     target_anchor: Exposure(4.0),
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
                 }
             ))),
         );
@@ -547,9 +526,6 @@ mod tests {
         let mut track = test_runtime();
         track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Frozen {
             target_anchor: Exposure(4.0),
-            guard: ReentryGuard {
-                boundary: BandBoundary::Below,
-            },
         }));
         track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
 
@@ -578,11 +554,9 @@ mod tests {
         assert_eq!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::Frozen {
+                AutoState::FlattenPending {
                     target_anchor: Exposure(4.0),
-                    guard: ReentryGuard {
-                        boundary: BandBoundary::Below,
-                    },
+                    boundary: BandBoundary::Below,
                 },
             ))),
         );
@@ -592,12 +566,11 @@ mod tests {
     #[test]
     fn flatten_pending_keeps_target_anchor_when_price_reenters_band() {
         let mut track = test_runtime_with_strategy_target(Exposure(2.0));
-        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Frozen {
-            target_anchor: Exposure(4.0),
-            guard: ReentryGuard {
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(4.0),
                 boundary: BandBoundary::Below,
-            },
-        }));
+            }));
         track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
             trigger_bps: 500,
             recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
@@ -721,20 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn holding_stays_holding_when_price_returns_in_band() {
-        let mut track = test_runtime();
-        set_runtime_status(&mut track, TrackStatus::Holding);
-        track.current_exposure = Exposure(8.0);
-        track.desired_exposure = Some(Exposure(3.0));
-
-        let result = reconcile_target(&track, 100.0);
-
-        assert_eq!(result.new_runtime_state, None);
-        assert_eq!(result.desired_exposure, Exposure(3.0));
-    }
-
-    #[test]
-    fn flatten_policy_freezes_before_trigger_band_with_current_runtime_shape() {
+    fn flatten_policy_uses_flatten_pending_before_flattening() {
         let mut track = test_runtime();
         track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
             trigger_bps: 500,
@@ -747,12 +707,48 @@ mod tests {
 
         assert_eq!(result.desired_exposure, Exposure(8.0));
         assert_eq!(
+            result.new_runtime_state.as_ref().cloned(),
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FlattenPending {
+                    target_anchor: Exposure(8.0),
+                    boundary: BandBoundary::Below,
+                },
+            ))),
+        );
+        assert_eq!(
             result
                 .new_runtime_state
                 .as_ref()
                 .map(|state| state.status()),
             Some(TrackStatus::Frozen),
         );
+    }
+
+    #[test]
+    fn flatten_pending_rearms_when_price_flips_to_opposite_out_of_band_side() {
+        let mut track = test_runtime_with_strategy_target(Exposure(4.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(4.0),
+                boundary: BandBoundary::Below,
+            }));
+        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
+            trigger_bps: 500,
+            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+        };
+
+        let result = reconcile_target(&track, 111.0);
+
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FlattenPending {
+                    target_anchor: Exposure(4.0),
+                    boundary: BandBoundary::Above,
+                },
+            ))),
+        );
+        assert_eq!(result.desired_exposure, Exposure(4.0));
     }
 
     #[test]

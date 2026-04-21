@@ -183,7 +183,7 @@ mod tests {
     use serde_json::json;
 
     use crate::execution_gate::ExecutionGateState;
-    use crate::runtime::{AutoState, ControlState, ReentryGuard, TrackRuntime, TrackState};
+    use crate::runtime::{AutoState, ControlState, TrackRuntime, TrackState};
     use crate::track::{Instrument, TrackId, Venue};
 
     use super::{
@@ -200,9 +200,7 @@ mod tests {
     fn flattening_state_json() -> String {
         serde_json::to_string(&TrackState::Running(ControlState::Automatic(
             AutoState::Flattening {
-                guard: ReentryGuard {
-                    boundary: poise_core::strategy::BandBoundary::Below,
-                },
+                boundary: poise_core::strategy::BandBoundary::Below,
             },
         )))
         .unwrap()

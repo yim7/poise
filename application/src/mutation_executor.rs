@@ -1262,7 +1262,7 @@ pub(crate) mod test_support {
     use chrono::Utc;
     use poise_core::events::DomainEvent;
     use poise_core::risk::CapacityBudget;
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{ClockPort, OrderRequest};
