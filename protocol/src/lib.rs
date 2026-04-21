@@ -404,7 +404,7 @@ pub enum ShapeFamily {
 pub enum BandProtectionPolicy {
     Freeze,
     Flatten {
-        trigger_bps: u32,
+        trigger: BandFlattenTrigger,
         recover: BandRecoverPolicy,
     },
     Terminate,
@@ -412,9 +412,19 @@ pub enum BandProtectionPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum BandFlattenTrigger {
+    Immediate,
+    FlattenConfirm { bps: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BandRecoverPolicy {
     BackInBand,
-    PriceConfirm { bps: u32 },
+    #[serde(alias = "price_confirm")]
+    ReentryConfirm {
+        bps: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +478,17 @@ impl fmt::Display for ShapeFamily {
 enum BandProtectionPolicySerde {
     Freeze {},
     Flatten {
+        trigger: BandFlattenTrigger,
+        recover: BandRecoverPolicy,
+    },
+    Terminate {},
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyBandProtectionPolicySerde {
+    Freeze {},
+    Flatten {
         trigger_bps: u32,
         recover: BandRecoverPolicy,
     },
@@ -486,6 +507,7 @@ enum LegacyBandProtectionPolicyKind {
 #[serde(untagged)]
 enum BandProtectionPolicyDeserialize {
     Canonical(BandProtectionPolicySerde),
+    LegacyCanonical(LegacyBandProtectionPolicySerde),
     Legacy(LegacyBandProtectionPolicyKind),
 }
 
@@ -501,13 +523,9 @@ impl BandProtectionPolicy {
     fn canonical(self) -> BandProtectionPolicySerde {
         match self {
             Self::Freeze => BandProtectionPolicySerde::Freeze {},
-            Self::Flatten {
-                trigger_bps,
-                recover,
-            } => BandProtectionPolicySerde::Flatten {
-                trigger_bps,
-                recover,
-            },
+            Self::Flatten { trigger, recover } => {
+                BandProtectionPolicySerde::Flatten { trigger, recover }
+            }
             Self::Terminate => BandProtectionPolicySerde::Terminate {},
         }
     }
@@ -516,8 +534,8 @@ impl BandProtectionPolicy {
         match value {
             LegacyBandProtectionPolicyKind::Freeze => Self::Freeze,
             LegacyBandProtectionPolicyKind::Flatten => Self::Flatten {
-                trigger_bps: 500,
-                recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
             },
             LegacyBandProtectionPolicyKind::Terminate => Self::Terminate,
         }
@@ -528,14 +546,26 @@ impl From<BandProtectionPolicySerde> for BandProtectionPolicy {
     fn from(value: BandProtectionPolicySerde) -> Self {
         match value {
             BandProtectionPolicySerde::Freeze {} => Self::Freeze,
-            BandProtectionPolicySerde::Flatten {
+            BandProtectionPolicySerde::Flatten { trigger, recover } => {
+                Self::Flatten { trigger, recover }
+            }
+            BandProtectionPolicySerde::Terminate {} => Self::Terminate,
+        }
+    }
+}
+
+impl From<LegacyBandProtectionPolicySerde> for BandProtectionPolicy {
+    fn from(value: LegacyBandProtectionPolicySerde) -> Self {
+        match value {
+            LegacyBandProtectionPolicySerde::Freeze {} => Self::Freeze,
+            LegacyBandProtectionPolicySerde::Flatten {
                 trigger_bps,
                 recover,
             } => Self::Flatten {
-                trigger_bps,
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: trigger_bps },
                 recover,
             },
-            BandProtectionPolicySerde::Terminate {} => Self::Terminate,
+            LegacyBandProtectionPolicySerde::Terminate {} => Self::Terminate,
         }
     }
 }
@@ -557,6 +587,7 @@ impl<'de> Deserialize<'de> for BandProtectionPolicy {
         Ok(
             match BandProtectionPolicyDeserialize::deserialize(deserializer)? {
                 BandProtectionPolicyDeserialize::Canonical(value) => value.into(),
+                BandProtectionPolicyDeserialize::LegacyCanonical(value) => value.into(),
                 BandProtectionPolicyDeserialize::Legacy(value) => Self::legacy_default(value),
             },
         )
@@ -583,10 +614,10 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSummaryView, BandProtectionPolicy, BandRecoverPolicy, RiskSignalView, ShapeFamily,
-        StrategyPriceStatusView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackLedgerGapReasonView,
-        TrackListResponse, TrackStatus,
+        AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy,
+        RiskSignalView, ShapeFamily, StrategyPriceStatusView, StreamEvent, TrackCommandAccepted,
+        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
+        TrackLedgerGapReasonView, TrackListResponse, TrackStatus,
     };
 
     #[test]
@@ -605,8 +636,8 @@ mod tests {
     #[test]
     fn band_protection_policy_serializes_flatten_as_object() {
         let payload = serde_json::to_value(BandProtectionPolicy::Flatten {
-            trigger_bps: 500,
-            recover: BandRecoverPolicy::PriceConfirm { bps: 500 },
+            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
         })
         .unwrap();
 
@@ -614,9 +645,11 @@ mod tests {
             payload,
             serde_json::json!({
                 "flatten": {
-                    "trigger_bps": 500,
+                    "trigger": {
+                        "flatten_confirm": { "bps": 500 }
+                    },
                     "recover": {
-                        "price_confirm": { "bps": 500 }
+                        "reentry_confirm": { "bps": 500 }
                     }
                 }
             })

@@ -103,7 +103,7 @@ tick_timeout_secs = 30
 - `leverage` 不写时默认按 `10x` 处理，并会在每个 `track` 启动时先下发到交易所
 - 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
 - `shape_family` 当前支持 `linear`、`inertial`、`responsive`
-- `out_of_band_policy` 当前使用嵌套 policy object 形状，例如 `{ freeze = {} }`、`{ flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }`、`{ terminate = {} }`
+- `out_of_band_policy` 当前使用嵌套 policy object 形状，例如 `{ freeze = {} }`、`{ flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }`、`{ terminate = {} }`
 - `flatten` 是自动带外平仓语义，不再接受旧的 `reduce_only`
 - 三者都按“围绕价格带中点对称”的控仓曲线解释
 - `inertial` 更恋边，从上下两侧往中间收仓都更慢

@@ -2160,7 +2160,7 @@ long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
 shape_family = "inertial"
-out_of_band_policy = { flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
 "#,
             );
         }

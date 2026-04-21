@@ -307,7 +307,7 @@ out_of_band_policy = { freeze = {} }
     }
 
     #[test]
-    fn config_toml_parses_flatten_trigger_and_price_confirm_policy() {
+    fn config_toml_parses_flatten_trigger_and_reentry_confirm_policy() {
         let config = parse_config(
             r#"
 [exchange]
@@ -323,7 +323,7 @@ short_exposure_units = 8
 notional_per_unit = 375
 daily_loss_limit = 120
 total_loss_limit = 500
-out_of_band_policy = { flatten = { trigger_bps = 500, recover = { price_confirm = { bps = 500 } } } }
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
 "#,
         )
         .unwrap();
@@ -331,8 +331,8 @@ out_of_band_policy = { flatten = { trigger_bps = 500, recover = { price_confirm 
         assert!(matches!(
             config.tracks[0].out_of_band_policy,
             Some(poise_core::strategy::BandProtectionPolicy::Flatten {
-                trigger_bps: 500,
-                recover: poise_core::strategy::BandRecoverPolicy::PriceConfirm { bps: 500 }
+                trigger: poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps: 500 }
             })
         ));
     }

@@ -4,7 +4,11 @@ import {
   createSourceSnapshot,
   type WorkbenchBridge,
 } from '@/app/workbenchBridge';
-import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
+import {
+  createTrackDraft,
+  defaultBandProtectionPolicy,
+  type TrackDraft,
+} from '@/domain/trackDraft';
 import { clearResolvedLoadIssues, parseFiniteNumber } from '@/domain/trackValidation';
 import { useWorkbenchSnapshot, useWorkbenchStore } from '@/state/workbenchStore';
 import { TrackWorkbenchChart } from '@/ui/chart/TrackWorkbenchChart';
@@ -303,8 +307,9 @@ export function AppShell({ bridge }: AppShellProps) {
                   if (field === 'shapeFamily') {
                     draft.enums.shapeFamily = value as TrackDraft['enums']['shapeFamily'];
                   } else {
-                    draft.enums.bandProtectionKind =
-                      value as TrackDraft['enums']['bandProtectionKind'];
+                    const nextKind = value as TrackDraft['enums']['bandProtectionKind'];
+                    draft.enums.bandProtectionKind = nextKind;
+                    draft.enums.bandProtectionPolicy = defaultBandProtectionPolicy(nextKind);
                   }
                   clearResolvedLoadIssues(draft, field);
                 });

@@ -25,7 +25,7 @@
   - 运行时当前处在什么阶段
   - 对外状态如何投影
 - 让 `freeze` 成为真正的“无成本等待回归”
-- 让 `flatten` 成为“先等待，再在更外侧保护触发带真正退到 0，并按确认规则自动恢复”
+- 让 `flatten` 成为“按触发规则决定何时真正退到 0，并按恢复规则自动恢复”
 - 维持当前 risk 语义：亏损触发直接 `terminate`
 
 ## 非目标
@@ -46,15 +46,20 @@
 enum BandProtectionPolicy {
     Freeze,
     Flatten {
-        trigger_bps: u32,
+        trigger: BandFlattenTrigger,
         recover: BandRecoverPolicy,
     },
     Terminate,
 }
 
+enum BandFlattenTrigger {
+    Immediate,
+    FlattenConfirm { bps: u32 },
+}
+
 enum BandRecoverPolicy {
     BackInBand,
-    PriceConfirm { bps: u32 },
+    ReentryConfirm { bps: u32 },
 }
 ```
 
@@ -65,8 +70,9 @@ enum BandRecoverPolicy {
   - 不主动减仓到 `0`
   - 回到主带后立即恢复
 - `Flatten`
-  - 价格一出主带不会立刻平仓，而是先进入等待阶段
-  - 只有继续朝带外方向走，穿过更外侧的触发带，才真正进入 `flattening`
+  - `trigger = "immediate"` 时，价格一出主带就直接进入 `flattening`
+  - `trigger = { flatten_confirm = { bps = ... } }` 时，价格一出主带先进入等待阶段
+  - 只有继续朝带外方向走，穿过更外侧的确认带，才真正进入 `flattening`
   - 真正 `flattening` 后，目标压到 `0`
   - 后续按 `recover` 自动恢复
 - `Terminate`
@@ -74,8 +80,8 @@ enum BandRecoverPolicy {
 
 这里的关键是：
 
-- `trigger_bps` 表示“外侧触发确认”，决定什么时候真正执行 `flatten`
-- `recover` 表示“内侧恢复确认”，决定 `flatten` 之后什么时候允许自动恢复
+- `trigger` 表示“什么时候真正执行 `flatten`”
+- `recover` 表示“什么时候允许自动恢复建仓”
 
 两者都属于 `flatten` policy，但负责的是不同阶段的不同决策，不能合成一个参数。
 
@@ -86,13 +92,13 @@ enum BandRecoverPolicy {
 原因：
 
 - `freeze` 想表达的是“只等待回归，不升级到平仓”
-- `flatten` 想表达的是“先等待，如果继续恶化再退到 0”
+- `flatten` 想表达的是“按触发规则决定何时退到 0，再按恢复规则决定何时自动回来”
 - 如果把两者合成一条组合策略，配置层会失去直接表达“我只想 freeze”的能力
 
 所以：
 
 - `freeze` 是独立策略
-- `flatten` 内部可以包含一个“等待确认是否真正 flatten”的阶段
+- `flatten` 可以直接进入 `Flattening`，也可以包含一个“等待确认是否真正 flatten”的阶段
 
 ### 3. `TrackState` 继续是 source of truth
 
@@ -153,7 +159,7 @@ enum ManualState {
 
 #### `FlattenPending`
 
-只用于 `flatten` 策略的前置阶段。
+只用于 `flatten.trigger = { flatten_confirm = ... }` 的前置阶段。
 
 语义：
 
@@ -161,7 +167,7 @@ enum ManualState {
 - 当前目标仍保持 `target_anchor`
 - 记录最初带外方向 `boundary`
 - 如果价格回到主带内但还没触发真正 `flatten`，直接回到 `FollowingBand`
-- 如果价格继续朝同一方向走，穿过外侧 `trigger_bps` 触发带，才进入 `Flattening`
+- 如果价格继续朝同一方向走，穿过外侧 `flatten_confirm` 确认带，才进入 `Flattening`
 - 如果价格还没回主带就从另一侧再次带外，旧的 pending 必须立即丢弃，并按当前观察到的带外方向重建新的 `FlattenPending`
 
 这说明：
@@ -203,7 +209,7 @@ enum ManualState {
 这次重新梳理后，真正需要 `boundary` 的只有 `flatten` 路径：
 
 - `FlattenPending` 需要知道价格是从哪一侧带外，才能判断是否进一步穿过外侧触发带
-- `Flattening` 需要知道价格是从哪一侧触发，才能按同侧的 `price_confirm` 做恢复判断
+- `Flattening` 需要知道价格是从哪一侧触发，才能按同侧的 `reentry_confirm` 做恢复判断
 
 而 `freeze` 并不需要这些信息。
 
@@ -214,24 +220,27 @@ enum ManualState {
 
 这样能减少一个泛化过度、但实际只被 `flatten` 使用的中间抽象。
 
-### 7. `flatten.trigger_bps` 和 `recover` 的精确定义
+### 7. `flatten.trigger` 和 `recover` 的精确定义
 
 对于主带 `[lower_price, upper_price]`：
 
 ```rust
 band_width = upper_price - lower_price
-trigger_distance = band_width * trigger_bps / 10_000
+confirm_distance = band_width * confirm_bps / 10_000
 recover_distance = band_width * recover_bps / 10_000
 ```
 
-#### 外侧触发确认
+#### 触发阶段
 
-仅用于 `FlattenPending -> Flattening`
+- `Immediate`
+  - 一出主带就直接进入 `Flattening`
 
-- `boundary = Below`
-  - 当 `price <= lower_price - trigger_distance` 时进入 `Flattening`
-- `boundary = Above`
-  - 当 `price >= upper_price + trigger_distance` 时进入 `Flattening`
+- `FlattenConfirm { bps }`
+  - 仅用于 `FlattenPending -> Flattening`
+  - `boundary = Below`
+    - 当 `price <= lower_price - confirm_distance` 时进入 `Flattening`
+  - `boundary = Above`
+    - 当 `price >= upper_price + confirm_distance` 时进入 `Flattening`
 
 #### 内侧恢复确认
 
@@ -239,7 +248,7 @@ recover_distance = band_width * recover_bps / 10_000
 
 - `BackInBand`
   - 价格回到 `[lower_price, upper_price]` 就恢复
-- `PriceConfirm { bps }`
+- `ReentryConfirm { bps }`
   - `boundary = Below`
     - 当 `price >= lower_price + recover_distance` 时恢复
   - `boundary = Above`
@@ -247,7 +256,8 @@ recover_distance = band_width * recover_bps / 10_000
 
 所以：
 
-- `trigger_bps` 防止“刚出带一点点就立刻止损”
+- `trigger = "immediate"` 表达传统的“一出带就平仓”
+- `trigger = { flatten_confirm = { bps } }` 防止“刚出带一点点就立刻止损”
 - `recover` 防止“刚回带内一点点就立刻重开”
 
 ### 8. 对外状态投影保持简单
@@ -307,9 +317,10 @@ risk 语义不改：
 拥有：
 
 - `BandProtectionPolicy`
+- `BandFlattenTrigger`
 - `BandRecoverPolicy`
 - `BandBoundary`
-- 与 `flatten.trigger_bps`、`recover` 有关的纯函数判定 helper
+- 与 `flatten.trigger`、`recover` 有关的纯函数判定 helper
 
 不拥有：
 
@@ -360,13 +371,17 @@ risk 语义不改：
 
 ## 配置形状
 
-稳定配置形状改为：
+稳定配置形状改为，且当前继续推荐用 inline table：
 
 ```toml
 out_of_band_policy = { freeze = {} }
 out_of_band_policy = { flatten = {
-  trigger_bps = 500,
-  recover = { price_confirm = { bps = 500 } }
+  trigger = "immediate",
+  recover = "back_in_band"
+} }
+out_of_band_policy = { flatten = {
+  trigger = { flatten_confirm = { bps = 500 } },
+  recover = { reentry_confirm = { bps = 500 } }
 } }
 out_of_band_policy = { terminate = {} }
 ```
@@ -382,10 +397,11 @@ out_of_band_policy = { terminate = {} }
 
 - `freeze` 一出主带就进入 `Frozen`
 - `Frozen` 回主带立刻恢复
-- `flatten` 一出主带先进入 `FlattenPending`
+- `flatten.trigger = "immediate"` 一出主带直接进入 `Flattening`
+- `flatten.trigger = { flatten_confirm = ... }` 一出主带先进入 `FlattenPending`
 - `FlattenPending` 回主带直接恢复，不会平到 `0`
-- `FlattenPending` 继续向外穿过 `trigger_bps` 触发带，才进入 `Flattening`
-- `Flattening` 的 `BackInBand / PriceConfirm` 恢复按 `boundary` 判定
+- `FlattenPending` 继续向外穿过 `flatten_confirm` 确认带，才进入 `Flattening`
+- `Flattening` 的 `BackInBand / ReentryConfirm` 恢复按 `boundary` 判定
 - `FlattenPending` 对外仍投影成 `frozen`
 - risk 触发仍直接 `terminate`
 

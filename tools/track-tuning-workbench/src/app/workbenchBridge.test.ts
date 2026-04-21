@@ -87,4 +87,60 @@ describe('createWorkbenchBridge', () => {
       takerFeeRate: 0.0005,
     });
   });
+
+  it('keeps non-default flatten parameters when loading and exporting the same draft', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        config_path: '/tmp/strategies/grid.toml',
+        projected_tracks: [
+          {
+            draft_id: 'draft-btc',
+            fields: {
+              track_id: 'btc',
+              symbol: 'BTCUSDT',
+              lower_price: 65000,
+              upper_price: 70000,
+              long_exposure_units: 8,
+              short_exposure_units: 8,
+              notional_per_unit: 250,
+              max_notional: 3000,
+              min_rebalance_units: 0.5,
+              leverage: 10,
+              out_of_band_policy: {
+                flatten: {
+                  trigger: {
+                    flatten_confirm: { bps: 125 },
+                  },
+                  recover: 'back_in_band',
+                },
+              },
+              daily_loss_limit: 120,
+              total_loss_limit: 500,
+              shape_family: 'linear',
+            },
+            load_issues: [],
+          },
+        ],
+      })
+      .mockResolvedValueOnce('[[tracks]]');
+
+    const bridge = createWorkbenchBridge();
+    const loaded = await bridge.loadConfigFile('/tmp/strategies/grid.toml');
+    await bridge.exportCurrentTrack(loaded.projectedTracks[0]);
+
+    expect(invokeMock).toHaveBeenLastCalledWith('export_current_track', {
+      draft: expect.objectContaining({
+        fields: expect.objectContaining({
+          out_of_band_policy: {
+            flatten: {
+              trigger: {
+                flatten_confirm: { bps: 125 },
+              },
+              recover: 'back_in_band',
+            },
+          },
+        }),
+      }),
+    });
+  });
 });

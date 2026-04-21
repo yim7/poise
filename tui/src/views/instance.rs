@@ -932,8 +932,8 @@ mod tests {
                 .unwrap();
         detail.strategy.out_of_band_policy = serde_json::from_value(serde_json::json!({
             "flatten": {
-                "trigger_bps": 500,
-                "recover": { "price_confirm": { "bps": 500 } }
+                "trigger": { "flatten_confirm": { "bps": 500 } },
+                "recover": { "reentry_confirm": { "bps": 500 } }
             }
         }))
         .unwrap();

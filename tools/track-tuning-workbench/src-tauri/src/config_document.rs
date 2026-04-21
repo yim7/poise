@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use poise_core::strategy::{BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy};
 use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
@@ -33,32 +34,6 @@ impl TrackShapeFamily {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrackBandProtectionKind {
-    Freeze,
-    Flatten,
-    Terminate,
-}
-
-impl TrackBandProtectionKind {
-    fn parse_legacy(value: &str) -> Result<Self> {
-        match value {
-            "freeze" => Ok(Self::Freeze),
-            "flatten" => Ok(Self::Flatten),
-            "terminate" => Ok(Self::Terminate),
-            other => bail!("unsupported out_of_band_policy `{other}`"),
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Freeze => "freeze",
-            Self::Flatten => "flatten",
-            Self::Terminate => "terminate",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditableTrackFields {
     pub track_id: String,
@@ -71,7 +46,7 @@ pub struct EditableTrackFields {
     pub max_notional: f64,
     pub min_rebalance_units: f64,
     pub leverage: u32,
-    pub out_of_band_policy: TrackBandProtectionKind,
+    pub out_of_band_policy: BandProtectionPolicy,
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub shape_family: TrackShapeFamily,
@@ -90,7 +65,7 @@ impl Default for EditableTrackFields {
             max_notional: 0.0,
             min_rebalance_units: DEFAULT_MIN_REBALANCE_UNITS,
             leverage: DEFAULT_LEVERAGE,
-            out_of_band_policy: TrackBandProtectionKind::Freeze,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
             daily_loss_limit: 0.0,
             total_loss_limit: 0.0,
             shape_family: TrackShapeFamily::Linear,
@@ -274,8 +249,8 @@ fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackL
     fields.leverage =
         optional_u32_lossy(table, "leverage", &mut issues).unwrap_or(DEFAULT_LEVERAGE);
     fields.out_of_band_policy =
-        optional_band_protection_kind_lossy(table, "out_of_band_policy", &mut issues)
-            .unwrap_or(TrackBandProtectionKind::Freeze);
+        optional_band_protection_policy_lossy(table, "out_of_band_policy", &mut issues)
+            .unwrap_or(BandProtectionPolicy::Freeze);
     fields.daily_loss_limit =
         required_f64_lossy(table, "daily_loss_limit", &mut issues).unwrap_or(0.0);
     fields.total_loss_limit =
@@ -357,16 +332,16 @@ fn optional_string_lossy(
     }
 }
 
-fn optional_band_protection_kind_lossy(
+fn optional_band_protection_policy_lossy(
     table: &Table,
     key: &str,
     issues: &mut Vec<TrackLoadIssue>,
-) -> Option<TrackBandProtectionKind> {
+) -> Option<BandProtectionPolicy> {
     let Some(item) = table.get(key) else {
         return None;
     };
 
-    match parse_band_protection_kind(item, key) {
+    match parse_band_protection_policy(item, key) {
         Ok(value) => Some(value),
         Err(error) => {
             issues.push(load_issue(key, error.to_string()));
@@ -375,34 +350,20 @@ fn optional_band_protection_kind_lossy(
     }
 }
 
-fn parse_band_protection_kind(item: &Item, key: &str) -> Result<TrackBandProtectionKind> {
-    if let Some(value) = item.as_str() {
-        return TrackBandProtectionKind::parse_legacy(value);
-    }
-
-    let Some(policy) = item.as_inline_table() else {
+fn parse_band_protection_policy(item: &Item, key: &str) -> Result<BandProtectionPolicy> {
+    if item.as_str().is_none() && item.as_inline_table().is_none() {
         return Err(anyhow!("field `{key}` must be a string or inline table"));
-    };
-
-    let kinds = [
-        ("freeze", TrackBandProtectionKind::Freeze),
-        ("flatten", TrackBandProtectionKind::Flatten),
-        ("terminate", TrackBandProtectionKind::Terminate),
-    ];
-
-    let mut matched = None;
-    for (name, kind) in kinds {
-        if policy.contains_key(name) {
-            if matched.is_some() {
-                return Err(anyhow!(
-                    "field `{key}` must contain exactly one policy variant"
-                ));
-            }
-            matched = Some(kind);
-        }
     }
 
-    matched.ok_or_else(|| anyhow!("field `{key}` must contain one of: freeze, flatten, terminate"))
+    #[derive(Deserialize)]
+    struct PolicyWrapper {
+        out_of_band_policy: BandProtectionPolicy,
+    }
+
+    let raw = format!("out_of_band_policy = {}", item);
+    let parsed: PolicyWrapper = toml_edit::de::from_str(&raw)
+        .map_err(|error| anyhow!("field `{key}` is invalid: {error}"))?;
+    Ok(parsed.out_of_band_policy)
 }
 
 fn required_f64_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> Option<f64> {
@@ -458,7 +419,7 @@ fn stable_draft_id(fields: &EditableTrackFields) -> String {
     hasher.write_u64(fields.max_notional.to_bits());
     hasher.write_u64(fields.min_rebalance_units.to_bits());
     hasher.write_u32(fields.leverage);
-    hasher.write_str(fields.out_of_band_policy.as_str());
+    write_band_protection_policy_hash(&mut hasher, &fields.out_of_band_policy);
     hasher.write_u64(fields.daily_loss_limit.to_bits());
     hasher.write_u64(fields.total_loss_limit.to_bits());
     hasher.write_str(fields.shape_family.as_str());
@@ -516,6 +477,30 @@ impl StableHasher {
 
     fn finish(self) -> u64 {
         self.state
+    }
+}
+
+fn write_band_protection_policy_hash(hasher: &mut StableHasher, policy: &BandProtectionPolicy) {
+    match policy {
+        BandProtectionPolicy::Freeze => hasher.write_str("freeze"),
+        BandProtectionPolicy::Flatten { trigger, recover } => {
+            hasher.write_str("flatten");
+            match trigger {
+                BandFlattenTrigger::Immediate => hasher.write_str("immediate"),
+                BandFlattenTrigger::FlattenConfirm { bps } => {
+                    hasher.write_str("flatten_confirm");
+                    hasher.write_u32(*bps);
+                }
+            }
+            match recover {
+                BandRecoverPolicy::BackInBand => hasher.write_str("back_in_band"),
+                BandRecoverPolicy::ReentryConfirm { bps } => {
+                    hasher.write_str("reentry_confirm");
+                    hasher.write_u32(*bps);
+                }
+            }
+        }
+        BandProtectionPolicy::Terminate => hasher.write_str("terminate"),
     }
 }
 

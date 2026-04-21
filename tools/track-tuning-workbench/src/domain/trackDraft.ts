@@ -1,5 +1,11 @@
 export type TrackShapeFamily = 'linear' | 'inertial' | 'responsive';
 export type TrackBandProtectionKind = 'freeze' | 'flatten' | 'terminate';
+export type BandFlattenTriggerPayload = 'immediate' | { flatten_confirm: { bps: number } };
+export type BandRecoverPolicyPayload = 'back_in_band' | { reentry_confirm: { bps: number } };
+export type BandProtectionPolicyPayload =
+  | { freeze: Record<string, never> }
+  | { flatten: { trigger: BandFlattenTriggerPayload; recover: BandRecoverPolicyPayload } }
+  | { terminate: Record<string, never> };
 
 export interface TrackDraftNumericFields {
   lowerPrice: number;
@@ -30,6 +36,7 @@ export interface TrackDraftRawNumericFields {
 export interface TrackDraftEnumFields {
   shapeFamily: TrackShapeFamily;
   bandProtectionKind: TrackBandProtectionKind;
+  bandProtectionPolicy?: BandProtectionPolicyPayload;
 }
 
 export interface TrackDraftAdditionalFields {
@@ -102,8 +109,11 @@ export interface TrackDraftParsedSnapshot {
 export interface CreateTrackDraftInput {
   draftId: string;
   raw: TrackDraftAdditionalFields &
-    TrackDraftRawNumericFields &
-    TrackDraftEnumFields;
+    TrackDraftRawNumericFields & {
+      shapeFamily: TrackShapeFamily;
+      bandProtectionKind: TrackBandProtectionKind;
+      bandProtectionPolicy?: BandProtectionPolicyPayload;
+    };
   parsedNumbers?: Partial<TrackDraftNumericFields>;
   enums?: TrackDraftEnumFields;
   additional?: TrackDraftAdditionalFields;
@@ -128,6 +138,11 @@ type TrackNumericFieldKey = (typeof TRACK_NUMERIC_FIELD_KEYS)[number];
 
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
   const rawNumbers = extractRawNumbers(input.raw);
+  const defaultPolicy = defaultBandProtectionPolicy(input.raw.bandProtectionKind);
+  const bandProtectionPolicy = input.enums?.bandProtectionPolicy
+    ?? input.raw.bandProtectionPolicy
+    ?? defaultPolicy;
+  const bandProtectionKind = bandProtectionKindFromPolicy(bandProtectionPolicy);
 
   return {
     draftId: input.draftId,
@@ -139,7 +154,8 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
     parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
     enums: input.enums ?? {
       shapeFamily: input.raw.shapeFamily,
-      bandProtectionKind: input.raw.bandProtectionKind,
+      bandProtectionKind,
+      bandProtectionPolicy,
     },
     ui: {
       quotePriceInput: input.ui?.quotePriceInput ?? '',
@@ -155,7 +171,45 @@ function extractRawNumbers(
   return Object.fromEntries(entries) as Record<TrackNumericFieldKey, string>;
 }
 
+export function bandProtectionKindFromPolicy(
+  policy: BandProtectionPolicyPayload,
+): TrackBandProtectionKind {
+  if ('freeze' in policy) {
+    return 'freeze';
+  }
+  if ('flatten' in policy) {
+    return 'flatten';
+  }
+  return 'terminate';
+}
+
+export function defaultBandProtectionPolicy(
+  kind: TrackBandProtectionKind,
+): BandProtectionPolicyPayload {
+  switch (kind) {
+    case 'freeze':
+      return { freeze: {} };
+    case 'flatten':
+      return {
+        flatten: {
+          trigger: {
+            flatten_confirm: { bps: 500 },
+          },
+          recover: {
+            reentry_confirm: { bps: 500 },
+          },
+        },
+      };
+    case 'terminate':
+      return { terminate: {} };
+  }
+}
+
 export function refreshTrackDraftParsedNumbers(draft: TrackDraft) {
+  const policy = draft.enums.bandProtectionPolicy
+    ?? defaultBandProtectionPolicy(draft.enums.bandProtectionKind);
+  draft.enums.bandProtectionPolicy = policy;
+  draft.enums.bandProtectionKind = bandProtectionKindFromPolicy(policy);
   draft.parsedNumbers = {
     ...draft.parsedNumbers,
     ...parseTrackDraftRawNumbers(draft.rawNumbers),
