@@ -1224,6 +1224,7 @@ mod tests {
     use poise_core::types::{ExchangeRules, Side};
 
     use crate::execution_plan::ExecutionAction;
+    use crate::executor::policy::PolicyKind;
     use crate::ports::ExecutionQuote;
     use crate::track::Venue;
 
@@ -1300,17 +1301,30 @@ mod tests {
         let (mut manager, id) = manager();
 
         let transition = manager.observe(&id, market(95.0)).unwrap();
+        let track = manager.tracks.get(&id).unwrap();
+        let catch_up_binding = track
+            .executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be tracked");
 
-        let [ExecutionAction::SubmitOrder { request, .. }] = transition.effects.as_slice() else {
-            panic!("expected one catch-up submit order");
-        };
+        let request = transition
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                ExecutionAction::SubmitOrder { request, .. }
+                    if request.client_order_id == catch_up_binding.request.client_order_id =>
+                {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("catch-up submit effect should exist");
         assert_eq!(request.side, Side::Buy);
         assert!((request.price - 95.1).abs() < 1e-9);
         assert!((request.quantity - 4.0).abs() < 1e-9);
-
-        let track = manager.tracks.get(&id).unwrap();
-        assert_eq!(track.executor_state.bindings.len(), 1);
-        assert_eq!(track.executor_state.bindings[0].allocations.len(), 4);
+        assert_eq!(catch_up_binding.allocations.len(), 4);
     }
 
     #[test]
@@ -1334,8 +1348,14 @@ mod tests {
         manager.observe(&id, market(100.0)).unwrap();
 
         let track = manager.tracks.get(&id).unwrap();
-        assert_ne!(track.executor_state.ledger_state.profile_revision, old_revision);
-        assert_eq!(track.executor_state.ledger_state.ledger_anchor_exposure, Exposure(0.0));
+        assert_ne!(
+            track.executor_state.ledger_state.profile_revision,
+            old_revision
+        );
+        assert_eq!(
+            track.executor_state.ledger_state.ledger_anchor_exposure,
+            Exposure(0.0)
+        );
         assert!(track.executor_state.bindings.is_empty());
     }
 

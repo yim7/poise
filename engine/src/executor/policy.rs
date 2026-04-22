@@ -43,6 +43,42 @@ pub fn select_catch_up_operations(
         .collect()
 }
 
+pub fn select_curve_maker_operations(
+    view: &BoundaryLedgerView,
+    coverage: &CoverageReservation,
+    exposure_epsilon: f64,
+    levels_per_side: usize,
+) -> Vec<BoundaryOperation> {
+    let mut up = view
+        .operations
+        .iter()
+        .filter(|operation| !operation.due)
+        .filter(|operation| operation.remaining > exposure_epsilon)
+        .filter(|operation| {
+            operation.operation.direction == crate::executor::boundary::BoundaryDirection::Up
+        })
+        .filter(|operation| !coverage.is_reserved(&operation.operation))
+        .map(|operation| operation.operation.clone())
+        .take(levels_per_side)
+        .collect::<Vec<_>>();
+    let mut down = view
+        .operations
+        .iter()
+        .rev()
+        .filter(|operation| !operation.due)
+        .filter(|operation| operation.remaining > exposure_epsilon)
+        .filter(|operation| {
+            operation.operation.direction == crate::executor::boundary::BoundaryDirection::Down
+        })
+        .filter(|operation| !coverage.is_reserved(&operation.operation))
+        .map(|operation| operation.operation.clone())
+        .take(levels_per_side)
+        .collect::<Vec<_>>();
+
+    up.append(&mut down);
+    up
+}
+
 #[cfg(test)]
 mod tests {
     use crate::executor::boundary::{
@@ -93,5 +129,48 @@ mod tests {
         let selected = select_catch_up_operations(&view, &coverage, 1e-9);
 
         assert_eq!(selected, vec![due]);
+    }
+
+    #[test]
+    fn curve_maker_policy_selects_nearest_future_operations_per_side() {
+        let future_up_near = operation(0, 10_000, BoundaryDirection::Up);
+        let future_up_far = operation(10_000, 20_000, BoundaryDirection::Up);
+        let future_down_far = operation(-20_000, -10_000, BoundaryDirection::Down);
+        let future_down_near = operation(-10_000, 0, BoundaryDirection::Down);
+        let due = operation(20_000, 30_000, BoundaryDirection::Up);
+        let view = BoundaryLedgerView {
+            operations: vec![
+                BoundaryOperationView {
+                    operation: future_down_far,
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: future_down_near.clone(),
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: future_up_near.clone(),
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: future_up_far,
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: due,
+                    remaining: 1.0,
+                    due: true,
+                },
+            ],
+        };
+
+        let selected =
+            select_curve_maker_operations(&view, &CoverageReservation::default(), 1e-9, 1);
+
+        assert_eq!(selected, vec![future_up_near, future_down_near]);
     }
 }

@@ -16,6 +16,7 @@ pub struct LiveOrderBinding {
     pub submit_purpose: SubmitPurpose,
     pub order_id: Option<String>,
     pub status: BindingStatus,
+    pub policy_state: BindingPolicyState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,15 @@ pub enum BindingStatus {
     Working,
     CancelPending,
     Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingPolicyState {
+    Stateless,
+    CurveMaker {
+        due_grace_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +115,7 @@ mod tests {
             submit_purpose: SubmitPurpose::AutoReconcile,
             order_id: None,
             status: BindingStatus::Working,
+            policy_state: BindingPolicyState::Stateless,
         };
         assert_eq!(binding.status, BindingStatus::Working);
     }

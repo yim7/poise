@@ -13,13 +13,17 @@ use crate::runtime::ExecutorState;
 use crate::track::Instrument;
 
 use super::binding::{
-    BindingOperationAllocation, BindingProposal, BindingStatus, LiveOrderBinding,
+    BindingOperationAllocation, BindingPolicyState, BindingProposal, BindingStatus,
+    LiveOrderBinding,
 };
 use super::boundary::{
-    BoundaryDirection, BoundaryOperation, discretize_boundaries, profile_revision_for_config,
+    BoundaryBlueprint, BoundaryDirection, BoundaryOperation, discretize_boundaries,
+    profile_revision_for_config, trigger_price_for_boundary,
 };
 use super::ledger::BoundaryLedgerView;
-use super::policy::{CoverageReservation, PolicyKind, select_catch_up_operations};
+use super::policy::{
+    CoverageReservation, PolicyKind, select_catch_up_operations, select_curve_maker_operations,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +68,8 @@ pub struct PendingSubmitHint {
 }
 
 static CLIENT_ORDER_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const CURVE_MAKER_LEVELS_PER_SIDE: usize = 3;
+const CURVE_MAKER_GRACE_MS: i64 = 60_000;
 
 impl<'a> ExecutorInput<'a> {
     pub fn new(
@@ -96,96 +102,56 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         return noop_plan(state);
     }
 
-    let inventory_gap = submit_intent
-        .current_exposure
-        .delta(&submit_intent.desired_exposure);
-    if inventory_gap.0.abs() < submit_intent.min_rebalance_units {
-        return noop_plan(state);
-    }
-
-    let Some(direction) = direction_for_gap(&inventory_gap) else {
-        return noop_plan(state);
-    };
-    let Some(price) = execution_price(direction, submit_intent.execution_quote) else {
-        return noop_plan(state);
-    };
-
     let boundaries = discretize_boundaries(
         submit_intent.config,
         profile_revision_for_config(submit_intent.config),
     );
+    let exposure_epsilon = exposure_epsilon(&submit_intent);
     let view = BoundaryLedgerView::from_boundaries(
         &boundaries,
         &state.ledger_state,
         submit_intent.desired_exposure.clone(),
-        exposure_epsilon(&submit_intent),
+        exposure_epsilon,
     );
-    let coverage = coverage_from_bindings(&state.bindings);
-    let selected = select_catch_up_operations(&view, &coverage, exposure_epsilon(&submit_intent))
-        .into_iter()
-        .filter(|operation| operation.direction == direction)
-        .collect::<Vec<_>>();
-    let allocations = allocate_operations(&view, selected, inventory_gap.0.abs());
-    if allocations.is_empty() {
-        return noop_plan(state);
-    }
+    let mut effects = update_curve_maker_due_grace(
+        &mut state,
+        &view,
+        submit_intent.observed_at,
+        CURVE_MAKER_GRACE_MS,
+    );
+    let mut desired_bindings = Vec::new();
+    let mut coverage = coverage_from_bindings(&state.bindings);
 
-    let exposure_qty = allocations
-        .iter()
-        .map(|allocation| allocation.exposure_qty)
-        .sum::<f64>();
-    let quantity = round_to_step(
-        exposure_qty * submit_intent.base_qty_per_unit,
-        submit_intent.exchange_rules.quantity_step,
-    );
-    if quantity <= f64::EPSILON
-        || !is_meetable_minimum(price, quantity, submit_intent.exchange_rules)
+    if let Some((proposal, binding, effect)) =
+        plan_catch_up_binding(&submit_intent, &view, &coverage)
     {
-        return noop_plan(state);
+        for allocation in &binding.allocations {
+            coverage.reserve(allocation.operation.clone());
+        }
+        state.bindings.push(binding);
+        desired_bindings.push(proposal);
+        effects.push(effect);
     }
 
-    let side = side_for_direction(direction);
-    let role = role_for_target_change(
-        &submit_intent.current_exposure,
-        &submit_intent.desired_exposure,
-    );
-    let request = OrderRequest {
-        instrument: submit_intent.instrument.clone(),
-        side,
-        price,
-        quantity,
-        client_order_id: next_client_order_id(),
-        reduce_only: role == OrderRole::DecreaseInventory,
-    };
-    let operations = allocations
-        .iter()
-        .map(|allocation| allocation.operation.clone())
-        .collect::<Vec<_>>();
-    let proposal = BindingProposal {
-        policy: PolicyKind::CatchUp,
-        operations,
-    };
-    let proposal_key = proposal.proposal_key();
-    let binding = LiveOrderBinding {
-        binding_id: request.client_order_id.clone(),
-        proposal_key,
-        allocations,
-        request: request.clone(),
-        desired_exposure: submit_intent.desired_exposure.clone(),
-        submit_purpose: submit_intent.submit_purpose,
-        order_id: None,
-        status: BindingStatus::SubmitPending,
-    };
+    for (proposal, binding, effect) in
+        plan_curve_maker_bindings(&submit_intent, &boundaries, &view, &coverage)
+    {
+        for allocation in &binding.allocations {
+            coverage.reserve(allocation.operation.clone());
+        }
+        state.bindings.push(binding);
+        desired_bindings.push(proposal);
+        effects.push(effect);
+    }
 
-    state.bindings.push(binding);
+    if effects.is_empty() {
+        effects.push(ExecutionAction::NoOp);
+    }
+
     ExecutorPlan {
         state,
-        desired_bindings: vec![proposal],
-        effects: vec![ExecutionAction::SubmitOrder {
-            request,
-            desired_exposure: submit_intent.desired_exposure,
-            submit_purpose: submit_intent.submit_purpose,
-        }],
+        desired_bindings,
+        effects,
         replacement_gate_reason: None,
     }
 }
@@ -227,12 +193,229 @@ fn noop_plan(state: ExecutorState) -> ExecutorPlan {
     }
 }
 
+fn plan_catch_up_binding(
+    submit_intent: &SubmitIntentInput<'_>,
+    view: &BoundaryLedgerView,
+    coverage: &CoverageReservation,
+) -> Option<(BindingProposal, LiveOrderBinding, ExecutionAction)> {
+    let inventory_gap = submit_intent
+        .current_exposure
+        .delta(&submit_intent.desired_exposure);
+    if inventory_gap.0.abs() < submit_intent.min_rebalance_units {
+        return None;
+    }
+
+    let direction = direction_for_gap(&inventory_gap)?;
+    let price = execution_price(direction, submit_intent.execution_quote)?;
+    let selected = select_catch_up_operations(view, coverage, exposure_epsilon(submit_intent))
+        .into_iter()
+        .filter(|operation| operation.direction == direction)
+        .collect::<Vec<_>>();
+    let allocations = allocate_operations(view, selected, inventory_gap.0.abs());
+    if allocations.is_empty() {
+        return None;
+    }
+
+    let exposure_qty = allocations
+        .iter()
+        .map(|allocation| allocation.exposure_qty)
+        .sum::<f64>();
+    let quantity = round_to_step(
+        exposure_qty * submit_intent.base_qty_per_unit,
+        submit_intent.exchange_rules.quantity_step,
+    );
+    if quantity <= f64::EPSILON
+        || !is_meetable_minimum(price, quantity, submit_intent.exchange_rules)
+    {
+        return None;
+    }
+
+    let side = side_for_direction(direction);
+    let role = role_for_target_change(
+        &submit_intent.current_exposure,
+        &submit_intent.desired_exposure,
+    );
+    let request = OrderRequest {
+        instrument: submit_intent.instrument.clone(),
+        side,
+        price,
+        quantity,
+        client_order_id: next_client_order_id(PolicyKind::CatchUp),
+        reduce_only: role == OrderRole::DecreaseInventory,
+    };
+    let proposal = proposal_for_allocations(PolicyKind::CatchUp, &allocations);
+    let binding = live_binding(
+        &proposal,
+        allocations,
+        request.clone(),
+        submit_intent,
+        BindingPolicyState::Stateless,
+    );
+    let effect = ExecutionAction::SubmitOrder {
+        request,
+        desired_exposure: submit_intent.desired_exposure.clone(),
+        submit_purpose: submit_intent.submit_purpose,
+    };
+
+    Some((proposal, binding, effect))
+}
+
+fn plan_curve_maker_bindings(
+    submit_intent: &SubmitIntentInput<'_>,
+    boundaries: &[BoundaryBlueprint],
+    view: &BoundaryLedgerView,
+    coverage: &CoverageReservation,
+) -> Vec<(BindingProposal, LiveOrderBinding, ExecutionAction)> {
+    select_curve_maker_operations(
+        view,
+        coverage,
+        exposure_epsilon(submit_intent),
+        CURVE_MAKER_LEVELS_PER_SIDE,
+    )
+    .into_iter()
+    .filter_map(|operation| {
+        let boundary = boundary_for_operation(boundaries, &operation)?;
+        let price = maker_price_for_operation(boundary, &operation, submit_intent)?;
+        let operation_view = view
+            .operations
+            .iter()
+            .find(|candidate| candidate.operation == operation)?;
+        let quantity = round_to_step(
+            operation_view.remaining * submit_intent.base_qty_per_unit,
+            submit_intent.exchange_rules.quantity_step,
+        );
+        if quantity <= f64::EPSILON
+            || !is_meetable_minimum(price, quantity, submit_intent.exchange_rules)
+        {
+            return None;
+        }
+
+        let request = OrderRequest {
+            instrument: submit_intent.instrument.clone(),
+            side: side_for_direction(operation.direction),
+            price,
+            quantity,
+            client_order_id: next_client_order_id(PolicyKind::CurveMaker),
+            reduce_only: reduce_only_for_operation(boundary, operation.direction),
+        };
+        let allocations = vec![BindingOperationAllocation {
+            operation,
+            exposure_qty: operation_view.remaining,
+        }];
+        let proposal = proposal_for_allocations(PolicyKind::CurveMaker, &allocations);
+        let binding = live_binding(
+            &proposal,
+            allocations,
+            request.clone(),
+            submit_intent,
+            BindingPolicyState::CurveMaker {
+                due_grace_started_at: None,
+            },
+        );
+        let effect = ExecutionAction::SubmitOrder {
+            request,
+            desired_exposure: submit_intent.desired_exposure.clone(),
+            submit_purpose: submit_intent.submit_purpose,
+        };
+        Some((proposal, binding, effect))
+    })
+    .collect()
+}
+
+fn update_curve_maker_due_grace(
+    state: &mut ExecutorState,
+    view: &BoundaryLedgerView,
+    observed_at: DateTime<Utc>,
+    grace_ms: i64,
+) -> Vec<ExecutionAction> {
+    let mut effects = Vec::new();
+    for binding in &mut state.bindings {
+        if binding.proposal_key.policy != PolicyKind::CurveMaker
+            || !matches!(
+                binding.status,
+                BindingStatus::SubmitPending | BindingStatus::Working
+            )
+        {
+            continue;
+        }
+        let BindingPolicyState::CurveMaker {
+            due_grace_started_at,
+        } = &mut binding.policy_state
+        else {
+            continue;
+        };
+        let is_due = binding
+            .allocations
+            .iter()
+            .any(|allocation| view.is_due(&allocation.operation));
+        if !is_due {
+            *due_grace_started_at = None;
+            continue;
+        }
+
+        let started_at = *due_grace_started_at.get_or_insert(observed_at);
+        if observed_at
+            .signed_duration_since(started_at)
+            .num_milliseconds()
+            < grace_ms
+        {
+            continue;
+        }
+
+        binding.status = BindingStatus::CancelPending;
+        if let Some(order_id) = binding.order_id.clone() {
+            effects.push(ExecutionAction::CancelOrder {
+                instrument: binding.request.instrument.clone(),
+                order_id,
+            });
+        } else {
+            binding.status = BindingStatus::Terminal;
+        }
+    }
+    effects
+}
+
+fn proposal_for_allocations(
+    policy: PolicyKind,
+    allocations: &[BindingOperationAllocation],
+) -> BindingProposal {
+    BindingProposal {
+        policy,
+        operations: allocations
+            .iter()
+            .map(|allocation| allocation.operation.clone())
+            .collect(),
+    }
+}
+
+fn live_binding(
+    proposal: &BindingProposal,
+    allocations: Vec<BindingOperationAllocation>,
+    request: OrderRequest,
+    submit_intent: &SubmitIntentInput<'_>,
+    policy_state: BindingPolicyState,
+) -> LiveOrderBinding {
+    LiveOrderBinding {
+        binding_id: request.client_order_id.clone(),
+        proposal_key: proposal.proposal_key(),
+        allocations,
+        request,
+        desired_exposure: submit_intent.desired_exposure.clone(),
+        submit_purpose: submit_intent.submit_purpose,
+        order_id: None,
+        status: BindingStatus::SubmitPending,
+        policy_state,
+    }
+}
+
 fn coverage_from_bindings(bindings: &[LiveOrderBinding]) -> CoverageReservation {
     let mut coverage = CoverageReservation::default();
-    for binding in bindings
-        .iter()
-        .filter(|binding| binding.status != BindingStatus::Terminal)
-    {
+    for binding in bindings.iter().filter(|binding| {
+        matches!(
+            binding.status,
+            BindingStatus::SubmitPending | BindingStatus::Working
+        )
+    }) {
         for allocation in &binding.allocations {
             coverage.reserve(allocation.operation.clone());
         }
@@ -271,6 +454,45 @@ fn allocate_operations(
     allocations
 }
 
+fn boundary_for_operation<'a>(
+    boundaries: &'a [BoundaryBlueprint],
+    operation: &BoundaryOperation,
+) -> Option<&'a BoundaryBlueprint> {
+    boundaries
+        .iter()
+        .find(|boundary| boundary.id == operation.boundary_id)
+}
+
+fn maker_price_for_operation(
+    boundary: &BoundaryBlueprint,
+    operation: &BoundaryOperation,
+    submit_intent: &SubmitIntentInput<'_>,
+) -> Option<f64> {
+    let raw_price = match operation.direction {
+        BoundaryDirection::Up => boundary.trigger_price,
+        BoundaryDirection::Down => {
+            trigger_price_for_boundary(boundary.lower_exposure.0, submit_intent.config)
+        }
+    };
+    raw_price.is_finite().then(|| {
+        round_passive_price(
+            raw_price,
+            submit_intent.exchange_rules.price_tick,
+            operation.direction,
+        )
+    })
+}
+
+fn round_passive_price(price: f64, tick: f64, direction: BoundaryDirection) -> f64 {
+    if tick <= f64::EPSILON {
+        return price;
+    }
+    match direction {
+        BoundaryDirection::Up => (price / tick).floor() * tick,
+        BoundaryDirection::Down => (price / tick).ceil() * tick,
+    }
+}
+
 fn direction_for_gap(gap: &Exposure) -> Option<BoundaryDirection> {
     if gap.0 > f64::EPSILON {
         Some(BoundaryDirection::Up)
@@ -279,6 +501,14 @@ fn direction_for_gap(gap: &Exposure) -> Option<BoundaryDirection> {
     } else {
         None
     }
+}
+
+fn reduce_only_for_operation(boundary: &BoundaryBlueprint, direction: BoundaryDirection) -> bool {
+    let (from, to) = match direction {
+        BoundaryDirection::Up => (boundary.lower_exposure.0, boundary.upper_exposure.0),
+        BoundaryDirection::Down => (boundary.upper_exposure.0, boundary.lower_exposure.0),
+    };
+    to.abs() + f64::EPSILON < from.abs()
 }
 
 fn side_for_direction(direction: BoundaryDirection) -> Side {
@@ -313,9 +543,14 @@ fn role_for_target_change(current_exposure: &Exposure, desired_exposure: &Exposu
     }
 }
 
-fn next_client_order_id() -> String {
+fn next_client_order_id(policy: PolicyKind) -> String {
     let sequence = CLIENT_ORDER_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
-    format!("boundary-catch-up-{sequence}")
+    match policy {
+        PolicyKind::ManualOverride => format!("boundary-manual-{sequence}"),
+        PolicyKind::Flatten => format!("boundary-flatten-{sequence}"),
+        PolicyKind::CatchUp => format!("boundary-catch-up-{sequence}"),
+        PolicyKind::CurveMaker => format!("boundary-maker-{sequence}"),
+    }
 }
 
 #[cfg(test)]
@@ -387,14 +622,28 @@ mod tests {
 
         let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0)));
 
-        let [ExecutionAction::SubmitOrder { request, .. }] = plan.effects.as_slice() else {
-            panic!("expected one submit order");
-        };
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be submitted");
+        let request = plan
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                ExecutionAction::SubmitOrder { request, .. }
+                    if request.client_order_id == catch_up_binding.request.client_order_id =>
+                {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("catch-up submit effect should exist");
         assert_eq!(request.side, Side::Buy);
         assert_eq!(request.price, 100.1);
         assert!((request.quantity - 2.0).abs() < 1e-9);
-        assert_eq!(plan.state.bindings.len(), 1);
-        assert_eq!(plan.state.bindings[0].allocations.len(), 2);
+        assert_eq!(catch_up_binding.allocations.len(), 2);
     }
 
     #[test]

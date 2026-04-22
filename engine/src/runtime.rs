@@ -577,7 +577,9 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::executor::binding::{BindingProposalKey, BindingStatus, LiveOrderBinding};
+    use crate::executor::binding::{
+        BindingPolicyState, BindingProposalKey, BindingStatus, LiveOrderBinding,
+    };
     use crate::executor::boundary::{BoundaryDirection, BoundaryId, BoundaryOperation};
     use crate::executor::policy::PolicyKind;
     use crate::ports::OrderRequest;
@@ -615,6 +617,7 @@ mod tests {
             submit_purpose: SubmitPurpose::AutoReconcile,
             order_id: None,
             status: BindingStatus::Working,
+            policy_state: BindingPolicyState::Stateless,
         });
 
         let json = serde_json::to_string(&state).unwrap();
