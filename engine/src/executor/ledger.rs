@@ -106,6 +106,7 @@ impl BoundaryLedgerView {
         Self { operations }
     }
 
+    #[allow(dead_code)]
     pub fn is_due(&self, operation: &BoundaryOperation) -> bool {
         self.operations
             .iter()

@@ -2,11 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::executor::boundary::BoundaryOperation;
 use crate::executor::policy::PolicyKind;
+use crate::ports::OrderRequest;
+use crate::price_gate::SubmitPurpose;
+use poise_core::types::Exposure;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveOrderBinding {
     pub binding_id: String,
     pub proposal_key: BindingProposalKey,
+    pub allocations: Vec<BindingOperationAllocation>,
+    pub request: OrderRequest,
+    pub desired_exposure: Exposure,
+    pub submit_purpose: SubmitPurpose,
+    pub order_id: Option<String>,
     pub status: BindingStatus,
 }
 
@@ -23,6 +31,12 @@ pub enum BindingStatus {
 pub struct BindingProposal {
     pub policy: PolicyKind,
     pub operations: Vec<BoundaryOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BindingOperationAllocation {
+    pub operation: BoundaryOperation,
+    pub exposure_qty: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -78,6 +92,18 @@ mod tests {
         let binding = LiveOrderBinding {
             binding_id: "binding-1".to_string(),
             proposal_key: proposal.proposal_key(),
+            allocations: Vec::new(),
+            request: OrderRequest {
+                instrument: crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+                side: poise_core::types::Side::Buy,
+                price: 100.0,
+                quantity: 1.0,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+            desired_exposure: Exposure(1.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            order_id: None,
             status: BindingStatus::Working,
         };
         assert_eq!(binding.status, BindingStatus::Working);

@@ -1,12 +1,10 @@
 use crate::observation::OrderObservation;
 use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
-use crate::runtime::{
-    ExecutionRound, ExecutionSlot, ExecutorState, RecentTerminalOrder, SlotState, WorkingOrder,
-};
+use crate::runtime::{ExecutorState, RecentTerminalOrder};
+use poise_core::types::Exposure;
 
-use super::{DesiredOrder, INVENTORY_CORE_SLOT, OrderSlot, slots};
-
-const RECENT_TERMINAL_ORDER_LIMIT: usize = 8;
+use super::binding::{BindingStatus, LiveOrderBinding};
+use super::ledger::{BoundaryProgress, BoundaryProgressEntry};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubmitReceiptResolution {
@@ -21,144 +19,41 @@ pub enum OrderUpdateAbsorbResult {
     Unabsorbed,
 }
 
-#[derive(Debug, Clone, PartialEq)]
 pub struct OrderObservationApplication {
     pub state: ExecutorState,
     pub absorb_result: OrderUpdateAbsorbResult,
 }
 
-fn updated_active_round(
-    previous_state: &ExecutorState,
-    desired_exposure: poise_core::types::Exposure,
-) -> ExecutionRound {
-    ExecutionRound {
-        desired_exposure,
-        mode: previous_state
-            .active_round
-            .as_ref()
-            .map(|round| round.mode.clone())
-            .unwrap_or_else(|| previous_state.diagnostics.mode.clone()),
-        started_at: previous_state
-            .active_round
-            .as_ref()
-            .map(|round| round.started_at)
-            .unwrap_or(previous_state.stats.started_at),
-    }
-}
-
 pub fn record_submit_request(
     previous_state: &ExecutorState,
-    request: &OrderRequest,
-    desired_exposure: poise_core::types::Exposure,
+    _request: &OrderRequest,
+    _desired_exposure: Exposure,
 ) -> ExecutorState {
-    let ((_, sibling_slots), _) =
-        slots::split_inventory_core_slot_from_slots(&previous_state.slots);
-    let mut state = previous_state.clone();
-    state.active_round = Some(updated_active_round(
-        previous_state,
-        desired_exposure.clone(),
-    ));
-    state.slots = slots::with_inventory_core_slot(
-        sibling_slots,
-        ExecutionSlot {
-            slot: OrderSlot::new(INVENTORY_CORE_SLOT),
-            state: SlotState::SubmitPending,
-            working_order: Some(WorkingOrder {
-                order_id: None,
-                client_order_id: request.client_order_id.clone(),
-                side: request.side,
-                price: request.price,
-                quantity: request.quantity,
-                status: OrderStatus::Submitting,
-                role: slots::role_for_reduce_only(request.reduce_only),
-            }),
-        },
-    );
-    state
-}
-
-fn remember_terminal_order(state: &mut ExecutorState, client_order_id: &str, order_id: &str) {
-    if order_id.is_empty() {
-        return;
-    }
-
-    let marker = RecentTerminalOrder {
-        client_order_id: client_order_id.to_string(),
-        order_id: order_id.to_string(),
-    };
-    state
-        .recent_terminal_orders
-        .retain(|existing| existing != &marker);
-    state.recent_terminal_orders.push(marker);
-    if state.recent_terminal_orders.len() > RECENT_TERMINAL_ORDER_LIMIT {
-        let overflow = state.recent_terminal_orders.len() - RECENT_TERMINAL_ORDER_LIMIT;
-        state.recent_terminal_orders.drain(0..overflow);
-    }
-}
-
-fn remember_terminal_orders_from_slots(state: &mut ExecutorState, slots: &[ExecutionSlot]) {
-    for slot in slots {
-        let Some(order) = slot.working_order.as_ref() else {
-            continue;
-        };
-        let Some(order_id) = order.order_id.as_deref() else {
-            continue;
-        };
-        remember_terminal_order(state, &order.client_order_id, order_id);
-    }
-}
-
-fn is_recent_terminal_order(
-    previous_state: &ExecutorState,
-    observation: &OrderObservation,
-) -> bool {
-    previous_state.recent_terminal_orders.iter().any(|recent| {
-        recent.client_order_id == observation.client_order_id
-            && recent.order_id == observation.order_id
-    })
+    previous_state.clone()
 }
 
 pub fn record_submit_receipt(
     previous_state: &ExecutorState,
     request: &OrderRequest,
-    desired_exposure: poise_core::types::Exposure,
+    _desired_exposure: Exposure,
     receipt: &OrderReceipt,
 ) -> SubmitReceiptResolution {
-    let matching_indexes = previous_state
-        .slots
-        .iter()
-        .enumerate()
-        .filter_map(|(index, slot)| {
-            slots::slot_matches_order(
-                slot,
-                &request.client_order_id,
-                Some(receipt.order_id.as_str()),
-            )
-            .then_some(index)
-        })
-        .collect::<Vec<_>>();
-    let [slot_index] = matching_indexes.as_slice() else {
-        return SubmitReceiptResolution::Unmatched;
-    };
-    let slot = &previous_state.slots[*slot_index];
-    let Some(existing_order) = slot.working_order.as_ref() else {
+    let Some(index) = previous_state.bindings.iter().position(|binding| {
+        binding.request.client_order_id == request.client_order_id
+            && binding
+                .order_id
+                .as_deref()
+                .is_none_or(|order_id| order_id == receipt.order_id)
+    }) else {
         return SubmitReceiptResolution::Unmatched;
     };
 
     let mut state = previous_state.clone();
-    state.active_round = Some(updated_active_round(previous_state, desired_exposure));
-    state.slots[*slot_index] = ExecutionSlot {
-        slot: slot.slot.clone(),
-        state: SlotState::Working,
-        working_order: Some(WorkingOrder {
-            order_id: Some(receipt.order_id.clone()),
-            client_order_id: existing_order.client_order_id.clone(),
-            side: request.side,
-            price: request.price,
-            quantity: request.quantity,
-            status: receipt.status,
-            role: existing_order.role.clone(),
-        }),
+    state.bindings[index].order_id = Some(receipt.order_id.clone());
+    state.bindings[index].status = if receipt.status.keeps_working_order() {
+        BindingStatus::Working
+    } else {
+        BindingStatus::Terminal
     };
     SubmitReceiptResolution::Recorded { state }
 }
@@ -167,20 +62,10 @@ pub fn record_submit_failure(
     previous_state: &ExecutorState,
     client_order_id: &str,
 ) -> ExecutorState {
-    let Some(slots) = slots::clear_matching_slots(&previous_state.slots, |slot| {
-        slot.state == SlotState::SubmitPending
-            && slot
-                .working_order
-                .as_ref()
-                .is_some_and(|order| order.client_order_id == client_order_id)
-    }) else {
-        return previous_state.clone();
-    };
-    let mut state = previous_state.clone();
-    state.slots = slots;
-    state
+    clear_binding_by_client_order_id(previous_state, client_order_id)
 }
 
+#[allow(dead_code)]
 pub fn apply_order_observation(
     previous_state: &ExecutorState,
     observation: &OrderObservation,
@@ -192,510 +77,229 @@ pub fn apply_order_observation_with_result(
     previous_state: &ExecutorState,
     observation: &OrderObservation,
 ) -> OrderObservationApplication {
-    if observation.status.keeps_working_order() {
-        let matching_indexes = previous_state
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                slots::slot_matches_order(
-                    slot,
-                    &observation.client_order_id,
-                    Some(observation.order_id.as_str()),
-                )
-                .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let [slot_index] = matching_indexes.as_slice() else {
-            return OrderObservationApplication {
-                state: previous_state.clone(),
-                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
-            };
-        };
-        let slot = &previous_state.slots[*slot_index];
-        let Some(existing_order) = slot.working_order.as_ref() else {
-            return OrderObservationApplication {
-                state: previous_state.clone(),
-                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
-            };
-        };
-
-        let mut state = previous_state.clone();
-        state.slots = slots::replace_first_matching_slot(
-            &previous_state.slots,
-            |candidate| {
-                slots::slot_matches_order(
-                    candidate,
-                    &observation.client_order_id,
-                    Some(observation.order_id.as_str()),
-                )
-            },
-            ExecutionSlot {
-                slot: slot.slot.clone(),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some(observation.order_id.clone()),
-                    client_order_id: observation.client_order_id.clone(),
-                    side: observation.side,
-                    price: observation.price,
-                    quantity: observation.quantity,
-                    status: observation.status,
-                    role: existing_order.role.clone(),
-                }),
-            },
-        )
-        .unwrap_or_else(|| previous_state.slots.clone());
-        let absorb_result = if state == *previous_state {
+    let Some(index) = previous_state
+        .bindings
+        .iter()
+        .position(|binding| binding_matches_observation(binding, observation))
+    else {
+        let absorb_result = if is_recent_terminal_order(previous_state, observation) {
             OrderUpdateAbsorbResult::DuplicateReplay
         } else {
-            OrderUpdateAbsorbResult::Applied
+            OrderUpdateAbsorbResult::Unabsorbed
         };
         return OrderObservationApplication {
-            state,
+            state: previous_state.clone(),
             absorb_result,
         };
-    }
+    };
 
-    if observation.status.clears_working_order() {
-        let matching_indexes = previous_state
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                slots::slot_matches_order(
-                    slot,
-                    &observation.client_order_id,
-                    Some(observation.order_id.as_str()),
-                )
-                .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        if matching_indexes.len() != 1 {
-            let absorb_result = if is_recent_terminal_order(previous_state, observation) {
-                OrderUpdateAbsorbResult::DuplicateReplay
-            } else {
-                OrderUpdateAbsorbResult::Unabsorbed
-            };
-            return OrderObservationApplication {
-                state: previous_state.clone(),
-                absorb_result,
-            };
+    let mut state = previous_state.clone();
+    state.bindings[index].order_id = Some(observation.order_id.clone());
+    state.bindings[index].request.price = observation.price;
+    state.bindings[index].request.quantity = observation.quantity;
+
+    if observation.status.keeps_working_order() {
+        state.bindings[index].status = BindingStatus::Working;
+    } else if observation.status.clears_working_order() {
+        if observation.status == OrderStatus::Filled {
+            let binding = state.bindings[index].clone();
+            apply_completed_binding_progress(&mut state, &binding);
         }
-        let Some(slots) = slots::clear_matching_slots(&previous_state.slots, |slot| {
-            slots::slot_matches_order(
-                slot,
-                &observation.client_order_id,
-                Some(observation.order_id.as_str()),
-            )
-        }) else {
-            return OrderObservationApplication {
-                state: previous_state.clone(),
-                absorb_result: OrderUpdateAbsorbResult::Unabsorbed,
-            };
-        };
-        let mut state = previous_state.clone();
-        state.slots = slots;
+        state.bindings[index].status = BindingStatus::Terminal;
         remember_terminal_order(
             &mut state,
             &observation.client_order_id,
             &observation.order_id,
         );
-        return OrderObservationApplication {
-            state,
-            absorb_result: OrderUpdateAbsorbResult::Applied,
-        };
     }
 
-    OrderObservationApplication {
-        state: previous_state.clone(),
-        absorb_result: OrderUpdateAbsorbResult::DuplicateReplay,
-    }
-}
-
-pub fn clear_pending_submit(
-    previous_state: &ExecutorState,
-    client_order_id: &str,
-) -> ExecutorState {
-    let Some(slots) = slots::clear_matching_slots(&previous_state.slots, |slot| {
-        slots::slot_matches_order(slot, client_order_id, None)
-    }) else {
-        return previous_state.clone();
+    let absorb_result = if state == *previous_state {
+        OrderUpdateAbsorbResult::DuplicateReplay
+    } else {
+        OrderUpdateAbsorbResult::Applied
     };
-    let mut state = previous_state.clone();
-    state.slots = slots;
-    state
+    OrderObservationApplication {
+        state,
+        absorb_result,
+    }
 }
 
 pub fn clear_working_order_by_order_id(
     previous_state: &ExecutorState,
     order_id: &str,
 ) -> ExecutorState {
-    let Some(slots) = slots::clear_matching_slots(&previous_state.slots, |slot| {
-        slots::slot_matches_order(slot, "", Some(order_id))
-    }) else {
-        return previous_state.clone();
-    };
-    let cleared_slots = previous_state
-        .slots
-        .iter()
-        .filter(|slot| slots::slot_matches_order(slot, "", Some(order_id)))
-        .cloned()
-        .collect::<Vec<_>>();
     let mut state = previous_state.clone();
-    state.slots = slots;
-    remember_terminal_orders_from_slots(&mut state, &cleared_slots);
+    for binding in &mut state.bindings {
+        if binding.order_id.as_deref() == Some(order_id) {
+            binding.status = BindingStatus::Terminal;
+        }
+    }
     state
 }
 
 pub fn clear_all_working_orders(previous_state: &ExecutorState) -> ExecutorState {
-    let Some(slots) = slots::clear_matching_slots(&previous_state.slots, |slot| {
-        slot.state == SlotState::Working
-    }) else {
-        return previous_state.clone();
-    };
-    let cleared_slots = previous_state
-        .slots
-        .iter()
-        .filter(|slot| slot.state == SlotState::Working)
-        .cloned()
-        .collect::<Vec<_>>();
     let mut state = previous_state.clone();
-    state.slots = slots;
-    remember_terminal_orders_from_slots(&mut state, &cleared_slots);
+    for binding in &mut state.bindings {
+        if binding.status == BindingStatus::Working {
+            binding.status = BindingStatus::Terminal;
+        }
+    }
     state
 }
 
-pub(super) fn submit_pending_slot(
-    desired_order: &DesiredOrder,
-    request: &OrderRequest,
-) -> ExecutionSlot {
-    ExecutionSlot {
-        slot: desired_order.slot.clone(),
-        state: SlotState::SubmitPending,
-        working_order: Some(WorkingOrder {
-            order_id: None,
-            client_order_id: request.client_order_id.clone(),
-            side: desired_order.side,
-            price: desired_order.price,
-            quantity: desired_order.quantity,
-            status: OrderStatus::Submitting,
-            role: desired_order.role.clone(),
-        }),
+fn clear_binding_by_client_order_id(
+    previous_state: &ExecutorState,
+    client_order_id: &str,
+) -> ExecutorState {
+    let mut state = previous_state.clone();
+    for binding in &mut state.bindings {
+        if binding.request.client_order_id == client_order_id {
+            binding.status = BindingStatus::Terminal;
+        }
+    }
+    state
+}
+
+fn binding_matches_observation(binding: &LiveOrderBinding, observation: &OrderObservation) -> bool {
+    binding.request.client_order_id == observation.client_order_id
+        || binding.order_id.as_deref() == Some(observation.order_id.as_str())
+}
+
+fn apply_completed_binding_progress(state: &mut ExecutorState, binding: &LiveOrderBinding) {
+    for allocation in &binding.allocations {
+        let Some(entry) = state
+            .ledger_state
+            .progress
+            .iter_mut()
+            .find(|entry| entry.boundary_id == allocation.operation.boundary_id)
+        else {
+            state.ledger_state.progress.push(BoundaryProgressEntry {
+                boundary_id: allocation.operation.boundary_id.clone(),
+                progress: progress_delta_for_allocation(allocation),
+            });
+            continue;
+        };
+        let delta = progress_delta_for_allocation(allocation);
+        entry.progress.cumulative_up += delta.cumulative_up;
+        entry.progress.cumulative_down += delta.cumulative_down;
     }
 }
 
-pub(super) fn desired_exposure_reached(
-    current_exposure: &poise_core::types::Exposure,
-    desired_exposure: &poise_core::types::Exposure,
-) -> bool {
-    let delta = desired_exposure.0 - current_exposure.0;
-    if delta.abs() <= f64::EPSILON {
-        return true;
+fn progress_delta_for_allocation(
+    allocation: &super::binding::BindingOperationAllocation,
+) -> BoundaryProgress {
+    match allocation.operation.direction {
+        super::boundary::BoundaryDirection::Up => BoundaryProgress {
+            cumulative_up: allocation.exposure_qty,
+            cumulative_down: 0.0,
+        },
+        super::boundary::BoundaryDirection::Down => BoundaryProgress {
+            cumulative_up: 0.0,
+            cumulative_down: allocation.exposure_qty,
+        },
     }
+}
 
-    if desired_exposure.0.abs() <= f64::EPSILON {
-        return current_exposure.0.abs() <= f64::EPSILON;
+fn remember_terminal_order(state: &mut ExecutorState, client_order_id: &str, order_id: &str) {
+    if state
+        .recent_terminal_orders
+        .iter()
+        .any(|order| order.client_order_id == client_order_id && order.order_id == order_id)
+    {
+        return;
     }
+    state.recent_terminal_orders.push(RecentTerminalOrder {
+        client_order_id: client_order_id.to_string(),
+        order_id: order_id.to_string(),
+    });
+    const MAX_RECENT_TERMINAL_ORDERS: usize = 32;
+    if state.recent_terminal_orders.len() > MAX_RECENT_TERMINAL_ORDERS {
+        let excess = state.recent_terminal_orders.len() - MAX_RECENT_TERMINAL_ORDERS;
+        state.recent_terminal_orders.drain(0..excess);
+    }
+}
 
-    if desired_exposure.0 >= 0.0 {
-        current_exposure.0 >= desired_exposure.0
-    } else {
-        current_exposure.0 <= desired_exposure.0
-    }
+fn is_recent_terminal_order(state: &ExecutorState, observation: &OrderObservation) -> bool {
+    state.recent_terminal_orders.iter().any(|order| {
+        order.client_order_id == observation.client_order_id
+            && order.order_id == observation.order_id
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
     use chrono::Utc;
-    use poise_core::types::{Exposure, Side};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::types::{ExchangeRules, Exposure};
 
     use super::*;
-    use crate::executor::{OrderRole, OrderSlot};
-    use crate::runtime::{ExecutionStats, SlotState};
+    use crate::executor::planning::{ExecutorInput, SubmitIntentInput, plan};
+    use crate::ports::ExecutionQuote;
+    use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
+    use crate::track::{Instrument, Venue};
 
-    fn working_state() -> ExecutorState {
-        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        ExecutorState {
-            active_round: Some(crate::runtime::ExecutionRound {
-                desired_exposure: Exposure(4.0),
-                mode: crate::executor::ExecutionMode::Passive,
-                started_at: now,
-            }),
-            diagnostics: crate::runtime::ExecutorDiagnostics {
-                mode: crate::executor::ExecutionMode::Passive,
-                inventory_gap: Exposure(4.0),
-                gap_started_at: Some(now),
-                last_reprice_at: Some(now),
-                last_execution_reason: None,
-                recovery_anomaly: None,
-            },
-            slots: vec![ExecutionSlot {
-                slot: OrderSlot::new("inventory_core"),
-                state: SlotState::Working,
-                working_order: Some(WorkingOrder {
-                    order_id: Some("order-1".into()),
-                    client_order_id: "client-1".into(),
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 15.0,
-                    status: OrderStatus::New,
-                    role: OrderRole::IncreaseInventory,
+    #[test]
+    fn recording_applies_fill_to_binding_then_updates_boundary_progress() {
+        let config = TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+        };
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let planned = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
                 }),
-            }],
-            recent_terminal_orders: Vec::new(),
-            stats: ExecutionStats::new(now),
-        }
-    }
-
-    #[test]
-    fn keeps_working_update_without_matching_slot_is_unabsorbed() {
-        let previous_state = working_state();
-
-        let applied = apply_order_observation_with_result(
-            &previous_state,
-            &OrderObservation {
-                order_id: "unknown-order".into(),
-                client_order_id: "unknown-client".into(),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::New,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
             },
-        );
-
-        assert_eq!(applied.state, previous_state);
-        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Unabsorbed);
-    }
-
-    #[test]
-    fn recording_submit_request_does_not_store_target_on_working_order() {
-        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let state = record_submit_request(
-            &ExecutorState::empty(now),
-            &OrderRequest {
-                instrument: crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                client_order_id: "client-1".into(),
-                reduce_only: false,
-            },
-            Exposure(4.0),
-        );
-        let state_json = serde_json::to_value(&state).unwrap();
-        let order = state_json["slots"][0]["working_order"]
-            .as_object()
-            .expect("submit request should record a working order");
-
-        assert!(
-            !order.contains_key("desired_exposure"),
-            "working order should only keep exchange facts"
-        );
-    }
-
-    #[test]
-    fn updated_active_round_preserves_existing_metadata_when_target_changes() {
-        let previous_state = working_state();
-        let updated = updated_active_round(&previous_state, Exposure(6.0));
-
-        assert_eq!(updated.desired_exposure, Exposure(6.0));
-        assert_eq!(
-            updated.mode,
-            previous_state
-                .active_round
-                .as_ref()
-                .expect("working state should carry active round")
-                .mode
-        );
-        assert_eq!(
-            updated.started_at,
-            previous_state
-                .active_round
-                .as_ref()
-                .expect("working state should carry active round")
-                .started_at
-        );
-    }
-
-    #[test]
-    fn identical_working_update_is_duplicate_replay() {
-        let previous_state = working_state();
-
-        let applied = apply_order_observation_with_result(
-            &previous_state,
-            &OrderObservation {
-                order_id: "order-1".into(),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::New,
-            },
-        );
-
-        assert_eq!(applied.state, previous_state);
-        assert_eq!(
-            applied.absorb_result,
-            OrderUpdateAbsorbResult::DuplicateReplay
-        );
-    }
-
-    #[test]
-    fn repeated_terminal_update_is_duplicate_replay_after_slot_was_already_cleared() {
-        let previous_state = working_state();
-
-        let cleared = apply_order_observation_with_result(
-            &previous_state,
-            &OrderObservation {
-                order_id: "order-1".into(),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::Filled,
-            },
-        );
-        assert_eq!(cleared.absorb_result, OrderUpdateAbsorbResult::Applied);
-
-        let replay = apply_order_observation_with_result(
-            &cleared.state,
-            &OrderObservation {
-                order_id: "order-1".into(),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::Filled,
-            },
-        );
-
-        assert_eq!(replay.state, cleared.state);
-        assert_eq!(
-            replay.absorb_result,
-            OrderUpdateAbsorbResult::DuplicateReplay
-        );
-    }
-
-    #[test]
-    fn terminal_update_after_cancel_success_clear_is_duplicate_replay() {
-        let previous_state = working_state();
-        let cleared = clear_working_order_by_order_id(&previous_state, "order-1");
-
-        let replay = apply_order_observation_with_result(
-            &cleared,
-            &OrderObservation {
-                order_id: "order-1".into(),
-                client_order_id: "client-1".into(),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::Canceled,
-            },
-        );
-
-        assert_eq!(replay.state, cleared);
-        assert_eq!(
-            replay.absorb_result,
-            OrderUpdateAbsorbResult::DuplicateReplay
-        );
-    }
-
-    #[test]
-    fn unknown_terminal_update_on_empty_slots_remains_unabsorbed() {
-        let previous_state =
-            ExecutorState::empty(Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap());
-
-        let applied = apply_order_observation_with_result(
-            &previous_state,
-            &OrderObservation {
-                order_id: "unknown-order".into(),
-                client_order_id: "unknown-client".into(),
-                side: Side::Buy,
-                price: 95.0,
-                quantity: 15.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::Filled,
-            },
-        );
-
-        assert_eq!(applied.state, previous_state);
-        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Unabsorbed);
-    }
-
-    #[test]
-    fn clearing_submit_pending_does_not_mark_other_working_orders_as_terminal() {
-        let now = Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap();
-        let previous_state = ExecutorState {
-            active_round: Some(crate::runtime::ExecutionRound {
-                desired_exposure: Exposure(2.0),
-                mode: crate::executor::ExecutionMode::Passive,
-                started_at: now,
-            }),
-            diagnostics: crate::runtime::ExecutorDiagnostics {
-                mode: crate::executor::ExecutionMode::Passive,
-                inventory_gap: Exposure(1.0),
-                gap_started_at: Some(now),
-                last_reprice_at: Some(now),
-                last_execution_reason: None,
-                recovery_anomaly: None,
-            },
-            slots: vec![
-                ExecutionSlot {
-                    slot: OrderSlot::new("inventory_core"),
-                    state: SlotState::SubmitPending,
-                    working_order: Some(WorkingOrder {
-                        order_id: None,
-                        client_order_id: "submit-client".into(),
-                        side: Side::Buy,
-                        price: 95.0,
-                        quantity: 5.0,
-                        status: OrderStatus::Submitting,
-                        role: OrderRole::IncreaseInventory,
-                    }),
-                },
-                ExecutionSlot {
-                    slot: OrderSlot::new("other_working"),
-                    state: SlotState::Working,
-                    working_order: Some(WorkingOrder {
-                        order_id: Some("other-order".into()),
-                        client_order_id: "other-client".into(),
-                        side: Side::Sell,
-                        price: 101.0,
-                        quantity: 3.0,
-                        status: OrderStatus::New,
-                        role: OrderRole::DecreaseInventory,
-                    }),
-                },
-            ],
-            recent_terminal_orders: Vec::new(),
-            stats: ExecutionStats::new(now),
+            None,
+        ));
+        let binding = &planned.state.bindings[0];
+        let observation = OrderObservation {
+            order_id: "order-1".to_string(),
+            client_order_id: binding.request.client_order_id.clone(),
+            side: binding.request.side,
+            price: binding.request.price,
+            quantity: binding.request.quantity,
+            realized_pnl: 0.0,
+            status: OrderStatus::Filled,
         };
 
-        let cleared = clear_pending_submit(&previous_state, "submit-client");
-        assert!(cleared.recent_terminal_orders.is_empty());
+        let applied = apply_order_observation_with_result(&planned.state, &observation);
 
-        let late_terminal = apply_order_observation_with_result(
-            &cleared,
-            &OrderObservation {
-                order_id: "other-order".into(),
-                client_order_id: "other-client".into(),
-                side: Side::Sell,
-                price: 101.0,
-                quantity: 3.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::Filled,
-            },
-        );
-
-        assert_eq!(
-            late_terminal.absorb_result,
-            OrderUpdateAbsorbResult::Applied
+        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Applied);
+        assert_eq!(applied.state.ledger_state.progress.len(), 1);
+        assert!(
+            (applied.state.ledger_state.progress[0]
+                .progress
+                .cumulative_up
+                - 1.0)
+                .abs()
+                < 1e-9
         );
     }
 }
