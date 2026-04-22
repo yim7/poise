@@ -12,6 +12,7 @@ mod order_outcome;
 mod projector;
 mod runtime;
 mod server_context;
+mod startup_preparation;
 mod state_bootstrap;
 mod submit_coordinator;
 mod submit_preflight;

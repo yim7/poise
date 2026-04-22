@@ -2,19 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use poise_application::PreparedTrackRegistry;
 use poise_engine::track::Instrument;
-use poise_engine::track::TrackId;
 
 use crate::config::{ExchangeConfig, TrackFileDefinition};
+use crate::startup_preparation::{SymbolLeverageSetter, TrackLeverageIndex};
 
 pub(crate) const DEFAULT_TRACK_LEVERAGE: u32 = 10;
-pub(crate) type TrackLeverageIndex = HashMap<TrackId, u32>;
-
-#[async_trait::async_trait]
-pub(crate) trait SymbolLeverageSetter: Send + Sync {
-    async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()>;
-}
 
 #[async_trait::async_trait]
 impl SymbolLeverageSetter for poise_binance::SymbolLeverageControl {
@@ -43,34 +36,6 @@ pub(crate) fn build_symbol_leverage_setter(
     }
 }
 
-pub(crate) async fn apply_track_startup_leverage(
-    prepared_registry: &PreparedTrackRegistry,
-    track_leverage_index: &TrackLeverageIndex,
-    symbol_leverage_setter: &dyn SymbolLeverageSetter,
-) -> Result<()> {
-    for track in prepared_registry.iter() {
-        let track_id = track.track_id().clone();
-        let instrument = track.instrument().clone();
-        let leverage = track_leverage_index
-            .get(&track_id)
-            .copied()
-            .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
-        symbol_leverage_setter
-            .set_leverage(&instrument, leverage)
-            .await
-            .map_err(|error| {
-                anyhow!(
-                    "failed to set startup leverage for track `{}` symbol `{}` to {}x: {}",
-                    track_id.as_str(),
-                    instrument.symbol,
-                    leverage,
-                    error
-                )
-            })?;
-    }
-    Ok(())
-}
-
 pub(crate) fn build_track_leverage_index(
     tracks: &[TrackFileDefinition],
 ) -> Result<TrackLeverageIndex> {
@@ -97,11 +62,9 @@ mod tests {
     use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
-    use super::{
-        SymbolLeverageSetter, apply_track_startup_leverage, build_symbol_leverage_setter,
-        build_track_leverage_index,
-    };
+    use super::{build_symbol_leverage_setter, build_track_leverage_index};
     use crate::config::{ExchangeConfig, TrackDefinition};
+    use crate::startup_preparation::{SymbolLeverageSetter, apply_track_startup_leverage};
 
     #[test]
     fn track_leverage_index_defaults_to_ten() {

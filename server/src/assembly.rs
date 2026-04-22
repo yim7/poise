@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::future::Future;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
@@ -17,23 +16,22 @@ use poise_application::{
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
 use poise_engine::manager::TrackManager;
+use poise_engine::ports::ClockPort;
+#[cfg(test)]
+use poise_engine::ports::MetadataPort;
 #[cfg(test)]
 use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
-use poise_engine::ports::{ClockPort, MetadataPort};
 use poise_engine::track::{Instrument, TrackId, Venue};
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 
 use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
 use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
-use crate::exchange_startup::{
-    TrackLeverageIndex, apply_track_startup_leverage, build_symbol_leverage_setter,
-    build_track_leverage_index,
-};
+use crate::exchange_startup::{build_symbol_leverage_setter, build_track_leverage_index};
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
@@ -42,6 +40,9 @@ use crate::runtime::{
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
+};
+use crate::startup_preparation::{
+    TrackLeverageIndex, load_exchange_info_with_retry, prepare_exchange_startup_with,
 };
 use crate::state_bootstrap::StateRepositories;
 use crate::submit_preflight::SubmitPreflight;
@@ -61,12 +62,6 @@ pub struct ServerPlatform {
     effect_worker_test_context: EffectWorkerTestContext,
     pub runtime: ServerRuntime,
 }
-
-const STARTUP_RETRY_ATTEMPTS: usize = 5;
-#[cfg(test)]
-const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(1);
-#[cfg(not(test))]
-const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 fn validate_unique_instruments(
     instruments: impl IntoIterator<Item = Instrument>,
@@ -163,35 +158,13 @@ async fn build_exchange_and_prepare_startup(
     prepared_registry: &PreparedTrackRegistry,
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<Exchange> {
-    build_exchange_and_prepare_startup_with(
+    prepare_exchange_startup_with(
         prepared_registry,
         track_leverage_index,
         || build_exchange(&config.exchange),
         || build_symbol_leverage_setter(&config.exchange),
     )
     .await
-}
-
-async fn build_exchange_and_prepare_startup_with<BuildExchange, BuildExchangeFuture, BuildSetter>(
-    prepared_registry: &PreparedTrackRegistry,
-    track_leverage_index: &TrackLeverageIndex,
-    build_exchange_fn: BuildExchange,
-    build_symbol_leverage_setter_fn: BuildSetter,
-) -> Result<Exchange>
-where
-    BuildExchange: FnOnce() -> BuildExchangeFuture,
-    BuildExchangeFuture: Future<Output = Result<Exchange>>,
-    BuildSetter: FnOnce() -> Result<Arc<dyn crate::exchange_startup::SymbolLeverageSetter>>,
-{
-    let exchange = build_exchange_fn().await?;
-    let symbol_leverage_setter = build_symbol_leverage_setter_fn()?;
-    apply_track_startup_leverage(
-        prepared_registry,
-        track_leverage_index,
-        symbol_leverage_setter.as_ref(),
-    )
-    .await?;
-    Ok(exchange)
 }
 
 #[cfg(test)]
@@ -442,35 +415,6 @@ fn build_startup_capacity_mode(
     }
 }
 
-async fn load_exchange_info_with_retry(
-    metadata: &dyn MetadataPort,
-    instrument: &Instrument,
-) -> Result<poise_engine::ports::ExchangeInfo> {
-    let mut last_error = None;
-
-    for attempt in 0..STARTUP_RETRY_ATTEMPTS {
-        match metadata.get_exchange_info(instrument).await {
-            Ok(info) => return Ok(info),
-            Err(error) => {
-                if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
-                    return Err(error);
-                }
-                tracing::warn!(
-                    instrument = %instrument.symbol,
-                    attempt = attempt + 1,
-                    max_attempts = STARTUP_RETRY_ATTEMPTS,
-                    "startup exchange info probe failed: {error}"
-                );
-                last_error = Some(error);
-            }
-        }
-
-        sleep(STARTUP_RETRY_DELAY).await;
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow!("failed to load exchange info")))
-}
-
 impl ServerPlatform {
     pub fn http_state(&self) -> HttpState {
         self.http_state.clone()
@@ -644,8 +588,6 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, TrackDefinition, parse_config};
-    use crate::exchange::Exchange;
-    use crate::exchange_startup::{SymbolLeverageSetter, build_track_leverage_index};
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
@@ -1007,226 +949,6 @@ total_loss_limit = 600.0
             error
                 .to_string()
                 .contains("missing required exchange.api_key")
-        );
-    }
-
-    #[tokio::test]
-    async fn assemble_retries_transient_exchange_info_failures() {
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let exchange = Arc::new(FlakyExchangeInfoExchange::new(2));
-        let config = Config {
-            bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
-                track_id: "btc-core".into(),
-                symbol: "BTCUSDT".into(),
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: Some(0.5),
-                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
-                out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
-                max_notional: None,
-                leverage: None,
-                daily_loss_limit: 300.0,
-                total_loss_limit: 600.0,
-                tick_timeout_secs: None,
-            }],
-            exchange: ExchangeConfig::default(),
-            account_monitor: Default::default(),
-        };
-
-        let platform = super::assemble_with_exchange_ports(
-            &config,
-            test_prepared_registry(&config),
-            super::ExchangePorts::new(
-                exchange.clone(),
-                Arc::new(FakeMarketData::empty()),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-            ),
-            StateRepositories::new(repository),
-            Arc::new(SystemClock),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            exchange.get_exchange_info_calls.load(Ordering::SeqCst),
-            3,
-            "should retry until exchange info succeeds"
-        );
-        let manager = platform.manager();
-        assert_eq!(manager.read().await.list_tracks().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn startup_preparation_builds_runtime_exchange_before_setting_leverage_and_loading_exchange_info()
-     {
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let call_log = Arc::new(Mutex::new(Vec::new()));
-        let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
-        let config = Config {
-            bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
-                track_id: "btc-core".into(),
-                symbol: "BTCUSDT".into(),
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: Some(0.5),
-                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
-                out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
-                max_notional: Some(3_000.0),
-                leverage: Some(20),
-                daily_loss_limit: 300.0,
-                total_loss_limit: 600.0,
-                tick_timeout_secs: None,
-            }],
-            exchange: ExchangeConfig::default(),
-            account_monitor: Default::default(),
-        };
-        let prepared_registry = test_prepared_registry(&config);
-        let track_leverage_index = build_track_leverage_index(&config.tracks).unwrap();
-        let exchange = super::build_exchange_and_prepare_startup_with(
-            prepared_registry.as_ref(),
-            &track_leverage_index,
-            {
-                let call_log = call_log.clone();
-                let startup_exchange = startup_exchange.clone();
-                move || {
-                    let call_log = call_log.clone();
-                    let startup_exchange = startup_exchange.clone();
-                    async move {
-                        call_log.lock().unwrap().push("build_exchange".to_string());
-                        Ok(Exchange::new(
-                            Venue::Binance,
-                            Arc::new(FakeExecutionPort),
-                            Arc::new(FakeMarketData::empty()),
-                            Arc::new(FakeAccountSummaryPort),
-                            startup_exchange.clone(),
-                            startup_exchange,
-                        ))
-                    }
-                }
-            },
-            {
-                let call_log = call_log.clone();
-                move || {
-                    Ok(
-                        Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone()))
-                            as Arc<dyn SymbolLeverageSetter>,
-                    )
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        super::assemble_with_state_store(
-            &config,
-            prepared_registry,
-            exchange,
-            StateRepositories::new(repository),
-            Arc::new(SystemClock),
-            &track_leverage_index,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            *call_log.lock().unwrap(),
-            vec![
-                "build_exchange".to_string(),
-                "set_leverage:BTCUSDT:20".to_string(),
-                "get_exchange_info:BTCUSDT".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_preparation_failure_surfaces_track_symbol_and_leverage_context() {
-        let call_log = Arc::new(Mutex::new(Vec::new()));
-        let startup_exchange = Arc::new(StartupOrderExchange::new(call_log.clone(), 1_000_000.0));
-        let config = Config {
-            bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
-                track_id: "btc-core".into(),
-                symbol: "BTCUSDT".into(),
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: Some(0.5),
-                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
-                out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
-                max_notional: Some(3_000.0),
-                leverage: Some(7),
-                daily_loss_limit: 300.0,
-                total_loss_limit: 600.0,
-                tick_timeout_secs: None,
-            }],
-            exchange: ExchangeConfig::default(),
-            account_monitor: Default::default(),
-        };
-        let prepared_registry = test_prepared_registry(&config);
-        let track_leverage_index = build_track_leverage_index(&config.tracks).unwrap();
-
-        let result = super::build_exchange_and_prepare_startup_with(
-            prepared_registry.as_ref(),
-            &track_leverage_index,
-            {
-                let call_log = call_log.clone();
-                move || {
-                    let call_log = call_log.clone();
-                    let startup_exchange = startup_exchange.clone();
-                    async move {
-                        call_log.lock().unwrap().push("build_exchange".to_string());
-                        Ok(Exchange::new(
-                            Venue::Binance,
-                            Arc::new(FakeExecutionPort),
-                            Arc::new(FakeMarketData::empty()),
-                            Arc::new(FakeAccountSummaryPort),
-                            startup_exchange.clone(),
-                            startup_exchange,
-                        ))
-                    }
-                }
-            },
-            {
-                let call_log = call_log.clone();
-                move || {
-                    Ok(Arc::new(RecordingSymbolLeverageSetter::fail(
-                        call_log.clone(),
-                        "exchange rejected leverage",
-                    )) as Arc<dyn SymbolLeverageSetter>)
-                }
-            },
-        )
-        .await;
-
-        let error = match result {
-            Ok(_) => {
-                panic!("build_exchange_and_prepare_startup_with should fail on leverage error")
-            }
-            Err(error) => error,
-        };
-        let message = error.to_string();
-        assert!(message.contains("btc-core"));
-        assert!(message.contains("BTCUSDT"));
-        assert!(message.contains("7"));
-        assert!(message.contains("exchange rejected leverage"));
-        assert_eq!(
-            *call_log.lock().unwrap(),
-            vec![
-                "build_exchange".to_string(),
-                "set_leverage:BTCUSDT:7".to_string()
-            ]
         );
     }
 
@@ -1639,109 +1361,6 @@ total_loss_limit = 600.0
     struct FakeMetadataPort;
     #[derive(Default)]
     struct FakeMarketDataPort;
-    struct RecordingSymbolLeverageSetter {
-        call_log: Arc<Mutex<Vec<String>>>,
-        failure: Option<String>,
-    }
-
-    struct StartupOrderExchange {
-        call_log: Arc<Mutex<Vec<String>>>,
-        max_increase_notional: f64,
-    }
-
-    struct FlakyExchangeInfoExchange {
-        remaining_failures: AtomicUsize,
-        get_exchange_info_calls: AtomicUsize,
-    }
-
-    impl FlakyExchangeInfoExchange {
-        fn new(initial_failures: usize) -> Self {
-            Self {
-                remaining_failures: AtomicUsize::new(initial_failures),
-                get_exchange_info_calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl RecordingSymbolLeverageSetter {
-        fn succeed(call_log: Arc<Mutex<Vec<String>>>) -> Self {
-            Self {
-                call_log,
-                failure: None,
-            }
-        }
-
-        fn fail(call_log: Arc<Mutex<Vec<String>>>, message: impl Into<String>) -> Self {
-            Self {
-                call_log,
-                failure: Some(message.into()),
-            }
-        }
-    }
-
-    impl StartupOrderExchange {
-        fn new(call_log: Arc<Mutex<Vec<String>>>, max_increase_notional: f64) -> Self {
-            Self {
-                call_log,
-                max_increase_notional,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SymbolLeverageSetter for RecordingSymbolLeverageSetter {
-        async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
-            self.call_log
-                .lock()
-                .unwrap()
-                .push(format!("set_leverage:{}:{leverage}", instrument.symbol));
-            if let Some(message) = &self.failure {
-                return Err(anyhow!(message.clone()));
-            }
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl AccountPort for StartupOrderExchange {
-        async fn get_account_capacity_snapshot(
-            &self,
-            instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            self.call_log.lock().unwrap().push(format!(
-                "get_account_capacity_snapshot:{}",
-                instrument.symbol
-            ));
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
-                max_increase_notional: self.max_increase_notional,
-            })
-        }
-
-        async fn subscribe_user_data(
-            &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
-            let (_sender, receiver) = mpsc::channel(1);
-            Ok(receiver)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl MetadataPort for StartupOrderExchange {
-        async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-            self.call_log
-                .lock()
-                .unwrap()
-                .push(format!("get_exchange_info:{}", instrument.symbol));
-            Ok(ExchangeInfo {
-                instrument: instrument.clone(),
-                rules: test_exchange_rules(),
-            })
-        }
-
-        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-            Ok(chrono::Utc::now())
-        }
-    }
 
     #[async_trait::async_trait]
     impl poise_engine::ports::AccountSummaryPort for FakeExchange {
@@ -1813,81 +1432,6 @@ total_loss_limit = 600.0
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
             Ok(chrono::Utc::now())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl poise_engine::ports::AccountSummaryPort for FlakyExchangeInfoExchange {
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
-            Ok(poise_engine::ports::AccountSummarySnapshot {
-                equity: 1_000_000.0,
-                available: 1_000_000.0,
-                unrealized_pnl: 0.0,
-                observed_at: chrono::Utc::now(),
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ExecutionPort for FlakyExchangeInfoExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
-            Err(anyhow!("not used in tests"))
-        }
-
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-            Err(anyhow!("not used in tests"))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl AccountPort for FlakyExchangeInfoExchange {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
-            })
-        }
-
-        async fn subscribe_user_data(
-            &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
-            let (_sender, receiver) = mpsc::channel(1);
-            Ok(receiver)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl MetadataPort for FlakyExchangeInfoExchange {
-        async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
-            self.get_exchange_info_calls.fetch_add(1, Ordering::SeqCst);
-            let remaining = self.remaining_failures.load(Ordering::SeqCst);
-            if remaining > 0 {
-                self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
-                return Err(anyhow!("temporary exchange info timeout"));
-            }
-
-            Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: test_exchange_rules(),
-            })
-        }
-
-        async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-            Err(anyhow!("not used in tests"))
         }
     }
 
